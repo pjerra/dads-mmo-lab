@@ -114,6 +114,14 @@ class ChannelSetup(Protocol):
 
     def enable(self, *, world_running: bool) -> object: ...
 
+    def settle(self) -> object: ...
+
+    def check(self) -> object: ...
+
+    def repair(self) -> object: ...
+
+    def roll_back(self) -> bool: ...
+
     def setup_state(self) -> object: ...
 
 
@@ -427,6 +435,12 @@ def _for_wotlk(
         create=lambda name, pw, level: wotlk_accounts.create_account(
             sql, name, pw, gm_level=level, scheme=entry.accounts.scheme or "azerothcore"
         ),
+        # The repair seam, and the reason it is a different function from
+        # `create`: `create_account` deliberately refuses to re-salt a row that
+        # exists, because silently changing an owner's password is worse than
+        # refusing. `reset_own_password` refuses every name that is not this
+        # app's own, so the one account it can rewrite is the one it made.
+        reset=lambda name, pw: wotlk_accounts.reset_own_password(sql, name, pw),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
             state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
@@ -722,7 +736,14 @@ def _channel_sentence(state: object) -> str:
     widget, the same reason `dashboard.line()` is one.
     """
     if isinstance(state, channel_setup.Verified):
-        return f"Command channel: verified as {state.account}."
+        # The time is the whole point of showing this at all: a channel proved
+        # once and broken since reads identically to one proved a minute ago.
+        # A credential written before the field existed says so rather than
+        # borrowing the current moment, which is the one answer that misleads.
+        when = f" at {state.at}" if state.at else " (before this app recorded when)"
+        return f"Command channel: verified as {state.account}{when}."
+    if isinstance(state, channel_setup.Refused):
+        return f"Command channel: refused. {state.reason}"
     if isinstance(state, channel_setup.Pending):
         return (
             f"Command channel: the account {state.account} exists and is waiting to be proved. "
@@ -913,6 +934,13 @@ class ControllerView(QWidget):
         self.enable_channel_button = QPushButton("Turn on the command channel", tab)
         self.enable_channel_button.setVisible(self.services.channel_setup is not None)
         self.enable_channel_button.clicked.connect(self.enable_channel)
+        # Hidden until the server has actually refused the saved credential.
+        # This is the one control on the tab that can break a channel that
+        # works -- it resets the account's password -- so it exists only where
+        # there is nothing left to break.
+        self.repair_channel_button = QPushButton("Repair the command channel", tab)
+        self.repair_channel_button.setVisible(False)
+        self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
@@ -968,6 +996,7 @@ class ControllerView(QWidget):
         box.addWidget(self.status_label)
         box.addWidget(self.channel_label)
         box.addWidget(self.enable_channel_button)
+        box.addWidget(self.repair_channel_button)
         box.addLayout(row)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
@@ -1111,8 +1140,33 @@ class ControllerView(QWidget):
         if setup is None:
             return
         state = setup.setup_state()
+        self._show_channel(state)
+
+    def _show_channel(self, state: object) -> None:
+        """One place where a channel state becomes what the tab looks like."""
         self.channel_label.setText(_channel_sentence(state))
         self.channel_label.setVisible(True)
+        self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
+
+    @Slot()
+    def repair_channel(self) -> None:
+        """Reset the channel account's password, and say what came back.
+
+        Pressed rather than automatic: the reset is a write to the user's auth
+        database, and one that this app is only allowed to make against its own
+        account. `InstallChannel.repair()` refuses from any state but refused,
+        so a stale press cannot break a channel that has since started working.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self.problem_label.setText("")
+        try:
+            state = setup.repair()
+        except Exception as exc:  # noqa: BLE001 - a failed repair is a sentence
+            self.problem_label.setText(str(exc))
+            return
+        self._show_channel(state)
 
     @Slot()
     def recheck(self) -> None:
@@ -1284,6 +1338,33 @@ class ControllerView(QWidget):
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
         self.refresh_status()
+        self._settle_the_channel()
+
+    def _settle_the_channel(self) -> None:
+        """After a start, ask the channel where it now stands.
+
+        Run through the job runner and never on the GUI thread: `settle()`
+        creates a database row and makes a SOAP round trip, and a world that is
+        still loading answers slowly by design -- doing it here would freeze the
+        window for as long as the server takes.
+
+        Failures are silent by design. This is not something the user asked
+        for; the channel's own line already says where the setup has got to,
+        and a red paragraph about it would land on top of whatever the Start
+        was actually telling them.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self._run(setup.settle, self._channel_settled, self._channel_settle_failed)
+
+    @Slot(object)
+    def _channel_settled(self, state: object) -> None:
+        self._show_channel(state)
+
+    @Slot(object)
+    def _channel_settle_failed(self, exc: object) -> None:
+        logger.info(f"the command channel could not be settled: {exc}")
 
     @Slot(object)
     def _stop_done(self, result: object) -> None:
@@ -1328,9 +1409,47 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         msg = str(exc)
-        self.problem_label.setText(msg)
-        self.action_failed.emit(msg)
+        rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
+        self.problem_label.setText(rolled or msg)
+        self.action_failed.emit(rolled or msg)
         self.refresh_status()
+
+    def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
+        """Undo the press when the start failed on the port the channel claims.
+
+        Docker refuses to publish a host port something else already holds, so
+        the container is never created and no setting the press wrote is ever
+        read. Rolling back is what makes the next Start work; saying so is what
+        stops the user pressing enable again into the same wall.
+
+        Returns the sentence to show, or "" when this failure was about
+        something else -- a start that failed for another reason must never
+        quietly switch the channel off.
+        """
+        setup = self.services.channel_setup
+        operations = self.entry.operations
+        if setup is None or operations is None:
+            return ""
+        if not channel_setup.blames_the_host_port(message, operations.port):
+            return ""
+        try:
+            undone = setup.roll_back()
+        except Exception as exc:  # noqa: BLE001 - the rollback is best effort
+            return (
+                f"The server could not start: port {operations.port} on this machine is in use "
+                f"by something else, and the command channel could not be undone: {exc}"
+            )
+        if not undone:
+            return (
+                f"The server could not start: port {operations.port} on this machine is in use "
+                "by something else. Free it, or stop whatever holds it, and start again."
+            )
+        self.refresh_channel()
+        return (
+            f"The server could not start: port {operations.port} on this machine is in use by "
+            "something else. The command channel has been turned off again and the port given "
+            "back, so the server will start. Free that port and turn the channel on again."
+        )
 
     def _offer_to_stop_the_other_server(self, exc: PortConflictError) -> None:
         """Name the install holding the ports, and offer to stop it.

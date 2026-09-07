@@ -165,7 +165,13 @@ def test_the_password_never_reaches_a_log_while_being_saved(
 
 
 def test_the_file_carries_no_more_than_it_must(tmp_path: Path) -> None:
-    """A credential file is not a place to accumulate install facts."""
+    """A credential file is not a place to accumulate install facts.
+
+    `verified_at` earns its place by being unavailable anywhere else: the file
+    IS the record that a round trip answered, so the moment it answered has no
+    other home, and without it the tab cannot tell a channel proved a minute
+    ago from one proved in March.
+    """
     path = setup.save_credential(
         _verified(),
         game="wow-wotlk",
@@ -177,7 +183,7 @@ def test_the_file_carries_no_more_than_it_must(tmp_path: Path) -> None:
 
     written = json.loads(path.read_text(encoding="utf-8"))
 
-    assert set(written) == {"account", "password", "host", "port"}
+    assert set(written) == {"account", "password", "host", "port", "verified_at"}
 
 
 # -- the whole path ---------------------------------------------------------

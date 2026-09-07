@@ -128,3 +128,119 @@ def test_an_entry_with_no_operations_block_is_refused_rather_than_guessed_at(
 
     with pytest.raises(setup.EnableRefused, match="wow-tbc"):
         setup.enable(tbc, tmp_path, templates_root=resources.installers_dir(), world_running=False)
+
+
+# -- the port claim, and rolling it back (8.2a) ------------------------------
+
+
+def test_the_press_claims_the_host_port_in_dotenv_so_the_claim_can_be_released(
+    tmp_path: Path,
+) -> None:
+    """The claim is written even though it equals the compose default.
+
+    The base compose publishes SOAP at `127.0.0.1:7878` by its DEFAULT VALUE,
+    so before this the port was claimed by every install whether or not it had
+    a channel — and nothing could give it back. Writing the claim down is what
+    makes releasing it possible: `roll_back()` has a key to change.
+    """
+    server_dir = _installed(tmp_path)
+
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    env = (server_dir / ".env").read_text(encoding="utf-8")
+    assert f"{setup.HOST_PORT_VAR}=127.0.0.1:7878" in env
+
+
+def test_rolling_back_restores_the_override_the_press_replaced(tmp_path: Path) -> None:
+    server_dir = _installed(tmp_path)
+    before = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+    assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") != before
+
+    rolled = setup.roll_back(WOTLK, server_dir)
+
+    assert rolled is True
+    assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") == before
+
+
+def test_rolling_back_releases_the_host_port_so_the_server_starts_again(
+    tmp_path: Path,
+) -> None:
+    """The clause this exists for.
+
+    An occupied 7878 stops the CONTAINER from being created at all — Docker
+    refuses to publish a port something else holds — so restoring the
+    environment alone would leave the install exactly as unstartable as it was.
+    The claim goes back to `127.0.0.1:0`, which asks the daemon for any free
+    port: the server starts, and the channel is not reachable at a port it does
+    not own, which is what rolled back means.
+    """
+    server_dir = _installed(tmp_path)
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    setup.roll_back(WOTLK, server_dir)
+
+    env = (server_dir / ".env").read_text(encoding="utf-8")
+    assert f"{setup.HOST_PORT_VAR}=127.0.0.1:0" in env
+    assert f"{setup.HOST_PORT_VAR}=127.0.0.1:7878" not in env
+
+
+def test_rolling_back_with_nothing_to_undo_says_so_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A rollback that never had a press behind it must not invent one.
+
+    Restoring "the state before" from a backup that does not exist would write
+    an empty override over a good one.
+    """
+    server_dir = _installed(tmp_path)
+    before = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+
+    assert setup.roll_back(WOTLK, server_dir) is False
+    assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") == before
+
+
+def test_a_second_press_does_not_overwrite_the_backup_of_the_original(
+    tmp_path: Path,
+) -> None:
+    """Otherwise the second press backs up the channel's own configuration.
+
+    The user presses twice — the first press already having written the
+    channel on — and the rollback would then restore a file with the channel
+    still in it, which is not a rollback at all.
+    """
+    server_dir = _installed(tmp_path)
+    original = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+
+    setup.roll_back(WOTLK, server_dir)
+
+    assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") == original
+
+
+def test_a_start_failure_that_names_our_port_is_told_apart_from_one_that_does_not() -> None:
+    """The predicate that decides whether a rollback is even relevant.
+
+    Docker's message for a taken published port names the port; a message about
+    anything else must not cause the channel to be silently switched off.
+    """
+    taken = (
+        "Error response from daemon: driver failed programming external "
+        "connectivity on endpoint ac-worldserver: Bind for 127.0.0.1:7878 failed: "
+        "port is already allocated"
+    )
+    assert setup.blames_the_host_port(taken, 7878) is True
+    assert setup.blames_the_host_port(taken, 8085) is False
+    assert setup.blames_the_host_port("ac-database exited with code 1", 7878) is False
+    # Compose says this on every command in an install that has not claimed the
+    # port yet. It names 7878 and is not a failure at all, so matching on the
+    # number alone would turn an ordinary start into a silent rollback.
+    assert (
+        setup.blames_the_host_port(
+            'The "DOCKER_SOAP_EXTERNAL_PORT" variable is not set. ' "Defaulting to 127.0.0.1:7878.",
+            7878,
+        )
+        is False
+    )
+    assert setup.blames_the_host_port("Bind for 127.0.0.1:7878 failed", 78) is False

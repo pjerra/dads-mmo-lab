@@ -1,0 +1,276 @@
+"""`InstallChannel` — the channel state machine as the Server tab holds it (8.2a).
+
+The module beneath this is pure and was tested that way. What is tested here is
+the object the tab actually talks to: where it gets its state from when the app
+opens, what it does when the credential it saved stops working, and the one
+thing it must never do on that path — create a second account.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from yulon import channel_setup as setup
+from yulon import resources
+from yulon.catalog import composegen
+from yulon.catalog.catalog import load_catalog
+
+WOTLK = load_catalog().get("wow-wotlk")
+INSTALL = "ab12cd34"
+
+
+class _Answering:
+    """A channel that answers the same way every time, and counts the asks."""
+
+    def __init__(self, outcome: str, *, indeterminate: bool = False, text: str = "") -> None:
+        self.outcome = outcome
+        self.indeterminate = indeterminate
+        self.text = text
+        self.asked = 0
+
+    def send(self, _command: object) -> object:
+        self.asked += 1
+        return type(
+            "Answer",
+            (),
+            {"outcome": self.outcome, "text": self.text, "indeterminate": self.indeterminate},
+        )()
+
+
+class _Scripted:
+    """A channel whose answers are given in order, one per ask."""
+
+    def __init__(self, outcomes: list[str]) -> None:
+        self.outcomes = list(outcomes)
+
+    def send(self, _command: object) -> object:
+        outcome = self.outcomes.pop(0) if self.outcomes else "no"
+        return type("Answer", (), {"outcome": outcome, "text": "", "indeterminate": False})()
+
+
+def _installed(tmp_path: Path) -> Path:
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    plan = composegen.render(WOTLK, server_dir, templates_root=resources.installers_dir())
+    composegen.write_plan(plan, server_dir)
+    return server_dir
+
+
+def _channel(
+    tmp_path: Path,
+    *,
+    answering: _Answering,
+    create: object = None,
+    reset: object = None,
+) -> setup.InstallChannel:
+    def refuse_create(*_args: object) -> object:
+        raise AssertionError("an account was created")
+
+    return setup.InstallChannel(
+        WOTLK,
+        _installed(tmp_path),
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=create or refuse_create,  # type: ignore[arg-type]
+        reset=reset or (lambda *_a: None),
+        channel_for=lambda _endpoint: answering,
+        config_dir=tmp_path / "config",
+    )
+
+
+def _save(
+    tmp_path: Path, *, password: str = "saved-password", at: str | None = "2026-09-07 01:23 UTC"
+) -> None:
+    setup.save_credential(
+        setup.Verified(setup.account_name(INSTALL), password, at=at),
+        game=WOTLK.id,
+        install_id=INSTALL,
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path / "config",
+    )
+
+
+def test_with_no_credential_on_disk_it_starts_idle(tmp_path: Path) -> None:
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+
+    assert isinstance(channel.setup_state(), setup.Idle)
+
+
+def test_a_saved_credential_reads_as_verified_with_the_time_it_was_proved(
+    tmp_path: Path,
+) -> None:
+    """Because a credential is written only after a round trip answered.
+
+    The file IS the record of that answer, so the time in it is not decoration:
+    it is the difference between "this works" and "this worked once".
+    """
+    _save(tmp_path)
+
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+
+    state = channel.setup_state()
+    assert isinstance(state, setup.Verified)
+    assert state.at == "2026-09-07 01:23 UTC"
+
+
+def test_a_credential_written_before_times_existed_reads_as_verified_without_one(
+    tmp_path: Path,
+) -> None:
+    """It must not be repaired, and it must not claim it was proved just now."""
+    _save(tmp_path)
+    path = setup.credential_path(WOTLK.id, INSTALL, config_dir=tmp_path / "config")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    del raw["verified_at"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    state = _channel(tmp_path, answering=_Answering("yes")).setup_state()
+
+    assert isinstance(state, setup.Verified)
+    assert state.at is None
+
+
+def test_checking_a_credential_the_server_rejects_downgrades_it_to_refused(
+    tmp_path: Path,
+) -> None:
+    _save(tmp_path)
+    channel = _channel(tmp_path, answering=_Answering("no", text="401"))
+
+    state = channel.check()
+
+    assert isinstance(state, setup.Refused)
+    assert channel.setup_state() is state
+
+
+def test_a_server_that_cannot_be_reached_leaves_the_credential_alone(
+    tmp_path: Path,
+) -> None:
+    """ "I could not ask" is not "your password is wrong".
+
+    A stopped world would otherwise offer the user a repair for a problem that
+    is not theirs, and the repair would reset a working password.
+    """
+    _save(tmp_path)
+    channel = _channel(tmp_path, answering=_Answering("no", indeterminate=True))
+
+    state = channel.check()
+
+    assert isinstance(state, setup.Verified)
+
+
+def test_checking_an_install_with_no_credential_asks_the_server_nothing(
+    tmp_path: Path,
+) -> None:
+    answering = _Answering("yes")
+    channel = _channel(tmp_path, answering=answering)
+
+    channel.check()
+
+    assert answering.asked == 0
+    assert isinstance(channel.setup_state(), setup.Idle)
+
+
+def test_repair_resets_the_existing_account_and_never_creates_another(
+    tmp_path: Path,
+) -> None:
+    """The `create` seam this fixture installs raises if it is ever called."""
+    _save(tmp_path, password="stale")
+    resets: list[tuple[str, str]] = []
+    # No to the stale credential, yes to the one the reset writes -- which is
+    # the only sequence that exercises a repair rather than a no-op.
+    answering = _Scripted(["no", "yes"])
+    channel = _channel(
+        tmp_path,
+        answering=answering,
+        reset=lambda name, password: resets.append((name, password)),
+    )
+    channel.check()
+
+    state = channel.repair()
+
+    assert isinstance(state, setup.Verified)
+    assert state.at is not None
+    assert [name for name, _ in resets] == [setup.account_name(INSTALL)]
+    saved = setup.load_credential(WOTLK.id, INSTALL, config_dir=tmp_path / "config")
+    assert saved is not None
+    assert saved.password == resets[0][1]
+    assert saved.password != "stale"
+
+
+def test_repair_from_a_state_that_is_not_refused_does_nothing(tmp_path: Path) -> None:
+    """Repair is a button, and a button can be pressed at the wrong moment.
+
+    Resetting the password of an account that is working would take a channel
+    that answers and break it for as long as the reset takes to prove.
+    """
+    _save(tmp_path)
+    resets: list[object] = []
+    channel = _channel(tmp_path, answering=_Answering("yes"), reset=lambda *a: resets.append(a))
+
+    state = channel.repair()
+
+    assert isinstance(state, setup.Verified)
+    assert resets == []
+
+
+def test_rolling_back_from_the_install_undoes_its_own_press(tmp_path: Path) -> None:
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+    override = channel.server_dir / composegen.OVERRIDE_FILE
+    before = override.read_text(encoding="utf-8")
+    channel.enable(world_running=False)
+
+    assert channel.roll_back() is True
+    assert override.read_text(encoding="utf-8") == before
+
+
+def test_the_press_still_refuses_while_the_world_is_running(tmp_path: Path) -> None:
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+
+    with pytest.raises(setup.EnableRefused, match="stopped"):
+        channel.enable(world_running=True)
+
+
+def test_settle_creates_and_proves_a_channel_that_has_never_been_set_up(
+    tmp_path: Path,
+) -> None:
+    """What the tab calls after a start, and the only thing that ever creates.
+
+    Without it the press writes a configuration nobody ever proves: the
+    account is never made, so the channel the user turned on never works.
+    """
+    made: list[tuple[str, str, int]] = []
+    channel = _channel(
+        tmp_path,
+        answering=_Answering("yes"),
+        create=lambda name, pw, level: made.append((name, pw, level)),
+    )
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Verified)
+    assert [name for name, _, _ in made] == [setup.account_name(INSTALL)]
+    assert made[0][2] == 3, "the channel account must be a full administrator"
+
+
+def test_settle_on_a_working_channel_checks_it_rather_than_creating_again(
+    tmp_path: Path,
+) -> None:
+    """The latch, at the seam the tab presses on every start."""
+    _save(tmp_path)
+    answering = _Answering("yes")
+    channel = _channel(tmp_path, answering=answering)
+
+    state = channel.settle()
+
+    assert isinstance(state, setup.Verified)
+    assert answering.asked == 1
+
+
+def test_settle_leaves_a_channel_that_gave_up_alone(tmp_path: Path) -> None:
+    channel = _channel(tmp_path, answering=_Answering("yes"))
+    channel._state = setup.GaveUp(account="YULON_AB12CD34", reason="three tries")
+
+    assert isinstance(channel.settle(), setup.GaveUp)

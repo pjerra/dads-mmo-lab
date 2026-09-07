@@ -56,6 +56,9 @@ descriptions are written by hand.
 | `catalog/composegen.py::write_dotenv::write_text` | the merged `.env`, to a temp name | install time |
 | `channel_setup.py::save_credential::os.open` | **new (8.2a)** this install's channel credential, created owner-only by its open flags rather than by a later chmod | yes — it is written after the round trip answers, which is after the world is up |
 | `channel_setup.py::enable::write_text` | **new (8.2a)** the generated override, rewritten with the keys that turn this install's command channel on | **no — the press refuses while the world is running**, which is the whole shape of that step |
+| `channel_setup.py::roll_back::write_text` | **new (8.2a)** the override put back exactly as it was before the first press, out of the copy that press kept | **no** — it undoes a press that itself refuses while the world runs, and it is reached from a start that failed |
+| `channel_setup.py::roll_back::unlink` | **new (8.2a)** that copy, removed once it has been restored, so the next press backs up the state the next press finds | **no** — same moment |
+| `controller_wow_wotlk/accounts.py::reset_own_password::run_statement` | **new (8.2a)** a new salt and verifier for THIS APP'S OWN account, refusing every name that does not carry the app's prefix | yes — it is the `auth` database, not `characters` or `world`, and the account it rewrites is one nobody plays |
 | `catalog/composegen.py::write_plan::write_text` | the rendered compose files in the server dir | install time; a running stack keeps what it started with |
 | `catalog/families/conf.py::_clear::shutil.rmtree` | a staging directory being cleared | install time |
 | `catalog/families/conf.py::_clear::unlink` | a staged file being cleared | install time |

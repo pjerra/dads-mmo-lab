@@ -1540,16 +1540,24 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     import ast
 
     view = Path(controller_view_module.__file__)
-    calls = {
-        f"{ast.unparse(n.func.value)}.{n.func.attr}:{n.lineno}"
+    # Found by parsing rather than pinned to a literal line: the literal was
+    # re-pinned by hand three times in one session by edits ABOVE it, which is
+    # churn that teaches a reader to update the number without reading what it
+    # guards. What is asserted is what the test is named for -- that this exact
+    # call is the one the seam guard exempts.
+    lines = [
+        n.lineno
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-    }
-    assert "networking.apply:370" in calls, "the call this test pins has moved; re-pin it"
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "apply"
+        and ast.unparse(n.func.value) == "networking"
+    ]
+    assert len(lines) == 1, f"expected exactly one networking.apply call, found {lines}"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:370" not in missing, missing
+    assert f"apply() at controller_view.py:{lines[0]}" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -2291,6 +2299,14 @@ class _StubSetup:
         self.refuse = refuse
         self.presses = 0
         self.world_running_when_pressed: list[bool] = []
+        self.checks = 0
+        self.settles = 0
+        self.settled: object = None
+        self.repairs = 0
+        self.rollbacks = 0
+        self.becomes: object = None
+        self.repaired: object = None
+        self.rolled_back = True
 
     def enable(self, *, world_running: bool) -> object:
         self.presses += 1
@@ -2301,6 +2317,28 @@ class _StubSetup:
 
     def setup_state(self) -> object:
         return self.state
+
+    def check(self) -> object:
+        self.checks += 1
+        if self.becomes is not None:
+            self.state = self.becomes
+        return self.state
+
+    def settle(self) -> object:
+        self.settles += 1
+        if self.settled is not None:
+            self.state = self.settled
+        return self.state
+
+    def repair(self) -> object:
+        self.repairs += 1
+        if self.repaired is not None:
+            self.state = self.repaired
+        return self.state
+
+    def roll_back(self) -> bool:
+        self.rollbacks += 1
+        return self.rolled_back
 
 
 def _with_channel(ps: _Ps, tmp_path: Path, stub: _StubSetup) -> ControllerServices:
@@ -2367,6 +2405,23 @@ def test_after_a_successful_press_the_tab_says_it_is_checked_at_the_next_start(
 def test_a_verified_channel_is_shown_with_the_time_it_was_proved(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    said = view.channel_label.text()
+    assert "verified" in said.lower()
+    assert "2026-09-07 01:23 UTC" in said, "verified once and verified in March read the same"
+
+
+def test_a_credential_written_before_times_existed_says_so_rather_than_inventing_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
     stub = _StubSetup(state=channel_setup.Verified(account="YULON_AB", password="pw"))
     view = ControllerView(
         WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
@@ -2375,6 +2430,130 @@ def test_a_verified_channel_is_shown_with_the_time_it_was_proved(
     view.refresh_channel()
 
     assert "verified" in view.channel_label.text().lower()
+
+
+def test_a_refused_credential_says_so_and_offers_the_repair(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The repair is offered only where it applies.
+
+    A button that resets the channel account's password is the one control on
+    this tab that can break a working channel, so it exists only while the
+    server has actually refused the credential.
+    """
+    stub = _StubSetup(
+        state=channel_setup.Refused(
+            account="YULON_AB", password="stale", reason="the server did not accept it"
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "did not accept" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is True
+
+
+def test_the_repair_is_hidden_while_the_channel_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert view.repair_channel_button.isVisibleTo(view) is False
+
+
+def test_pressing_repair_asks_the_setup_and_shows_what_came_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Refused(account="YULON_AB", password="stale", reason="rejected")
+    )
+    stub.repaired = channel_setup.Verified(
+        account="YULON_AB", password="fresh", at="2026-09-07 02:00 UTC"
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.repair_channel()
+
+    assert stub.repairs == 1
+    assert "2026-09-07 02:00 UTC" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is False
+
+
+def test_a_finished_start_asks_the_channel_where_it_now_stands(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise the press writes a configuration nobody ever proves.
+
+    The account is created by the first settle after a start, so without this
+    call the channel the user turned on is never set up at all -- and a
+    credential that stopped working is never noticed.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    stub.settled = channel_setup.Verified(
+        account="YULON_AB", password="pw", at="2026-09-07 02:10 UTC"
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._server_action_done(None)
+
+    assert stub.settles == 1
+    assert "2026-09-07 02:10 UTC" in view.channel_label.text()
+
+
+def test_a_start_that_fails_on_the_channel_port_rolls_the_channel_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause about an occupied port, at the seam that learns about it.
+
+    Docker refuses to publish a host port something else holds, so the
+    container is never created and no setting is ever read. Undoing the press
+    is what makes the next Start work, and saying so is what stops the user
+    pressing enable again into the same wall.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._start_failed(
+        docker.DockerCommandError(
+            "driver failed programming external connectivity on endpoint ac-worldserver: "
+            "Bind for 127.0.0.1:7878 failed: port is already allocated"
+        )
+    )
+
+    assert stub.rollbacks == 1
+    said = view.problem_label.text()
+    assert "7878" in said
+    assert "command channel" in said.lower()
+
+
+def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._start_failed(docker.DockerCommandError("ac-database exited with code 1"))
+
+    assert stub.rollbacks == 0
+    assert "exited with code 1" in view.problem_label.text()
 
 
 def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(

@@ -45,9 +45,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from yulon import commands, platform, soap
@@ -73,6 +75,16 @@ spinning.
 """
 
 ACCOUNT_PREFIX = "YULON_"
+
+
+def now_utc() -> str:
+    """The moment a round trip answered, in words a person reads once.
+
+    Minutes, not seconds: the question this answers is "was that recently or
+    was that in March", and a false precision invites the reader to compare two
+    values that were never measured against the same clock.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def generate_password(fill: Callable[[int], bytes] = secrets.token_bytes, size: int = 64) -> str:
@@ -133,8 +145,9 @@ class Pending:
             )
         return Pending(account=self.account, password=self.password, tries=tries)
 
-    def verified(self) -> Verified:
-        return Verified(account=self.account, password=self.password)
+    def verified(self, *, now: Callable[[], str] = now_utc) -> Verified:
+        """Proved, and when. The clock is a seam so the value can be asserted."""
+        return Verified(account=self.account, password=self.password, at=now())
 
 
 @dataclass(frozen=True)
@@ -143,10 +156,34 @@ class Verified:
 
     account: str
     password: str = field(repr=False)
+    at: str | None = None
+    """When that round trip answered, as `now_utc()` writes it.
+
+    Optional only because a credential written before this field existed has no
+    time in it, and refusing to read such a file would break the channel of
+    every install that already has one. A missing time reads as unknown, never
+    as now -- inventing the current moment for a file of unknown age is the one
+    answer that would be actively misleading.
+    """
 
     def credentials(self, *, host: str, port: int) -> soap.Endpoint:
         """The endpoint to persist. Only reachable from here, by design."""
         return soap.Endpoint(host=host, port=port, account=self.account, password=self.password)
+
+
+@dataclass(frozen=True)
+class Refused:
+    """A credential exists and the server says no to it.
+
+    Distinct from `GaveUp` because it is repairable and `GaveUp` is not: the
+    account is known, so the way out is to reset its password, never to create
+    another. Distinct from `Idle` for the same reason -- an `Idle` install
+    would create.
+    """
+
+    account: str
+    password: str = field(repr=False)
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -157,10 +194,25 @@ class GaveUp:
     reason: str
 
 
-State = Idle | Pending | Verified | GaveUp
+State = Idle | Pending | Verified | Refused | GaveUp
 
 
 # -- the enable press --------------------------------------------------------
+
+
+HOST_PORT_VAR = "DOCKER_SOAP_EXTERNAL_PORT"
+"""The `.env` key the base compose reads for SOAP's whole host binding.
+
+Named in `docker-compose.yml` beside the mapping itself: the value carries the
+address AND the port, because a literal `127.0.0.1:` prefix on the mapping would
+render `127.0.0.1:127.0.0.1:7878:7878` once this key is set.
+"""
+
+RELEASED_HOST_PORT = "127.0.0.1:0"
+"""What a rolled-back channel claims: loopback, and whatever port is free."""
+
+BACKUP_SUFFIX = ".before-channel"
+"""The override as it was before the first press, kept beside it."""
 
 
 class EnableRefused(RuntimeError):
@@ -214,6 +266,18 @@ def enable(
 
     target = server_dir / composegen.OVERRIDE_FILE
     before = target.read_text(encoding="utf-8") if target.exists() else ""
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    # Written once, by the FIRST press. A second press would otherwise back up
+    # the channel's own configuration, and a rollback would then restore a file
+    # with the channel still in it.
+    if not backup.exists():
+        backup.write_text(before, encoding="utf-8", newline="\n")
+    # The claim is written even though it equals the compose default, because a
+    # default cannot be given back: the base file publishes SOAP at
+    # `127.0.0.1:7878` through `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}`,
+    # so until this key exists the port is held by every install whether or not
+    # it has a channel, and `roll_back()` would have nothing to change.
+    composegen.write_dotenv(server_dir, {HOST_PORT_VAR: f"127.0.0.1:{operations.port}"})
     plan = composegen.render(
         entry,
         server_dir,
@@ -227,6 +291,46 @@ def enable(
     target.write_text(plan.override, encoding="utf-8", newline="\n")
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return Enabled(path=target, changed=True)
+
+
+def roll_back(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Undo the press: the configuration this install had, and the port back.
+
+    Two halves, and the second is the one the box names. Restoring the
+    environment alone leaves the install exactly as unstartable as it was: an
+    occupied 7878 stops the CONTAINER being created, because Docker refuses to
+    publish a host port something else already holds, and that happens before
+    the worldserver reads a single setting. So the claim goes back to
+    `127.0.0.1:0` -- any free port the daemon likes -- which is the honest
+    statement of what a rolled-back channel owns: a port nobody can reach it on.
+
+    Returns False, writing nothing, when there is no press to undo. Restoring
+    "the state before" out of a backup that does not exist would put an empty
+    override on top of a good one.
+    """
+    target = server_dir / composegen.OVERRIDE_FILE
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    if not backup.is_file():
+        logger.info(f"nothing to roll back for {entry.id}: no {backup.name}")
+        return False
+    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    backup.unlink()
+    composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
+    logger.info(f"rolled {entry.id}'s command channel back and released its host port")
+    return True
+
+
+def blames_the_host_port(message: str, port: int) -> bool:
+    """Does this start failure name the channel's published port?
+
+    Matched on the port as a whole token against Docker's own words, so a
+    failure about anything else can never silently switch the channel off, and
+    so 7878 is not found inside 78780. The daemon's message is
+    "Bind for 127.0.0.1:7878 failed: port is already allocated".
+    """
+    if "bind for" not in message.lower():
+        return False
+    return re.search(rf"[:\s]{port}(?![0-9])", message) is not None
 
 
 def _world_env(entry: CatalogEntry, extra: Mapping[str, str]) -> dict[str, str]:
@@ -286,6 +390,7 @@ def save_credential(
             "password": verified.password,
             "host": host,
             "port": port,
+            "verified_at": verified.at,
         },
         indent=2,
     )
@@ -349,7 +454,11 @@ def ensure(
     already has), and it is called only from `Idle`.
     """
     current = state if state is not None else Idle()
-    if isinstance(current, Verified | GaveUp):
+    # `Refused` is here for the same reason `Verified` and `GaveUp` are, and for
+    # one more: it carries an account that EXISTS, so the try-again branch below
+    # would call methods on it that only an un-created state has. The repair
+    # path is what a refused credential is for.
+    if isinstance(current, Verified | Refused | GaveUp):
         return current
     if isinstance(current, Idle):
         create(account, password, gm_level)
@@ -365,6 +474,88 @@ def ensure(
         verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
     )
     return verified
+
+
+def refused(state: Verified | Refused, *, reason: str) -> Refused:
+    """Downgrade a credential the server has rejected.
+
+    Only a definite rejection may come here. A transport failure means the
+    server was not asked, and turning "I could not reach it" into "your
+    credential is wrong" would offer the user a repair for a problem that is
+    somebody else's -- `channel.Answer.indeterminate` is what tells them apart,
+    and the caller is what reads it.
+    """
+    return Refused(account=state.account, password=state.password, reason=reason)
+
+
+def repair(
+    *,
+    state: Refused,
+    create: Callable[[str, str, int], object],
+    reset: Callable[[str, str], object],
+    channel_for: Callable[[str], object],
+    game: str,
+    install_id: str,
+    host: str,
+    port: int,
+    config_dir: Path | None = None,
+    gm_level: int = 3,
+    now: Callable[[], str] = now_utc,
+) -> State:
+    """Give the account this install already has a password that works.
+
+    `create` is taken and never called. It is here so the type of this function
+    says what it does not do, and so the test that proves it can hand in a seam
+    that raises: a repair that quietly minted a second account would look
+    identical from the outside -- the channel would work -- while leaving
+    another GM-level-3 row in the user's auth database every time a credential
+    went stale.
+
+    A round trip still decides. The password is already changed in the database
+    by the time it is tried, which is exactly the moment it is tempting to
+    write the credential down anyway; a credential that has not answered is
+    what this app refuses to keep.
+    """
+    _ = create, gm_level
+    password = generate_password()
+    reset(state.account, password)
+    # Built from the password that was just written, not before it: a channel
+    # made ahead of the reset carries the credential the server has already
+    # refused, and would prove nothing while looking like a repair that failed.
+    channel = channel_for(password)
+    answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
+    if getattr(answer, "outcome", "") != "yes":
+        logger.info(f"{game}: the reset password did not answer either; nothing saved")
+        return Refused(
+            account=state.account,
+            password=password,
+            reason=(
+                "the account's password was reset and the server still did not answer, "
+                "so nothing was saved"
+            ),
+        )
+    verified = Verified(account=state.account, password=password, at=now())
+    save_credential(
+        verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
+    )
+    return verified
+
+
+def verified_at(game: str, install_id: str, *, config_dir: Path | None = None) -> str | None:
+    """When this install's saved credential was proved, if it says.
+
+    Read separately from `load_credential()` so that function keeps returning
+    exactly an endpoint: everything that talks to the server wants the endpoint
+    and nothing else, and only the tab's sentence wants this.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no verified time at {path}: {type(exc).__name__}")
+        return None
+    at = raw.get("verified_at") if isinstance(raw, dict) else None
+    return at if isinstance(at, str) and at else None
 
 
 # -- what the tab is handed --------------------------------------------------
@@ -392,6 +583,7 @@ class InstallChannel:
         install_id: str,
         create: Callable[[str, str, int], object],
         channel_for: Callable[[soap.Endpoint], object],
+        reset: Callable[[str, str], object] | None = None,
         config_dir: Path | None = None,
         db_password: str | None = None,
     ) -> None:
@@ -400,6 +592,7 @@ class InstallChannel:
         self.templates_root = templates_root
         self.install_id = install_id
         self._create = create
+        self._reset = reset
         self._channel_for = channel_for
         self._config_dir = config_dir
         self._db_password = db_password
@@ -409,7 +602,95 @@ class InstallChannel:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
         if saved is None:
             return Idle()
-        return Verified(account=saved.account, password=saved.password)
+        return Verified(
+            account=saved.account,
+            password=saved.password,
+            at=verified_at(self.entry.id, self.install_id, config_dir=self._config_dir),
+        )
+
+    def _endpoint(self, account: str, password: str) -> soap.Endpoint:
+        operations = self.entry.operations
+        port = operations.port if operations is not None else 0
+        return soap.Endpoint(host="127.0.0.1", port=port, account=account, password=password)
+
+    def check(self) -> State:
+        """Ask whether the saved credential still works, and keep the answer.
+
+        Only a definite rejection downgrades it. `Answer.indeterminate` is the
+        difference between the server saying no and the server not being there,
+        and treating the second as the first would offer a repair that resets a
+        working password because a container was down.
+        """
+        state = self._state
+        if not isinstance(state, Verified):
+            return state
+        channel = self._channel_for(self._endpoint(state.account, state.password))
+        answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
+        if getattr(answer, "outcome", "") == "yes":
+            return state
+        if getattr(answer, "indeterminate", False):
+            logger.info(f"{self.entry.id}: could not reach the channel; the credential stands")
+            return state
+        self._state = refused(
+            state,
+            reason=(
+                "the server did not accept the saved password. Nothing else about this "
+                "install has changed; the account's password can be reset for it."
+            ),
+        )
+        return self._state
+
+    def repair(self) -> State:
+        """Give the account this install already has a password that works.
+
+        Does nothing unless the credential has actually been refused: this is a
+        button, and pressing it against a working channel would break one that
+        answers for as long as the reset takes to prove.
+        """
+        state = self._state
+        if not isinstance(state, Refused):
+            return state
+        if self._reset is None:
+            return GaveUp(
+                account=state.account,
+                reason=f"{self.entry.id} has no way to reset its own account's password yet",
+            )
+        operations = self.entry.operations
+        endpoint = self._endpoint(state.account, "")
+        self._state = repair(
+            state=state,
+            create=self._create,
+            reset=self._reset,
+            channel_for=lambda pw: self._channel_for(self._endpoint(state.account, pw)),
+            game=self.entry.id,
+            install_id=self.install_id,
+            host=endpoint.host,
+            port=endpoint.port,
+            config_dir=self._config_dir,
+            gm_level=operations.gm_level if operations is not None else 3,
+        )
+        return self._state
+
+    def settle(self) -> State:
+        """Move the channel to wherever the live server says it is.
+
+        One entry point for the tab, because the right thing to do depends on
+        where the setup already is and the tab should not be the thing that
+        knows: an install that has never been set up gets an account and a
+        round trip, one that has a credential gets that credential checked, and
+        one that has given up is left alone until a person acts.
+        """
+        # Two arms and not three: a state that gave up needs no arm here,
+        # because `ensure()` is the latch and returns it untouched. A third one
+        # was written, and a mutation that deleted it changed no observable
+        # behaviour -- which is the definition of a guard that guards nothing.
+        if isinstance(self._state, Verified):
+            return self.check()
+        return self.prove()
+
+    def roll_back(self) -> bool:
+        """Undo this install's own press, and give its host port back."""
+        return roll_back(self.entry, self.server_dir)
 
     def enable(self, *, world_running: bool) -> Enabled:
         """Write the channel on. Refuses while the world is running."""

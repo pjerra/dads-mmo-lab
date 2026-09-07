@@ -11,10 +11,13 @@ another.
 from __future__ import annotations
 
 import string
+from pathlib import Path
 
 import pytest
 
 from yulon import channel_setup as setup
+
+FIXED = "2026-09-07 01:23 UTC"
 
 # -- the password -----------------------------------------------------------
 
@@ -151,3 +154,177 @@ def test_a_pending_state_cannot_be_told_it_was_created_again() -> None:
 
     with pytest.raises(AttributeError):
         pending.created("YULON_AB12CD34", "another")  # type: ignore[attr-defined]
+
+
+# -- the time it was proved, and repairing a credential that stopped working --
+
+
+def test_a_verified_state_carries_the_time_the_round_trip_answered() -> None:
+    """ "Verified" without a time cannot be told from "verified in March".
+
+    The tab's line is the only place a user learns the channel works, and a
+    channel that was proved once and has been broken since reads identically
+    to one proved a minute ago unless the moment is carried.
+    """
+    verified = setup.Idle().created("YULON_AB12CD34", "pw").verified(now=lambda: FIXED)
+
+    assert verified.at == FIXED
+
+
+def test_the_time_is_written_beside_the_credential_and_read_back() -> None:
+    """It survives the app closing, because that is when the question is asked."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as raw:
+        config = Path(raw)
+        verified = setup.Idle().created("YULON_AB12CD34", "pw").verified(now=lambda: FIXED)
+        setup.save_credential(
+            verified,
+            game="wow-wotlk",
+            install_id="ab12cd34",
+            host="127.0.0.1",
+            port=7878,
+            config_dir=config,
+        )
+
+        assert setup.verified_at("wow-wotlk", "ab12cd34", config_dir=config) == FIXED
+
+
+def test_a_missing_or_unreadable_credential_has_no_time_rather_than_a_wrong_one() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as raw:
+        assert setup.verified_at("wow-wotlk", "nothing", config_dir=Path(raw)) is None
+
+
+def test_a_credential_the_server_rejects_reads_as_refused_not_as_verified() -> None:
+    """The state the repair path starts from.
+
+    A saved credential is written only after a round trip answered, so finding
+    one is normally proof. It stops being proof the moment the account is
+    changed underneath us -- somebody resets it, or the auth database is
+    restored from before it existed -- and the honest answer then is refused,
+    not verified.
+    """
+    state = setup.Verified("YULON_AB12CD34", "pw", at=FIXED)
+
+    refused = setup.refused(state, reason="the server did not accept the saved password")
+
+    assert isinstance(refused, setup.Refused)
+    assert refused.account == "YULON_AB12CD34"
+    assert "did not accept" in refused.reason
+
+
+def test_repair_resets_the_password_of_the_account_it_already_has() -> None:
+    """And never, ever creates a second one.
+
+    `create` is handed in as a seam that raises: a repair that quietly minted
+    `YULON_..._2` would look identical from the outside -- the channel would
+    work -- while leaving a GM-level-3 account behind in the user database
+    every time a credential went stale.
+    """
+    import tempfile
+
+    reset: list[tuple[str, str]] = []
+
+    def never_create(*_args: object) -> object:
+        raise AssertionError("repair created an account")
+
+    def do_reset(account: str, password: str) -> None:
+        reset.append((account, password))
+
+    with tempfile.TemporaryDirectory() as raw:
+        config = Path(raw)
+        state = setup.Refused("YULON_AB12CD34", "stale", reason="rejected")
+
+        after = setup.repair(
+            state=state,
+            create=never_create,
+            reset=do_reset,
+            # Yes only to a password that is NOT the one the server refused, so a
+            # repair that proves the old credential fails here instead of
+            # passing on a channel that would never have answered.
+            channel_for=lambda pw: _Answering("yes" if pw != "stale" else "no"),
+            game="wow-wotlk",
+            install_id="ab12cd34",
+            host="127.0.0.1",
+            port=7878,
+            config_dir=config,
+            now=lambda: FIXED,
+        )
+
+        assert isinstance(after, setup.Verified)
+        assert after.at == FIXED
+        assert len(reset) == 1
+        assert reset[0][0] == "YULON_AB12CD34"
+        assert reset[0][1] != "stale", "it reused the password the server just refused"
+        assert setup.load_credential("wow-wotlk", "ab12cd34", config_dir=config) is not None
+
+
+def test_a_repair_whose_round_trip_still_fails_saves_nothing() -> None:
+    """The rule the whole module is built on, on the one path that could break it.
+
+    The password was already reset in the database by the time the round trip
+    is tried, so there is a real temptation to write it down anyway. A
+    credential that has not answered is exactly what this app refuses to keep.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as raw:
+        config = Path(raw)
+        state = setup.Refused("YULON_AB12CD34", "stale", reason="rejected")
+
+        after = setup.repair(
+            state=state,
+            create=lambda *a: None,
+            reset=lambda *a: None,
+            channel_for=lambda _pw: _Answering("no"),
+            game="wow-wotlk",
+            install_id="ab12cd34",
+            host="127.0.0.1",
+            port=7878,
+            config_dir=config,
+        )
+
+        assert not isinstance(after, setup.Verified)
+        assert setup.load_credential("wow-wotlk", "ab12cd34", config_dir=config) is None
+
+
+class _Answering:
+    """A channel that always answers the same way."""
+
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+
+    def send(self, _command: object) -> object:
+        return type("Answer", (), {"outcome": self.outcome, "text": "", "indeterminate": False})()
+
+
+def test_ensure_leaves_a_refused_credential_for_the_repair_path(tmp_path: Path) -> None:
+    """A refused state must never fall into the create-or-verify machinery.
+
+    `Refused` carries an account that exists, so the branch that treats an
+    un-verified state as "try again" would call the wrong methods on it. mypy
+    found this the moment `Refused` joined the union; what it costs at runtime
+    is an AttributeError inside a background job.
+    """
+
+    def never_create(*_args: object) -> object:
+        raise AssertionError("ensure created an account for a refused credential")
+
+    state = setup.Refused("YULON_AB12CD34", "stale", reason="rejected")
+
+    after = setup.ensure(
+        account="YULON_AB12CD34",
+        password="stale",
+        create=never_create,
+        channel=_Answering("yes"),
+        game="wow-wotlk",
+        install_id="ab12cd34",
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path,
+        state=state,
+    )
+
+    assert after is state
