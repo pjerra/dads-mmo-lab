@@ -65,7 +65,10 @@ def test_the_apps_own_account_is_left_out_because_it_is_not_the_users_to_change(
 
     useraccounts.accounts(sql, WOTLK, MARKER, app_account="YULON_AB12CD34")
 
-    assert "YULON_AB12CD34" in sql.asked[0][1]
+    # By the prefix every account this app makes carries, not by this install's
+    # own name: two installs can share an auth database, and the neighbour's
+    # channel account must not be listed either.
+    assert "LEFT(a.username, 6) <> 'YULON_'" in sql.asked[0][1]
 
 
 def test_a_row_the_read_cannot_parse_is_a_problem_rather_than_a_silent_gap() -> None:
@@ -280,3 +283,81 @@ def test_the_install_object_refuses_its_own_account_too(tmp_path) -> None:
 
     assert outcome.done is False
     assert channel.sent == []
+
+
+# -- what the second adversarial review found (2026-09-07) -------------------
+
+
+def test_every_account_this_app_owns_is_protected_and_not_only_this_installs() -> None:
+    """Two installs can share one auth database, and then one breaks the other.
+
+    `YULON_AAAAAAAA` and `YULON_BBBBBBBB` are two installs' channel accounts. A
+    guard that knows only its own name lists the neighbour's and offers to
+    change its password, which ends that install's command channel while saying
+    nothing about it. The prefix is the app's, not the install's, and it is what
+    the guard reads.
+    """
+    channel = _Channel()
+
+    outcome = useraccounts.set_password(
+        channel, account="YULON_BBBBBBBB", password="n3w-p@ss", app_account="YULON_AAAAAAAA"
+    )
+
+    assert outcome.done is False
+    assert channel.sent == []
+
+
+def test_an_ordinary_account_that_merely_starts_with_the_letters_is_not_protected() -> None:
+    """`YULONGATE` is a person's account on the gate box, and it is theirs to change."""
+    channel = _Channel()
+
+    outcome = useraccounts.set_password(
+        channel, account="YULONGATE", password="n3w-p@ss", app_account="YULON_AAAAAAAA"
+    )
+
+    assert outcome.done is True
+    assert channel.sent == ["account set password YULONGATE n3w-p@ss n3w-p@ss"]
+
+
+def test_the_list_leaves_out_every_account_this_app_owns() -> None:
+    sql = _Reader("")
+
+    useraccounts.accounts(sql, WOTLK, MARKER, app_account="YULON_AB12CD34")
+
+    statement = sql.asked[0][1]
+    assert "LEFT(a.username, 6) <> 'YULON_'" in statement
+
+
+def test_a_change_the_server_did_not_answer_in_time_is_not_reported_as_a_failure() -> None:
+    """A timeout means the command MAY have run.
+
+    The SOAP listener queues onto the world thread and blocks until the command
+    finishes, so a client giving up says nothing about whether the server did.
+    Told "that did not work", a person retypes the old password and is locked
+    out of an account whose password has already changed.
+    """
+
+    class _Slow:
+        sent: list[str] = []
+
+        def send(self, command: str) -> object:
+            self.sent.append(command)
+            return type(
+                "Answer",
+                (),
+                {
+                    "outcome": "unknown",
+                    "text": "",
+                    "reason": "the server did not answer within 20s",
+                    "indeterminate": True,
+                    "denied": False,
+                },
+            )()
+
+    outcome = useraccounts.set_password(
+        _Slow(), account="ALICE", password="n3w-p@ss", app_account="YULON_AB"
+    )
+
+    assert outcome.done is False
+    assert outcome.indeterminate is True
+    assert "may already" in outcome.problem.lower()

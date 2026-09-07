@@ -53,6 +53,21 @@ class Listing:
     problem: str = ""
 
 
+APP_PREFIX = "YULON_"
+"""The prefix every account this app makes for itself carries.
+
+The guard reads THIS and not one install's own name, because two installs can
+share an auth database: `YULON_AAAAAAAA` and `YULON_BBBBBBBB` are two channel
+accounts, and a guard that knows only its own would list the neighbour's and
+offer to change its password -- ending that install's command channel while
+saying nothing about it (adversarial review, 2026-09-07).
+
+The underscore is load-bearing. `YULONGATE` is a person's account on the gate
+box and is theirs to change; `LEFT(username, 6)` tells them apart, where a LIKE
+would not because `_` is a wildcard.
+"""
+
+
 def accounts(sql: SqlReader, entry: CatalogEntry, marker: Marker, *, app_account: str) -> Listing:
     """This install's accounts, without the bots and without the app's own."""
     level = entry.accounts.level
@@ -77,7 +92,7 @@ def accounts(sql: SqlReader, entry: CatalogEntry, marker: Marker, *, app_account
     group = "" if level.table is None else " GROUP BY a.id, a.username"
     statement = (
         f"SELECT a.id, a.username, {selected} FROM {auth}.account a{join} "
-        f"WHERE NOT ({bots}) AND UPPER(a.username) <> '{app_account.upper()}'"
+        f"WHERE NOT ({bots}) AND LEFT(a.username, {len(APP_PREFIX)}) <> '{APP_PREFIX}'"
         f"{group} ORDER BY a.username;"
     )
     try:
@@ -150,6 +165,15 @@ class Outcome:
     done: bool
     text: str = ""
     problem: str = ""
+    indeterminate: bool = False
+    """The command may have run, and nobody knows whether it did.
+
+    A SOAP timeout is not a failure: the listener queues onto the world thread
+    and blocks until the command finishes, so a client giving up says nothing
+    about whether the server did. Reported as a plain failure, a person retypes
+    the old password and is locked out of an account whose password has already
+    changed (adversarial review, 2026-09-07).
+    """
 
 
 def set_password(channel: object, *, account: str, password: str, app_account: str) -> Outcome:
@@ -190,14 +214,16 @@ def _not_our_own(account: str, app_account: str, what: str) -> Outcome | None:
     every other Phase 8 feature rides on; dropping its level below administrator
     breaks it just as thoroughly, and neither failure says what it was.
     """
-    if account.strip().upper() != app_account.strip().upper():
+    name = account.strip().upper()
+    if not name.startswith(APP_PREFIX) and name != app_account.strip().upper():
         return None
+    mine = name == app_account.strip().upper()
+    whose = "its own command channel" if mine else "another install's command channel"
     return Outcome(
         False,
         problem=(
-            f"{account} is the account this app made for its own command channel, and it "
-            f"cannot {what} from here — the channel every other control on these tabs uses "
-            "would stop working"
+            f"{account} is an account this app made for {whose}, and it cannot {what} from "
+            "here — the channel it belongs to would stop working"
         ),
     )
 
@@ -209,10 +235,17 @@ def _send(channel: object, line: str) -> Outcome:
         return Outcome(True, text=getattr(answer, "text", ""))
     if outcome == "no":
         return Outcome(False, problem=getattr(answer, "text", "the server refused"))
-    return Outcome(
-        False,
-        problem=getattr(answer, "reason", "") or "the server could not be asked",
-    )
+    reason = getattr(answer, "reason", "") or "the server could not be asked"
+    if getattr(answer, "indeterminate", False):
+        return Outcome(
+            False,
+            indeterminate=True,
+            problem=(
+                f"{reason}. The change may already have been made — the server keeps working "
+                "on a command after this app stops waiting. Check before trying it again."
+            ),
+        )
+    return Outcome(False, problem=reason)
 
 
 # -- what the tab is handed --------------------------------------------------

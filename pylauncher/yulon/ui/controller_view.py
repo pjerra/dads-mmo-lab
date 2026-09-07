@@ -2091,7 +2091,12 @@ class ControllerView(QWidget):
             return
         problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
         self.account_report.setText(problem)
-        self.action_failed.emit(problem)
+        # `action_failed` is what the rest of the app treats as "that did not
+        # happen", and a timeout is not that: the server keeps working on a
+        # command after this app stops waiting. The sentence is shown either
+        # way; only the signal is withheld.
+        if not getattr(outcome, "indeterminate", False):
+            self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:

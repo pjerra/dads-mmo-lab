@@ -141,3 +141,18 @@ def test_a_game_with_no_measured_marker_refuses() -> None:
 
     assert page.total is None
     assert page.problem
+
+
+def test_the_order_has_a_tiebreak_so_two_of_a_name_cannot_swap_between_pages() -> None:
+    """`ORDER BY name` alone is not a total order.
+
+    Two characters can share a name across realms on some trees, and rows with
+    equal keys may come back in any order — so the same bot can appear on two
+    pages and another on none. The guid breaks the tie. (Paging over a table
+    that is changing underneath still shifts rows; see the module docstring.)
+    """
+    sql = _Reader("2\t2\t0", "")
+
+    botlist.page(sql, WOTLK, MARKER)
+
+    assert "ORDER BY name, guid" in sql.asked[1][1]

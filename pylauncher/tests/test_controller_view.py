@@ -3009,3 +3009,34 @@ def test_one_bot_is_a_bot_and_not_one_bots(qapp: object, ps: _Ps, tmp_path: Path
     view.refresh_bots()
 
     assert "1 bot:" in view.bot_summary.text()
+
+
+def test_a_change_whose_result_is_unknown_is_not_announced_as_a_failure(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence is shown; the failure signal is not raised.
+
+    `action_failed` is what the rest of the app treats as "that did not
+    happen". A timeout on a password change is not that — the command may have
+    run — so the tab says so in words and stays quiet on the wire.
+    """
+    stub = _StubAccounts(
+        outcome=useraccounts.Outcome(
+            False,
+            indeterminate=True,
+            problem="the server did not answer within 20s. The change may already have been made",
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert "may already have been made" in view.account_report.text()
+    assert failures == []

@@ -11,6 +11,15 @@ look.
 Paged because the owner runs 500 and has said the number is his to raise. Read
 live, never cached: the population moves while the tab is open.
 
+**A page is a snapshot, and the population moves.** The order carries a
+tiebreak — `name, guid` — because `ORDER BY name` alone is not a total order and
+rows with equal keys may come back in any order, which would put one bot on two
+pages and another on none. That fixes the ordering; it does not fix `OFFSET`
+over a table that is changing, where a row inserted before the boundary shifts
+every later page by one. Keyset pagination is the answer to that and is not
+written yet (adversarial review, 2026-09-07); what is here is a live list read
+fresh on every press, which is what the box asked for.
+
 **The filter is escaped with `!`, not with a backslash.** `NO_BACKSLASH_ESCAPES`
 is a real mode on both MySQL and MariaDB, and under it a backslash is an
 ordinary character — so a filter escaped with one silently stops escaping and
@@ -125,7 +134,8 @@ def page(
             "characters",
             f"SELECT name, level, {online}, "
             f"CASE WHEN {registry} THEN 'registry' ELSE 'prefix' END "
-            f"FROM {table} WHERE {where} ORDER BY name LIMIT {int(limit)} OFFSET {int(offset)};",
+            f"FROM {table} WHERE {where} ORDER BY name, guid "
+            f"LIMIT {int(limit)} OFFSET {int(offset)};",
         )
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         logger.warning(f"could not browse {entry.id}'s bots: {exc}")
