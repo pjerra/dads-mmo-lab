@@ -94,14 +94,23 @@ def sha_hash(account: str, password: str) -> str:
     return hashlib.sha1(f"{account.upper()}:{password.upper()}".encode()).hexdigest().upper()
 
 
-def matches(scheme: str, account: str, password: str, values: Sequence[str]) -> bool:
+def matches(scheme: str, account: str, password: str, values: Sequence[str]) -> bool | None:
     """Does this account's stored credential belong to this password?
 
-    `values` are the columns `COLUMNS[scheme]` names, in that order, as they
-    were read. A scheme with no measured recipe answers `False`, and so does a
-    row with the wrong number of columns in it -- the question is "may this app
-    tell somebody their password changed?", and the answer to that is no
-    whenever it cannot be shown.
+    Three answers, and the third is the one the adversarial review asked for.
+    `True` and `False` are a comparison that was actually made; **`None` is
+    "this module could not read what is in that column"** -- an unmeasured
+    scheme, a row with the wrong number of columns in it, a salt that is not
+    hex, an empty or unreadable stored value.
+
+    The distinction is not academic here. Since 8.3d a `False` CONTRADICTS the
+    server's own report of success and tells a person their new password "will
+    not log in" -- so a core that changed how it stores credentials, or a query
+    that came back truncated, would turn every successful password change into
+    a reported lockout. A shape this module does not recognise is a question it
+    could not ask.
+
+    `values` are the columns `COLUMNS[scheme]` names, in that order, as read.
 
     A plain `==` would be wrong twice over on the SRP6 trees: the stored value
     is a big number's hex, whose width nobody promised, and the case is the
@@ -109,16 +118,27 @@ def matches(scheme: str, account: str, password: str, values: Sequence[str]) -> 
     """
     columns = COLUMNS.get(scheme)
     if columns is None or len(values) != len(columns):
-        return False
+        return None
     if scheme == "mangos_sha":
         return _same(values[0], sha_hash(account, password))
     salt, stored = values
     expected = _verifier(scheme, account, password, salt)
-    return expected is not None and _same(stored, expected)
+    if expected is None:
+        return None
+    return _same(stored, expected)
 
 
-def _same(stored: str, expected: str) -> bool:
-    """One hex number equalling another, however either was written down."""
-    if not stored.strip():
-        return False
-    return stored.strip().upper().lstrip("0") == expected.upper().lstrip("0")
+def _same(stored: str, expected: str) -> bool | None:
+    """One hex number equalling another, however either was written down.
+
+    `None` where the stored side is not a hex number at all: that is a column
+    this module cannot read rather than a password that does not match.
+    """
+    text = stored.strip()
+    if not text:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+    return text.upper().lstrip("0") == expected.upper().lstrip("0")

@@ -446,7 +446,10 @@ class InstallAccounts:
             # No row at all is not "the wrong password" -- it is no answer.
             logger.info(f"{account} has no credential row to read")
             return None
-        return passwordcheck.matches(scheme, account, password, fields)
+        answered = passwordcheck.matches(scheme, account, password, fields)
+        if answered is None:
+            logger.info(f"{account}'s credential is not in a shape this app can read")
+        return answered
 
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()

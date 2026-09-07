@@ -49,24 +49,27 @@ def test_a_scheme_nobody_has_measured_answers_nothing_rather_than_a_guess() -> N
     """The whole value of this module is that it was measured on the machine.
 
     A scheme that has not been is one whose password changes this app cannot
-    confirm — which is a smaller answer, not a wrong one.
+    confirm — which is a smaller answer, not a wrong one. `None` rather than
+    `False` since 8.3d's review: a false answers "that password will not log
+    in", and this module has no business saying that about a tree it has never
+    read.
     """
     pair = (SALT, VERIFIER)
-    assert passwordcheck.matches("azerothcore", "SRPPROBE", "kn0wn-p@ss77", pair) is False
-    assert passwordcheck.matches("", "SRPPROBE", "kn0wn-p@ss77", pair) is False
+    assert passwordcheck.matches("azerothcore", "SRPPROBE", "kn0wn-p@ss77", pair) is None
+    assert passwordcheck.matches("", "SRPPROBE", "kn0wn-p@ss77", pair) is None
 
 
 def test_a_salt_that_is_not_hex_answers_nothing_rather_than_raising() -> None:
     """A caller reads this off a database and cannot promise what comes back."""
-    assert _srp("SRPPROBE", "kn0wn-p@ss77", salt="not hex") is False
-    assert _srp("SRPPROBE", "kn0wn-p@ss77", salt="") is False
+    assert _srp("SRPPROBE", "kn0wn-p@ss77", salt="not hex") is None
+    assert _srp("SRPPROBE", "kn0wn-p@ss77", salt="") is None
 
 
 def test_a_row_with_the_wrong_number_of_columns_in_it_is_not_an_answer() -> None:
     """One scheme has two columns and the other has one, so the count is a fact
     about the scheme rather than about whatever came back from the database."""
-    assert passwordcheck.matches("mangos_srp6", "SRPPROBE", "kn0wn-p@ss77", (VERIFIER,)) is False
-    assert passwordcheck.matches("mangos_sha", "SHAPROBE", "x", (SALT, VERIFIER)) is False
+    assert passwordcheck.matches("mangos_srp6", "SRPPROBE", "kn0wn-p@ss77", (VERIFIER,)) is None
+    assert passwordcheck.matches("mangos_sha", "SHAPROBE", "x", (SALT, VERIFIER)) is None
 
 
 # -- comparing it with what the database actually holds ----------------------
@@ -88,13 +91,18 @@ def test_a_stored_verifier_is_matched_however_the_server_padded_it() -> None:
     assert _srp("SRPPROBE", "kn0wn-p@ss77", stored=f" {VERIFIER} ")
 
 
-def test_the_wrong_password_and_the_unmeasured_scheme_both_answer_false() -> None:
-    """Never `None` here: a caller asking "may I say this worked?" gets a no."""
+def test_only_a_readable_credential_can_answer_no() -> None:
+    """The two halves a caller must be able to tell apart.
+
+    A well-formed verifier for the wrong password is a no. A scheme nobody has
+    measured, or an empty column, is not a no -- it is a question this module
+    could not ask, and since 8.3d a no contradicts the server's own success.
+    """
     assert _srp("SRPPROBE", "WRONG-p@ss77") is False
     assert (
-        passwordcheck.matches("azerothcore", "SRPPROBE", "kn0wn-p@ss77", (SALT, VERIFIER)) is False
+        passwordcheck.matches("azerothcore", "SRPPROBE", "kn0wn-p@ss77", (SALT, VERIFIER)) is None
     )
-    assert _srp("SRPPROBE", "kn0wn-p@ss77", stored="") is False
+    assert _srp("SRPPROBE", "kn0wn-p@ss77", stored="") is None
 
 
 # -- the other tree, and the other shape ------------------------------------
@@ -132,5 +140,60 @@ def test_the_two_trees_do_not_answer_for_each_other() -> None:
     TOO, so a check that reached for the SRP6 pair on this tree would find
     something to read and would answer no forever.
     """
-    assert passwordcheck.matches("mangos_srp6", "SHAPROBE", "kn0wn-p@ss77", (SHA_KNOWN,)) is False
+    # One column where two are expected is unreadable, not wrong...
+    assert passwordcheck.matches("mangos_srp6", "SHAPROBE", "kn0wn-p@ss77", (SHA_KNOWN,)) is None
+    # ...and a well-formed hex value of the right shape for the OTHER tree is
+    # readable, and is simply not this password.
     assert passwordcheck.matches("mangos_sha", "SRPPROBE", "kn0wn-p@ss77", (VERIFIER,)) is False
+
+
+# -- 8.3d's review: a value this module cannot read is not a wrong password ---
+
+
+def test_a_credential_this_module_cannot_read_is_not_a_mismatch() -> None:
+    """The adversarial review's finding, and it is the dangerous direction.
+
+    Since 8.3d a `False` here CONTRADICTS the server's own success and tells a
+    person their password "will not log in". So every shape this module cannot
+    evaluate — a salt that is not hex, an empty stored value, a row with the
+    wrong number of columns, a scheme nobody has measured — has to answer "I
+    cannot say" rather than "wrong". Storage drift in a core we do not control
+    would otherwise turn every successful password change into a reported
+    lockout.
+
+    `None` and `False` are both falsy, so this test asserts identity: `is None`
+    would pass for `False` under a truthiness check, and that is exactly the
+    bug it is guarding.
+    """
+    good = (SALT, VERIFIER)
+    assert passwordcheck.matches("mangos_srp6", "SRPPROBE", "kn0wn-p@ss77", good) is True
+
+    cannot_say = [
+        ("mangos_srp6", ("not hex", VERIFIER)),
+        ("mangos_srp6", ("", VERIFIER)),
+        ("mangos_srp6", (SALT, "")),
+        ("mangos_srp6", (SALT, "not hex either")),
+        ("mangos_srp6", (VERIFIER,)),
+        ("mangos_srp6", (SALT, VERIFIER, "a third column")),
+        ("mangos_sha", ("",)),
+        ("mangos_sha", ("zzzz",)),
+        ("azerothcore", good),
+        ("", good),
+    ]
+    for scheme, values in cannot_say:
+        assert (
+            passwordcheck.matches(scheme, "SRPPROBE", "kn0wn-p@ss77", values) is None
+        ), f"{scheme} {values} should be unreadable, not wrong"
+
+
+def test_a_readable_credential_that_is_the_wrong_password_is_still_false() -> None:
+    """The other side: the check must not answer `None` to everything.
+
+    Both of these are well-formed values of the right shape for their scheme —
+    the only thing wrong with them is the password, which is the one case that
+    must contradict a server's success.
+    """
+    assert (
+        passwordcheck.matches("mangos_srp6", "SRPPROBE", "WRONG-p@ss77", (SALT, VERIFIER)) is False
+    )
+    assert passwordcheck.matches("mangos_sha", "SHAPROBE", "WRONG-p@ss77", (SHA_KNOWN,)) is False
