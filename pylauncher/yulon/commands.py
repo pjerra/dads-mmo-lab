@@ -118,6 +118,137 @@ def account_set_password(account: str, password: str) -> str:
     return line(f"account set password {account} {password} {password}")
 
 
+# -- the Play verbs (8.4a) ---------------------------------------------------
+#
+# Every shape below was read off a live AzerothCore server on 2026-09-07 by
+# asking it for its own help, and one of them by asking it for its BEHAVIOUR
+# because the help is wrong: `.revive` documents no argument at all, and
+# `revive NOSUCHCHARACTER` answered "Character 'Nosuchcharacter' does not
+# exist." A feature built from that help would have drawn no revive button.
+
+_TELEPORT_LOCATION = re.compile(r"^[A-Za-z0-9_$-]{1,64}$")
+"""One token of the server's own `game_tele` alphabet.
+
+1989 rows on this install, spelled `7thLegionFront`, `AbandonedArmory`, `AB`.
+The `$` is there for `$home`, which that command's help names as a location. A
+space in this argument is a SECOND argument to the server, not a longer name.
+"""
+
+_MONEY_CAP = 2_147_483_647
+"""Copper in a signed 32-bit field, which is what the server counts money in."""
+
+
+def _character(name: str) -> str:
+    """The one place a character name is checked, for every verb below.
+
+    A check that lives on six code paths is a check that is missing from one of
+    them, so the verbs all come through here.
+    """
+    _require(
+        valid_character_name(name), f"{name!r} is not a character name this server would accept"
+    )
+    return name
+
+
+def teleport_to(character: str, location: str) -> str:
+    """`teleport name <character> <location>` -- and it works on an OFFLINE one.
+
+    `teleport name` rather than `teleport`: the second moves whoever is
+    selected, and over a command channel nobody is selected. The server's own
+    help says "Character can be offline", which is what makes this a button
+    that works on a character list rather than only on somebody playing.
+    """
+    _character(character)
+    _require(
+        bool(_TELEPORT_LOCATION.match(location)),
+        f"{location!r} is not one of this server's teleport names",
+    )
+    return line(f"teleport name {character} {location}")
+
+
+def set_character_level(character: str, level: int) -> str:
+    """`character level <character> <level>`.
+
+    1 to 255 is the shape this command takes; whether THIS server allows level
+    80 or 60 is its own configured business and it says so itself when asked.
+    """
+    _character(character)
+    _require(1 <= level <= 255, f"{level} is not a level this command takes")
+    return line(f"character level {character} {level}")
+
+
+def rename_at_login(character: str) -> str:
+    """`character rename <character>` -- marked for rename at the next login.
+
+    The optional `reserveName` and `$newName` arguments are deliberately not
+    sent: one reserves the old name server-wide and the other renames without
+    asking the player, and neither is what a button called "Rename at next
+    login" promises.
+    """
+    _character(character)
+    return line(f"character rename {character}")
+
+
+def revive(character: str) -> str:
+    """`revive <character>` -- named, whatever the help says.
+
+    See the note above: the help documents no argument and the server answers
+    one anyway.
+    """
+    _character(character)
+    return line(f"revive {character}")
+
+
+def mail_items(
+    character: str,
+    *,
+    subject: str,
+    body: str,
+    items: tuple[tuple[int, int], ...],
+    cap: int = 12,
+) -> str:
+    """`send items <to> "<subject>" "<text>" id:count ...`.
+
+    `cap` is passed rather than written here because the trees disagree -- this
+    one takes twelve attachments and 8.4c's takes exactly one -- and a number in
+    this file would silently promise the wrong thing on one of them.
+    """
+    _character(character)
+    _require(bool(items), "a mail with no items in it is not a gift")
+    _require(len(items) <= cap, f"this server carries at most {cap} items in one mail")
+    parts = []
+    for item, count in items:
+        _require(item > 0, f"{item} is not an item id")
+        _require(count > 0, f"{count} is not a number of items to send")
+        parts.append(f"{item}:{count}")
+    subject, body = _mail_text(subject), _mail_text(body)
+    return line(f'send items {character} "{subject}" "{body}" ' + " ".join(parts))
+
+
+def mail_money(character: str, *, subject: str, body: str, copper: int) -> str:
+    """`send money <to> "<subject>" "<text>" <copper>`.
+
+    Copper, because that is what the server counts. A button that says gold
+    multiplies before it gets here; this refuses to guess which unit it was
+    handed.
+    """
+    _character(character)
+    _require(0 < copper <= _MONEY_CAP, f"{copper} is not an amount of copper this server holds")
+    return line(f'send money {character} "{_mail_text(subject)}" "{_mail_text(body)}" {copper}')
+
+
+def _mail_text(text: str) -> str:
+    """Subject or body, made safe to sit inside the quotes the server parses.
+
+    A quote would close the argument early and hand the rest of the sentence to
+    the parser as item ids; a line break would end the command and start
+    another one with whatever followed. Quotes are dropped and line breaks
+    become spaces -- REPLACED rather than deleted, so two words do not glue
+    together into one.
+    """
+    return "".join(" " if c in "\r\n" else c for c in text if c != '"')
+
+
 SERVER_INFO = "server info"
 """The round trip that proves a channel without changing anything.
 
