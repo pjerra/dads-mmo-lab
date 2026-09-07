@@ -3278,3 +3278,30 @@ def test_a_game_that_knows_where_its_levels_live_gets_the_accounts_surface(
             f"{entry.id}: level block {'measured' if measured else 'absent'}, "
             f"accounts surface {'present' if services.accounts else 'absent'}"
         )
+
+
+@pytest.mark.parametrize("game", [e.id for e in load_catalog().games])
+def test_the_gm_level_controls_offer_what_this_tree_actually_accepts(
+    game: str, tmp_path: Path
+) -> None:
+    """A hard-coded 0-to-3 was drawn for every game until 8.3d.
+
+    The Tortoise fork accepts 4 -- measured on the live server, where
+    `account set gmlevel SHAPROBE 4` answered *"You change security level of
+    account SHAPROBE to 4."* and `5` answered *"Incorrect values."* Its own
+    check grants at the caller's own level rather than strictly below it, so
+    drawing 0-to-3 there hides a level the tree has, and hides it silently:
+    nothing fails, the person simply cannot ask for it.
+
+    Both controls are checked, because there are two -- one for creating an
+    account and one for changing an existing one -- and they were two separate
+    hard-coded numbers.
+    """
+    entry = load_catalog().get(game)
+    view = ControllerView(entry, _services(_Ps(), tmp_path, []), status_poll_ms=0)
+    level = entry.accounts.level
+    ceiling = level.max_level if level is not None else 3
+
+    assert view.account_gm.maximum() == ceiling, game
+    assert view.selected_gm.maximum() == ceiling, game
+    assert view.account_gm.minimum() == 0, game

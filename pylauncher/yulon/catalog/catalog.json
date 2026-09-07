@@ -95,7 +95,8 @@
         "level": {
           "table": "account_access",
           "account_column": "id",
-          "level_column": "gmlevel"
+          "level_column": "gmlevel",
+          "max_level": 3
         }
       },
       "operations": {
@@ -480,7 +481,7 @@
         "local_address_column": null
       },
       "accounts": {
-        "level": { "level_column": "gmlevel" },
+        "level": { "level_column": "gmlevel", "max_level": 3 },
         "scheme": "mangos_srp6"
       },
       "console": {
@@ -870,9 +871,7 @@
         "local_address_column": null
       },
       "accounts": {
-        "level": {
-          "level_column": "gmlevel"
-        },
+        "level": { "level_column": "gmlevel", "max_level": 3 },
         "scheme": "mangos_srp6"
       },
       "console": {
@@ -1200,6 +1199,7 @@
         "local_address_column": null
       },
       "accounts": {
+        "level": { "level_column": "rank", "max_level": 4 },
         "scheme": "mangos_sha"
       },
       "console": {

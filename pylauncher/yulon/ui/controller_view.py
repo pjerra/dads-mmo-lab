@@ -157,6 +157,18 @@ class ChannelSetup(Protocol):
     def setup_state(self) -> object: ...
 
 
+def _highest_level(entry: CatalogEntry) -> int:
+    """The highest GM level this tree's own command accepts.
+
+    Falls back to 3 where the tree's level store has not been measured, which is
+    the level every core in this catalog calls administrator: a game whose block
+    is absent draws no level controls that do anything anyway, and 3 is the
+    number this app drew for all four before any of them were measured.
+    """
+    level = entry.accounts.level
+    return level.max_level if level is not None else 3
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -838,15 +850,32 @@ def _for_tortoise(
     # to enable and no `channel_setup` here -- the console IS the channel. The
     # tab is handed this install's channel as one callable, and the Server tab's
     # probe is the only Phase 8 surface that exists on this tree so far.
+    # 8.3d. One channel object, used twice: the Server tab's probe presses it,
+    # and the Accounts tab sends this tree's two commands down it. They are the
+    # same console and the same lock, which is the point -- two channels over
+    # one `docker attach` would interleave two replies in one window.
+    console = channel_module.AttachChannel(
+        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    )
+    # There is no credential and nothing to set up on this core, so the channel
+    # is simply always the console: `channel_for_saved` answers it rather than
+    # looking one up, and the AttachChannel says "could not ask" by itself when
+    # the world is not there to answer.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=lambda: console,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
-        console_probe=channel_module.AttachChannel(
-            send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
-        ).send,
+        console_probe=console.send,
+        accounts=accounts_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -2126,7 +2155,11 @@ class ControllerView(QWidget):
         self.account_password = QLineEdit(accounts)
         self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.account_gm = QSpinBox(accounts)
-        self.account_gm.setRange(0, 3)
+        # 8.3d: the ceiling is this tree's, measured by asking its own
+        # command. Three of the four stop at 3; the tortoise fork accepts 4,
+        # and a control that offered 0-to-3 there would hide a level the
+        # tree has without anything failing.
+        self.account_gm.setRange(0, _highest_level(self.entry))
         self.create_account_button = QPushButton("Create", accounts)
         self.create_account_button.clicked.connect(self.create_account)
         form.addRow("Username", self.account_name)
@@ -2151,7 +2184,7 @@ class ControllerView(QWidget):
         self.set_password_button = QPushButton("Set password", existing)
         self.set_password_button.clicked.connect(self.set_selected_password)
         self.selected_gm = QSpinBox(existing)
-        self.selected_gm.setRange(0, 3)
+        self.selected_gm.setRange(0, _highest_level(self.entry))
         self.set_gm_button = QPushButton("Set GM level", existing)
         self.set_gm_button.clicked.connect(self.set_selected_gm_level)
         change.addRow("New password", self.selected_password)

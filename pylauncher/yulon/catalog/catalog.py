@@ -958,6 +958,18 @@ class AccountLevel(_Strict):
     level_column: str = Field(
         default="gmlevel", min_length=1, description="The column holding the level itself."
     )
+    max_level: int = Field(
+        default=3,
+        ge=1,
+        le=9,
+        description=(
+            "The highest level this core's own command accepts, measured by asking it. Three of "
+            "the four trees stop at 3 (`SEC_ADMINISTRATOR`, and Vanilla's own help says `#level "
+            "may range from 0 to 3`); the tortoise fork accepts 4, because its check grants at "
+            "the caller's own level rather than strictly below it. A surface that draws the "
+            "wrong ceiling here does not fail -- it silently offers less than the tree has."
+        ),
+    )
 
 
 class Accounts(_Strict):

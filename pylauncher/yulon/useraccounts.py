@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import commands, srp6
+from yulon import commands, passwordcheck
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
 from yulon.log import get_logger
@@ -318,23 +318,6 @@ def _send(channel: object, line: str) -> Outcome:
     return Outcome(False, problem=reason)
 
 
-_CREDENTIAL_COLUMNS: dict[str, tuple[str, ...]] = {
-    "azerothcore": ("salt", "verifier"),
-    "mangos_srp6": ("s", "v"),
-}
-"""Which columns hold an account's SALT and then its VERIFIER, per scheme.
-
-The ORDER is the point and it differs: AzerothCore names them `salt`,
-`verifier`; the CMaNGOS trees name them `s`, `v` -- and `s` is the salt, so a
-pair read in the table's own column order would be back to front on one of the
-two trees and would answer "no" for every correct password.
-
-Not a guess and not a default: `accounts.scheme` is what each tree's own box
-measured, and a scheme absent from here is one whose password changes cannot be
-confirmed by reading -- which is a refusal, not a shrug.
-"""
-
-
 def _text_literal(text: str) -> str:
     """A hex blob, as every other statement in this project writes a string."""
     return "_utf8mb4 X'" + text.encode("utf-8").hex().upper() + "'"
@@ -398,16 +381,19 @@ class InstallAccounts:
         that as this command's success would lock somebody out with a
         reassurance (8.3b's adversarial review).
 
-        The columns are this tree's own -- `salt`/`verifier` on AzerothCore,
-        `s`/`v` on the CMaNGOS trees -- because reading the wrong pair would not
-        fail loudly on a row that has both; it would answer no every time.
+        The columns are this tree's own, and `yulon.passwordcheck` holds both
+        them and the recipe that reads them so the two cannot drift apart: the
+        CMaNGOS trees keep a salt and a verifier in `s`/`v`, and the Tortoise
+        fork keeps ONE unsalted hash in `sha_pass_hash` -- and carries `v`/`s`
+        columns as well, so a check that reached for the wrong pair there would
+        find something to read and answer no forever.
 
         The salt and the verifier never leave this method. They are not a
         password, and nothing logs them.
         """
         scheme = self.entry.accounts.scheme or ""
-        columns = _CREDENTIAL_COLUMNS.get(scheme)
-        if columns is None or scheme not in srp6.MEASURED_SCHEMES:
+        columns = passwordcheck.COLUMNS.get(scheme)
+        if columns is None:
             logger.info(f"{self.entry.name} has no measured credential recipe; the reply stands")
             return False
         auth = self.entry.schema_map()["auth"]
@@ -416,12 +402,7 @@ class InstallAccounts:
             f"SELECT {', '.join(columns)} FROM {auth}.account "
             f"WHERE username = {_text_literal(account)};",
         )
-        fields = row.split()
-        if len(fields) != 2:
-            logger.info(f"{account} has no single credential row to read")
-            return False
-        salt, verifier = fields
-        return srp6.matches(scheme, account, password, salt, verifier)
+        return passwordcheck.matches(scheme, account, password, row.split())
 
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()

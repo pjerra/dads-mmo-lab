@@ -282,3 +282,42 @@ def test_wotlk_still_keeps_it_in_its_own_join_table() -> None:
 
     assert level is not None
     assert level.table == "account_access"
+
+
+def test_tortoise_keeps_the_level_in_its_own_column_and_reaches_one_higher() -> None:
+    """Measured on the live Tortoise server, m910q, 2026-09-07.
+
+    `account set gmlevel SHAPROBE 4` answered *"You change security level of
+    account SHAPROBE to 4."* and the `rank` column read 4; `5` answered
+    *"Incorrect values."* The fork's own check grants at the caller's own level
+    rather than strictly below it, so a console can hand out 4 — and a surface
+    that offered 0 to 3 here would present a lower ceiling than the tree has.
+
+    `security` is NOT the column: it stayed NULL through every one of those
+    changes while `rank` moved, and both exist on this row.
+    """
+    level = load_catalog().get("wow-tortoise").accounts.level
+
+    assert level is not None
+    assert level.table is None
+    assert level.level_column == "rank"
+    assert level.max_level == 4
+
+
+def test_every_tree_says_how_high_its_levels_go() -> None:
+    """A hard-coded 0-to-3 was drawn for all four games until 8.3d.
+
+    Three of them do stop at 3 (`SEC_ADMINISTRATOR`), and Vanilla's own help
+    says so in as many words: `#level may range from 0 to 3`. The fourth does
+    not, and the number belongs beside the column it applies to rather than in
+    the widget.
+    """
+    for game, ceiling in (
+        ("wow-wotlk", 3),
+        ("wow-tbc", 3),
+        ("wow-vanilla", 3),
+        ("wow-tortoise", 4),
+    ):
+        level = load_catalog().get(game).accounts.level
+        assert level is not None, game
+        assert level.max_level == ceiling, game
