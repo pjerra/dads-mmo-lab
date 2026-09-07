@@ -52,6 +52,15 @@ character can see.
 | `3-filtered.png` | a three-letter filter, and the one row it matched |
 | `4-who-list.png` | the client in the world, and `/who` finding a bot the tab listed |
 
+## After the gate
+
+The adversarial review that followed replaced `OFFSET` paging with a cursor —
+`(name, guid)` — because the list is read live and `OFFSET` counts rows: one bot
+logging out before the boundary shifts every later page by one. The screenshots
+here were retaken against that version, which is why the summary reads
+"Page 2, 50 shown" rather than a row range: the rows are read by cursor and a
+range would be a count the tab does not have.
+
 ## How to re-run it
 
 ```
