@@ -225,14 +225,29 @@ def test_a_start_failure_that_names_our_port_is_told_apart_from_one_that_does_no
     Docker's message for a taken published port names the port; a message about
     anything else must not cause the channel to be silently switched off.
     """
-    taken = (
+    # Two wordings, and the SECOND one is why this test exists in this shape.
+    # The first is what Docker's older message looks like and what this
+    # predicate was written against. The second is what the daemon on
+    # `yulon-ubuntu` actually said on 2026-09-07 when the gate held the port,
+    # and it contains neither "bind for" nor "already allocated" -- so the
+    # first version of this predicate answered no, no rollback happened, and
+    # the gate failed on the clause it was written to prove.
+    older = (
         "Error response from daemon: driver failed programming external "
         "connectivity on endpoint ac-worldserver: Bind for 127.0.0.1:7878 failed: "
         "port is already allocated"
     )
-    assert setup.blames_the_host_port(taken, 7878) is True
-    assert setup.blames_the_host_port(taken, 8085) is False
+    measured = (
+        "Error response from daemon: failed to set up container networking: driver "
+        "failed programming external connectivity on endpoint ac-worldserver "
+        "(34fb00de9718): failed to bind host port 127.0.0.1:7878/tcp: address "
+        "already in use"
+    )
+    for taken in (older, measured):
+        assert setup.blames_the_host_port(taken, 7878) is True
+        assert setup.blames_the_host_port(taken, 8085) is False
     assert setup.blames_the_host_port("ac-database exited with code 1", 7878) is False
+    assert setup.blames_the_host_port("could not bind: out of memory", 7878) is False
     # Compose says this on every command in an install that has not claimed the
     # port yet. It names 7878 and is not a failure at all, so matching on the
     # number alone would turn an ordinary start into a silent rollback.
@@ -244,3 +259,4 @@ def test_a_start_failure_that_names_our_port_is_told_apart_from_one_that_does_no
         is False
     )
     assert setup.blames_the_host_port("Bind for 127.0.0.1:7878 failed", 78) is False
+    assert setup.blames_the_host_port("failed to bind host port 127.0.0.1:78780/tcp", 7878) is False

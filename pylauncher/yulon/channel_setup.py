@@ -323,12 +323,27 @@ def roll_back(entry: CatalogEntry, server_dir: Path) -> bool:
 def blames_the_host_port(message: str, port: int) -> bool:
     """Does this start failure name the channel's published port?
 
-    Matched on the port as a whole token against Docker's own words, so a
-    failure about anything else can never silently switch the channel off, and
-    so 7878 is not found inside 78780. The daemon's message is
-    "Bind for 127.0.0.1:7878 failed: port is already allocated".
+    Two things have to be true, and neither alone is enough: the daemon says it
+    could not bind, AND the port it names is ours. Matched as a whole token, so
+    7878 is not found inside 78780.
+
+    **The wording is per-daemon and was measured, not remembered.** This was
+    written against Docker's older sentence --
+
+        Bind for 127.0.0.1:7878 failed: port is already allocated
+
+    -- and the daemon on the gate box said something with none of those words
+    in it:
+
+        failed to bind host port 127.0.0.1:7878/tcp: address already in use
+
+    so the predicate answered no, the rollback never ran, and the gate failed
+    on the clause it existed to prove. What both sentences share is the verb,
+    which is what is matched now. Requiring "already in use" or "already
+    allocated" as well would be a third wording to get wrong, and a bind that
+    fails for some OTHER reason is still a bind of our port that failed.
     """
-    if "bind for" not in message.lower():
+    if "bind" not in message.lower():
         return False
     return re.search(rf"[:\s]{port}(?![0-9])", message) is not None
 
