@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
 from yulon import docker, install_wiring, networking
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.installer import rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
@@ -118,6 +121,18 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    rebuild: install_wiring.RebuildSource | None = None
+    """Recompile this install and restart it on the result; None when nothing can.
+
+    The only optional seam here, and the default is None rather than a callable
+    that refuses, because the tab greys the button on it: a control that is
+    visibly unavailable beats one that is pressed and then explains itself
+    (roadmap 6.1, and the same rule the Console tab applies to a missing pty).
+
+    `install_wiring.rebuild_for_app()` is what fills it, including the refusal
+    for a server adopted from a WSL distro — which is a fact about the INSTALL,
+    not about this view, so the view never asks about distros.
+    """
 
     @classmethod
     def for_entry(
@@ -328,6 +343,15 @@ def _assemble(
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+        # HERE, in the shared half, and not in the four per-game factories. A
+        # rebuild takes no per-game decision at all — the engine is chosen from
+        # `catalog.json` by `installer_for()`, and every family's stage tuple
+        # carries the `build` and `ready` stages `rebuild_stages()` selects — so
+        # wiring it once is what makes "every tab offers it" true by
+        # construction rather than by remembering it four times. Only WotLK ever
+        # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
+        # the same kind of checkout and its users patch it the same way.
+        rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -625,6 +649,15 @@ together without retyping the string, and placed below `_assemble()` so it does
 not move the `networking.apply(...)` call `test_controller_view.py` pins by line.
 """
 
+REBUILD_BUTTON_LABEL = "Rebuild the server…"
+"""The rebuild button's label, in one place because two things say it.
+
+The button wears it, and `_format_report()` tells the user to press it by
+name. Two literals would be one rename away from a report that points at a
+control that is not there any more, which is the class of defect this whole
+feature is a fix for.
+"""
+
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
 """Two labels for one button, because a teardown should not be one click away.
@@ -820,8 +853,9 @@ class ControllerView(QWidget):
     def shutdown(self) -> None:
         """Stop this tab's timers and join its background jobs (called before teardown)."""
         self._timer.stop()
-        self.console_log.stop()
-        self.console_log.wait(5000)
+        for panel in self.log_panels():
+            panel.stop()
+            panel.wait(5000)
         waiter = getattr(self._jobs, "wait", None)
         if callable(waiter):
             # Derived from the grace, not a flat ten seconds. `_JobWorker.run()`
@@ -987,6 +1021,15 @@ class ControllerView(QWidget):
         teardown started a second one on top of the first — and whichever
         finished first called `_set_busy(False)` and unlocked Start while the
         other was still writing schemas (review, 2026-08-23).
+
+        Five since 2026-09-08, and Rebuild is the same argument one size larger:
+        it stops and replaces the very containers Start, Stop and Remove act
+        on, and it runs for the length of a compile. Both directions are locked
+        — this method is what a running rebuild calls (the panel's own
+        `run_started`/`run_finished`), and `rebuild_server()` refuses while
+        `_busy`, so an import cannot start a rebuild on top of itself either.
+        Unlocking honours the standing gate: a game with no rebuild wiring must
+        not have its greyed button handed back by a job ending.
         """
         self._busy = busy
         if busy:
@@ -994,6 +1037,7 @@ class ControllerView(QWidget):
             self.stop_button.setEnabled(False)
             self.remove_button.setEnabled(False)
             self.repair_button.setEnabled(False)
+            self.rebuild_button.setEnabled(False)
             # Refresh too, and this one is not symmetry. `recheck()` blanks
             # `problem_label` — which during an import is the live output the
             # user is watching — and then fires `Controller.import_state()`,
@@ -1008,6 +1052,7 @@ class ControllerView(QWidget):
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
             self.repair_button.setEnabled(True)
+            self.rebuild_button.setEnabled(self.services.rebuild is not None)
 
     @Slot()
     def start_server(self) -> None:
@@ -1733,18 +1778,61 @@ class ControllerView(QWidget):
         self.remove_module_button = QPushButton("Remove selected", tab)
         self.install_module_button.clicked.connect(lambda: self._module_action("install"))
         self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
+        # The action `_format_report` has always named. It sits on THIS tab
+        # because this is the tab that prints "worldserver REBUILD required
+        # before this takes effect" — for 20 of the 41 shipped manifests, every
+        # one of them a `module` — and until 2026-09-08 a grep for a
+        # rebuild/compile/build button across `yulon/ui/` returned nothing at
+        # all, so that sentence named an action this app did not have.
+        #
+        # The ellipsis is the convention for "this opens a dialog first": it is
+        # the only visual difference between this and the two buttons beside it,
+        # and the two beside it act immediately.
+        self.rebuild_button = QPushButton(REBUILD_BUTTON_LABEL, tab)
+        self.rebuild_button.clicked.connect(self.rebuild_server)
+        self.rebuild_button.setToolTip(
+            "Compile the server again so modules installed since the last build are in it. "
+            "Asks first — it takes as long as an install's compile and the server goes down."
+        )
+        # Its own panel, not the report box above it. `module_report` is a
+        # `setPlainText` field that shows the LAST action's result, and a
+        # multi-hour job written into it would show one line and then look
+        # frozen — which is the exact reading that produced this feature's bug
+        # report. `LogPanel` is timestamped, follows the bottom, carries a
+        # ticking elapsed field and owns the Stop button, and it already exists.
+        self.rebuild_log = LogPanel(tab)
+        # The lock, in both directions. A rebuild replaces the containers the
+        # Server tab's Start/Stop/Remove act on, so those go dead for its
+        # duration; `rebuild_server()` refuses while `_busy` for the mirror
+        # case. Driven off the PANEL's own signals rather than set by hand
+        # around the call, so a job that fails, is stopped, or raises before its
+        # first line still unlocks — the shape `_set_busy(False)` is missed by
+        # is exactly how the Server tab's own buttons were left dead once
+        # before.
+        self.rebuild_log.run_started.connect(self._rebuild_started)
+        self.rebuild_log.run_finished.connect(self._rebuild_finished)
         row = QHBoxLayout()
         row.addWidget(self.install_module_button)
         row.addWidget(self.remove_module_button)
+        row.addStretch(1)
+        row.addWidget(self.rebuild_button)
         box.addWidget(self.module_list, 2)
         box.addLayout(row)
         box.addWidget(self.module_report, 1)
+        box.addWidget(self.rebuild_log, 2)
         self._tabs.addTab(tab, "Modules")
         self._manifests: dict[str, Manifest] = {}
         self.reload_modules()
         enabled = self.services.store is not None and self.services.applier is not None
         self.install_module_button.setEnabled(enabled)
         self.remove_module_button.setEnabled(enabled)
+        # A separate gate from the two above, and it must stay separate: the
+        # three CMaNGOS games have no manifest store at all, and their
+        # worldservers are still compiled from a checkout somebody may have
+        # patched. Tying the rebuild to `store` would have taken the control
+        # away from three of the four games for a reason that is about
+        # manifests.
+        self.rebuild_button.setEnabled(self.services.rebuild is not None)
 
     def reload_modules(self) -> None:
         """Fill the list from the store (every family), newest store contents first."""
@@ -1795,6 +1883,111 @@ class ControllerView(QWidget):
         what, self._module_pending = self._module_pending or "module action", None
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
+
+    @Slot()
+    def rebuild_server(self) -> bool:
+        """Ask, then recompile this install and restart it on the result. False if not started.
+
+        Returns whether anything was started, so a caller — and every test of
+        the decline path — can tell "the user said no" from "the button is
+        broken" without inspecting the seam.
+
+        **The confirmation is a real gate, and everything about it is chosen so
+        that it cannot be clicked through.** Yes/No with No as the default, so
+        Enter declines; `is ... Yes` rather than `is not ... No`, because
+        Escape and the window's close button both answer `NoButton` and only an
+        explicit Yes may take somebody's server down for an hour; and the text
+        is `rebuild_confirmation()`'s, which names the folder and quotes this
+        project's own measured compile times rather than "this may take a
+        while". The view does not author that copy — `catalog/installer.py`
+        does, where it has assertions on it that run without Qt.
+
+        Cancelling changes nothing at all: the seam is not called, so no engine
+        is built, no daemon is asked anything and the running server is not
+        touched. `test_declining_the_rebuild_confirmation_starts_nothing`.
+
+        The refusals a rebuild can raise — no install record, a compose file
+        this app did not write, a server inside a WSL distro — arrive as
+        exceptions from the generator and land in the panel's own FAILED line
+        plus `action_failed`, which is the same route every other refusal on
+        this tab takes.
+        """
+        source = self.services.rebuild
+        if source is None:
+            return False
+        if self.rebuild_log.running:
+            QMessageBox.information(
+                self, "Already rebuilding", "This server is already being rebuilt."
+            )
+            return False
+        if self._busy:
+            # A rebuild replaces the very containers the Server tab's actions
+            # are operating on, and `busy_reason()` records that one of those —
+            # the import — cannot be stopped at all and runs 10-30 minutes.
+            # Refused rather than queued: the honest outcome of two actions
+            # wanting the same containers is that one of them waits, and the
+            # user is the one who should choose which.
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish on the "
+                "Server tab, then press Rebuild again. Nothing was started.",
+            )
+            return False
+        if (
+            QMessageBox.question(
+                self,
+                f"Rebuild {self.entry.name}?",
+                rebuild_confirmation(self.entry, self.services.controller.server_dir),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            is not QMessageBox.StandardButton.Yes
+        ):
+            logger.info(f"rebuild of {self.entry.id} declined at the confirmation")
+            return False
+        # The engine's own cancel, handed to the panel so its Stop button reaches
+        # a build that is blocked between lines rather than only stopping the
+        # reader of them.
+        cancel = threading.Event()
+        return self.rebuild_log.run(
+            lambda: source(cancel),
+            title=f"Rebuilding {self.entry.name}",
+            cancel=cancel,
+        )
+
+    @Slot()
+    def _rebuild_started(self) -> None:
+        self._set_busy(True)
+
+    @Slot(bool, str)
+    def _rebuild_finished(self, ok: bool, message: str) -> None:
+        """Unlock, and put a refusal where the user is looking.
+
+        The panel's own header already carries `FAILED: <message>`, but a
+        refusal from this action is a paragraph — "this folder has no install
+        record", "that compose file was not written by Yu'lon" — and the header
+        is one wrapped label beside a Stop button. `action_failed` is the route
+        every other refusal on this tab takes, and it is also what `main.py`
+        connects to the app log, which is the file a user pastes into a bug
+        report.
+        """
+        self._set_busy(False)
+        if not ok:
+            self.action_failed.emit(message)
+
+    def log_panels(self) -> tuple[LogPanel, ...]:
+        """Every streaming panel this view owns, for the exit path to join.
+
+        `main.py` registers these so `_stop_background_threads()` can stop and
+        wait on each: a `QThread` destroyed while running ABORTS the process
+        (0xC0000409, verified), so a panel the exit path cannot see is a crash
+        on close. It is a method rather than a list `main.py` builds by hand
+        because this view grew its second panel with the rebuild control, and
+        the registration was in two files at the time — a third panel added
+        later is picked up by code that already exists.
+        """
+        return (self.console_log, self.rebuild_log)
 
     # -------------------------------------------------------- networking tab
 
@@ -1890,11 +2083,26 @@ class ControllerView(QWidget):
 
 
 def _format_report(report: ApplyReport) -> str:
+    """What one module action did, and what the user has to do next.
+
+    The rebuild line names the button, and it can only do that since
+    2026-09-08. Before then it read "worldserver REBUILD required before this
+    takes effect" and stopped there — an instruction whose action did not exist
+    anywhere in `yulon/ui/`, printed after 20 of the 41 shipped manifests. A
+    user who read it and pressed Install again got nothing, because
+    `stage_build()` skips a compile whose images are all still on the daemon
+    and the image tag is derived from the folder, so a new module changes no
+    tag. The wording is now a pointer at `ControllerView.rebuild_server()`, one
+    row below the report it appears in.
+    """
     lines = [f"{report.action} {report.item_id}:"]
     lines += [f"  ✓ {step}" for step in report.done]
     lines += [f"  – skipped: {step}" for step in report.skipped]
     if report.rebuild_required:
-        lines.append("  ⚠ worldserver REBUILD required before this takes effect")
+        lines.append(
+            "  ⚠ worldserver REBUILD required before this takes effect — "
+            f'press "{REBUILD_BUTTON_LABEL}" below'
+        )
     elif report.restart_recommended:
         lines.append("  ⚠ restart the server to apply")
     return "\n".join(lines)
