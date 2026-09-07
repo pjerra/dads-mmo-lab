@@ -337,7 +337,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # has not had its 8.3 box. 8.3b, 8.3c and 8.3d each add their own, and
         # this test fails the day one of them lands without its wiring.
         unlisted = {"accounts"} if entry.accounts.level is None else set()
-        allowed = module_surface | unmeasured | unwired | unlisted
+        # 8.5a's bot browser rides on the same measurement 8.1a's dashboard
+        # does -- the bot marker -- so it is absent exactly where `observability`
+        # is, and arrives with that tree's own 8.1 box.
+        unbrowsed = {"bots"} if entry.observability is None else set()
+        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed
         if game == "wow-wotlk":
             assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
         else:

@@ -45,9 +45,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import channel as channel_module
 from yulon import (
+    botlist,
     channel_setup,
+    dbreads,
     docker,
     install_wiring,
     logsnap,
@@ -56,6 +57,7 @@ from yulon import (
     resources,
     useraccounts,
 )
+from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog import composegen
@@ -104,6 +106,12 @@ class UnsupportedGameError(RuntimeError):
     registry covers the whole catalog, so this raises in CI before it can
     raise in front of anybody.
     """
+
+
+class BotBrowser(Protocol):
+    """What the Bots tab needs (8.5a). One question, asked with a page and a filter."""
+
+    def page(self, *, offset: int = 0, name_like: str = "") -> object: ...
 
 
 class AccountAdmin(Protocol):
@@ -192,6 +200,13 @@ class ControllerServices:
     A small object rather than two callables because the two questions belong
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
+    """
+    bots: BotBrowser | None = None
+    """This install's bots, for a game whose marker is measured (8.5a).
+
+    The tab exists only where this is wired: a Bots tab that cannot say which
+    accounts are bots would have to show every character on the server, and on
+    this install that is 900 rows of which 500 are the answer.
     """
     accounts: AccountAdmin | None = None
     """This install's user accounts, for a game whose stores are measured (8.3a).
@@ -388,6 +403,7 @@ def _assemble(
     log_snapshot: logsnap.Recorder | None = None,
     channel_setup: ChannelSetup | None = None,
     accounts: AccountAdmin | None = None,
+    bots: BotBrowser | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -418,6 +434,7 @@ def _assemble(
         log_snapshot=log_snapshot,
         channel_setup=channel_setup,
         accounts=accounts,
+        bots=bots,
     )
 
 
@@ -497,6 +514,10 @@ def _for_wotlk(
         log_snapshot=recorder,
         channel_setup=channel,
         accounts=accounts_admin,
+        # 8.5a. The marker is resolved per read rather than once at start-up:
+        # it lives in a conf file the user can change while the app is open,
+        # and a list built on a stale marker is a list of the wrong characters.
+        bots=_BotBrowser(entry, server_dir, sql),
         controller=Controller(
             spec,
             server_dir,
@@ -615,6 +636,7 @@ def _for_tbc(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        bots=_BotBrowser(entry, server_dir, sql),
         controller=tbc_controller.TbcController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
         ),
@@ -677,6 +699,7 @@ def _for_vanilla(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
         ),
@@ -735,6 +758,7 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
         ),
@@ -771,6 +795,27 @@ A dict rather than a chain of `if`s so that adding a game is adding a row, and
 so that "which games can this build manage?" has an answer that can be printed
 (`UnsupportedGameError` prints it) and asserted against `catalog.json`.
 """
+
+
+class _BotBrowser:
+    """`botlist.page()` with this install's live marker in front of it."""
+
+    def __init__(self, entry: CatalogEntry, server_dir: Path, sql: DockerSql) -> None:
+        self.entry = entry
+        self.server_dir = server_dir
+        self._sql = sql
+
+    def page(self, *, offset: int = 0, name_like: str = "") -> botlist.Page:
+        answer = dbreads.resolve_marker(self.entry, self.server_dir)
+        if answer.marker is None:
+            return botlist.Page(problem=answer.problem or "this install's bot marker is unreadable")
+        return botlist.page(
+            self._sql,
+            self.entry,
+            answer.marker,
+            offset=offset,
+            name_like=name_like,
+        )
 
 
 def _channel_sentence(state: object) -> str:
@@ -940,6 +985,7 @@ class ControllerView(QWidget):
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
+        self._build_bots_tab()
         self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
@@ -2090,6 +2136,114 @@ class ControllerView(QWidget):
         self.create_account_button.setEnabled(True)
         self.account_report.setText(f"Could not create the account: {exc}")
         self.action_failed.emit(str(exc))
+
+    # --------------------------------------------------------------- bots tab
+
+    def _build_bots_tab(self) -> None:
+        """Browsing the bots, for a game whose marker this app has measured.
+
+        The whole tab is absent otherwise rather than empty: without a marker
+        the only honest list is every character on the server, which on this
+        install is 900 rows of which 500 are the answer.
+        """
+        if self.services.bots is None:
+            return
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        self.bot_summary = QLabel("", tab)
+        self.bot_summary.setWordWrap(True)
+        self.bot_list = QListWidget(tab)
+        row = QHBoxLayout()
+        self.bot_filter = QLineEdit(tab)
+        self.bot_filter.setPlaceholderText("name begins with…")
+        self.bot_filter.returnPressed.connect(self.filter_bots)
+        self.filter_bots_button = QPushButton("Find", tab)
+        self.filter_bots_button.clicked.connect(self.filter_bots)
+        self.previous_bots_button = QPushButton("Previous", tab)
+        self.previous_bots_button.clicked.connect(self.previous_bot_page)
+        self.next_bots_button = QPushButton("Next", tab)
+        self.next_bots_button.clicked.connect(self.next_bot_page)
+        row.addWidget(self.bot_filter)
+        row.addWidget(self.filter_bots_button)
+        row.addWidget(self.previous_bots_button)
+        row.addWidget(self.next_bots_button)
+        box.addWidget(self.bot_summary)
+        box.addWidget(self.bot_list)
+        box.addLayout(row)
+        self._bot_offset = 0
+        self._bot_total: int | None = None
+        self._show_page_buttons()
+        self._tabs.addTab(tab, "Bots")
+
+    def _show_page_buttons(self) -> None:
+        """Neither button offers a page that is not there."""
+        self.previous_bots_button.setEnabled(self._bot_offset > 0)
+        total = self._bot_total
+        self.next_bots_button.setEnabled(
+            total is not None and self._bot_offset + botlist.PAGE_SIZE < total
+        )
+
+    @Slot()
+    def refresh_bots(self) -> None:
+        """Read the page this tab is on, off the GUI thread."""
+        browser = self.services.bots
+        if browser is None:
+            return
+        offset, name_like = self._bot_offset, self.bot_filter.text().strip()
+        self._run(
+            lambda: browser.page(offset=offset, name_like=name_like),
+            self._bots_listed,
+            self._bots_failed,
+        )
+
+    @Slot()
+    def filter_bots(self) -> None:
+        """A new filter starts at the first page.
+
+        Otherwise a filter typed on page nine shows page nine of a list that may
+        now be one page long, which reads as "no bots match".
+        """
+        self._bot_offset = 0
+        self.refresh_bots()
+
+    @Slot()
+    def next_bot_page(self) -> None:
+        self._bot_offset += botlist.PAGE_SIZE
+        self.refresh_bots()
+
+    @Slot()
+    def previous_bot_page(self) -> None:
+        # Never below zero: a negative OFFSET is a SQL error, and the button
+        # can be pressed by a keyboard even while it is disabled by a mouse.
+        self._bot_offset = max(0, self._bot_offset - botlist.PAGE_SIZE)
+        self.refresh_bots()
+
+    @Slot(object)
+    def _bots_listed(self, page: object) -> None:
+        self.bot_list.clear()
+        problem = getattr(page, "problem", "")
+        self._bot_total = getattr(page, "total", None)
+        if problem:
+            self.bot_summary.setText(problem)
+            self._show_page_buttons()
+            return
+        for bot in getattr(page, "bots", []):
+            where = "online" if bot.online else "offline"
+            self.bot_list.addItem(f"{bot.name} — level {bot.level} — {where} — {bot.source}")
+        total = self._bot_total
+        first = self._bot_offset + 1 if self.bot_list.count() else self._bot_offset
+        said = (
+            f"{total} bots: {getattr(page, 'by_registry', 0)} by the playerbots registry, "
+            f"{getattr(page, 'by_prefix', 0)} by the account prefix. "
+            f"Showing {first}–{self._bot_offset + self.bot_list.count()}."
+        )
+        warning = getattr(page, "warning", "")
+        self.bot_summary.setText(f"{said} {warning}".strip() if warning else said)
+        self._show_page_buttons()
+
+    @Slot(object)
+    def _bots_failed(self, exc: object) -> None:
+        self.bot_summary.setText(f"Could not read this server's bots: {exc}")
 
     # -------------------------------------------------------- maintenance tab
 

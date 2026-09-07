@@ -10,7 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from yulon import channel_setup, dashboard, docker, logsnap, networking, runner, useraccounts
+from yulon import (
+    botlist,
+    channel_setup,
+    dashboard,
+    docker,
+    logsnap,
+    networking,
+    runner,
+    useraccounts,
+)
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
@@ -2848,3 +2857,137 @@ def test_a_game_with_no_account_seam_shows_no_list_and_no_buttons(
 
     assert view.account_list.isVisibleTo(view) is False
     assert view.set_password_button.isVisibleTo(view) is False
+
+
+# -- 8.5a: browsing the bots -------------------------------------------------
+
+
+class _StubBots:
+    """Stands in for the bot-browsing seam the wiring hands down (8.5a)."""
+
+    def __init__(self, page: botlist.Page | None = None) -> None:
+        self.result = page or botlist.Page(
+            bots=[
+                botlist.Bot(name="Guglu", level=14, online=True, source="registry"),
+                botlist.Bot(name="Ritdy", level=3, online=False, source="prefix"),
+            ],
+            total=500,
+            by_registry=480,
+            by_prefix=20,
+        )
+        self.asked: list[tuple[int, str]] = []
+
+    def page(self, *, offset: int = 0, name_like: str = "") -> botlist.Page:
+        self.asked.append((offset, name_like))
+        return self.result
+
+
+def _with_bots(ps: _Ps, tmp_path: Path, stub: _StubBots) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.bots = stub
+    return services
+
+
+def test_the_bot_list_shows_the_rows_and_the_split_by_signal(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Both numbers, because one of them hides the case that matters.
+
+    An install whose prefix changed after its bots were made has rows the
+    registry knows and the prefix does not.
+    """
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    said = [view.bot_list.item(i).text() for i in range(view.bot_list.count())]
+    assert any("Guglu" in line and "registry" in line for line in said)
+    assert any("Ritdy" in line and "prefix" in line for line in said)
+    assert "500" in view.bot_summary.text()
+    assert "480" in view.bot_summary.text()
+    assert "20" in view.bot_summary.text()
+
+
+def test_a_marker_that_could_not_be_read_says_so_and_shows_no_rows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubBots(page=botlist.Page(problem="this install's bot marker could not be read"))
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert view.bot_list.count() == 0
+    assert "could not be read" in view.bot_summary.text()
+
+
+def test_a_marker_matching_nothing_warns_rather_than_reading_as_no_bots(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubBots(
+        page=botlist.Page(total=0, warning="no character matched the bot marker 'rndbot'")
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "no character matched" in view.bot_summary.text()
+
+
+def test_the_next_page_asks_for_the_next_page(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+
+    view.next_bot_page()
+
+    assert stub.asked[-1][0] == botlist.PAGE_SIZE
+
+
+def test_the_first_page_has_no_previous_to_go_back_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """And the offset never goes negative, which would be a SQL error."""
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+
+    view.previous_bot_page()
+
+    assert stub.asked[-1][0] == 0
+    assert view.previous_bots_button.isEnabled() is False
+
+
+def test_a_filter_is_passed_through_and_sends_the_list_back_to_the_first_page(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise a filter typed on page nine shows page nine of a shorter list."""
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    view.next_bot_page()
+    view.bot_filter.setText("Gug")
+
+    view.filter_bots()
+
+    assert stub.asked[-1] == (0, "Gug")
+
+
+def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
