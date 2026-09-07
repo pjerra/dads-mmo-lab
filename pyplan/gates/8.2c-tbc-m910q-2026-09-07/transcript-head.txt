@@ -1,0 +1,11 @@
+8.2c - Command channel, WoW TBC - live gate on m910q
+====================================================
+
+Code at 5b835150 in ~/gate82c; the install is ~/tbc-7.4c, built by 7.4c.
+Every stamp is the script's own (UTC). The box shows CEST.
+
+
+1. BEFORE ANYTHING
+------------------
+
+    (re-run below; the first before-run predates the namespace work)
