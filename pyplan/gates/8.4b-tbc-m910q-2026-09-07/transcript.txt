@@ -38,3 +38,22 @@ help tele name -> Syntax: .tele name [#playername] #location
    mails 1 -> 2   per mail: 588	12 | 572	12 | 
 13 items -> unknown: 'http://127.0.0.1:7878/ took the command and closed the connection with'
    mails 2 -> 2   per mail: 588	12 | 572	12 | 
+
+##### the actions, on a character a person was playing (live-actions.py)
+[20:19:03] before: 5	1	1
+[20:19:03] teleport to Stormwind: done=True 'You are teleporting Ddsasd to Stormwind.'
+[20:19:33]    row now: 5	1	1
+[20:19:33] set level 25: done=True 'You changed level of Ddsasd to 25.'
+[20:20:04]    row now: 5	1	1
+[20:20:04] send 9 gold: done=True 'Mail sent to Ddsasd'
+[20:20:34]    row now: 5	1	1
+
+[exited with code 0]
+
+##### the realm the client could not reach, fixed through the app's own Networking press
+realm before: 1 MaNGOS 192.168.10.134 8085
+  applied: realmlist -> 100.78.24.50
+realm after : 1 MaNGOS 100.78.24.50 8085
+
+##### the row after that session
+Ddsasd	25	0	1	0

@@ -1,8 +1,7 @@
 # 8.4b — Play, WoW TBC — server side gated live on m910q, 2026-09-07
 
-**Not ticked.** Every clause that does not need the game client is green; the
-client half is one screen from done and is written up at the end so tomorrow's
-attempt starts where this one stopped.
+Every clause is green, the client half included: the real 2.4.3 client stood in
+the world while the commands were sent from the other side of the machine.
 
 Server: the 7.4c TBC install on `m910q` (`~/tbc-7.4c`, CMaNGOS 0.18). Code
 `5b31bd03`.
@@ -44,24 +43,55 @@ button promises before the press.
 guid — so this tree reads the id straight off the inventory row. The wrong shape
 would answer a list of instance guids that look exactly like item ids.
 
-## The client half, and where it stopped
+## The client half
 
-The account `TBCGATE` owns `Ddsasd`, the one character on this server that is
-not a bot. Its password was set through 8.3a's own button and the real 2.4.3
-client logged in with it — it is at the realm-choosing screen in
-`tbcplay-w02.png`, which is as far as 8.3b ever needed to go.
+`TBCGATE` owns `Ddsasd`, the one character on this server that is not a bot. Its
+password was set through 8.3a's own button, the real 2.4.3 client logged in with
+it, and the actions were sent from `m910q` while it stood in the world.
 
-Three things had to be learnt to get that far, and the third is the one that
-cost the evening:
+| what was sent | what the client showed |
+| --- | --- |
+| `tele name Ddsasd Orgrimmar` (the gate's own stage) | the character panel reading **Orgrimmar** (`4-client-character-orgrimmar.png`) |
+| `tele name Ddsasd Stormwind` | in the world, **Elwynn Forest**, the Eastern Kingdoms — a different continent from where it started (`5-client-in-world-level-25.png`) |
+| `character level Ddsasd 25` | the portrait reading **25**, and the row reading 25 after the logout saved it |
+| `send money Ddsasd "A gift" … 90000` | the **envelope** on the minimap (`6-client-mail-envelope.png`) |
+| `character rename Ddsasd` | at the next login: **"Your name has been flagged for rename"** (`7-client-rename-prompt.png`) |
 
-1. This client publishes **no `MainWindowHandle` and no `GxWindowClass`** while
-   it is starting, so a driver that clicks by window coordinates clicks 0,0 —
-   the desktop — and types the login at whatever is there.
-2. The reason there was no window: **"Hardware changed. Reload default
-   settings?"**, a Windows message box this client puts up when `Config.wtf` has
-   been edited, BEFORE it creates its own window. The driver's own windowed-mode
-   rewrite caused it. An ENTER after launch answers it, and the window handle
-   appears immediately afterwards.
-3. Its realm dialog is not where the 3.3.5a client's is, so the click that
-   dismisses one does not dismiss the other. That is the screen this box stops
-   on.
+The row after that session read `Ddsasd 25 0 1 0` — level 25, offline, rename
+flagged, map 0 — so what the world held while it was played is what the database
+holds now.
+
+## Four things this client needed that the 3.3.5a one did not
+
+Each was found by looking at what came back, and each is in `client-login.ps1`:
+
+1. **"Hardware changed. Reload default settings?"** — a plain Windows message box
+   this client puts up when `WTF\Config.wtf` has been edited, BEFORE it creates
+   its game window (`hardware-changed-dialog.png`). So there is no window to
+   find: `MainWindowHandle` is 0, `GxWindowClass` finds nothing, and every click
+   goes to 0,0 — the desktop. An ENTER eight seconds after launch answers it and
+   the handle appears at once. Three runs were lost to this.
+2. **The realm screen wants a language ticked first.** Its "Development"
+   checkbox is what turns "Suggest Realm" from grey to red
+   (`3-client-development-ticked.png`); the 3.3.5a client shows a realm list
+   straight away and has neither control.
+3. **Then "Suggest Realm", then Accept** — *"You have been assigned to the MaNGOS
+   Realm."* — and only then the character screen.
+4. **The realm dialog reappears if Okay is clicked during "Logging in to game
+   server".** It has to wait for the load, and clicking it early simply reopens
+   it, twice measured.
+
+And one that was not the client's fault at all: **the realm row advertised
+`192.168.10.134`**, m910q's LAN address, which the Hyper-V host cannot reach. The
+client authenticated against realmd over Tailscale and was then told to connect
+to an address on another network, so the realm dialog came back for ever. Fixed
+through **Yu'lon's own Networking plan and apply** — `realmlist → 100.78.24.50`,
+which is a live press of that feature rather than a row written by hand.
+
+## The rename flag survives a live session
+
+`character rename` was sent while the character was ONLINE and the flag was
+still there after the logout, which is not obvious: the logout save writes the
+player's own row, and it could have overwritten it. On this client the prompt
+appears when **Enter World** is pressed rather than on arrival at the character
+screen, which is where the 3.3.5a client shows it.

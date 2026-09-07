@@ -34,6 +34,7 @@ param(
   # first character on the list and one more confirms; the client then
   # loads, which takes longer than the login did.
   [switch]$EnterWorld,
+  [switch]$RealmStyle,
   [int]$WorldSeconds = 60,
   # A character flagged for rename cannot enter the world until it is
   # renamed: the prompt sits in front of the character screen. Giving a
@@ -247,6 +248,40 @@ if ($EnterWorld) {
   # The realm dialog does NOT take ENTER -- measured twice, 2026-09-07: the
   # dialog was still up eight seconds later and the second ENTER dropped the
   # client back to the login screen. Its Okay button is clicked instead.
+  if ($RealmStyle) {
+    # The 2.4.3 realm screen asks for a LANGUAGE before it shows any realms:
+    # its "Choose your language" panel has one checkbox and the list appears
+    # only after it is ticked. The 3.3.5a client goes straight to the list.
+    ClickAt 0.737 0.344
+    Start-Sleep -Seconds 4
+    Raise
+    Shoot "$Label-3a2-language"
+    # Ticking it lights up "Suggest Realm", which is how this client gets from
+    # the realm-STYLE screen to an actual realm. The 3.3.5a client shows the
+    # list straight away and has neither control.
+    ClickAt 0.841 0.629
+    Start-Sleep -Seconds 8
+    Raise
+    Shoot "$Label-3a3-realm-list"
+    # "You have been assigned to the MaNGOS Realm." -- Accept, and this client
+    # is at its character screen. Three clicks where the 3.3.5a client needs
+    # one, and none of them in the same place.
+    ClickAt 0.396 0.527
+    # "Logging in to game server" follows, and the character list takes a while
+    # to arrive. Clicking Okay during it RE-OPENS the realm dialog -- measured,
+    # 2026-09-07 -- so this waits instead, and the Okay below is skipped
+    # entirely because Accept has already chosen the realm.
+    Start-Sleep -Seconds 25
+    Raise
+    Shoot "$Label-3a4-accepted"
+  }
+  # Okay on the realm-selection dialog. BOTH clients end up here: the 3.3.5a
+  # one shows it straight after login, and the 2.4.3 one only after the
+  # language, Suggest Realm and Accept above -- at almost exactly the same
+  # place, which is why one coordinate serves both.
+  # Okay on the realm-selection dialog, which BOTH clients put in front of the
+  # character screen. It has to come AFTER "Logging in to game server" has
+  # finished: clicked during it, the dialog simply re-opens (measured twice).
   ClickAt 0.616 0.788
   Start-Sleep -Seconds 20
   Raise
