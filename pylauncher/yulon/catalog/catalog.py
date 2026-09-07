@@ -1015,6 +1015,58 @@ class Accounts(_Strict):
     )
 
 
+class Equipped(_Strict):
+    """Where THIS tree keeps the item id of a thing a character is wearing.
+
+    Two shapes, and reading the wrong one does not fail: AzerothCore's
+    `character_inventory` row carries the item INSTANCE guid (`item`) and the
+    template id is one join away in `item_instance.itemEntry`, while the CMaNGOS
+    trees carry the template id on the inventory row itself (measured on the TBC
+    install, 2026-09-06). A query built for the wrong shape answers a list of
+    instance guids that look exactly like item ids -- every one of them wrong,
+    and not one of them empty.
+    """
+
+    template_column: str = Field(
+        min_length=1,
+        description=(
+            "The column holding the item's template id -- on `item_instance` where "
+            "`instance_table` is set, and on the inventory row where it is null."
+        ),
+    )
+    instance_table: str | None = Field(
+        default=None,
+        description=(
+            "The table to join for the template id, or null where the inventory row "
+            "already carries it."
+        ),
+    )
+    inventory_column: str = Field(
+        default="item",
+        min_length=1,
+        description="The inventory column that keys the join. Ignored without instance_table.",
+    )
+
+
+class Play(_Strict):
+    """What the Characters tab may offer on this tree (8.4a).
+
+    Absent until that tree's own box measures it, like `observability` and
+    `accounts.level`, and for the same reason: an inherited block is a guess
+    wearing the shape of a fact.
+    """
+
+    equipped: Equipped = Field(description="How to read what a character is wearing.")
+    mail_item_cap: int = Field(
+        ge=1,
+        description=(
+            "How many attachments this tree carries in ONE mail. Twelve on AzerothCore and "
+            "CMaNGOS TBC; 8.4c's tree takes exactly one, so a set of gear is that many mails "
+            "and the button has to say so before the press."
+        ),
+    )
+
+
 class Console(_Strict):
     """How this core's worldserver console delimits the answer to a command.
 
@@ -1278,7 +1330,11 @@ class CatalogEntry(_Strict):
     client: Client
     realmlist: Realmlist = Realmlist()
     console: Console = Console()
-    accounts: Accounts = Accounts()
+    accounts: Accounts = Field(default_factory=Accounts)
+    play: Play | None = Field(
+        default=None,
+        description="What the Characters tab may offer here, once this tree has measured it.",
+    )
     operations: Operations | None = Field(
         default=None,
         description=(

@@ -91,6 +91,14 @@
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
       },
+      "play": {
+        "equipped": {
+          "template_column": "itemEntry",
+          "instance_table": "item_instance",
+          "inventory_column": "item"
+        },
+        "mail_item_cap": 12
+      },
       "accounts": {
         "level": {
           "table": "account_access",
@@ -479,6 +487,10 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "mail_item_cap": 12
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
