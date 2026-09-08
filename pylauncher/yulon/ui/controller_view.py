@@ -2488,6 +2488,16 @@ class ControllerView(QWidget):
                 f"Kept {', '.join(report.kept_volumes)} \u2014 reinstall to the same folder to "
                 f"find those characters again."
             )
+        if report.secret_kept is not None:
+            # Only on a `generated` entry, where the password that opens the
+            # kept volume was inside the folder that has just been deleted. The
+            # sentence above promises the characters come back; this one names
+            # the file that promise now rests on, so a user who moves their
+            # config directory knows what has to travel with it.
+            said.append(
+                f"Its database password was kept at {report.secret_kept}, because the folder "
+                f"holding it is gone — the reinstall reads it from there."
+            )
         if report.snapshot.path is not None:
             said.append(f"The server's last log was saved to {report.snapshot.path}.")
         elif report.snapshot.problem:

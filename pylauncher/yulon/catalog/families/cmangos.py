@@ -71,7 +71,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import docker, platform
+from yulon import dbsecret, docker, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
@@ -618,6 +618,17 @@ class CmangosInstaller(StagedInstaller):
                 f"Docker would not say whether the database volume {volume} exists ({exc}), so "
                 "this install cannot prove a new password is safe to write. Nothing was written."
             ) from exc
+        if exists and self._is_the_copy_this_volume_was_made_with(ctx, volume):
+            try:
+                _write_secret(path, ctx.secrets.db_password)
+            except OSError as exc:
+                raise InstallerError(f"{path} could not be written: {exc}") from exc
+            yield (
+                f"Put this install's database password back into {plan.file} from the copy "
+                f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
+                "your characters are in. Back that file up."
+            )
+            return
         if exists:
             raise InstallerError(
                 f"{path} is gone, but this install's database volume {volume} still exists and "
@@ -635,6 +646,32 @@ class CmangosInstaller(StagedInstaller):
             f"Wrote this install's database password to {plan.file}. Back that file up: the "
             f"database in {volume} cannot be opened without it."
         )
+
+    def _is_the_copy_this_volume_was_made_with(self, ctx: StageContext, volume: str) -> bool:
+        """Is the secret in hand the one Yu'lon kept when it deleted this install's folder?
+
+        The narrow exception to the refusal above, and it is narrow in three
+        ways rather than one, because a wrong `True` here writes a password
+        into a file the rest of the install then believes:
+
+        * there has to BE a copy, filed under this game and this folder's
+          install id — the pair a reinstall to the same folder recomputes;
+        * the copy has to name THIS volume. Two installs of one game keep two
+          copies, and a value from the wrong one locks this database out
+          exactly as a minted password would, while looking like a recovery;
+        * it has to be the value the spine actually resolved. `resolve_secrets()`
+          reads the FILE first and only falls back to the copy, so a
+          `.db_password` that reappeared between the two reads wins — and if the
+          two disagree, the one the database was created with is not knowable
+          from here and the refusal is the honest answer.
+
+        A stale copy for a volume that no longer exists never reaches this
+        method: it is only asked when the volume DOES exist.
+        """
+        kept = dbsecret.recall(self.entry.id, self._install_id(ctx.server_dir))
+        if kept is None:
+            return False
+        return kept.volume == volume and kept.password == ctx.secrets.db_password
 
     def _db_volume(self, server_dir: Path) -> str:
         """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""

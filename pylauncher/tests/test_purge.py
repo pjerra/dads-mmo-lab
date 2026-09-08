@@ -12,13 +12,17 @@ module: this is the one action whose bug deletes somebody's server.
 from __future__ import annotations
 
 import os
+import shutil
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from yulon import docker, logsnap, purge
-from yulon.catalog import composegen
+from yulon import dbsecret, docker, logsnap, platform, purge
+from yulon.catalog import composegen, native
+from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.ownership import Ownership
 
@@ -612,3 +616,189 @@ def test_a_wsl_resident_install_is_refused_rather_than_half_deleted(
         rec.uninstaller(wsl_distro="Ubuntu").run(keep_characters=False)
     assert "WSL" in str(caught.value)
     assert "snapshot" not in rec.order
+
+
+# -- 6. the password the deleted folder was holding ------------------------
+#
+# The blocker the 8.9b lane found by reading this module's own code: a ticked
+# purge keeps `<project>_db-data` and then deletes the folder — and on every
+# `generated` entry the folder holds `.db_password`, the only copy of the
+# password that volume was created with. "The characters are kept" was true in
+# the letter and false in the substance: the reinstall to the same folder mints
+# a NEW password and stops, because `CmangosInstaller._db_password` refuses to
+# write one next to a volume that exists.
+
+
+GENERATED_GAME = "wow-vanilla"
+"""A shipped entry whose password is minted per install and kept in the folder.
+
+`wow-wotlk` — the family 8.9a gates on — is `fixed`, so the catalog carries its
+password and deleting the folder costs it nothing. That is exactly why the gate
+could not have found this: the bug is invisible on the gated family.
+"""
+
+MADE_UP_SECRET = "vanilla-not-a-real-password"
+"""Shaped like a generated value, and deliberately not one. Nothing depends on it."""
+
+
+def test_a_ticked_purge_leaves_the_password_where_a_reinstall_will_look_for_it(
+    tmp_path: Path,
+) -> None:
+    """The clause the checkbox promises, asked of the two halves that have to agree.
+
+    Both ends run their PRODUCTION defaults: the purge's own way of deciding
+    what is at risk and where to keep it, and the shipped installer's own way of
+    resolving this install's secret. The folder is really deleted in between
+    (`remove_folder=shutil.rmtree`), because the whole failure is that the
+    secret lived inside it.
+
+    What it asserts is not "a file was written somewhere" but the property that
+    matters: after the purge, the thing a REINSTALL asks answers with the value
+    that opens the kept volume.
+    """
+    server_dir = tmp_path / "wowserver"
+    server_dir.mkdir()
+    entry = load_catalog().get(GENERATED_GAME)
+    plan = entry.install.password
+    assert plan.mode == "generated" and plan.file, plan
+    (server_dir / plan.file).write_text(MADE_UP_SECRET + "\n", encoding="utf-8")
+
+    rec = Recorder(
+        server_dir,
+        project=composegen.project_name(GENERATED_GAME, server_dir),
+        remove_folder=shutil.rmtree,
+    )
+    report = rec.uninstaller(game=GENERATED_GAME).run(keep_characters=True)
+
+    assert report.kept_volumes and not server_dir.exists()
+    engine = CmangosInstaller(entry, seams=native.Seams())
+    assert engine.resolve_secrets(server_dir).db_password == MADE_UP_SECRET, (
+        "the volume the tick kept was created with this password and the folder that "
+        "held it is gone, so a reinstall that cannot find it keeps characters nothing "
+        "can open"
+    )
+
+
+def test_a_ticked_purge_names_the_volume_the_copy_opens(tmp_path: Path) -> None:
+    """The copy is filed against one volume, and the report says where it went.
+
+    Both halves are what makes the copy usable rather than merely stored: the
+    reinstall's stage checks the volume name before it trusts the value, and a
+    user who wants to keep the secret elsewhere has to be told which file it is.
+    """
+    server_dir = tmp_path / "wowserver"
+    server_dir.mkdir()
+    entry = load_catalog().get(GENERATED_GAME)
+    assert entry.install.password.file
+    (server_dir / entry.install.password.file).write_text(MADE_UP_SECRET, encoding="utf-8")
+    rec = Recorder(server_dir, project=composegen.project_name(GENERATED_GAME, server_dir))
+
+    report = rec.uninstaller(game=GENERATED_GAME).run(keep_characters=True)
+
+    assert report.secret_kept is not None
+    kept = dbsecret.recall(GENERATED_GAME, composegen.install_id(server_dir))
+    assert kept == dbsecret.Kept(password=MADE_UP_SECRET, volume=report.kept_volumes[0])
+
+
+def test_a_ticked_purge_refuses_when_the_password_it_would_have_to_keep_is_gone(
+    tmp_path: Path,
+) -> None:
+    """Fail closed, and fail EARLY: the folder may still hold a recoverable copy.
+
+    Reported afterwards this is not a warning but an obituary - the volume is
+    kept, its key is gone, and nothing can put either back. Refused here the
+    user still has the folder, the file and the choice.
+    """
+    rec = _recorder(tmp_path)  # a folder with no `.db_password` in it
+    with pytest.raises(purge.PurgeError) as caught:
+        rec.uninstaller(game=GENERATED_GAME).run(keep_characters=True)
+    message = str(caught.value)
+    assert "Keep my characters" in message and "nothing was removed" in message
+    assert rec.removed_volumes == [] and "snapshot" not in rec.order
+
+
+def test_the_same_install_with_the_box_unticked_is_not_refused_and_keeps_nothing(
+    tmp_path: Path,
+) -> None:
+    """The refusal is about a promise, not about a password.
+
+    Same folder, same missing file, box unticked: the database is going with
+    everything else, so there is nothing to keep and nothing to be unable to
+    keep. A guard written as "generated entries need their password file"
+    would have stopped this press too, for a reason that does not apply to it.
+    """
+    rec = _recorder(tmp_path)
+    report = rec.uninstaller(game=GENERATED_GAME).run(keep_characters=False)
+    assert report.secret_kept is None
+    assert len(rec.removed_volumes) == 2
+    assert not (platform.config_dir() / dbsecret.DIR_NAME).exists()
+
+
+def test_a_fixed_password_install_keeps_no_copy_of_a_password_the_catalog_carries(
+    tmp_path: Path,
+) -> None:
+    """The gated family, and the reason the gate could not have found this bug.
+
+    `wow-wotlk` is `fixed`: the value is in `catalog.json`, so the folder never
+    held the only copy and there is nothing for a purge to rescue. Copying it
+    into the config directory anyway would spread a secret for no reason and
+    make the ticked path look tested on a family where it is trivially true.
+    """
+    rec = _recorder(tmp_path)
+    report = rec.uninstaller().run(keep_characters=True)
+    assert report.kept_volumes and report.secret_kept is None
+    assert not (platform.config_dir() / dbsecret.DIR_NAME).exists()
+
+
+def test_a_copy_that_cannot_be_written_stops_the_purge_before_anything_is_removed(
+    tmp_path: Path,
+) -> None:
+    """The write is a real reach at the disk, so it is a real way to lose a database.
+
+    Placed above the line where the machine starts changing precisely so that
+    this failure costs nothing: the folder, the volume and the record are all
+    still there afterwards.
+    """
+    server_dir = tmp_path / "wowserver"
+    server_dir.mkdir()
+    entry = load_catalog().get(GENERATED_GAME)
+    assert entry.install.password.file
+    (server_dir / entry.install.password.file).write_text(MADE_UP_SECRET, encoding="utf-8")
+    rec = Recorder(server_dir, project=composegen.project_name(GENERATED_GAME, server_dir))
+
+    def refuse(password: str, volume: str) -> Path:
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(purge.PurgeError) as caught:
+        rec.uninstaller(game=GENERATED_GAME, keep_secret=refuse).run(keep_characters=True)
+    assert "No space left on device" in str(caught.value)
+    assert "snapshot" not in rec.order, rec.order
+    assert rec.removed_volumes == [] and rec.forgotten == 0
+    assert server_dir.is_dir()
+
+
+def test_the_kept_copy_is_created_owner_only_and_a_damaged_one_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """It is a password in a file, and a password in a file has two obligations.
+
+    The mode is asserted on POSIX only, where it means something: on Windows
+    `os.open`'s mode argument is ignored, and reading it back there would pass
+    for the wrong reason (`channel_setup.CREDENTIAL_MODE` holds the same note).
+
+    A hand-edited or truncated copy answers `None` rather than raising, because
+    the caller is a reinstall: the honest outcome is that it mints a password
+    and the stage that would lock a user out refuses on its own evidence.
+    """
+    path = dbsecret.remember(
+        GENERATED_GAME, "deadbeef", password=MADE_UP_SECRET, volume="v_db-data"
+    )
+    assert dbsecret.recall(GENERATED_GAME, "deadbeef") == dbsecret.Kept(MADE_UP_SECRET, "v_db-data")
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == dbsecret.SECRET_MODE
+
+    assert dbsecret.recall(GENERATED_GAME, "never-purged") is None
+    path.write_text("{", encoding="utf-8")
+    assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None
+    path.write_text('{"volume": "v_db-data", "password": ""}', encoding="utf-8")
+    assert dbsecret.recall(GENERATED_GAME, "deadbeef") is None

@@ -49,7 +49,7 @@ from tests.support_native import (
     Recorder,
     lay_patch_sources,
 )
-from yulon import docker, platform, resources
+from yulon import dbsecret, docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -2832,6 +2832,71 @@ def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(
     assert ".db_password" in str(refusal.value)
     assert db_volume(server_dir) in str(refusal.value)
     assert not (server_dir / ".db_password").exists()
+
+
+def kept_copy(server_dir: Path, *, password: str, volume: str) -> Path:
+    """Put a copy of the password where a purge with the box ticked would have left it.
+
+    Keyed through `composegen.install_id()` with this file's pinned
+    `platform_id`, because the engine under test resolves its own id through
+    the same seam: the id lowercases a path on Windows and does not on Linux,
+    so a copy filed under the ambient answer would be invisible to the stage on
+    one of the two.
+    """
+    return dbsecret.remember(
+        ENTRY.id,
+        composegen.install_id(server_dir, platform_id=lambda: "linux"),
+        password=password,
+        volume=volume,
+    )
+
+
+def test_db_password_writes_back_the_copy_yulon_kept_when_this_install_was_purged(
+    tmp_path: Path,
+) -> None:
+    """The other side of "keep my characters": the file comes back, and no one is locked out.
+
+    This is the exact state a ticked uninstall leaves behind — no
+    `.db_password`, and `<project>_db-data` still on the daemon — which is the
+    state the refusal below exists for. What makes it safe here and not there is
+    that the copy was made FOR THIS VOLUME by the action that deleted the file,
+    so writing it back restores what the database already knows rather than
+    replacing it.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    volume = db_volume(server_dir)
+    kept_copy(server_dir, password=DB_PASSWORD, volume=volume)
+    rec = Recorder()
+    rec.volumes.add(volume)
+
+    said = list(engine(rec)._db_password(context(server_dir)))
+
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any(volume in line for line in said), said
+
+
+def test_a_copy_kept_for_another_volume_does_not_unlock_the_refusal(tmp_path: Path) -> None:
+    """The copy names what it opens, and the stage checks that name before trusting it.
+
+    Two installs of one game keep two copies; a value from the wrong one would
+    lock this database out exactly as a minted password would, and it would do
+    it while looking like a recovery. The password matches on purpose — the
+    volume name is the only thing separating the two cases.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    kept_copy(server_dir, password=DB_PASSWORD, volume="yulon-wow-tbc-somewhere-else_db-data")
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists(), "the refusal wrote nothing"
 
 
 VOLUME_DELETING_PAIRS = (("volume", "rm"), ("volume", "prune"))

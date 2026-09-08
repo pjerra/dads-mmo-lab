@@ -4142,6 +4142,35 @@ def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
     assert fake.runs == [False, True]
 
 
+def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The promise on screen is "reinstall and your characters are there".
+
+    On a `generated` entry that promise rests on a file this action wrote into
+    Yu'lon's config directory, because the one inside the folder went with the
+    folder. The user is told which file: it is the thing that has to travel
+    with a moved config directory, and the thing worth a backup.
+    """
+    kept = tmp_path / "config" / "db-secrets" / "wow-vanilla-deadbeef.json"
+    fake = _FakeUninstall(
+        tmp_path,
+        report=purge.PurgeReport(
+            kept_volumes=("yulon-wow-vanilla-deadbeef_db-data",),
+            secret_kept=kept,
+            folder_removed=True,
+            record_forgotten=True,
+        ),
+    )
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    text = view.uninstall_label.text()
+    assert "find those characters again" in text
+    assert str(kept) in text
+
+
 def test_the_removal_is_signalled_up_with_the_game_and_the_folder(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

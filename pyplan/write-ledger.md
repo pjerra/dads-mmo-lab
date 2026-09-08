@@ -92,6 +92,7 @@ descriptions are written by hand.
 | `controller_wow_wotlk/maintenance.py::forget_interrupted_restore::unlink` | the marker, when the user chooses to forget it | yes — it only removes the record |
 | `controller_wow_wotlk/maintenance.py::restore::unlink` | the marker, once the restore finished | no — as above |
 | `controller_wow_wotlk/repair.py::reset_unfinished::run_statement` | `DROP DATABASE` on a half-imported schema | no — refused outright on a populated database |
+| `dbsecret.py::remember::os.open` | **new (8.9a)** the database password of an install being uninstalled with "keep my characters" ticked, into Yu'lon's own config directory, owner-only at creation. It is a COPY of `<server_dir>/.db_password`, made because the same action deletes the folder that file is in and keeps the volume it opens; a reinstall to the same folder is filed under the same `<game>-<install id>` and reads it back. Nothing removes it | **no — the purge refuses while any container of the project is running**, and this write happens before the first destructive step of one |
 | `docker.py::pin_project_name::os.replace` | `.env` renamed into place | yes |
 | `docker.py::pin_project_name::unlink` | the temp `.env` after a failure | yes |
 | `docker.py::pin_project_name::write_bytes` | the compose project pin appended to `.env`, to a temp name | yes |

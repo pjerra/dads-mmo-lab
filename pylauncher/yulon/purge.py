@@ -60,6 +60,15 @@ uninstall. Nothing here prunes: `image prune`, `builder prune` and
 `system prune` reach the whole daemon, and `alpine/git` — the sha256-pinned
 image every install's clone stage uses — shows up untagged, which is to say it
 looks exactly like something a prune should take.
+
+**A ticked box keeps the password too, or keeps nothing.** The volume it keeps
+was created with a password that, on every `generated` entry, lives in a file
+inside the folder this action deletes — so "keep my characters" kept a database
+nothing could open (the 8.9b lane, reading this module, 2026-09-08).
+`yulon.dbsecret` holds that argument and the copy; here it is two lines in
+`run()`, placed with the refusals and BEFORE the first destructive step,
+because a copy that could not be made has to stop the press rather than be
+discovered afterwards.
 """
 
 from __future__ import annotations
@@ -71,7 +80,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import docker, logsnap, platform
+from yulon import dbsecret, docker, logsnap, platform
+from yulon.catalog import composegen
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 
@@ -105,8 +115,9 @@ LEFT_BEHIND = (
     "Docker, WSL, and every other dependency Yu'lon provisioned",
     "another install of this game in another folder — different path, "
     "different install id, different project",
-    "this install's saved log snapshots and its stored server credential, "
-    "under Yu'lon's own config directory",
+    "this install's saved log snapshots, its stored server credential, and — "
+    "if you keep your characters — the copy of the database password that "
+    "opens the volume they are in, all under Yu'lon's own config directory",
 )
 """What this action does not reach, in the words the dialog shows.
 
@@ -123,6 +134,13 @@ Removing it is not done here because owner answer 1 says "only the launcher's
 own state record", and this module does not widen an owner's answer on its own;
 it is named to the user instead, and named again in the gate plan as a question
 for the owner.
+
+The kept database password (`dbsecret`) is the third thing under that directory
+and the only one this action WRITES. It is named in the same line rather than a
+new one because a user reading the dialog is being told one thing — that a
+directory of Yu'lon's own is not part of the blast radius — and because it is
+written only on the ticked path, which is the path whose whole purpose is that
+something survives.
 """
 
 
@@ -154,6 +172,13 @@ class PurgeReport:
     """What an uninstall actually did."""
 
     snapshot: logsnap.Snapshot = field(default_factory=logsnap.Snapshot)
+    secret_kept: Path | None = None
+    """Where the kept volume's password was copied to, on a ticked purge that needed one.
+
+    `None` on every unticked purge and on a `fixed` entry, which are the two
+    cases where nothing had to be copied — not "it failed", because a copy that
+    could not be made raises instead.
+    """
     removed_containers: bool = False
     removed_volumes: tuple[str, ...] = ()
     kept_volumes: tuple[str, ...] = ()
@@ -220,6 +245,8 @@ class Uninstaller:
         containers_of: Callable[[str], list[str] | None] | None = None,
         volumes_of: Callable[[str], list[str] | None] | None = None,
         folder_size: Callable[[Path], int] | None = None,
+        db_secret: Callable[[], dbsecret.AtRisk] | None = None,
+        keep_secret: Callable[[str, str], Path] | None = None,
         snapshot: Callable[[], logsnap.Snapshot] | None = None,
         remove_containers: Callable[[], bool] | None = None,
         remove_volume: Callable[[str], None] | None = None,
@@ -240,6 +267,8 @@ class Uninstaller:
         self._containers_of = containers_of if containers_of is not None else self._real_containers
         self._volumes_of = volumes_of if volumes_of is not None else self._real_volumes
         self._folder_size = folder_size if folder_size is not None else folder_bytes
+        self._db_secret = db_secret if db_secret is not None else self._real_db_secret
+        self._keep_secret = keep_secret if keep_secret is not None else self._real_keep_secret
         self._snapshot = snapshot if snapshot is not None else self._real_snapshot
         self._remove_containers = (
             remove_containers if remove_containers is not None else self._real_remove_containers
@@ -261,6 +290,35 @@ class Uninstaller:
 
     def _real_volumes(self, project: str) -> list[str] | None:
         return docker.project_volumes(project, wsl_distro=self.wsl_distro)
+
+    def _real_db_secret(self) -> dbsecret.AtRisk:
+        """What this install's password plan says, looked up by game id.
+
+        The catalog rather than a `CatalogEntry` field on this class, so that
+        every existing construction of an `Uninstaller` gets the check without
+        being rewritten — including the two the UI builds and the ones a future
+        family will build. A game id the catalog does not know is reported as a
+        problem and not as "nothing at risk": an uninstall that cannot find out
+        what it would destroy must not tick the box on the user's behalf.
+        """
+        from yulon.catalog.catalog import load_catalog
+
+        try:
+            entry = load_catalog().get(self.game)
+        except (OSError, ValueError, KeyError) as exc:
+            return dbsecret.AtRisk(
+                problem=f"Yu'lon could not read what game {self.game} keeps its password in ({exc})"
+            )
+        return dbsecret.at_risk(entry.install, self.server_dir)
+
+    def _real_keep_secret(self, password: str, volume: str) -> Path:
+        """Copy the password out of the folder, keyed the way a reinstall will ask."""
+        return dbsecret.remember(
+            self.game,
+            composegen.install_id(self.server_dir),
+            password=password,
+            volume=volume,
+        )
 
     def _real_snapshot(self) -> logsnap.Snapshot:
         logs = self._logs_dir if self._logs_dir is not None else platform.config_dir() / "logs"
@@ -387,6 +445,7 @@ class Uninstaller:
                 f"{targets.project}{DB_VOLUME_SUFFIX} exists — so it will not promise to keep "
                 f"the characters. Nothing was removed."
             )
+        secret_kept = self._keep_the_password(targets, keep_characters=keep_characters)
 
         # --- everything below this line changes the machine ---------------
         snapshot = self._snapshot()
@@ -428,6 +487,7 @@ class Uninstaller:
             )
         return PurgeReport(
             snapshot=snapshot,
+            secret_kept=secret_kept,
             removed_containers=removed_containers,
             removed_volumes=tuple(removed_volumes),
             kept_volumes=tuple(kept),
@@ -436,6 +496,53 @@ class Uninstaller:
             record_forgotten=forgotten,
             warnings=tuple(warnings),
         )
+
+    def _keep_the_password(self, targets: _Targets, *, keep_characters: bool) -> Path | None:
+        """Copy this install's database password out of the folder, or refuse the press.
+
+        Called from `run()` among the refusals and ABOVE the line where the
+        machine starts changing, which is where the argument for it lives:
+
+        * a copy has to exist before the only other copy is deleted, and this
+          is the last moment at which nothing has been lost if it cannot be
+          made;
+        * what it writes is one file in Yu'lon's own config directory, so a
+          copy left beside an install that is still there — because a later
+          step refused — costs nothing and opens the same volume it always did.
+
+        Unticked returns `None` without asking anything: the volume is going
+        with the folder, so nothing has to survive either.
+
+        The refusal is deliberately not a warning. A ticked box that kept a
+        volume whose only key had already been lost would leave characters in a
+        database that cannot be opened again, and reporting that afterwards
+        does not undo it — the user still has the folder at this point, and the
+        file may still be recoverable from it.
+        """
+        if not keep_characters:
+            return None
+        at_risk = self._db_secret()
+        if at_risk.problem:
+            raise PurgeError(
+                f'"Keep my characters" was ticked, but Yu\'lon cannot read the password this '
+                f"install's database was created with ({at_risk.problem}). Keeping "
+                f"{targets.character_volume} without it would keep characters that nothing can "
+                f"open again, so nothing was removed. Put that file back, or untick the box to "
+                f"remove the database along with the rest."
+            )
+        if not at_risk.password:
+            # `fixed`: the password is in the catalog, so deleting the folder
+            # does not lose it and there is nothing here to keep.
+            return None
+        assert targets.character_volume is not None  # `run()` refused None above
+        try:
+            return self._keep_secret(at_risk.password, targets.character_volume)
+        except OSError as exc:
+            raise PurgeError(
+                f'"Keep my characters" was ticked, but Yu\'lon could not keep a copy of the '
+                f"password that opens {targets.character_volume} ({exc}) — and this uninstall "
+                f"deletes the folder holding the only other copy. Nothing was removed."
+            ) from exc
 
 
 @dataclass(frozen=True)

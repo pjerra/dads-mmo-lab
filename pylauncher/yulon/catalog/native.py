@@ -69,7 +69,7 @@ from pathlib import Path
 from secrets import token_hex
 from typing import ClassVar, Protocol
 
-from yulon import docker, git, networking, platform, resources, runner
+from yulon import dbsecret, docker, git, networking, platform, resources, runner
 from yulon.catalog import composegen, preflight
 from yulon.catalog.catalog import CatalogEntry, EmulatorSource, NativeInstall, ReadyMarkers
 from yulon.catalog.installer import (
@@ -1974,6 +1974,18 @@ class StagedInstaller:
         write_state(ctx.server_dir, recorded)
         return recorded
 
+    def _install_id(self, server_dir: Path) -> str:
+        """This install's id, always through the engine's own `platform_id` seam.
+
+        One method rather than the same two-line call at each site: the seam is
+        the whole point of it. `install_id()` lowercases the path on Windows and
+        does not elsewhere, so a caller that let `platform.detect` default would
+        compute a different id from the one the rest of the install uses — and
+        an id is what both the compose project and the kept database password
+        are filed under.
+        """
+        return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
+
     def resolve_secrets(self, server_dir: Path) -> Secrets:
         """The database password this install uses, decided before stage 1.
 
@@ -1988,6 +2000,17 @@ class StagedInstaller:
         value this app mints; it is not a shape an existing password has to
         have, and a shipped bash installer minted the same passwords without
         the dash `catalog.json` now carries.
+
+        **No file, but a copy Yu'lon kept** is the third case and the reason
+        this is not two branches: an uninstall with "keep my characters" ticked
+        deletes the folder the file was in and keeps the database volume, so
+        minting here would hand every later stage a password that database has
+        never heard of. `dbsecret.recall()` is keyed by the same
+        `<game>-<install id>` a reinstall to this folder recomputes, and
+        answers `None` for every install that never went through such an
+        uninstall — so the mint below is still what an ordinary first install
+        gets. Whether the recalled value may be WRITTEN back beside a volume
+        that exists is the `db-password` stage's question, not this one's.
         """
         plan = self.entry.install.password
         if plan.mode == "fixed":
@@ -2006,6 +2029,13 @@ class StagedInstaller:
         try:
             return Secrets(path.read_text(encoding="utf-8").strip())
         except FileNotFoundError:
+            kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
+            if kept is not None:
+                logger.info(
+                    f"{path} is gone; using the password Yu'lon kept for {kept.volume} "
+                    "when this install was removed"
+                )
+                return Secrets(kept.password)
             return Secrets(f"{plan.prefix}{token_hex(8)}")
         except OSError as exc:
             raise InstallerError(
@@ -2202,7 +2232,7 @@ class StagedInstaller:
         user with a damaged file one sentence and one deletion; the other
         direction cost them their work.
         """
-        install_id = composegen.install_id(server_dir, platform_id=self._seams.platform_id)
+        install_id = self._install_id(server_dir)
         claim = (
             read_claim(server_dir, valid=self.stage_names())
             if server_dir.is_dir()
