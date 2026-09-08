@@ -249,6 +249,45 @@ def test_a_db_import_glob_matching_nothing_reports_none_rather_than_a_guess(
     assert report.pending_sql[0].files == ()
 
 
+def test_a_conf_key_the_catalog_names_with_no_value_is_reported_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """8.7a's first defect, measured on `yulon-ubuntu` 2026-09-08 and fixed here.
+
+    `mod-npc-beastmaster.json` names `Creatures.CustomIDs` on
+    `env/dist/etc/worldserver.conf` with a note and no `default`. The install
+    reported `activate … mod_npc_beastmaster.conf` and **nothing at all** about
+    `worldserver.conf` — not in `done`, not in `skipped` — and the file was
+    byte-identical before and after. So the one core-side configuration change
+    that module needs was documented in the catalog, never made, and never
+    mentioned. Same shape as the SQL clause above: a step nobody takes has to be
+    visible, and a key with no value is not a value.
+    """
+    manifest = dict(MODULE)
+    manifest["conf"] = [
+        *MODULE["conf"],
+        {
+            "file": "env/dist/etc/worldserver.conf",
+            "keys": [{"key": "Creatures.CustomIDs", "note": "add 601026"}],
+        },
+    ]
+    core = tmp_path / "env/dist/etc/worldserver.conf"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.write_bytes(b'Creatures.CustomIDs = "190010"\n')
+
+    report = Applier(tmp_path, git=_ahbot_git(), sql=_FakeSql()).install(
+        parse_manifest(manifest), {"bot_guid": "42"}
+    )
+
+    assert (
+        "conf env/dist/etc/worldserver.conf: no value in the catalog for "
+        "Creatures.CustomIDs — not written" in report.skipped
+    )
+    # And nothing was claimed either: the file is byte-identical.
+    assert core.read_bytes() == b'Creatures.CustomIDs = "190010"\n'
+    assert not any("worldserver.conf" in step for step in report.done)
+
+
 def test_a_templated_db_import_path_answers_unknown_not_zero(tmp_path: Path) -> None:
     """`{key}` in a db-import path is a count this run cannot take, not a zero.
 
@@ -2095,6 +2134,29 @@ def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
     lopsided = parse_manifest({**body, "build": {"restart": True}})
     assert lopsided.build.rebuild is True
     assert parse_manifest(body).build.rebuild is False
+
+
+def test_configuring_ale_asks_for_the_restart_the_engine_needs() -> None:
+    """Measured live on `yulon-ubuntu2`, 2026-09-09 (8.7a's fifth clause).
+
+    `applier.configure('mod-ale')` reported `2 step(s), 0 skipped, rebuild=False,
+    restart_recommended=False` — "nothing further needed" — over a world that went on
+    loading scripts from the OLD `ALE.ScriptPath` for another minute, until this gate
+    restarted it by hand: `dml_bridge_ping` still answered *Command 'dml_bridge_ping'
+    does not exist* after the write, and answered `DML-BRIDGE-READY` after the restart.
+
+    That is the exact shape the `build.restart` field was added for and its own schema
+    description names ("a file the emulator reads only at startup") — TBC's five conf
+    mods declare it, and this WotLK module, whose whole configure IS a conf write, did
+    not. `configure` never sets `rebuild_required`, so without the field there is
+    nothing in the report to tell a user to restart.
+    """
+    ale = _shipped("mod-ale")
+    assert ale.build.rebuild is True, "installing ALE is a C++ module: it needs the compile"
+    assert ale.build.restart is True, (
+        "configuring ALE writes ALE.Enabled/ALE.ScriptPath into a file the engine reads at "
+        "startup; a report that recommends nothing tells the user the value is in force"
+    )
 
 
 # --------------------------------------------------------------------------

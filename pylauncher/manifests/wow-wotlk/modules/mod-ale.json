@@ -10,7 +10,8 @@
     "rev": "319f43edd58ffa6ed72873ddd68820ab86e4a99b"
   },
   "build": {
-    "rebuild": true
+    "rebuild": true,
+    "restart": true
   },
   "conf": [
     {
@@ -42,6 +43,7 @@
   ],
   "notes": [
     "env/dist/etc is volume-mounted to /azerothcore/env/dist/etc, so no docker cp is needed. Reload scripts in-game with .reload ale.",
-    "This module is C++: installing it puts a clone under modules/ and changes nothing about the server that is running. The engine arrives only when the image is rebuilt, which is why yulon.party reads the worldserver binary rather than this conf file to decide whether the Lua engine is there (measured on yulon-ubuntu 2026-09-08: no ALE string in a 528 MB worldserver built 2026-09-04)."
+    "This module is C++: installing it puts a clone under modules/ and changes nothing about the server that is running. The engine arrives only when the image is rebuilt, which is why yulon.party reads the worldserver binary rather than this conf file to decide whether the Lua engine is there (measured on yulon-ubuntu 2026-09-08: no ALE string in a 528 MB worldserver built 2026-09-04).",
+    "build.restart is declared because `configure` never sets rebuild_required and this item's whole configure is a conf write. Measured on yulon-ubuntu2 2026-09-09: configure reported `2 step(s), 0 skipped, rebuild=False, restart_recommended=False` while the running world went on loading scripts from the previous ALE.ScriptPath — dml_bridge_ping still answered 'does not exist' until the world was restarted."
   ]
 }
