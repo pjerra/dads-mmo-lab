@@ -428,10 +428,16 @@ def test_every_tortoise_source_is_pinned_to_a_commit_not_a_moving_branch() -> No
     # rest are held to the SHAPE of a full commit id, because an abbreviation
     # is a prefix and a prefix can stop being unique.
     core = next(s for s in sources if s.repo.endswith("tortoise-wow"))
-    assert core.rev == "7c0fb278f3f8966422f219e6f5035cb09b76ada7", (
-        f"the core is pinned to {core.rev!r}; every measurement in this file -- the exit "
-        "status, the migrations path, the ready banner, the bot conf, the SQL globs, the "
-        "harmless log line -- was taken from 7c0fb278. Moving the pin means taking them again"
+    assert core.rev == "3a8472e68e4aca5d2675feb9241e924f1c31899c", (
+        f"the core is pinned to {core.rev!r}. Until 2026-09-08 it was 7c0fb278, where every "
+        "measurement in this file was taken; the pin moved to 3a8472e -- the SOAP interface "
+        "(3f9a062) and the account-lockout fix (3a8472e), which the fork's own README now says "
+        "are the last of its own work before it archives -- and the measurements were taken "
+        "again: the ready banner, the migrations path, the SQL globs and the harmless bot-log "
+        "line on a copy of m910q's install (pyplan/gates/tortoise-reimport-rehearsal-m910q-"
+        "2026-09-08/), the exit status and the bot conf on the fresh install on yulon-arch "
+        "(pyplan/gates/tortoise-fresh-yulon-arch-2026-09-08/). Moving it again means taking "
+        "them again"
     )
     for source in sources:
         assert re.fullmatch(
