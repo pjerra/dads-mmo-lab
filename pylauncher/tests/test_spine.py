@@ -2347,6 +2347,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "retry still cannot finish. A failure on any single entry is skipped here on purpose "
         "- the report belongs to the rmtree that follows, not to one chmod"
     ),
+    ("party.py", "deploy"): (
+        "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
+        "anything of the user's, and the folder it goes on to write is created by the same "
+        "call - so no emptiness verdict about somebody's directory is reached. Its OSError is "
+        "translated into `NothingToDeploy` on purpose and is the opposite of an exoneration: "
+        "the Rust launcher reported a success envelope when this listing found nothing, and "
+        "My Party then silently did not work (`rust-main:bridge.rs:56-70`)"
+    ),
     ("apply.py", "_undeploy"): (
         "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
         "removes exactly those names; reads a folder this app filled, decides no write into it"

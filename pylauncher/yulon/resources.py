@@ -38,3 +38,15 @@ def manifests_dir() -> Path:
 def installers_dir() -> Path:
     """`<bundle_root>/catalog/installers` — where `install.native.templates` resolves from."""
     return bundle_root() / "catalog" / "installers"
+
+
+def lua_dir() -> Path:
+    """`<bundle_root>/lua` — the My Party bridge scripts, one directory per family.
+
+    Data rather than code, on the same reasoning as `installers_dir()`: these are
+    files the app copies into somebody's server folder, not modules it imports.
+    The layout (a family directory per group of scripts, flattened at deploy)
+    is the bash launcher's `cli/lua/<family>/*.lua`, kept so the two trees'
+    scripts stay comparable file for file.
+    """
+    return bundle_root() / "lua"
