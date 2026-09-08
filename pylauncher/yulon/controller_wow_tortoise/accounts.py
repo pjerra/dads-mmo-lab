@@ -64,6 +64,9 @@ from yulon.controller_wow_wotlk.accounts import Scheme, SqlSeam
 from yulon.controller_wow_wotlk.accounts import (
     create_account as _create_account,
 )
+from yulon.controller_wow_wotlk.accounts import (
+    reset_own_password as _reset_own_password,
+)
 
 
 def scheme() -> Scheme:
@@ -129,7 +132,13 @@ def create_account(
         NotImplementedError: this entry declares no account scheme (see
             `scheme()`); nothing was written.
     """
-    return _create_account(sql, username, password, gm_level=gm_level, scheme=scheme())
+    level = game.entry().accounts.level
+    # This fork's scale runs to 4 and its SOAP wants 4 (measured on yulon-arch
+    # 2026-09-08); the writer's default cap is AzerothCore's 3.
+    top = level.max_level if level is not None else NO_GM
+    return _create_account(
+        sql, username, password, gm_level=gm_level, scheme=scheme(), max_gm_level=top
+    )
 
 
 def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> DockerSql:
@@ -155,3 +164,17 @@ def sql_for_install(server_dir: Path, *, wsl_distro: str | None = None) -> Docke
             f"in {server_dir}. Nothing was asked of the database."
         )
     return sql_for(password, wsl_distro=wsl_distro)
+
+
+def reset_own_password(sql: SqlSeam, name: str, password: str) -> None:
+    """Give THIS APP'S OWN account a new password, in this core's own columns.
+
+    The shared writer with this game's scheme bound (`mangos_sha`, one column),
+    exactly as `create_account()` above is. The repair path for a credential
+    the server has rejected (8.2d's shape, on this tree since its entry gained
+    a SOAP channel on 2026-09-08); `create_account()` will not do it, because
+    re-salting a row that exists would silently change its owner's password.
+    The guard on the name lives in the shared writer and refuses every account
+    that does not carry this app's own prefix.
+    """
+    _reset_own_password(sql, name, password, scheme=scheme())

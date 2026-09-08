@@ -294,6 +294,24 @@ def test_a_gm_level_the_server_has_no_meaning_for_is_refused() -> None:
     assert sql.statements == []
 
 
+def test_the_cap_is_the_callers_scale_when_the_tree_has_more_ranks() -> None:
+    """Measured on yulon-arch 2026-09-08: Tortoise's SOAP answered a rank-3 account
+    with 'below administrator' -- its scale runs to 4 (`accounts.level.max_level`).
+    The default stays AzerothCore's 3 for every caller that passes nothing; a tree
+    with a wider scale says so, and the writer writes the rank it asked for."""
+    sql = _FakeSql()
+    result = accounts.create_account(
+        sql, "gm", "hunter2", gm_level=4, scheme="mangos_sha", max_gm_level=4
+    )
+    assert result.gm_level == 4
+    grant = _one_statement(sql, "UPDATE account SET `rank`")
+    assert "`rank` = 4" in grant
+    with pytest.raises(accounts.AccountError, match="GM level"):
+        accounts.create_account(
+            sql, "gm2", "hunter2", gm_level=5, scheme="mangos_sha", max_gm_level=4
+        )
+
+
 # ------------------------------------------------------------ already exists
 
 

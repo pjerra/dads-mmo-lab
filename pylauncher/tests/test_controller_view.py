@@ -26,7 +26,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -3815,16 +3815,30 @@ def test_a_change_whose_result_is_unknown_is_not_announced_as_a_failure(
 # -- 8.2e: the tree with no listener to set up -------------------------------
 
 
+def _attach_only() -> CatalogEntry:
+    """A tree whose entry says `attach`: the shape Tortoise had until 2026-09-08.
+
+    Tortoise was the real example while its mangosd had no SOAP (8.2e). The fork
+    re-added the interface and the pin moved onto it, so no shipped entry is
+    attach-only any more -- and a test asserting the console-only shape against
+    a real entry would start asserting that the channel is missing from the tree
+    it was just added to. The same move `test_channel_enable.py` made for the
+    no-block refusal: pin the shape against a synthetic entry.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    return tortoise.model_copy(update={"operations": Operations(channel="attach")})
+
+
 def test_a_console_channel_says_so_instead_of_offering_a_button(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Tortoise links neither gsoap nor RASocket: there is nothing to switch on.
+    """A core with no listener: there is nothing to switch on.
 
     A greyed-out "Turn on the command channel" would be the worst of both --
     it says the feature exists and refuses to explain. The tab carries the
-    reason instead, and the button does not exist on this entry at all.
+    reason instead, and the button does not exist on such an entry at all.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     services = _services(ps, tmp_path, [])
     view = ControllerView(tortoise, services, status_poll_ms=0, job_runner=run_inline)
 
@@ -3843,6 +3857,11 @@ def test_a_console_channel_says_so_instead_of_offering_a_button(
 def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The control, without which the test above would pass on a build with no buttons."""
     services = _with_channel(ps, tmp_path, _StubSetup())
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        soap = ControllerView(
+            load_catalog().get(game), services, status_poll_ms=0, job_runner=run_inline
+        )
+        assert soap.enable_channel_button.isVisibleTo(soap) is True, game
     view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
 
     assert view.enable_channel_button.isVisibleTo(view) is True
@@ -3875,7 +3894,7 @@ def test_the_console_probe_button_belongs_to_the_console_trees_alone(
     on it. The console trees have no such line to show, which is what this
     button is for.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1"))
 
     console = ControllerView(
@@ -3891,7 +3910,7 @@ def test_the_console_probe_button_belongs_to_the_console_trees_alone(
 
 def test_the_probe_shows_what_the_console_answered(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The visible effect this box asks for: a real reply, on the Server tab."""
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1\nOnline players: 0"))
     view = ControllerView(
         tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline

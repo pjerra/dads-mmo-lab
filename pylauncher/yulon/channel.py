@@ -88,12 +88,14 @@ class Channel(Protocol):
 class AttachChannel:
     """The attach-console transport, for a core with no SOAP and no RA (8.2e).
 
-    Tortoise's mangosd links neither gsoap nor `RASocket` -- its complete source
-    and dependency lists name neither -- so there is no listener to enable, no
-    port to publish and no account to authenticate. What it has is the console
-    the Console tab already types at, live-gated against a real worldserver on
-    2026-08-23, and this wraps it in the one method every feature module is
-    handed.
+    Written for Tortoise when its mangosd linked neither gsoap nor `RASocket`
+    (measured 2026-09-07 at the pin of that day, `7c0fb278`: its source and
+    dependency lists named neither). The fork re-added SOAP on 2026-09-07
+    (`3f9a062`) and the pin moved onto it on 2026-09-08 (`3a8472e`), so that
+    tree now has a listener too and its entry says `soap`; this transport stays
+    for the console the Console tab types at, live-gated against a real
+    worldserver on 2026-08-23, and for any core that ships no listener. It wraps
+    the console in the one method every feature module is handed.
 
     **The distinction this class exists for** is what a window with no prompt in
     it means. `ConsoleReply.prompted` is False when nothing was delimited, and
@@ -161,10 +163,12 @@ class AttachChannel:
 
 
 class SoapChannel:
-    """The SOAP transport: the only one WotLK, TBC and Vanilla need.
+    """The SOAP transport, for every tree whose entry says `soap`.
 
-    Tortoise has no SOAP at all and reaches its world another way -- see
-    `AttachChannel`, which 8.2e added once that transport had a box of its own.
+    Until 2026-09-08 that was WotLK, TBC and Vanilla, and Tortoise reached its
+    world through `AttachChannel` (8.2e) because its mangosd had no SOAP. The
+    fork re-added the interface (`3f9a062`) and the pin moved onto it
+    (`3a8472e`), measured on the fresh install on yulon-arch.
     """
 
     def __init__(

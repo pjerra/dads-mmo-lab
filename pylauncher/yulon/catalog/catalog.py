@@ -1308,7 +1308,16 @@ class Operations(_Strict):
         default=None, gt=0, lt=65536, description="The channel's port inside the container."
     )
     gm_level: int | None = Field(
-        default=None, ge=0, le=3, description="The level the channel needs of its account."
+        default=None,
+        ge=0,
+        le=9,
+        description=(
+            "The level the channel needs of its account, on THIS tree's scale. Capped at 3 "
+            "until 2026-09-08 -- the MaNGOS/AzerothCore scale -- and Tortoise's administrator "
+            "is 4 on a scale that runs to 4 (measured: its SOAP answered a rank-3 account with "
+            "'below administrator'). The real bound is the entry's `accounts.level.max_level`, "
+            "checked on the entry; this one only keeps the shape sane."
+        ),
     )
     enable_env: dict[str, str] = Field(
         default_factory=dict,
@@ -1447,6 +1456,26 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    @model_validator(mode="after")
+    def _the_channel_rank_is_one_this_tree_can_hold(self) -> CatalogEntry:
+        """`operations.gm_level` may not exceed `accounts.level.max_level`.
+
+        Two blocks written by different boxes about the same account: the channel
+        says what rank it needs, the accounts block says what ranks exist. A rank
+        above the scale is not a stricter requirement, it is one no row can meet,
+        and the first sign of it was a 401 on a fresh install (yulon-arch,
+        2026-09-08) rather than a catalog error. Checked here, once, for both.
+        """
+        ops = self.operations
+        if ops is not None and ops.gm_level is not None and self.accounts.level is not None:
+            top = self.accounts.level.max_level
+            if ops.gm_level > top:
+                raise ValueError(
+                    f"{self.id}: operations.gm_level {ops.gm_level} is above this tree's own "
+                    f"level scale (accounts.level.max_level {top}); no account can hold it"
+                )
+        return self
 
     @model_validator(mode="after")
     def _every_patch_names_a_source_this_entry_clones(self) -> CatalogEntry:

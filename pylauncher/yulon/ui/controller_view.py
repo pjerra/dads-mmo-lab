@@ -1194,57 +1194,39 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
-    # 8.2e. This core links neither gsoap nor RASocket, so there is no listener
-    # to enable and no `channel_setup` here -- the console IS the channel. The
-    # tab is handed this install's channel as one callable, and the Server tab's
-    # probe is the only Phase 8 surface that exists on this tree so far.
-    # 8.3d. One channel object, used twice: the Server tab's probe presses it,
-    # and the Accounts tab sends this tree's two commands down it. They are the
-    # same console and the same lock, which is the point -- two channels over
-    # one `docker attach` would interleave two replies in one window.
-    console = channel_module.AttachChannel(
-        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    # Until 2026-09-08 this tab reached its world through `AttachChannel` over
+    # the console (8.2e): the fork's mangosd linked no SOAP. The fork re-added
+    # the interface (3f9a062) and the pin moved onto it (3a8472e), so the
+    # entry now says `soap` and this is Vanilla's wiring over this tree's own
+    # account seam -- one column, `mangos_sha`, not Vanilla's `v`/`s`. The
+    # console itself is still what the Console tab types at (`send_console`).
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: tortoise_accounts.create_account(
+            sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: tortoise_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
     )
-    # There is no credential and nothing to set up on this core, so the channel
-    # is simply always the console: `channel_for_saved` answers it rather than
-    # looking one up, and the AttachChannel says "could not ask" by itself when
-    # the world is not there to answer.
     accounts_admin = useraccounts.InstallAccounts(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=lambda: console,
+        channel_for_saved=channel.live_channel,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
-    # 8.4d. The same seam as 8.4a, 8.4b and 8.4c, over the ATTACH channel rather
-    # than SOAP -- the same `console` object the Server tab's probe and the
-    # Accounts tab's writes already press, because it is one console with one
-    # lock and two channels over one `docker attach` would interleave two
-    # replies in one window. There is no SOAP alternative here to choose
-    # between: this build's `src/mangosd` has no SOAP source and its
-    # `etc/mangosd.conf` no `SOAP.*` key (the fork added one on 2026-09-07,
-    # after this tree's HEAD), which is what `operations.channel: attach` says.
-    #
-    # The facts under it were read from this fork's own source on 2026-09-07,
-    # and two of them are ITS OWN rather than a sibling's: `rename` is a
-    # top-level command here (`Chat.cpp:850`) where the other three spell it
-    # `character rename`, and there is no console route to an arbitrary level at
-    # all, so the tab draws a sentence where that group would be.
-    #
-    # The `play=` keyword below was missing for a while, and two independent
-    # runs found it: the catalog block, the commands and the tab were all
-    # written, and without that one keyword the tab on this game drew "WoW
-    # Tortoise has not had its character actions measured yet" -- the entry
-    # saying the measurement existed and the window saying it did not.
-    # `test_every_game_offers_the_whole_controller_surface_wotlk_does` is what
-    # caught it, from the entry rather than from a list of which games are
-    # behind, and `test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_
-    # own_entry` asserts WHICH entry rather than only that one arrived.
     characters_admin = play_module.InstallPlay(
         entry,
         server_dir,
         sql=sql,
-        channel_for_saved=lambda: console,
+        channel_for_saved=channel.live_channel,
     )
     return _assemble(
         entry,
@@ -1252,7 +1234,7 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
-        console_probe=console.send,
+        channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),

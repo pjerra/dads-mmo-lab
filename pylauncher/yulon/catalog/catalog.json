@@ -1245,7 +1245,20 @@
         "prompt_precedes_answer": false
       },
       "operations": {
-        "channel": "attach"
+        "channel": "soap",
+        "namespace": "urn:MaNGOS",
+        "port": 7878,
+        "gm_level": 4,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878"
+          }
+        },
+        "publish": true,
+        "must_not_listen": []
       },
       "observability": {
         "characters": {

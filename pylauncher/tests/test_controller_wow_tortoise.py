@@ -515,3 +515,16 @@ def test_no_module_in_this_package_spells_a_game_fact_as_a_literal() -> None:
                 if fact in node.value:
                     offenders.append(f"{path.name}:{node.lineno} spells {fact!r}")
     assert offenders == []
+
+
+def test_tortoise_accepts_the_rank_its_own_fork_calls_administrator() -> None:
+    """This fork's `account.rank` runs 0-4 (8.3d) and its SOAP wants 4 -- measured on the
+    fresh install on yulon-arch, 2026-09-08 19:52Z, when a rank-3 channel account was
+    answered with 'below administrator'. The wrapper hands the writer this tree's scale
+    from the catalog; 5 is still refused, because no row here can hold it."""
+    sql = _FakeSql()
+    result = accounts.create_account(sql, "chan", "pw", gm_level=4)
+    assert result.gm_level == 4
+    assert any("`rank` = 4" in stmt for _, stmt in sql.statements), sql.statements
+    with pytest.raises(accounts.AccountError, match="GM level"):
+        accounts.create_account(sql, "chan2", "pw", gm_level=5)

@@ -316,6 +316,7 @@ def create_account(
     *,
     gm_level: int = NO_GM,
     scheme: Scheme = "azerothcore",
+    max_gm_level: int = MAX_GM_LEVEL,
 ) -> AccountResult:
     """Create one game account, or bring an existing one up to what was asked for.
 
@@ -362,7 +363,9 @@ def create_account(
 
     Raises:
         AccountError: the username or password is unusable, `gm_level` is out
-            of range, or a statement failed. The seam's own `ApplyError` (no
+            of range (above `max_gm_level` -- AzerothCore's 3 by default, the tree's
+            own `accounts.level.max_level` where a wrapper passes it: Tortoise's is 4,
+            measured 2026-09-08), or a statement failed. The seam's own `ApplyError` (no
             Docker, MySQL refused the statement, the connection dropped) is
             translated here rather than left to escape, so this is the only
             type a caller has to handle — it used to leak out of the lookup and
@@ -371,8 +374,8 @@ def create_account(
     """
     name = _checked_username(username)
     _check_password(password)
-    if not NO_GM <= gm_level <= MAX_GM_LEVEL:
-        raise AccountError(f"GM level must be between {NO_GM} and {MAX_GM_LEVEL}, got {gm_level}")
+    if not NO_GM <= gm_level <= max_gm_level:
+        raise AccountError(f"GM level must be between {NO_GM} and {max_gm_level}, got {gm_level}")
 
     account_id, created = _account_row(sql, name, password, scheme)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
