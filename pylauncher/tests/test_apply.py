@@ -2183,3 +2183,421 @@ def test_module_updates_keeps_could_not_ask_apart_from_up_to_date(tmp_path: Path
 def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:
     """The three CMaNGOS games have no `modules/` at all, and that is not an error."""
     assert apply_module.module_updates(tmp_path, git=_FakeBehind({})) == ()
+
+
+# ----------------------------------------------- a folder instead of a clone
+#
+# The second way to fill `modules/<id>`: a folder on the user's own disk,
+# copied in through a seam, instead of a repository cloned through git. The
+# engine learns nothing new about what a module IS — the copy lands at the same
+# path, gets the same claim, the same `include.sh`, and the same deploy /
+# patch / SQL / conf / client / DBC pass over whatever is now there.
+#
+# It also learns one hook: a manifest DERIVED from a link or a folder cannot
+# know the conf files and SQL directories the content carries until the content
+# is on disk, so `complete()` is handed the filled clone and returns the
+# manifest the later steps read. There is no second clone and no second report.
+
+
+class _Copier:
+    """The `FolderCopier` seam: records the pair it was handed, materialises `files`.
+
+    A fake for the reason `_FakeGit` is one — the real copier is a `copytree`
+    over a folder the user chose, and the property under test is that the
+    engine goes through the seam and then treats the result exactly as it
+    treats a clone. `fail` is how the `OSError` branch is reached without
+    arranging a full disk.
+    """
+
+    def __init__(self, files: dict[str, str] | None = None, *, fail: OSError | None = None) -> None:
+        self.files = files or {}
+        self.fail = fail
+        self.calls: list[tuple[Path, Path]] = []
+
+    def __call__(self, src: Path, dest: Path) -> None:
+        self.calls.append((src, dest))
+        if self.fail is not None:
+            raise self.fail
+        for rel, text in self.files.items():
+            p = dest / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+
+
+FOLDER_MODULE: dict[str, Any] = {
+    "id": "mod-my-thing",
+    "name": "mod-my-thing",
+    "type": "module",
+    "game": "wow-wotlk",
+    "description": "Custom module (copied from a folder you provided).",
+    # Dropped again by `_folder_module()`; here only so pydantic will build the
+    # object at all — see that function.
+    "source": {"repo": "you/mod-my-thing"},
+    "build": {"rebuild": True},
+}
+
+
+def _folder_module(**over: Any) -> Any:
+    """The manifest a folder derivation hands this engine: `type='module'`, no `source`.
+
+    Built by parsing and then `model_copy`, not by parsing a sourceless dict,
+    and that is a LANE BOUNDARY rather than a shortcut. Today
+    `Manifest._shape_by_type` requires a `source` for `type='module'`, and the
+    one-clause relaxation that lets a folder-derived manifest through belongs to
+    `manifest.py` — another lane's file, which this one may not touch. What the
+    applier reads is the OBJECT, so the object is what this builds; when the
+    relaxation lands, `parse_manifest` produces the same one and this helper
+    becomes a plain parse.
+    """
+    return parse_manifest({**FOLDER_MODULE, **over}).model_copy(update={"source": None})
+
+
+def _a_folder_to_copy(tmp_path: Path) -> Path:
+    """A directory OUTSIDE the server dir, standing in for the one the user picked."""
+    src = tmp_path / "elsewhere" / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "mod.cpp").write_text("// the user's module\n", encoding="utf-8")
+    return src
+
+
+def test_install_from_a_folder_copies_through_the_seam_and_then_walks_the_same_steps(
+    tmp_path: Path,
+) -> None:
+    """The whole of the divergence: `git.clone` is replaced by one call to a copier.
+
+    Everything after it is the shipped install, asserted here one item at a
+    time because each is a thing a "just copy the folder in" implementation
+    would plausibly leave out: the claim that makes the folder recognisable
+    next time, the `include.sh` CMake needs, the conf activation, the
+    pending-SQL report and the rebuild sentence.
+    """
+    copier = _Copier(
+        {
+            "src/mod.cpp": "// the user's module\n",
+            "conf/mod_thing.conf.dist": "Thing.Enable = 0\n",
+            "data/sql/db-world/a.sql": "-- a",
+        }
+    )
+    git = _FakeGit({"README.md": "upstream\n"})
+    origins = _Origins()
+    applier = Applier(tmp_path, git=git, remote_url=origins)
+    m = _folder_module(
+        conf=[
+            {"file": "env/dist/etc/modules/mod_thing.conf", "template": "conf/mod_thing.conf.dist"}
+        ],
+        sql=[{"db": "world", "path": "data/sql/db-world/*.sql", "applied_by": "db-import"}],
+    )
+    source = _a_folder_to_copy(tmp_path)
+    clone = applier.clone_dir(m)
+
+    report = applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    assert copier.calls == [(source, clone)]
+    assert git.calls == []  # a copy is not a clone, and git is never asked to make one
+    assert apply_module.read_clone_claim(clone, item_id="mod-my-thing") is Ownership.OWNED
+    assert (clone / "include.sh").exists()
+    conf = tmp_path / "env/dist/etc/modules/mod_thing.conf"
+    assert conf.read_text(encoding="utf-8") == "Thing.Enable = 0\n"
+    assert f"copy {source} → {clone.relative_to(tmp_path)}" in report.done
+    assert "touch include.sh" in report.done
+    assert [(p.db, p.files) for p in report.pending_sql] == [
+        ("world", ("data/sql/db-world/a.sql",))
+    ]
+    assert report.rebuild_required is True
+
+
+def test_a_folder_install_needs_a_copier_and_says_so(tmp_path: Path) -> None:
+    """A folder source that put nothing at the clone path is a refusal, not an install.
+
+    Two ways to get there and one answer for both. `FolderSource` will not be
+    built without a copier at all — the seam is not optional, because an
+    optional one is an install that silently copies nothing. And a copier that
+    ran and left no directory (a filter that matched nothing, a copy into the
+    wrong place) must not go on to write a claim, touch `include.sh` and report
+    a module that is not there.
+    """
+    with pytest.raises(TypeError, match="copier"):
+        apply_module.FolderSource(path=tmp_path)  # type: ignore[call-arg]
+
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+    nothing = _Copier()  # runs, copies nothing
+
+    with pytest.raises(ApplyError) as err:
+        applier.install(m, folder=apply_module.FolderSource(path=source, copier=nothing))
+
+    assert nothing.calls == [(source, applier.clone_dir(m))]
+    assert str(source) in str(err.value)
+    assert not applier.clone_dir(m).exists()
+
+
+def test_a_copier_that_could_not_read_the_folder_speaks_the_appliers_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """`OSError` out of the seam becomes `ApplyError`, as `GitError` does for a clone.
+
+    One failure vocabulary for the whole applier: every caller of `install()`
+    handles `ApplyError`, and a bare `PermissionError` reaching the Modules tab
+    would arrive as an unhandled worker exception rather than as a report line.
+    """
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+    refused = _Copier(fail=PermissionError(13, "Permission denied"))
+
+    with pytest.raises(ApplyError, match="Permission denied"):
+        applier.install(
+            _folder_module(), folder=apply_module.FolderSource(path=source, copier=refused)
+        )
+
+    assert not applier.clone_dir(_folder_module()).exists()
+
+
+def test_a_manifest_with_a_source_and_a_folder_is_one_source_too_many(tmp_path: Path) -> None:
+    """Two ways to fill the clone is a caller bug, refused before either one runs.
+
+    Cloning and then copying over it, or copying and then cloning over it, are
+    both destructive and neither is what anybody meant. The manifest's `source`
+    is what the report and the claim would name, the folder is where the bytes
+    would come from — a contradiction this engine must not resolve by picking.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+
+    with pytest.raises(ApplyError, match="one source"):
+        applier.install(
+            parse_manifest(OWNED_ITEM),
+            folder=apply_module.FolderSource(path=source, copier=copier),
+        )
+
+    assert git.calls == [] and copier.calls == []
+
+
+def _thing_conf() -> Any:
+    """The `conf` tuple a completer would have derived from a `conf/*.conf.dist`."""
+    return parse_manifest(
+        {
+            **FOLDER_MODULE,
+            "conf": [
+                {
+                    "file": "env/dist/etc/modules/mod_thing.conf",
+                    "template": "conf/mod_thing.conf.dist",
+                }
+            ],
+        }
+    ).conf
+
+
+def _world_sql() -> Any:
+    """The `sql` tuple a completer would have derived from a `data/sql/db-world/`."""
+    return parse_manifest(
+        {
+            **FOLDER_MODULE,
+            "sql": [
+                {"db": "world", "path": "data/sql/db-world/**/*.sql", "applied_by": "db-import"}
+            ],
+        }
+    ).sql
+
+
+def test_the_complete_hook_runs_after_the_folder_is_there_and_the_steps_read_what_it_returned(
+    tmp_path: Path,
+) -> None:
+    """The hook exists because a derived manifest cannot know what it is derived FROM.
+
+    A link or a folder yields an id, a name and a type; the conf files to
+    activate and the SQL directories to report are in the content, and the
+    content is not on disk until the clone or the copy has run. So the hook is
+    handed the FILLED clone, and every step after it reads the manifest it
+    returned — not the empty one the caller passed in.
+    """
+    copier = _Copier(
+        {"conf/mod_thing.conf.dist": "Thing.Enable = 0\n", "data/sql/db-world/a.sql": "-- a"}
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    minimal = _folder_module()  # no conf, no sql: nothing is known yet
+    seen: list[tuple[str, tuple[str, ...]]] = []
+
+    def complete(manifest: Any, clone: Path) -> Any:
+        # What the hook can see is the whole point: the folder is already there.
+        seen.append((manifest.id, tuple(sorted(p.name for p in clone.rglob("*") if p.is_file()))))
+        return manifest.model_copy(update={"conf": _thing_conf(), "sql": _world_sql()})
+
+    source = _a_folder_to_copy(tmp_path)
+    report = applier.install(
+        minimal, folder=apply_module.FolderSource(path=source, copier=copier), complete=complete
+    )
+
+    assert seen and seen[0][0] == "mod-my-thing"
+    assert "mod_thing.conf.dist" in seen[0][1]  # called AFTER the copy, not before
+    assert (tmp_path / "env/dist/etc/modules/mod_thing.conf").is_file()
+    assert [(p.db, p.files) for p in report.pending_sql] == [
+        ("world", ("data/sql/db-world/a.sql",))
+    ]
+    # And the manifest handed in is untouched: the hook returns, it does not mutate.
+    assert minimal.conf == () and minimal.sql == ()
+
+
+def test_the_complete_hook_also_finishes_a_manifest_that_was_cloned(tmp_path: Path) -> None:
+    """A link derivation knows no more than a folder one, so the hook is not folder-only.
+
+    Same clone path, same shipped `git.clone`, and the conf the hook found in
+    what came down is activated by the same pass that cloned it — no second
+    clone and no second report.
+    """
+    git = _FakeGit({"conf/mod_thing.conf.dist": "Thing.Enable = 0\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins())
+    m = parse_manifest({**FOLDER_MODULE, "id": "mod-linked", "name": "mod-linked"})
+    seen: list[bool] = []
+
+    def complete(manifest: Any, clone: Path) -> Any:
+        seen.append((clone / "conf" / "mod_thing.conf.dist").is_file())
+        return manifest.model_copy(update={"conf": _thing_conf()})
+
+    applier.install(m, complete=complete)
+
+    assert seen == [True]
+    assert len(git.calls) == 1
+    assert (tmp_path / "env/dist/etc/modules/mod_thing.conf").is_file()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("id", "mod-something-else"), ("type", "mod"), ("game", "wow-tbc")],
+)
+def test_a_complete_hook_that_changes_the_id_is_refused(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """The hook finishes ONE manifest; it does not get to substitute another.
+
+    Everything downstream of it is addressed by those three fields: the clone
+    path already written to (`clone_dir()` reads `type` and `id`), the claim
+    already inside that folder, and the `item_id` the report carries. A hook
+    returning a different item would report an install of something that was
+    never installed, over a folder holding another module's claim — so a
+    difference is a refusal rather than a silently relabelled report.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+
+    def swap(manifest: Any, clone: Path) -> Any:
+        return manifest.model_copy(update={field: value})
+
+    with pytest.raises(ApplyError, match=field):
+        applier.install(
+            _folder_module(),
+            folder=apply_module.FolderSource(path=source, copier=copier),
+            complete=swap,
+        )
+
+
+def test_remove_deletes_a_copied_folder_this_app_claimed_even_without_git(tmp_path: Path) -> None:
+    """A copy has no `.git`, and the guard's no-`.git` branch refused everything.
+
+    That branch was written for content somebody else put there — a tarball
+    unpacked into `modules/<id>`, a hand-installed module — and until a copy
+    could land there, "no `.git`" and "not ours" were the same fact. They are
+    not any more: this app's own claim is inside the folder it wrote, and it is
+    the same evidence that authorises removing a clone. Without this, a module
+    installed from a folder could never be uninstalled through the app.
+    """
+    copier = _Copier({"src/mod.cpp": "// the user's module\n"})
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins())
+    m = _folder_module(sql=[{"db": "world", "statement": "DELETE FROM x", "when": "remove"}])
+    source = _a_folder_to_copy(tmp_path)
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    clone = applier.clone_dir(m)
+    assert not (clone / ".git").exists()
+
+    report = applier.remove(m)
+
+    assert not clone.exists()
+    assert sql.statements == [("world", "DELETE FROM x")]
+    assert any(step.startswith("rm -r ") for step in report.done)
+    assert (source / "src" / "mod.cpp").is_file()  # the folder it was copied FROM is untouched
+
+
+def test_remove_still_refuses_a_hand_made_folder_without_a_claim(tmp_path: Path) -> None:
+    """The relaxation above is exactly one clause wide, and this is its other side.
+
+    A REGRESSION test, and said so rather than counted as evidence: it passes
+    before the claim is consulted in the no-`.git` branch as well as after,
+    because before the change every such folder was refused. Its job starts the
+    moment that branch learns to say yes — a relaxation written as "no `.git`
+    and nothing here we recognise, let it through" would delete three evenings
+    of somebody's work, which is the harm the whole guard exists for.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins())
+    m = _folder_module()
+    clone = applier.clone_dir(m)
+    (clone / "src").mkdir(parents=True)
+    mine = clone / "src" / "mine.cpp"
+    mine.write_text("// my patch, three evenings\n", encoding="utf-8")
+    before = mine.read_bytes()
+
+    with pytest.raises(ApplyError, match="was not put there by this app"):
+        applier.remove(m)
+
+    assert mine.read_bytes() == before
+    assert sql.statements == [] and sql.files == []
+
+
+def test_a_second_folder_install_over_this_apps_own_copy_is_allowed_and_a_strangers_is_not(
+    tmp_path: Path,
+) -> None:
+    """Re-choosing the same folder is how a custom module is updated, so it must pass.
+
+    And the folder next to it that this app did not write must still not be
+    copied over: the real copier REPLACES its destination, so this guard is the
+    only thing between a user's hand-installed `modules/mod-theirs` and losing
+    it.
+    """
+    copier = _Copier({"src/mod.cpp": "// v1\n"})
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    assert len(copier.calls) == 2  # this app's own copy: allowed, and replaced
+
+    theirs = _folder_module(id="mod-theirs", name="mod-theirs")
+    hand_made = applier.clone_dir(theirs)
+    (hand_made / "src").mkdir(parents=True)
+    (hand_made / "src" / "mine.cpp").write_text("// three evenings\n", encoding="utf-8")
+
+    with pytest.raises(ApplyError, match="was not put there by this app"):
+        applier.install(theirs, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    assert len(copier.calls) == 2  # the seam is where the harm is, and it was not reached
+    assert (hand_made / "src" / "mine.cpp").read_text(encoding="utf-8") == "// three evenings\n"
+
+
+def test_a_folder_source_never_asks_git_anything(tmp_path: Path) -> None:
+    """There is no repository, so every git question is one with no true answer.
+
+    `remote_url()` on a copy answers `None` at best and, on a copy taken from
+    somebody's checkout, whatever THAT checkout's origin was — a URL this
+    install has nothing to do with. `is_unmodified` and `no_local_commits` are
+    the same. The guard must reach its answer from the claim alone, on the
+    install and on the remove.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    origins = _Origins(OWNED_URL)
+    applier = Applier(tmp_path, git=git, remote_url=origins)
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    applier.remove(m)
+
+    assert origins.asked == []
+    assert git.asked_about == [] and git.branches_asked == []
+    assert git.calls == []
