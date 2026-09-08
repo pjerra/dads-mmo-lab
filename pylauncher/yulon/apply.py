@@ -38,6 +38,7 @@ from yulon import platform, runner
 from yulon.catalog import composegen
 from yulon.dbreads import SqlReader
 from yulon.git import (
+    BehindReader,
     CloneSpec,
     Git,
     GitError,
@@ -1800,3 +1801,85 @@ def _rel(base: Path, path: Path) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
+
+
+@dataclass(frozen=True)
+class ModuleUpdate:
+    """One installed module and how far behind its upstream it is (checklist 8.7a)."""
+
+    key: str
+    """The folder name under `modules/` — which is the module's id, and the same
+    string `docker.allowed_modules()` hands the importer."""
+
+    path: Path
+    is_checkout: bool
+    """Whether this folder is a git checkout at all. A `modules/` directory also
+    holds `CMakeLists.txt`, `ModulesLoader.cpp.in.cmake` and friends beside the
+    modules (read off yulon-ubuntu, 2026-09-07), and a user can copy a module in
+    by hand with no `.git` in it. Both are still listed — a folder the importer
+    will be handed is worth showing — but neither can be asked."""
+
+    behind: int | None
+    """Commits the upstream has that this checkout does not. `None` is "could not
+    ask": no `.git`, an offline machine, a repository that has gone private.
+    Never collapsed into `0` — see `git.BehindReader`."""
+
+    @property
+    def line(self) -> str:
+        """The row as the Modules tab prints it.
+
+        Here rather than in the view because it is the sentence the figure is
+        READ in, and the one thing 8.7a's definition of done is about is that
+        this number equals the same range run by hand. A view that formatted it
+        itself could round, pluralise or default it without a test noticing.
+        """
+        if not self.is_checkout:
+            return f"{self.key}: not a git checkout — nothing to compare"
+        if self.behind is None:
+            return f"{self.key}: could not ask (no answer from git)"
+        plural = "" if self.behind == 1 else "s"
+        return f"{self.key}: {self.behind} commit{plural} behind"
+
+
+def module_updates(
+    server_dir: Path,
+    *,
+    git: BehindReader,
+    branches: Mapping[str, str | None] | None = None,
+    kind: ManifestType = "module",
+) -> tuple[ModuleUpdate, ...]:
+    """How far behind each installed module of `server_dir` is (checklist 8.7a).
+
+    Enumerated from DISK, not from the manifest store, and that is the whole
+    point: "installed" means a clone is in `modules/`, so a module a user put
+    there by hand is listed and a manifest nobody installed is not. It is the
+    same enumeration `docker.allowed_modules()` hands the importer, for the same
+    reason — the folder is what the server has, and the catalog is only what it
+    could have had.
+
+    `branches` maps a module key to the branch its manifest names, because the
+    manifest's branch is what an update would fetch. Every module in the
+    `wow-wotlk` catalog omits `source.branch`, so the ordinary answer is `None`
+    and the ordinary fetch is `origin HEAD` — which is exactly why a wrong
+    branch here would go unnoticed until the first module that names one.
+
+    Costs one `git fetch` per checkout, so it belongs behind a control the user
+    pressed. Nothing outside each clone's `.git` is written and no working tree
+    is touched.
+    """
+    root = server_dir / CLONE_DIRS[kind]
+    branch_of = branches or {}
+    try:
+        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError as exc:
+        # Not an error and not empty-with-a-shrug: the three CMaNGOS games have
+        # no `modules/` at all, and a server dir that cannot be listed is a
+        # different problem than one with nothing installed. Logged, either way.
+        logger.debug(f"no {CLONE_DIRS[kind]} folder to list under {server_dir}: {exc}")
+        return ()
+    rows: list[ModuleUpdate] = []
+    for path in entries:
+        checkout = (path / ".git").is_dir()
+        behind = git.commits_behind(path, branch_of.get(path.name)) if checkout else None
+        rows.append(ModuleUpdate(key=path.name, path=path, is_checkout=checkout, behind=behind))
+    return tuple(rows)

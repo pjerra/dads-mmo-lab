@@ -1000,6 +1000,82 @@ def test_the_module_sql_route_reaches_this_games_own_binding(
     assert seen["output"] is print
 
 
+# ------------------------------- how far behind each installed module is (8.7a)
+
+
+def test_the_modules_tab_shows_how_far_behind_each_installed_module_is(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.7a's first clause, at the control the user presses.
+
+    The figure comes up from `apply.module_updates()` already formatted — the
+    view never builds the sentence — because the one thing this clause is about
+    is that the number on screen equals the same range run by hand.
+    """
+    rows = (
+        apply_module.ModuleUpdate(
+            key="mod-aoe-loot", path=tmp_path / "mod-aoe-loot", is_checkout=True, behind=3
+        ),
+        apply_module.ModuleUpdate(
+            key="mod-playerbots", path=tmp_path / "mod-playerbots", is_checkout=True, behind=0
+        ),
+    )
+    services = _services(ps, tmp_path, [])
+    services.module_updates = lambda: rows
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.module_updates_button.isEnabled()
+
+    view.check_module_updates()
+
+    text = view.module_report.toPlainText()
+    assert "mod-aoe-loot: 3 commits behind" in text
+    assert "mod-playerbots: 0 commits behind" in text
+
+
+def test_a_game_with_no_module_checkouts_gets_no_update_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games have no `modules/` folder, so the control is dead.
+
+    Same rule as `module_sql`: a control that is visibly unavailable beats one
+    that is pressed and then explains itself. A press with nothing wired must
+    still be harmless, because `_set_busy(False)` re-enables from the seam.
+    """
+    services = _services(ps, tmp_path, [])
+    services.module_updates = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.module_updates_button.isEnabled()
+    view.check_module_updates()  # must not raise
+
+
+def test_an_install_with_nothing_installed_says_so_rather_than_printing_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An empty answer and a failed read look identical in a blank box."""
+    services = _services(ps, tmp_path, [])
+    services.module_updates = lambda: ()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.check_module_updates()
+    assert "No modules are installed" in view.module_report.toPlainText()
+
+
+def test_the_update_check_route_reaches_this_games_own_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wired callable asks about THIS install's folder, like the SQL route."""
+    seen: dict[str, object] = {}
+
+    def fake(server_dir: Path, **kwargs: object) -> tuple[object, ...]:
+        seen["server_dir"] = server_dir
+        return ()
+
+    monkeypatch.setattr(modules, "module_updates", fake)
+    route = ControllerServices.for_entry(WOTLK, tmp_path).module_updates
+    assert route is not None
+    route()
+    assert seen["server_dir"] == tmp_path
+
+
 def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.network_mode() == "lan"

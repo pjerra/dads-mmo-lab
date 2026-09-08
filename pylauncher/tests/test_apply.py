@@ -2095,3 +2095,91 @@ def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
     lopsided = parse_manifest({**body, "build": {"restart": True}})
     assert lopsided.build.rebuild is True
     assert parse_manifest(body).build.rebuild is False
+
+
+# --------------------------------------------------------------------------
+# module_updates() — checklist 8.7a, "how far behind each installed module is"
+# --------------------------------------------------------------------------
+
+
+class _FakeBehind:
+    """A `BehindReader` that answers from a dict keyed by folder name."""
+
+    def __init__(self, answers: dict[str, int | None]) -> None:
+        self.answers = answers
+        self.asked: list[tuple[str, str | None]] = []
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        self.asked.append((dest.name, branch))
+        return self.answers.get(dest.name)
+
+
+def test_module_updates_reports_one_row_per_installed_checkout(tmp_path: Path) -> None:
+    """Installed means "a clone is on disk here", and the row carries the number.
+
+    The list is what the user reads, so it is the enumeration that matters: a
+    module the store has never heard of is still installed, and a store entry
+    nobody installed is not. Neither of those is a fact about the manifests.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-solocraft", "mod-aoe-loot"):
+        (modules / name / ".git").mkdir(parents=True)
+    # Not a checkout: AzerothCore's own `modules/` carries CMakeLists.txt and
+    # friends beside the module folders, and a folder somebody copied in by
+    # hand has no `.git` either. Both are named, neither is counted.
+    (modules / "not-a-clone").mkdir()
+    (modules / "CMakeLists.txt").write_text("x\n", encoding="utf-8")
+
+    git = _FakeBehind({"mod-aoe-loot": 3, "mod-solocraft": 0})
+    rows = apply_module.module_updates(tmp_path, git=git)
+
+    assert [(r.key, r.behind, r.is_checkout) for r in rows] == [
+        ("mod-aoe-loot", 3, True),
+        ("mod-solocraft", 0, True),
+        ("not-a-clone", None, False),
+    ]
+    # Sorted, and a non-checkout is never asked — there is nothing to fetch.
+    assert git.asked == [("mod-aoe-loot", None), ("mod-solocraft", None)]
+
+
+def test_module_updates_asks_each_module_about_its_own_branch(tmp_path: Path) -> None:
+    """The branch is the MANIFEST's, because the manifest's is what an update fetches.
+
+    All 21 shipped `wow-wotlk` manifests omit `source.branch`, so `None` is the
+    ordinary answer — which is exactly why passing the wrong one would go
+    unnoticed until the first module that names one.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-a", "mod-b"):
+        (modules / name / ".git").mkdir(parents=True)
+
+    git = _FakeBehind({"mod-a": 1, "mod-b": 2})
+    apply_module.module_updates(tmp_path, git=git, branches={"mod-a": "wotlk"})
+
+    assert git.asked == [("mod-a", "wotlk"), ("mod-b", None)]
+
+
+def test_module_updates_keeps_could_not_ask_apart_from_up_to_date(tmp_path: Path) -> None:
+    """`None` and `0` are different sentences, and the row has to carry both.
+
+    An offline machine that reported every module as up to date would be the
+    same defect this project has now recorded three times: a question with more
+    states than the answer being carried.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-offline", "mod-current"):
+        (modules / name / ".git").mkdir(parents=True)
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_FakeBehind({"mod-current": 0, "mod-offline": None})
+    )
+    by_key = {r.key: r for r in rows}
+    assert by_key["mod-current"].behind == 0
+    assert by_key["mod-offline"].behind is None
+    assert "0 commits behind" in by_key["mod-current"].line
+    assert "could not ask" in by_key["mod-offline"].line
+
+
+def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:
+    """The three CMaNGOS games have no `modules/` at all, and that is not an error."""
+    assert apply_module.module_updates(tmp_path, git=_FakeBehind({})) == ()

@@ -1401,3 +1401,111 @@ def test_a_source_pinned_on_a_named_branch_clones_the_branch_and_still_pins_by_h
     checkout = next(argv for argv in seen if "checkout" in argv)
     assert checkout[-3:] == ["checkout", "--detach", PIN]
     assert seen.index(clone) < seen.index(fetch) < seen.index(checkout)
+
+
+# --------------------------------------------------------------------------
+# commits-behind (checklist 8.7a: "how far behind each installed module is")
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "impl",
+    [
+        git.RunnerGit(),
+        git.ContainerGit(selinux_enforcing=lambda: False, filesystem_type=lambda _path: "ext4"),
+    ],
+    ids=["host", "containerized"],
+)
+def test_commits_behind_counts_what_the_update_would_bring_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, impl: git.BehindReader
+) -> None:
+    """The OTHER direction of the range, and it is not the same question.
+
+    `no_local_commits()` counts `FETCH_HEAD..HEAD` — what this checkout has that
+    the update has not, a guard's input. This counts `HEAD..FETCH_HEAD` — what
+    the update would bring in, a NUMBER shown to a user. Reversing the range is
+    the whole difference between them and the easiest thing in this file to get
+    backwards, so both ends are pinned here.
+
+    The target is `FETCH_HEAD` after this method's own fetch, for
+    `no_local_commits()`'s measured reason: `fetch origin HEAD` refreshes no
+    remote-tracking ref, so `origin/<branch>` — which is what the Rust launcher
+    counted against (`crates/dml-wow/src/maint.rs:443`, `HEAD..origin/{branch}`,
+    after a refspec-less `git fetch origin` that DOES refresh it) — is stale for
+    every module in the wow-wotlk catalog, all 21 of which name no branch.
+    """
+    dest = tmp_path / "mod-aoe-loot"
+    (dest / ".git").mkdir(parents=True)
+    answers: list[subprocess.CompletedProcess[str]] = []
+    seen_argv: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_argv.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner, "run", fake_run)
+
+    answers += [_completed(), _completed(stdout="7\n")]
+    assert impl.commits_behind(dest, "wotlk") == 7
+    assert seen_argv[-2][-3:] == ["fetch", "origin", "wotlk"]
+    assert seen_argv[-1][-3:] == ["rev-list", "--count", "HEAD..FETCH_HEAD"]
+    assert not [arg for arg in seen_argv[-2] if arg.startswith("--depth")]
+
+    # Up to date is 0, and 0 is a real answer — never None, which means "could
+    # not ask" and is what a caller has to print differently.
+    answers += [_completed(), _completed(stdout="0\n")]
+    assert impl.commits_behind(dest, None) == 0
+    assert seen_argv[-2][-3:] == ["fetch", "origin", "HEAD"]
+
+    # A fetch that cannot reach the remote asks nothing further.
+    answers.append(_completed(returncode=128, stderr="Could not resolve host"))
+    before = len(seen_argv)
+    assert impl.commits_behind(dest, None) is None
+    assert len(seen_argv) == before + 1, "a failed fetch must not be followed by a count"
+
+    # A count that will not parse is None too: a figure a user checks against
+    # `git rev-list` by hand must never be invented.
+    answers += [_completed(), _completed(stdout="not a number\n")]
+    assert impl.commits_behind(dest, None) is None
+    assert impl.commits_behind(tmp_path / "not-a-checkout", None) is None
+
+
+@pytest.mark.skipif(not git.git_available(), reason="needs a host git to make a real checkout")
+def test_the_behind_figure_equals_the_same_range_run_by_hand(tmp_path: Path) -> None:
+    """8.7a's definition of done, against real git rather than a mock.
+
+    A mock can only prove the argv. What has to be true is that the number the
+    app shows is the number `git rev-list --count HEAD..FETCH_HEAD` prints for
+    the same checkout — the comparison the live gate makes on the box, made here
+    against a `file://` remote so it runs in CI too.
+    """
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    author = ["-c", "user.email=t@example", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=upstream, check=True)
+    (upstream / "a.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+    subprocess.run([*["git", *author], "commit", "-qm", "one"], cwd=upstream, check=True)
+
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(upstream), str(dest)], check=True)
+    impl = git.RunnerGit()
+    assert impl.commits_behind(dest, "main") == 0
+
+    for name in ("two", "three"):
+        (upstream / f"{name}.txt").write_text(f"{name}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=upstream, check=True)
+        subprocess.run([*["git", *author], "commit", "-qm", name], cwd=upstream, check=True)
+
+    assert impl.commits_behind(dest, "main") == 2
+    by_hand = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD..FETCH_HEAD"],
+        cwd=dest,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert by_hand.stdout.strip() == "2"
+    # And the guard's question still answers its own: nothing of the user's is
+    # in the way of an update that is two commits ahead of this checkout.
+    assert impl.no_local_commits(dest, "main") is True

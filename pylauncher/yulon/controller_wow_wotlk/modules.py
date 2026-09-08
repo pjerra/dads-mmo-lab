@@ -14,13 +14,15 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from yulon import docker, resources
-from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, SqlRunner
+from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, ModuleUpdate, SqlRunner
+from yulon.apply import module_updates as apply_updates
 from yulon.controller_wow_wotlk import docker_ctl
-from yulon.git import Git
+from yulon.git import BehindReader, Git, RunnerGit
 
 # Explicit re-export (the `as` form is what mypy's --no-implicit-reexport asks for):
 # the value lives in `install_wiring` since 7.1, and this name stays so no importer moves twice.
 from yulon.install_wiring import DEFAULT_DB_ROOT_PASSWORD as DEFAULT_DB_ROOT_PASSWORD
+from yulon.log import get_logger
 from yulon.manifest import Manifest, ManifestType
 from yulon.manifest_store import (
     HttpGet,
@@ -30,6 +32,8 @@ from yulon.manifest_store import (
     load_manifest,
     urllib_get,
 )
+
+logger = get_logger(__name__)
 
 GAME = "wow-wotlk"
 
@@ -86,6 +90,39 @@ def applier(
     if runner is None:
         runner = DockerSql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
     return Applier(server_dir, git=git, sql=runner, client_dir=client_dir, dbc=dbc)
+
+
+def module_updates(
+    server_dir: Path,
+    *,
+    git: BehindReader | None = None,
+) -> tuple[ModuleUpdate, ...]:
+    """How far behind each module installed at `server_dir` is (checklist 8.7a).
+
+    The per-game binding only: which folder the clones live in is `apply.py`'s,
+    and the counting is `git.commits_behind()`'s. What is WotLK's here is the
+    branch table — each module's `source.branch` out of this game's own manifest
+    store, because the manifest's branch is what an update would fetch. Every
+    one of the 21 shipped `wow-wotlk` module manifests omits it, so the table is
+    ordinarily empty and every fetch is `origin HEAD`; it is built anyway,
+    because the first manifest that names a branch must not silently be counted
+    against the wrong ref.
+
+    A module on disk that the store has never heard of still gets a row — it is
+    installed, and `docker.allowed_modules()` will hand its name to the importer
+    whatever the catalog thinks.
+
+    Costs one `git fetch` per installed checkout, so it belongs behind a control
+    the user pressed rather than on the status poll.
+    """
+    reader: BehindReader = git if git is not None else RunnerGit()
+    branches: dict[str, str | None] = {}
+    try:
+        for manifest in store().load_all("module"):
+            branches[manifest.id] = manifest.source.branch if manifest.source else None
+    except Exception as exc:  # boundary: a broken manifest tree must not stop the count
+        logger.warning(f"could not read the wow-wotlk manifests for their branches: {exc}")
+    return apply_updates(server_dir, git=reader, branches=branches)
 
 
 def apply_module(

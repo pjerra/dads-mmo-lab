@@ -411,6 +411,15 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # list is spelled out with its expiry: wow-tbc and wow-tortoise share
         # wow-vanilla's engine and inherit the seam when a box wires them.
         unremovable = {"uninstall"} if game in _NO_UNINSTALL_YET else set()
+        # 8.7a's update check counts git CLONES under `modules/`, so it belongs
+        # to a game whose manifest set actually puts one there. wow-tbc ships a
+        # `modules.json` with an empty `items` -- 8.7b's finding, a core that
+        # compiles no modules -- so it has manifests and still has nothing that
+        # could be behind, which is why this cannot ride on `has_manifests`.
+        # Read off the store the services were handed, so the day a CMaNGOS game
+        # ships its first module manifest this fails until its wiring lands.
+        counted = services.store is not None and any(services.store.load_all("module"))
+        uncounted = set() if counted else {"module_updates"}
         allowed = (
             unstocked
             | unmeasured
@@ -420,6 +429,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unprobed
             | unplayed
             | unremovable
+            | uncounted
         )
         if game == "wow-wotlk":
             assert (
