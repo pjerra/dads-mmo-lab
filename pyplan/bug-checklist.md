@@ -3615,3 +3615,124 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       refusal (the folder was built before the doodad patch), so it never reached `ready` and no
       `The server is up.` belongs to this gate; it did not compile.
       `pyplan/gates/bug43-keepawake-win11-2026-09-05/README.md`.
+
+---
+
+### 44. The Modules tab can never ask for a value that has a default — 2026-09-08, OPEN
+
+Found by pressing the button rather than calling the applier, during the 8.7b live gate on
+`m910q` (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/`, `04-install-tab-press.txt`).
+
+`ControllerView._module_values()` opens the prompt dialog only when *some* required prompt has no
+default:
+
+```python
+needed = required_prompts(manifest, cast(When, action))
+if not any(prompt.default is None for prompt in needed):
+    return True, None
+```
+
+The comment above it says the gate is "deliberately narrow" so that 39 of the shipped manifests
+get no new window — which was the right trade when the two exceptions were `mod-ah-bot` and
+`mod-ah-bot-plus`, whose prompts have no default and which were simply unreachable from the GUI
+before 2026-09-07. The TBC manifest set added on 8.7b changes what that narrowness costs: every
+one of its five items is a knob whose value the operator is meant to choose, and every one of them
+carries a default, so the dialog never opens for any of them.
+
+Measured live, on the running TBC install. Ground line 924 of `etc/mangosd.conf`:
+
+```
+Motd = "Welcome to the Continued Massive Network Game Object Server."
+```
+
+After selecting **Message of the Day** and pressing **Install selected** — no dialog shown, nothing
+asked:
+
+```
+Motd = "Welcome!"
+```
+
+`"Welcome!"` is `motd.json`'s prompt default. There is no path from the Modules tab to any other
+value: the same press on a second machine writes the same string. The restarted server duly
+reported `Welcome!` (`07-after-restart-motd.txt`), so the manifest machinery is sound — it is the
+tab that has no way to ask. `Yulon 8.7b gate` reached the server in the same gate only because that
+install was driven through `services.applier.install(manifest, {"motd": …})` in a script.
+
+The same holds for the rest of the set: `xp-rates` (three multipliers, all defaulted),
+`all-stackables` (`stack_size`, default `200`), and `all-flight-paths` and `cross-faction`, which
+have no prompts at all. So on this game the tab offers five items and zero choices.
+
+Not a blocker for 8.7b, whose clause is only that the key reaches the running server, and it does.
+It is a blocker for the feature being worth having: a message of the day the operator cannot write
+is a message of the day nobody wants.
+
+A note in passing, because it is the same rot: `_format_report`'s docstring counts "41 shipped
+manifests … 20 of the 41 … 21 others (7 ale, 2 keg, 11 mod, and `mod-arac`)", measured 2026-09-07.
+Counted through `load_manifest()` on 2026-09-08 the tree holds **46** (41 `wow-wotlk` + 5
+`wow-tbc`): 21 `module`, 16 `mod`, 7 `ale`, 2 `keg`, of which 20 are `rebuild=True`. The split the
+sentence is about still holds; the totals beside it went stale the moment 8.7b landed, which is
+what a count written in prose does.
+
+**The obvious fix is the wrong one.** "Open the dialog whenever the manifest has any prompt" puts a
+window in front of all 46 manifests including the 20 that need a rebuild and whose prompts are
+internal plumbing, which is the churn the narrow gate was written to avoid. The shape that fits what was
+measured is a per-prompt fact — a prompt the operator is meant to answer versus one that merely
+needs a value — declared in the manifest, not inferred from whether somebody remembered to leave
+the default out. That is a schema change and an owner call, so it is filed and not fixed here.
+
+---
+
+### 45. On CMaNGOS there is no compliant way to install a SQL mod at all — 2026-09-08, OPEN
+
+Owner answer 7 (2026-09-06, quoted in [`write-ledger.md`](write-ledger.md)): *no Phase 8 feature
+writes `characters` or `world` while the world server is up.* The ledger's row for
+`apply.py::_run_sql::run_statement` reads "**yes, and unguarded**", and says 8.7 is where the
+applier's guard lands.
+
+So on TBC the compliant sequence for `all-stackables`, whose three statements all target the world
+schema, is: press **Stop** on the Server tab, press **Install selected**, press **Start**.
+
+**That sequence does not exist.** Measured on `m910q` against the live `~/tbc-7.4c` install,
+2026-09-08 09:07Z (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/14-sql-mod-world-stopped.txt`,
+`14-sql-mod-with-the-world-stopped.png`):
+
+```
+--- pressing Stop on the Server tab, as owner answer 7 requires ---
+status label: status: db down, auth down, world down
+census after Stop: tbc-db exited | tbc-mangosd exited | tbc-realmd exited
+is the DATABASE still reachable? ERR: … container f94521f9a435… is not running
+
+--- now pressing Install selected on all-stackables, world down ---
+install all-stackables FAILED: SQL failed (inline → mangos): Error response from daemon:
+container f94521f9a435da653cf216d8308c02fa1e9535e0a122efbdc542144a35b32605 is not running
+```
+
+The app's Stop is `docker.stop_staged()`, which runs `compose stop` over the whole project — by
+design, and the docstring says why: it walks `depends_on` "so the servers close their connections
+before the database goes away". The applier's `DockerSql` reaches the database with
+`docker exec tbc-db mariadb`. Stopping the world therefore removes the only route the applier has
+to the database, and the two facts are individually correct and jointly fatal.
+
+The consequence is a fork with no good branch. Install the SQL mod with the server up and you break
+owner answer 7 — which is what the 8.7b gate itself did for its step 9, deliberately and with the
+data restored to ground afterwards, because the alternative was not to gate the clause. Stop first
+and the install fails. And when 8.7a's guard lands as written — refuse world SQL while the world
+runs — it closes the first branch too, and `all-stackables`, `xp-rates`' SQL siblings and every
+future CMaNGOS SQL mod become uninstallable through the app on all three CMaNGOS trees (8.7b TBC,
+8.7c Vanilla, 8.7d Tortoise).
+
+Two things have to be true for the feature to work, and neither is today:
+
+* **The guard's question is the wrong one.** "Is the world server running" and "may I write the
+  world database" are the same question only on a tree where the database outlives the world. The
+  guard needs to ask about the *world container*, and the app needs a way to put the world down
+  while leaving the database up — which `compose stop tbc-mangosd` does and `stop_staged()`
+  deliberately does not. That is a new capability, not a flag.
+* **The failure is unreadable.** What the user gets is a raw daemon error carrying a 64-character
+  container id, naming neither the database, nor the module, nor anything to do about it. Every
+  other refusal in this app names the thing and the next action; this one is the exception because
+  it is not a refusal at all — it is an unguarded call failing.
+
+Nothing was written by the failed press: `stackable > 1` stayed at 3471, `stackable = 200` at its
+ground 121, and `yulon_stackable_backup` was never created. The failure is clean, which is the only
+good news in the entry.
