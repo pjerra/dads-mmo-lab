@@ -6,6 +6,12 @@ Game-agnostic on purpose (style-guide §4): a `ManifestStore` reads one game's
 GitHub base URL into the cache with ETag/`If-None-Match` revalidation
 (README §11). Per-game `controller_<acronym>/modules.py` binds these to its
 game id and adds the apply step; nothing here knows what a module *does*.
+
+A store may be given a second, USER tree over the first (`user_root`): manifests
+this app derived from a link or a folder the user supplied, written by
+`yulon.module_source` under the config directory. The layout is identical, the
+bundled layer always wins a contested id, and the fetcher never reads or writes
+there — it mirrors the project's tree into its own cache root and nothing else.
 """
 
 from __future__ import annotations
@@ -41,11 +47,30 @@ class ManifestError(RuntimeError):
 
 
 class ManifestStore:
-    """Read-only view of one game's manifest tree: indexes + per-item files."""
+    """Read-only view of one game's manifest tree: indexes + per-item files.
 
-    def __init__(self, root: Path, game: str) -> None:
+    Optionally TWO trees. `root` is what the app ships (or the refreshed cache
+    over it); `user_root`, when given, is a second tree under the app's own
+    config directory holding manifests this app DERIVED from a link or a folder
+    the user chose (`yulon.module_source`). Its layout is byte-for-byte this
+    class's own — `<user_root>/<game>/<family>.json` plus
+    `<user_root>/<game>/<family>/<id>.json` — so the user layer is read by the
+    class that already exists rather than by a second parser.
+
+    **A user file can never shadow a shipped id.** The bundled layer comes first
+    in `load_all()` and wins in `load()`, and a user file naming a shipped id is
+    skipped with a warning that names the path. A shipped manifest is reviewed —
+    its repo passed README §3a, its conf keys and SQL steps were written by hand;
+    a derived one was built from a repository basename. Letting the second
+    replace the first would be a way to substitute an arbitrary repo for a
+    catalogued module by dropping a file into a directory, and the file can
+    arrive by hand as easily as by a press.
+    """
+
+    def __init__(self, root: Path, game: str, user_root: Path | None = None) -> None:
         self.root = root
         self.game = game
+        self.user_root = user_root
 
     @property
     def game_dir(self) -> Path:
@@ -60,19 +85,61 @@ class ManifestStore:
         """`<root>/<game>/<family>/<id>.json`."""
         return self.game_dir / FAMILY_FILES[kind] / f"{item_id}.json"
 
+    def user_index_path(self, kind: ManifestType) -> Path:
+        """`<user_root>/<game>/<family>.json`; raises if there is no user layer."""
+        return self._user_game_dir / f"{FAMILY_FILES[kind]}.json"
+
+    def user_item_path(self, kind: ManifestType, item_id: str) -> Path:
+        """`<user_root>/<game>/<family>/<id>.json`; raises if there is no user layer."""
+        return self._user_game_dir / FAMILY_FILES[kind] / f"{item_id}.json"
+
+    @property
+    def _user_game_dir(self) -> Path:
+        if self.user_root is None:
+            raise ManifestError("this store has no user layer")
+        return self.user_root / self.game
+
     def load_index(self, kind: ManifestType) -> Index:
         """Parse the family index; raises `ManifestError` if missing/invalid."""
-        index = parse_index(_read_json(self.index_path(kind)))
+        return self._index_at(self.index_path(kind), kind)
+
+    def _index_at(self, path: Path, kind: ManifestType) -> Index:
+        index = parse_index(_read_json(path))
         if index.game != self.game or index.type != kind:
             raise ManifestError(
-                f"{self.index_path(kind)} is for {index.game}/{index.type}, "
-                f"expected {self.game}/{kind}"
+                f"{path} is for {index.game}/{index.type}, expected {self.game}/{kind}"
             )
         return index
 
+    def user_index_items(self, kind: ManifestType) -> tuple[str, ...]:
+        """The ids the user index lists, or `()` when there is no user layer or no index.
+
+        A MISSING index is an empty second layer, never an error: on a machine
+        that has never derived a module there is nothing to read, and raising
+        would draw `!! could not load modules: …` over the whole tab and take
+        every shipped module down with it. An index that IS there and does not
+        parse is a real error — something wrote a file this app reads back, and
+        answering "absent" would hide a custom module the user believes is there.
+        """
+        if self.user_root is None:
+            return ()
+        path = self.user_index_path(kind)
+        if not path.is_file():
+            return ()
+        return self._index_at(path, kind).items
+
     def load(self, kind: ManifestType, item_id: str) -> Manifest:
-        """Parse one item; raises `ManifestError` if missing/invalid or mismatched."""
+        """Parse one item; raises `ManifestError` if missing/invalid or mismatched.
+
+        The bundled file when the bundled index lists the id, the user file
+        otherwise. With no user layer this is what it always was, byte for byte.
+        """
         path = self.item_path(kind, item_id)
+        if self.user_root is not None and item_id not in self.load_index(kind).items:
+            path = self.user_item_path(kind, item_id)
+        return self._load_at(path, kind, item_id)
+
+    def _load_at(self, path: Path, kind: ManifestType, item_id: str) -> Manifest:
         manifest = load_manifest(path)
         if manifest.id != item_id or manifest.type != kind or manifest.game != self.game:
             raise ManifestError(
@@ -82,9 +149,19 @@ class ManifestStore:
         return manifest
 
     def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        """Every item the family index lists, in index order."""
-        for item_id in self.load_index(kind).items:
-            yield self.load(kind, item_id)
+        """Every bundled item in index order, then every user item that shadows none."""
+        bundled = self.load_index(kind).items
+        for item_id in bundled:
+            yield self._load_at(self.item_path(kind, item_id), kind, item_id)
+        shipped = set(bundled)
+        for item_id in self.user_index_items(kind):
+            if item_id in shipped:
+                logger.warning(
+                    f"ignoring {self.user_item_path(kind, item_id)}: "
+                    f"{item_id} is a {kind} this app ships, and a user file never replaces one"
+                )
+                continue
+            yield self._load_at(self.user_item_path(kind, item_id), kind, item_id)
 
     def relative_files(self, kind: ManifestType) -> list[str]:
         """Paths (relative to `<root>`) the fetcher must mirror for a family."""
