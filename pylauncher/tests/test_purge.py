@@ -421,6 +421,75 @@ def test_only_this_installs_own_four_image_refs_are_removed(tmp_path: Path) -> N
     assert not any("alpine" in ref for ref in rec.removed_images)
 
 
+def test_every_tab_that_offers_an_uninstall_is_handed_this_installs_own_built_images(
+    tmp_path: Path,
+) -> None:
+    """The JOIN, which the test above cannot reach: what the app actually hands one.
+
+    `test_only_this_installs_own_four_image_refs_are_removed` asks a `Recorder`
+    whose `image_refs` this file typed itself (`_images()`), so it proves the
+    ENGINE removes what it is given and says nothing about what the app gives
+    it. `reviews check functions, not call sites` is the standing lesson and
+    this is that shape exactly: measured at `dcc64543` on 2026-09-08, replacing
+    `image_refs=composegen.built_image_refs(entry, server_dir)` with
+    `image_refs=()` at `yulon/ui/controller_view.py:778` left the whole suite
+    byte-identical -- 3597 passed and the same five Windows line-ending failures
+    -- while every WotLK install's four images leaked on every uninstall for
+    ever. The same mutation at `:1128` was caught at once, by
+    `test_uninstall_second_family.py::test_the_vanilla_uninstall_removes_this_installs_images_and_not_the_shared_one`,
+    which is why this is enumerated over the catalog rather than written twice:
+    a per-family assertion is a per-family hole, and 8.9c and 8.9d will each
+    add a third and a fourth wiring of the identical five lines.
+
+    The `_FakeUninstall` in `test_controller_view.py`'s 8.9a section is the
+    other half of the reason nothing saw it: that whole section assigns
+    `services.uninstall = fake`, so the real `for_entry()` is never asked what
+    it wired.
+
+    **What the refs must not be, and it is not hypothetical.** The bash prior
+    art derives its removal list from the compose FILE
+    (`_compose_server_images`, `cli/src/90-main.sh:80`), which includes the
+    PULLED database image, and its whole defence is that the daemon refuses a
+    removal while somebody holds it -- `docker image rm` failing becomes a
+    warn. On m910q that defence is absent: `wow-vanilla` and `wow-tbc` both
+    pull `mariadb:11`, the TBC install has no containers at all, so the daemon
+    would not refuse, and a neighbour's next start would re-pull 458 MB over
+    that box's known-flaky link. `built_image_refs()` never names a pulled
+    image, so the safety is structural rather than a race the daemon usually
+    wins.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    offered: dict[str, tuple[str, ...]] = {}
+    for entry in load_catalog().games:
+        server_dir = tmp_path / entry.id
+        server_dir.mkdir()
+        # `wow-vanilla`'s password plan is `generated`, and its Uninstaller
+        # reads the file out of the folder it is about to delete before it will
+        # build. Written for every entry rather than for the one that needs it:
+        # which trees generate is a per-tree fact, and a fixture that knows
+        # which is a fixture that goes quietly wrong when 8.9c adds one.
+        (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+        services = ControllerServices.for_entry(entry, server_dir)
+        if services.uninstall is None:
+            continue
+        offered[entry.id] = services.uninstall.image_refs
+        built = composegen.built_image_refs(entry, server_dir)
+        assert services.uninstall.image_refs == built, entry.id
+        assert built, f"{entry.id}: an install with no built ref leaves its images behind for ever"
+        for ref in built:
+            assert ref.startswith("yulon.local/"), (entry.id, ref)
+        db_image = entry.install.native.db.image if entry.install.native else None
+        assert db_image not in built, (entry.id, db_image)
+
+    # The subject, pinned before the rule is believed. An empty `offered` would
+    # make every assertion above pass, and this box's own history is that a
+    # tab's uninstall arrives one family at a time -- so the day 8.9c wires TBC
+    # this goes red, and the fix is to add the id here rather than to widen a
+    # rule that has stopped covering anything.
+    assert sorted(offered) == ["wow-vanilla", "wow-wotlk"], sorted(offered)
+
+
 def test_an_image_still_in_use_is_a_warning_and_not_a_failed_uninstall(
     tmp_path: Path,
 ) -> None:
