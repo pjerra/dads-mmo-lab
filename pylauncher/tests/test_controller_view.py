@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -745,6 +745,269 @@ def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path)
     assert asked == []
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-ah-bot"]
+
+
+# ------------------------------- the module SQL that no other button reaches
+#
+# `docker.apply_module_sql()` and its per-game binding were measured working on
+# yulon-ubuntu (2026-09-07) and had NO caller in `yulon/ui/` at all — a route
+# with no button on it, which is the same thing as no route for anyone who is
+# not reading the source. These tests are that button.
+
+
+class _FakeImporter:
+    """Stands in for `controller_wow_wotlk.modules.apply_module_sql`.
+
+    Records what the view handed down and what the tab looked like WHILE the
+    run was in flight — the second one is the only way to see a lock that a
+    synchronous job runner puts back before the next line of the test.
+    """
+
+    def __init__(
+        self, says: Sequence[str] = (), refusal: Exception | None = None, returncode: int = 0
+    ) -> None:
+        self.says = tuple(says)
+        self.refusal = refusal
+        self.returncode = returncode
+        self.sinks: list[object] = []
+        self.enabled_in_flight: list[bool] = []
+        self.view: ControllerView | None = None
+        self.during: Callable[[], object] | None = None
+
+    def __call__(self, output: object = None) -> docker.AttachedRun:
+        self.sinks.append(output)
+        if self.view is not None:
+            self.enabled_in_flight.append(self.view.module_sql_button.isEnabled())
+        if self.during is not None:
+            self.during()
+        for line in self.says:
+            if callable(output):
+                output(line)
+        if self.refusal is not None:
+            raise self.refusal
+        return docker.AttachedRun(self.returncode, self.says)
+
+
+def _importer_view(
+    ps: _Ps, tmp_path: Path, importer: _FakeImporter | None
+) -> tuple[ControllerView, _FakeImporter | None]:
+    services = _services(ps, tmp_path, [])
+    services.module_sql = importer
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    if importer is not None:
+        importer.view = view
+    return view, importer
+
+
+def test_the_modules_tab_can_apply_the_module_sql_nothing_else_applies(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole box in one press: the route exists, and now something reaches it.
+
+    The line asserted here is the importer's own evidence that a module's SQL
+    was applied — `>> Applying update <file>.sql`, measured on yulon-ubuntu
+    2026-09-07 while `acore_world.updates` went 2967 → 2968. The tab shows what
+    the importer said rather than a sentence of its own, because the run's
+    output is the only thing that knows whether anything was applied.
+    """
+    view, importer = _importer_view(
+        ps, tmp_path, _FakeImporter(says=(">> Applying update aoe_loot_module_string.sql",))
+    )
+    assert importer is not None
+    view.apply_module_sql()
+
+    assert len(importer.sinks) == 1
+    assert ">> Applying update aoe_loot_module_string.sql" in view.module_report.toPlainText()
+
+
+def test_the_refusal_that_makes_this_not_a_button_that_always_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A running world refuses, and the refusal is what the user reads.
+
+    Checklist 8.7a's rule lives in `docker.apply_module_sql()` — one guard,
+    inside the step every caller passes through — so the tab must NOT spell a
+    second copy of it. What the tab owes is that the refusal arrives on screen
+    intact and that nothing is claimed to have been applied.
+    """
+    refusal = docker.DockerCommandError(
+        "ac-worldserver is running. The importer writes to the databases underneath them, and "
+        "a running worldserver holds characters in memory and saves them back over whatever it "
+        "finds. Press Stop first, then try again."
+    )
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(refusal=refusal))
+    assert importer is not None
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.apply_module_sql()
+
+    report = view.module_report.toPlainText()
+    assert "Press Stop first" in report
+    assert "FAILED" in report
+    assert "applied" not in report.lower(), report
+    assert failures and "Press Stop first" in failures[0]
+
+
+def test_the_importer_talks_through_a_relay_because_it_talks_from_a_worker_thread(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sink handed down must be the relay's emitter, never a bound slot of the view.
+
+    Same reason the repair's sink is: this call runs on a worker thread and
+    everything it invokes runs there too, so a bound `@Slot(str)` would write
+    into a widget from off the GUI thread. Running inline, as these tests do,
+    the wrong version behaves identically — only the identity of what was
+    passed down can tell them apart.
+    """
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(says=("one",)))
+    assert importer is not None
+    view.apply_module_sql()
+
+    sink = importer.sinks[0]
+    assert getattr(sink, "__self__", None) is view._module_sql_relay, (
+        "the importer was handed something that is not the relay, so its lines "
+        "would reach a widget on the worker thread"
+    )
+
+
+def test_the_module_sql_button_is_locked_while_the_importer_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The button is dead for the length of the run, and alive again after it.
+
+    `run_one_shot(allowed_modules=...)` is `compose run --rm`, which starts a
+    NEW container each time rather than refusing because one is already up, so
+    nothing below this tab would stop a second press from racing the first —
+    the disabled button is the whole of that defence.
+
+    Two presses here are two runs, and that is the test being honest rather
+    than the lock failing: these tests run their jobs inline, so the first has
+    already finished by the second line. What is asserted is what the tab
+    looked like WHILE each one ran.
+    """
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(says=("one",)))
+    assert importer is not None
+    view.apply_module_sql()
+    view.apply_module_sql()
+
+    assert importer.enabled_in_flight == [False, False], importer.enabled_in_flight
+    assert view.module_sql_button.isEnabled(), "the button never came back"
+
+
+def test_the_window_will_not_close_while_the_module_importer_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same one-shot service, so the same close guard — which it did not have.
+
+    `busy_reason()` covered the repair alone and said so ("Only the import"),
+    because until this tab had a second button that runs `ac-db-import` that
+    was true. `_JobWorker.run()` calls its work synchronously, `quit()` cannot
+    preempt a blocking `subprocess`, and a QThread destroyed while running
+    aborts the process (0xC0000409) — so a close during a module import that
+    outlives the join is the recorded crash, not a slow exit.
+
+    Shorter than a full import, and that is not a defence: how many pending
+    files a module set has is not something this tab gets to assume.
+    """
+    reasons: list[str | None] = []
+    importer = _FakeImporter(says=("one",))
+    view, _ = _importer_view(ps, tmp_path, importer)
+    assert view.busy_reason() is None, "a quiet tab refused to close"
+
+    importer.during = lambda: reasons.append(view.busy_reason())
+    view.apply_module_sql()
+
+    assert reasons and reasons[0], "the close guard had nothing to say mid-run"
+    assert "importer" in reasons[0]
+    assert view.busy_reason() is None, "the tab stayed unclosable afterwards"
+
+
+def test_a_game_with_no_importer_is_offered_no_module_sql_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`module_sql` is None for the three CMaNGOS games, and the tab says so rather than fails.
+
+    The disabled button is the honest shape: pressing it would reach
+    `docker.apply_module_sql()`'s first refusal ("this game does not say which
+    compose service imports its databases"), which is a true sentence delivered
+    after a click that could never have worked.
+    """
+    view, _ = _importer_view(ps, tmp_path, None)
+
+    assert view.module_sql_button.isEnabled() is False
+    assert "no" in view.module_sql_button.toolTip().lower()
+    view.apply_module_sql()  # a press that gets through must not raise
+    assert view.module_report.toPlainText() == ""
+
+
+def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
+    tmp_path: Path,
+) -> None:
+    """The wiring, not the tab: which games really get the route, asked of the factories.
+
+    A defaulted `None` field is exactly the shape that can be forgotten — the
+    tab would then be permanently disabled on the game that HAS an importer and
+    no test of the view would notice, because the view was handed a fake.
+    """
+    assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        entry = load_catalog().get(game)
+        assert entry.container_spec().import_service == "", f"{game} now names an importer"
+        assert ControllerServices.for_entry(entry, tmp_path).module_sql is None, game
+
+    # And the same question asked of the WotLK factory itself, so that what the
+    # route is conditional on is `import_service` and not the game's name.
+    without = WOTLK.model_copy(
+        update={"containers": WOTLK.containers.model_copy(update={"db_import": None})}
+    )
+    assert ControllerServices.for_entry(without, tmp_path).module_sql is None
+
+
+def test_an_importer_that_is_running_locks_the_other_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Repair and Apply module SQL run the SAME one-shot service against the same databases.
+
+    So the tab's busy lock has to cover both, in both directions, and it has to
+    put back what this install really has rather than unconditionally: a
+    CMaNGOS install whose Stop has just finished must not be handed a live
+    Apply module SQL button it can only be refused for.
+    """
+    view, _ = _importer_view(ps, tmp_path, _FakeImporter())
+    view._set_busy(True)
+    assert not view.module_sql_button.isEnabled()
+    view._set_busy(False)
+    assert view.module_sql_button.isEnabled()
+
+    without, _ = _importer_view(ps, tmp_path, None)
+    without._set_busy(True)
+    without._set_busy(False)
+    assert not without.module_sql_button.isEnabled(), "a game with no importer got a live button"
+
+
+def test_the_module_sql_route_reaches_this_games_own_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the wired lambda really calls: the per-game binding, with THIS install's folder.
+
+    The seam under it (`docker.apply_module_sql`) takes a spec and a directory,
+    so a call site that passed the wrong directory would run the importer
+    against somebody else's install and look identical from the tab.
+    """
+    seen: dict[str, object] = {}
+
+    def fake(server_dir: Path, **kwargs: object) -> docker.AttachedRun:
+        seen["server_dir"] = server_dir
+        seen.update(kwargs)
+        return docker.AttachedRun(0, ())
+
+    monkeypatch.setattr(modules, "apply_module_sql", fake)
+    route = ControllerServices.for_entry(WOTLK, tmp_path).module_sql
+    assert route is not None
+    route(print)
+    assert seen["server_dir"] == tmp_path
+    assert seen["output"] is print
 
 
 def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -1530,6 +1793,21 @@ def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
     )
     services.network_plan("lan")
     assert asked == ["dml-arch"], f"the port scan addressed the wrong daemon: {asked}"
+
+    # The Modules tab's importer, which is three docker calls in a row — the
+    # `compose config` mount probe, the database start, and the one-shot itself.
+    # Added when the route got its first call site; the seam scan below found
+    # this exact gap the same day, in the binding this lambda goes through.
+    ran: dict[str, object] = {}
+    monkeypatch.setattr(
+        modules,
+        "apply_module_sql",
+        lambda server_dir, **kw: ran.update(kw) or docker.AttachedRun(0, ()),
+    )
+    route = services.module_sql
+    assert route is not None, "wotlk has an import service and must have the route"
+    route(print)
+    assert ran.get("wsl_distro") == "dml-arch", f"the importer addressed the wrong daemon: {ran}"
 
 
 def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(

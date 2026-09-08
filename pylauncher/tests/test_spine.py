@@ -2381,6 +2381,12 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
+    ("docker.py", "allowed_modules"): (
+        "lists the install's `modules/` to name them to the importer; its own `except OSError` "
+        "warns and answers upstream's own default, which leaves an unreadable folder "
+        "behaving exactly as it was found. Nothing is written on the strength of it - the "
+        "answer travels in argv to a container that then decides file by file"
+    ),
     ("networking.py", "write_client_realmlist"): (
         "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
         "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"

@@ -259,6 +259,18 @@ the answer — install with it, or change nothing at all.
 """
 
 
+ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
+"""Apply the SQL of the modules on disk, reporting the importer's lines to a sink.
+
+Named once because the field, the factory parameter and the tab's own attribute
+all have to be the same shape, and the thing that makes this route different
+from every other seam on the tab is that its ANSWER is a run rather than a
+report: whether a module's SQL was applied is only knowable from what the
+importer printed (`>> Applying update <file>.sql`), so the lines are the result
+and the sink is not a nicety.
+"""
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -341,6 +353,21 @@ class ControllerServices:
     One object and not three callables for the reason `channel_setup` is one:
     the read and the two writes share a fact -- which account is the app's own
     -- and splitting them would be three places to remember it.
+    """
+    module_sql: ModuleSqlRoute | None = None
+    """Run this install's importer over the modules on disk, or None if it has none.
+
+    Defaulted, and the default is the honest answer for three of the four
+    games: only AzerothCore ships a one-shot import service, so only its
+    factory wires this. The cost of a defaulted seam is that it can be
+    forgotten for the game that HAS one and every view test would still pass —
+    the view is handed a fake — so what the factories really answer is pinned
+    in `test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route`.
+
+    Takes the sink the importer's lines are handed to. It is the ONE argument
+    because everything else the run needs — which container, which folder,
+    which refusals — belongs below this seam, in `docker.apply_module_sql()`,
+    which is where 8.7a's "not while the world is running" guard lives.
     """
 
     @classmethod
@@ -560,6 +587,7 @@ def _assemble(
     bots: BotBrowser | None = None,
     console_probe: Callable[[str], object] | None = None,
     uninstall: Uninstall | None = None,
+    module_sql: ModuleSqlRoute | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -594,6 +622,12 @@ def _assemble(
         play=play,
         bots=bots,
         console_probe=console_probe,
+        # Defaulted to None here rather than demanded from every factory: three
+        # of the four games name no import service at all, and a keyword they
+        # would all have to pass as None is a keyword that says nothing. What
+        # the WotLK factory passes instead is spelled there, next to the
+        # `import_service` it is conditional on.
+        module_sql=module_sql,
     )
 
 
@@ -735,6 +769,27 @@ def _for_wotlk(
         applier=(
             wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
             if entry.has_manifests
+            else None
+        ),
+        # The other half of installing a module, and until now the half with no
+        # button: `applier` clones the module and activates its conf, leaving
+        # `data/sql/db-world/*.sql` "to ac-db-import on next start" — and no
+        # Start ever reaches the importer (`docker.start_staged()` names the
+        # three long-running services). This is that next start.
+        #
+        # Conditional on the same fact the repair's probe is, `import_service`,
+        # and for the same reason: an entry that names no one-shot importer has
+        # nothing to run, and a disabled button is a better answer than a
+        # refusal delivered after a click. The refusal still exists underneath
+        # (`docker.apply_module_sql()` opens with it), so this condition is a
+        # courtesy and not the guard.
+        module_sql=(
+            (
+                lambda output: wotlk_modules.apply_module_sql(
+                    server_dir, output=output, wsl_distro=wsl_distro
+                )
+            )
+            if spec.import_service
             else None
         ),
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
@@ -1338,6 +1393,49 @@ cancel to offer. Abandoning a `compose up` means terminating it, which stops
 """
 
 _IMPORT_TAIL_LINES = 2
+MODULE_SQL_RUNNING = "Running the importer over the modules installed here. What it prints:"
+"""The heading above the module importer's live output.
+
+It says what is running rather than what will have happened, because at this
+point nothing is known: the importer decides file by file, and a run that
+applies nothing at all is a perfectly normal outcome for an install whose
+modules are already ledgered in `updates`.
+"""
+
+MODULE_SQL_FINISHED = (
+    "The importer finished. Any '>> Applying update <file>.sql' line above is a file that was "
+    "applied just now; a module already recorded in the database's `updates` table correctly "
+    "gets nothing. Modules with C++ code still need a rebuild — that is a separate job."
+)
+"""What is said at the end, and everything it deliberately does not say.
+
+No count and no "N modules applied". This tab cannot know that number: the
+importer works a FILE at a time and names each one itself, so a total invented
+here would be the same defect 8.7a's other half was opened for — a module
+reported as done while nothing ran.
+"""
+
+MODULE_SQL_TIP = (
+    "Applies the SQL that installing a module leaves for the importer. The server must be "
+    "stopped: press Stop on the Server tab first."
+)
+"""The button's tooltip on a game that has an importer.
+
+It names the refusal the user is most likely to meet — `docker.apply_module_sql()`
+will not write module SQL underneath a running worldserver (checklist 8.7a) —
+before the click rather than after it. It is a courtesy, not the guard.
+"""
+
+MODULE_SQL_NO_IMPORTER = (
+    "This game has no one-shot import service, so there is nothing to run its modules' SQL with."
+)
+"""Why the button is dead on the three CMaNGOS games.
+
+A disabled button with no reason on it reads as a broken app. This is the same
+sentence `docker.apply_module_sql()` refuses with, said before the press
+instead of after it.
+"""
+
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
 
@@ -1417,6 +1515,11 @@ class ControllerView(QWidget):
         Cleared by a failure, because the machine has changed under the
         photograph: a second press then has to ask for a fresh one.
         """
+        # The Modules tab's run of the SAME one-shot service. A second flag
+        # rather than a second meaning for `_import_running`, which also
+        # decides whether the repair offer is hidden and whether Refresh is
+        # locked -- overloading it would change the Server tab from here.
+        self._module_sql_running = False
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -1600,7 +1703,14 @@ class ControllerView(QWidget):
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
 
-        Only the import. Everything else here finishes inside `shutdown()`'s
+        Both runs of the one-shot import service: the Server tab's repair and
+        the Modules tab's `apply_module_sql()`. It said "only the import" and
+        meant it until 8.7a gave that service a second button; the module run
+        is the shorter of the two, which is not a defence, because how many
+        pending SQL files a module set has is not something this tab gets to
+        assume.
+
+        Everything else here finishes inside `shutdown()`'s
         join; a database import runs for 10-30 minutes, which is long enough
         that a user WILL close the window during one — and closing during one
         froze the window for `STOP_GRACE_SECONDS + 30` seconds and then aborted
@@ -1613,6 +1723,13 @@ class ControllerView(QWidget):
         """
         if self._uninstall_running:
             return UNINSTALL_RUNNING
+        if self._module_sql_running:
+            return (
+                "The module importer is still running. It cannot be stopped, and closing now "
+                "would leave the world database part-way through a module's SQL. This window "
+                "will close normally once it finishes — the Modules tab shows what it is "
+                "printing."
+            )
         if not self._import_running:
             return None
         return (
@@ -1963,8 +2080,18 @@ class ControllerView(QWidget):
             # "press Refresh now", so it is the button a hesitating user
             # reaches for (review, 2026-08-23).
             self.refresh_button.setEnabled(False)
+            # The Modules tab's importer too, and for the reason above rather
+            # than for symmetry: `repair_import()` and `apply_module_sql()` run
+            # the SAME one-shot service against the same databases, so one
+            # while the other is live is two importers writing at once.
+            self.module_sql_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
+            # Back to what this install can do, not unconditionally: a game
+            # with no import service has no route, and re-enabling it here
+            # would hand the three CMaNGOS games a live button the moment any
+            # action of theirs finished.
+            self.module_sql_button.setEnabled(self.services.module_sql is not None)
             # Re-enabled, not re-shown: `_show_repair()` owns whether Repair is
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
@@ -3634,20 +3761,37 @@ class ControllerView(QWidget):
         self.module_report.setReadOnly(True)
         self.install_module_button = QPushButton("Install selected", tab)
         self.remove_module_button = QPushButton("Remove selected", tab)
+        # The third button on this tab, and the only one that is not about one
+        # selected manifest: it applies the pending SQL of everything installed
+        # here, because that is the granularity the importer has — it is handed
+        # the module folder list and ledgers what it applies in `updates`.
+        self.module_sql_button = QPushButton("Apply module SQL", tab)
         self.install_module_button.clicked.connect(lambda: self._module_action("install"))
         self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
+        self.module_sql_button.clicked.connect(self.apply_module_sql)
         row = QHBoxLayout()
         row.addWidget(self.install_module_button)
         row.addWidget(self.remove_module_button)
+        row.addWidget(self.module_sql_button)
         box.addWidget(self.module_list, 2)
         box.addLayout(row)
         box.addWidget(self.module_report, 1)
         self._tabs.addTab(tab, "Modules")
         self._manifests: dict[str, Manifest] = {}
+        # The importer talks from a worker thread for however long it runs, and
+        # this is what carries its lines to the GUI one. Same mechanism as the
+        # repair's `_import_relay`, and a separate object because the two runs
+        # write to different widgets. See `LineRelay`.
+        self._module_sql_relay = LineRelay(self)
+        self._module_sql_relay.line.connect(self._module_sql_line)
         self.reload_modules()
         enabled = self.services.store is not None and self.services.applier is not None
         self.install_module_button.setEnabled(enabled)
         self.remove_module_button.setEnabled(enabled)
+        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        self.module_sql_button.setToolTip(
+            MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
+        )
 
     def reload_modules(self) -> None:
         """Fill the list from the store (every family), newest store contents first."""
@@ -3732,6 +3876,96 @@ class ControllerView(QWidget):
         what, self._module_pending = self._module_pending or "module action", None
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
+
+    @Slot()
+    def apply_module_sql(self) -> None:
+        """Run this install's importer over the modules on disk, and show what it prints.
+
+        One press, no arming. The two-press gesture on the Server tab guards
+        the actions that overwrite what is already there; this one adds update
+        files that upstream's own `docker compose up` would apply on every
+        start, and re-running it applies nothing a second time because the
+        importer ledgers each file in `updates`.
+
+        What it is NOT is a button that always works. The rule that a module's
+        SQL must not be written underneath a live worldserver is checklist
+        8.7a's, and it is enforced once, in `docker.apply_module_sql()`, which
+        every caller passes through — so this method holds no copy of it and
+        cannot come to disagree with it. A press while the server is running
+        comes back as the refusal, in `_module_sql_failed`, saying to press
+        Stop first.
+
+        The button is locked for the length of the run and so are the Server
+        tab's, because `compose run --rm` starts a NEW container each time
+        rather than refusing while one is up: nothing below this tab would stop
+        a second press, or a Start, from racing the writes.
+        """
+        route = self.services.module_sql
+        if route is None:
+            return
+        # One call, not a second copy: `_set_busy(True)` is what locks this
+        # button as well as the Server tab's, so the two cannot drift into
+        # disagreeing about whether an importer is running.
+        self._set_busy(True)
+        self._module_sql_running = True
+        self._module_pending = "apply module SQL"
+        self.module_report.setPlainText(MODULE_SQL_RUNNING)
+        # The sink is the relay's emitter, not `_module_sql_line`: this lambda
+        # runs on a worker thread and everything it calls runs there too.
+        self._run(
+            lambda: route(self._module_sql_relay.emit_line),
+            self._module_sql_done,
+            self._module_sql_failed,
+        )
+
+    @Slot(str)
+    def _module_sql_line(self, line: str) -> None:
+        """Append one of the importer's lines. Reached only through the relay.
+
+        Appended rather than summarised, and kept rather than trimmed to a
+        tail: this run's whole output is a handful of lines even on a big
+        install — one `>> Applying update <file>.sql` per pending file — and
+        `--rm` deletes the container when it exits, so `docker compose logs`
+        has nothing to add afterwards. What is on screen is what there is.
+        """
+        text = line.rstrip()
+        if not text:
+            return
+        self.module_report.appendPlainText(text)
+
+    @Slot(object)
+    def _module_sql_done(self, result: object) -> None:
+        self._set_busy(False)
+        self._module_sql_running = False
+        self._module_pending = None
+        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        # Deliberately not "N modules applied". This tab cannot count that: the
+        # importer applies a FILE at a time and says so itself, and a module
+        # whose SQL was already in `updates` is a module that correctly gets
+        # nothing. Claiming a number here would be the same lie in a new place
+        # — the one 8.7a's other half was fixed for.
+        if isinstance(result, docker.AttachedRun):
+            self.module_report.appendPlainText(MODULE_SQL_FINISHED)
+        # The run starts this install's database if it was down and leaves it
+        # up, so the Server tab's line is stale — and `_set_busy(False)` does
+        # not bring Start and Stop back; only a status read does.
+        self.refresh_status()
+
+    @Slot(object)
+    def _module_sql_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self._module_sql_running = False
+        self._module_pending = None
+        self.module_sql_button.setEnabled(self.services.module_sql is not None)
+        # The refusal verbatim and under whatever the importer had already
+        # printed, because a run that got part-way is a different situation
+        # from one that never started and only its own output can tell them
+        # apart.
+        self.module_report.appendPlainText(f"FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+        # As above: a refusal can arrive after the database was started, and
+        # Start and Stop are locked until something reads the status.
+        self.refresh_status()
 
     # -------------------------------------------------------- networking tab
 

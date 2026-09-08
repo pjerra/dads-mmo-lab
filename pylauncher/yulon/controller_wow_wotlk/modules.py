@@ -105,7 +105,10 @@ def apply_module(
 
 
 def apply_module_sql(
-    server_dir: Path, *, output: Callable[[str], None] | None = None
+    server_dir: Path,
+    *,
+    output: Callable[[str], None] | None = None,
+    wsl_distro: str | None = None,
 ) -> docker.AttachedRun:
     """Run the AzerothCore importer over `server_dir` for the modules that are ON DISK.
 
@@ -130,5 +133,17 @@ def apply_module_sql(
     `output` receives the importer's lines as they arrive; the `>> Applying
     update <file>.sql` lines among them are the only evidence that a module's
     SQL was applied, so a caller reporting to a user should pass one.
+
+    `wsl_distro` says which daemon this install's containers are inside, and it
+    is here because the route below takes one and this binding is what a caller
+    holding the install reaches it through. Without it the whole run — the
+    `compose config` probe, the database start and the importer itself — goes
+    to the Windows host's Docker, which has never heard of `ac-database`, and
+    the user reads "Docker could not be found on this machine" from a tab whose
+    other buttons are working (the shape of the 2026-08-27 Discord report).
+    `test_controller_view.py`'s seam scan is what found this one, on the day
+    its first call site was written.
     """
-    return docker.apply_module_sql(docker_ctl.SPEC, server_dir, output=output)
+    return docker.apply_module_sql(
+        docker_ctl.SPEC, server_dir, output=output, wsl_distro=wsl_distro
+    )

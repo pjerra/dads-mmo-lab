@@ -315,9 +315,15 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     from yulon.catalog.catalog import load_catalog
     from yulon.ui.controller_view import ControllerServices
 
-    module_surface = {"store", "applier"}
+    module_surface = {"store", "applier", "module_sql"}
     every_field = {f.name for f in fields(ControllerServices)}
     assert module_surface < every_field, "the module fields are no longer called store/applier"
+    # `module_sql` joined the surface when the module importer got a button
+    # (8.7a). It is None for the same three games and for a second reason as
+    # well as the manifests one: they name no one-shot import service, so there
+    # is no container to run their modules' SQL in. Both halves are asserted
+    # per game in `test_controller_view.py`; what is required here is only that
+    # the exception stays deliberate.
 
     catalog = load_catalog()
     for game in sorted(g.id for g in catalog.games):
