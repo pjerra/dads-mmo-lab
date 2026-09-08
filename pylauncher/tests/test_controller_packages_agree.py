@@ -267,14 +267,14 @@ def test_the_dump_the_restore_and_the_listing_all_use_the_declared_client() -> N
         monkey.undo()
 
 
-_NO_UNINSTALL_YET = frozenset({"wow-tbc", "wow-vanilla", "wow-tortoise"})
+_NO_UNINSTALL_YET = frozenset({"wow-tbc", "wow-tortoise"})
 """The games whose tab has no Uninstall yet, and the box that removes each name.
 
-`wow-vanilla` leaves this set in **8.9b**, which is the second and last of the
-two family boxes. `wow-tbc` and `wow-tortoise` are CMaNGOS forks too and inherit
-the same mechanism, but neither has a box yet -- so they are named here rather
-than left to be noticed, and this test fails the day one of them is wired
-without this line being deleted.
+`wow-vanilla` LEFT this set in **8.9b**, the second and last of the two family
+boxes, so both gated families are now wired. `wow-tbc` and `wow-tortoise` are
+CMaNGOS forks too and inherit the same mechanism, but neither has a box yet --
+so they are named here rather than left to be noticed, and this test fails the
+day one of them is wired without this line being edited.
 """
 
 

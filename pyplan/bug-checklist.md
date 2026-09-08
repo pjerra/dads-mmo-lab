@@ -3782,3 +3782,55 @@ Two things have to be true for the feature to work, and neither is today:
 Nothing was written by the failed press: `stackable > 1` stayed at 3471, `stackable = 200` at its
 ground 121, and `yulon_stackable_backup` was never created. The failure is clean, which is the only
 good news in the entry.
+---
+
+## Found by the 8.7c / 8.9b live gates on m910q, 2026-09-08
+
+- [ ] **MEDIUM — The Modules tab never asks for the one value a `mod` exists to set.**
+  *This is the same defect as §45 above, found independently by the 8.7b gate on `wow-tbc`
+  and by the 8.7c gate on `wow-vanilla`. Both records are kept because each measured it on
+  a different game and by a different route; fix them as one item.*
+  `ControllerView._module_values()` (`ui/controller_view.py`) opens the prompt dialog only when
+  some prompt has **no** default: `if not any(prompt.default is None for prompt in needed):
+  return True, None`. That is right for the 39 manifests where the default is a good answer,
+  and wrong for the three where it is a placeholder. Pressing Install on `motd` writes
+  `Motd = "Welcome!"` with no dialog and no way past it, and `motd`'s whole point is a sentence
+  the operator chooses; `xp-rates` (all three multipliers default to 1, i.e. "change nothing")
+  and `all-stackables` (200) are the same shape. **Not a Vanilla defect** — the same three
+  manifests exist on `wow-tbc` and equivalents on `wow-wotlk`, so it lands on every game with
+  manifests. Found by 8.7c's gate, whose driver replaced `_prompt_asker` and watched it never
+  be called (`pyplan/gates/8.7c-vanilla-m910q-2026-09-08/README.md`, finding 1). The clause was
+  still met with the manifest's own default, because that value differs from the line the
+  server was running. The fix is a decision, not a patch: either a manifest says which of its
+  prompts must be asked even when it has a default, or the tab always asks when a manifest has
+  any prompt at all. It is the owner's, and it belongs with 9.x's UI pass rather than to a
+  modules box.
+- [ ] **LOW — A ticked purge deletes the built image, so "reinstall to find those characters
+  again" costs a full recompile.** `purge.Uninstaller.run(keep_characters=True)` keeps
+  `<project>_db-data` and removes `built_image_refs()` — correct, the image is this install's
+  alone — and then deletes the folder, which on a CMaNGOS tree holds `src/` and a 2.4 GB
+  extracted `data/`. So the reinstall the dialog promises re-clones, recompiles, re-extracts
+  and rebuilds mmaps. Measured on m910q 2026-09-08: with the image gone, `docker compose up` in
+  the restored folder tries to **pull** from a registry that does not exist — `failed to resolve
+  reference "yulon.local/cmangos-vanilla-server:native-e9e233c0": dial tcp: lookup yulon.local:
+  no such host` — and hangs whatever is waiting for the server. Nothing here is wrong; what is
+  missing is that the sentence a user reads ("Kept … — reinstall to the same folder to find
+  those characters again") says nothing about the price. This is `pyplan/8.9b-gate-plan.md`
+  open question 2 with a measured shape, and the answer is the owner's: either the ticked path
+  keeps `./data` and `src/` too and the dialog says so, or the dialog names the recompile.
+  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/README.md`, finding 1.
+- [x] **LOW — Every purge plan logged a warning that the install came from a newer Yu'lon.**
+  `purge._default_reason()` and `apply.server_dir_claim()` both call
+  `native.read_claim(server_dir, valid=())` and both say in their own docstrings that the stage
+  names are not their business — one wants the version, the other the identity.
+  `native._parse_state()` measured `completed` against that empty tuple anyway, so every
+  recorded stage came out "unknown" and the log said *"records stages this build does not know:
+  clone-sources, write-dockerfile, build, … — this is usually an older Yu'lon opening an install
+  a newer one created"* about an install this build had written itself. Advice about a version
+  mismatch that is not happening, on the one action that cannot be undone. Family-neutral, so
+  8.9a's WotLK gate produced it too and nobody read the log; read on m910q during 8.9b's,
+  2026-09-08. **Fixed** by warning only when the caller named the stages it knows (`if unknown
+  and valid:`); `stages` is still filtered and `unknown` is still carried, so nothing the file
+  yields changes. Pinned by
+  `test_uninstall_second_family.py::test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown`,
+  which also requires the warning to still fire for a caller that did supply a list.

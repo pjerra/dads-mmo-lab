@@ -398,3 +398,186 @@ def test_the_seams_this_file_uses_are_the_shipped_ones(tmp_path: Path) -> None:
     assert native.Seams().volume_exists is docker.volume_exists
     replaced = replace(native.Seams(), volume_exists=lambda _name: True)
     assert replaced.volume_exists is not docker.volume_exists
+
+
+# ------------------------------------------------- 8.9b: the wiring itself
+#
+# Everything above was written while 8.9b had no code of its own: it read the
+# real installs and pinned what the second family's shape does to 8.9a's
+# engine. What follows is the box's own half — the Vanilla tab actually gets an
+# Uninstall — and it is asked of `ControllerServices.for_entry()`, the object
+# the Server tab holds, rather than of `_for_vanilla`'s source, so a factory
+# that built an Uninstaller and forgot to pass it fails here.
+
+
+def test_the_vanilla_tab_gets_an_uninstall_scoped_to_this_install(tmp_path: Path) -> None:
+    """8.9b's first requirement: there is a button, and it is aimed at this folder.
+
+    `ControllerServices.uninstall = None` is what "no controls on this tab"
+    means (`ui/controller_view.py`, and `_NO_UNINSTALL_YET` in
+    `test_controller_packages_agree.py` names the games it is still true of).
+    Presence is not enough to assert on its own — an Uninstaller built with the
+    WotLK spec would be present and would stop `ac-worldserver`, a container
+    this box has never had — so the three facts that scope it are read back:
+    the game, the folder, and the container spec that came from THIS entry.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    entry = entry_for(VANILLA)
+    server_dir = tmp_path / "vanilla"
+    server_dir.mkdir()
+    (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+
+    services = ControllerServices.for_entry(entry, server_dir)
+    assert services.uninstall is not None, "the Vanilla tab still has no Uninstall (8.9b)"
+    assert services.uninstall.game == VANILLA
+    assert services.uninstall.server_dir == server_dir
+    assert services.uninstall.spec.world == "vanilla-mangosd"
+    assert services.uninstall.spec.world != entry_for(WOTLK).container_spec().world
+
+
+def test_the_vanilla_uninstall_removes_this_installs_images_and_not_the_shared_one(
+    tmp_path: Path,
+) -> None:
+    """Defect 2 of `pyplan/8.9b-gate-plan.md`, pinned at the wiring rather than in the engine.
+
+    `wow-vanilla` and `wow-tbc` both pull `mariadb:11`; `wow-wotlk` pulls
+    `mysql:8.4` and nothing else does, so 8.9a's gate could not see this. What
+    the Uninstaller is handed must therefore be the BUILT refs — the ones this
+    install's own build produced, tagged with this folder's digest — and never
+    the pulled database image a live neighbour is using.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    entry = entry_for(VANILLA)
+    server_dir = tmp_path / "vanilla"
+    server_dir.mkdir()
+    (server_dir / ".db_password").write_text("hunter2\n", encoding="utf-8")
+
+    services = ControllerServices.for_entry(entry, server_dir)
+    assert services.uninstall is not None
+    refs = services.uninstall.image_refs
+    assert refs == composegen.built_image_refs(entry, server_dir)
+    assert refs, "an install with no built image would leave its image behind for ever"
+    for ref in refs:
+        assert ref.startswith("yulon.local/"), ref
+        assert "mariadb" not in ref and "mysql" not in ref, f"{ref} is a pulled image"
+
+
+def test_a_ticked_vanilla_purge_keeps_the_password_the_reinstall_will_need(
+    tmp_path: Path,
+) -> None:
+    """The whole reason this box exists, driven through the shipped `run()`.
+
+    WotLK's password plan is `fixed`, so 8.9a's ticked press kept nothing and
+    could not exercise this at all. Vanilla's is `generated` into
+    `.db_password` inside the folder the purge deletes, so the copy-and-recall
+    path `yulon/dbsecret.py` was written for gets its first press here. Only
+    the four seams that touch the world are replaced; the decision about what
+    to keep is the shipped one.
+    """
+    from yulon import dbsecret, docker, logsnap, purge
+    from yulon.ownership import Ownership
+
+    entry = entry_for(VANILLA)
+    server_dir = tmp_path / "vanilla"
+    server_dir.mkdir()
+    (server_dir / ".db_password").write_text("s3cret-generated\n", encoding="utf-8")
+    volume = db_volume(VANILLA, server_dir)
+    config_dir = tmp_path / "config"
+
+    removed_volumes: list[str] = []
+    uninstaller = purge.Uninstaller(
+        game=VANILLA,
+        server_dir=server_dir,
+        spec=entry.container_spec(),
+        image_refs=(),
+        forget=lambda: None,
+        claim=lambda _p: Ownership.OWNED,
+        project_of=lambda: composegen.project_name(
+            VANILLA, server_dir, platform_id=lambda: "linux"
+        ),
+        census=lambda _p: docker.Running(),
+        containers_of=lambda _p: [],
+        volumes_of=lambda _p: [volume],
+        folder_size=lambda _p: 0,
+        keep_secret=lambda password, vol: dbsecret.remember(
+            VANILLA,
+            composegen.install_id(server_dir),
+            password=password,
+            volume=vol,
+            config_dir=config_dir,
+        ),
+        snapshot=lambda: logsnap.Snapshot(path=tmp_path / "snap.log"),
+        remove_containers=lambda: True,
+        remove_volume=removed_volumes.append,
+        remove_image=lambda ref: ref,
+        remove_folder=lambda path: shutil.rmtree(path),
+    )
+    result = uninstaller.run(keep_characters=True)
+
+    assert result.warnings == (), result.warnings
+    assert removed_volumes == [], "a ticked purge must keep the database volume"
+    assert result.kept_volumes == (volume,)
+    assert result.secret_kept is not None, "nothing recorded where the password went"
+    assert result.folder_removed and not server_dir.exists()
+    kept = dbsecret.recall(VANILLA, composegen.install_id(server_dir), config_dir=config_dir)
+    assert kept is not None, "the key to the kept volume died with the folder"
+    assert kept.password == "s3cret-generated"
+    assert kept.volume == volume
+
+
+def test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found by 8.9b's live gate: every purge plan logged a warning that is not true.
+
+    `purge._default_reason()` and `apply.server_dir_claim()` both call
+    `native.read_claim(server_dir, valid=())`, and both say in as many words that
+    the stage names are not their business — they want the identity and the
+    version. `_parse_state` measures `completed` against `valid` anyway, so with
+    an empty tuple EVERY recorded stage is "unknown" and the log says:
+
+        .yulon-install.json records stages this build does not know:
+        clone-sources, write-dockerfile, build, extract, mmaps, conf, import.
+        … this is usually an older Yu'lon opening an install a newer one created.
+
+    Read on m910q 2026-09-08 against a perfectly ordinary CMaNGOS install this
+    build had just written. The sentence is advice about a version mismatch that
+    is not happening, printed on the one action that cannot be undone, and it is
+    the last thing a user should be reading while deciding whether to press
+    Uninstall. It is a family-neutral defect: `valid=()` makes every name unknown
+    whoever installed it, so 8.9a's WotLK gate saw it too and nobody read the log.
+    """
+    import logging
+
+    from yulon.catalog import native
+
+    server_dir = tmp_path / "vanilla"
+    server_dir.mkdir()
+    stages = ("clone-sources", "write-dockerfile", "build", "extract", "conf", "import")
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=VANILLA,
+            install_id=composegen.install_id(server_dir),
+            family="cmangos",
+            completed=stages,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        claim = native.read_claim(server_dir, valid=())
+    assert claim.state is not None and claim.state.install_id
+    assert [r.message for r in caplog.records] == [], (
+        "asking for the identity alone must not accuse the install of coming from a "
+        "newer build; only a caller that supplied a stage list is asking about stages"
+    )
+
+    # And the warning must still fire for the caller that IS asking about stages.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        native.read_claim(server_dir, valid=("clone-sources",))
+    assert any(
+        "records stages this build does not know" in r.message for r in caplog.records
+    ), "a caller that named the stages it knows must still be told about the ones it does not"

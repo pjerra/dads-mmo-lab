@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "game": "wow-vanilla",
+  "type": "mod",
+  "items": [
+    "motd",
+    "xp-rates",
+    "all-flight-paths",
+    "cross-faction",
+    "all-stackables"
+  ]
+}
