@@ -77,8 +77,10 @@ from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import console as tortoise_console
+from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
+from yulon.controller_wow_tortoise import modules as tortoise_modules
 from yulon.controller_wow_vanilla import accounts as vanilla_accounts
 from yulon.controller_wow_vanilla import console as vanilla_console
 from yulon.controller_wow_vanilla import controller as vanilla_controller
@@ -1194,8 +1196,42 @@ def _for_tortoise(
         create_account=lambda name, pw, gm: tortoise_accounts.create_account(
             sql, name, pw, gm_level=gm
         ),
-        store=_no_manifest_store(entry),
-        applier=None,
+        # 8.7d. The store is this game's own, and the applier is the GUARDED one
+        # -- `tortoise_modules.applier()` returns an `autoupdate.GuardedApplier`,
+        # which is the whole of checklist 2504 on the object the tab holds. The
+        # two readings it needs are callables rather than values on purpose: a
+        # world can be started or stopped between the moment this tab is built
+        # and the moment somebody presses Install, and a guard that decided here
+        # would be guarding a fact about the past.
+        #
+        # `sql=sql` is the SAME runner the console, the bot browser and the
+        # account tile use, carrying this install's generated password and this
+        # fork's `tw_*` schema map -- so a SQL mod reaches `tw_world`, and the
+        # guard's ledger query reaches `tw_world.migrations` rather than
+        # `acore_world`'s.
+        store=tortoise_modules.store() if entry.has_manifests else None,
+        applier=(
+            tortoise_modules.applier(
+                server_dir,
+                sql=sql,
+                arming=lambda: tortoise_autoupdate.read_arming(
+                    server_dir,
+                    world_container=spec.world,
+                    schemas=entry.schema_map(),
+                    sql=sql,
+                    wsl_distro=wsl_distro,
+                ),
+                # `status == "running"` and not `settled`: a container that is
+                # RESTARTING is on its way back up and its next start is exactly
+                # the one the guard is about.
+                world_running=lambda: docker.container_state(
+                    spec.world, wsl_distro=wsl_distro
+                ).status
+                in ("running", "restarting"),
+            )
+            if entry.has_manifests
+            else None
+        ),
         backup=lambda: tortoise_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
         plan_restore=lambda path: tortoise_maintenance.plan_restore(
             path, server_dir, wsl_distro=wsl_distro
