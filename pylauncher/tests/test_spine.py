@@ -2422,6 +2422,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
     ),
+    ("module_source.py", "_conf_steps"): (
+        "lists the top level of a derived module's conf/ to find the .conf.dist files the "
+        "manifest will name; decides no write, and a conf it cannot see is simply one "
+        "Applier._conf() never activates"
+    ),
+    ("module_source.py", "_sql_steps"): (
+        "lists a derived module's data/sql/ to map each database directory to a deferred "
+        "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
+        "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
+    ),
+    ("module_source.py", "_rewrite_index"): (
+        "lists the user manifest directory to REBUILD its index from the files that are "
+        "actually there, never appending to it - which is why a crash between the item write "
+        "and the index write leaves a file the next persist picks up rather than an index "
+        "naming a file that is not there"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
