@@ -171,6 +171,14 @@ Two things keep the frames honest:
 | `shots/wow-<game>-console-tab-before-send.png` | the Console tab, panel empty (asserted 0 chars) |
 | `shots/wow-<game>-console-tab-after-send.png` | the reply that came back through the widget from that game's live worldserver |
 
+**One thing the frames show that the transcripts do not, and it is the reason the exit line
+asks for this re-run.** The Server tab in every `…-before-refresh.png` carries a line Phase 7
+never had — *"Command channel: verified as YULON_06CED116 at 2026-09-07 11:20 UTC"* on Vanilla,
+and its equivalent on the other two, with a **Turn on the command channel** button under it.
+That is 8.2's group sitting on the surface 7.9 gated, on the same tab, above the Start/Stop
+buttons this gate times. The exit line's reason — *"the base controller's stop path and the
+service assembly both change"* — is visible in one frame.
+
 ## Deviations from the original recipe, named
 
 1. **The box.** 7.9's TBC half ran on `m910q`; its Vanilla and Tortoise halves ran on
