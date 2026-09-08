@@ -1799,7 +1799,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:351 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:370 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1808,16 +1808,24 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     import ast
 
     view = Path(controller_view_module.__file__)
-    calls = {
-        f"{ast.unparse(n.func.value)}.{n.func.attr}:{n.lineno}"
+    # Found by parsing rather than pinned to a literal line: the literal was
+    # re-pinned by hand three times in one session by edits ABOVE it, which is
+    # churn that teaches a reader to update the number without reading what it
+    # guards. What is asserted is what the test is named for -- that this exact
+    # call is the one the seam guard exempts.
+    lines = [
+        n.lineno
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-    }
-    assert "networking.apply:351" in calls, "the call this test pins has moved; re-pin it"
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "apply"
+        and ast.unparse(n.func.value) == "networking"
+    ]
+    assert len(lines) == 1, f"expected exactly one networking.apply call, found {lines}"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:351" not in missing, missing
+    assert f"apply() at controller_view.py:{lines[0]}" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:

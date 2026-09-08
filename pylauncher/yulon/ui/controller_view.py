@@ -678,10 +678,6 @@ not pressed Show plan has not yet chosen anything.
 Defined here rather than inline so a test can assert the label and the mode
 together without retyping the string, and placed below `_assemble()` so it does
 not move the `networking.apply(...)` call `test_controller_view.py` pins by line.
-
-That pin moved once, on purpose: 8.7a added a field to `ControllerServices` and
-a parameter to `_assemble()`, both of which are above it. Re-pinning is what the
-test's own message asks for — it exists to make a MOVE loud, not to forbid one.
 """
 
 REMOVE_IDLE = "Stop and remove containers…"
