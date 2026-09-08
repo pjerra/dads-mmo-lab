@@ -292,9 +292,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     What the view actually depends on is `ControllerServices`: one field per
     operation the Server tab can perform. So every field is required to arrive
     for every game, with exactly one documented exception -- `store` and
-    `applier` are the module surface, and `manifests/` holds `wow-wotlk` alone,
-    so for the other three they are legitimately None and `_no_manifest_store()`
-    warns if the catalog ever says otherwise.
+    `applier` are the module surface, and a game has them only if the catalog
+    says `has_manifests` and a `manifests/<game>/` tree exists for it. That was
+    `wow-wotlk` alone until 8.7b added `wow-tbc`; for the two that still have
+    none the pair is legitimately None, and `_no_manifest_store()` warns if the
+    catalog ever says otherwise. The exception is keyed on the ENTRY rather
+    than on a list of game ids here, so the next game to get manifests needs no
+    edit in this file -- and cannot silently keep the exemption either.
 
     Enumerated from the dataclass rather than listed here, so a sixteenth
     capability added to the view cannot be wired for WotLK and forgotten for
@@ -336,6 +340,18 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
 
         services = ControllerServices.for_entry(entry, server_dir)
         absent = sorted(name for name in every_field if getattr(services, name, None) is None)
+        # The FIRST documented exception, and since 8.7b it closes itself too.
+        # `store`/`applier` used to be absent on "everything except wow-wotlk";
+        # the entry now says which games ship manifests, so the exception is
+        # read off the catalog and a game that gains a `manifests/<game>/` tree
+        # fails this test until its store is wired. `module_sql` is absent on
+        # all three CMaNGOS games either way, and for a different reason: they
+        # name no one-shot import service, so there is no container to run
+        # their modules' SQL in. WHOSE manifests arrived is not asked here --
+        # that is `test_controller_view.test_a_tab_gets_a_manifest_store_
+        # exactly_when_the_catalog_says_it_has_one`, which reads the store's
+        # own game id.
+        unstocked = module_surface if not entry.has_manifests else {"module_sql"}
         # The second documented exception, and it closes itself. 8.1a wired the
         # dashboard and the pre-stop snapshot for WotLK only, because the counts
         # need per-tree facts measured per tree; 8.1b, 8.1c and 8.1d each add
@@ -396,7 +412,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # wow-vanilla's engine and inherit the seam when a box wires them.
         unremovable = {"uninstall"} if game in _NO_UNINSTALL_YET else set()
         allowed = (
-            module_surface
+            unstocked
             | unmeasured
             | unwired
             | unlisted
@@ -416,11 +432,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             )
             # And the exception has to be REAL. Without this the test would
             # pass just as happily on an implementation where nothing is ever
-            # None -- including one that handed the three games WotLK's own
+            # None -- including one that handed a game somebody else's
             # manifest store, which is the mistake `_no_manifest_store()`
             # exists to prevent.
             assert set(absent) == allowed, (
-                f"{game} reports {absent} rather than the module surface; `manifests/` holds "
-                "wow-wotlk alone, so a non-None store here means this game was handed "
+                f"{game} reports {absent} rather than the module surface; its entry does not "
+                "say `has_manifests`, so a non-None store here means this game was handed "
                 "somebody else's manifests"
             )

@@ -2043,3 +2043,55 @@ def _shipped_all() -> list[Any]:
         except Exception:  # a family this game does not ship
             continue
     return out
+
+
+def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
+    """`restart_recommended` was DERIVED, and the derivation cannot see a conf change.
+
+    It answers yes for NPCs, direct SQL and server DBCs — three things that all
+    reach the database or the data volume. A manifest whose whole content is
+    `conf[].keys` reaches neither, so it reported "nothing further needed"
+    while the change it had just written sat in a file the emulator reads only
+    at startup. That is the whole of a CMaNGOS "module" (roadmap 8.7b), so the
+    fact has to be declarable rather than guessed at.
+
+    `False` by default, so every manifest written before this field keeps the
+    answer it had; declaring it never SUPPRESSES a derived yes, only adds one.
+    """
+    conf = tmp_path / "etc"
+    conf.mkdir()
+    (conf / "mangosd.conf").write_text('Motd = "old"\n', encoding="utf-8", newline="\n")
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "id": "motd",
+        "name": "Message of the Day",
+        "type": "mod",
+        "game": "wow-tbc",
+        "conf": [{"file": "etc/mangosd.conf", "keys": [{"key": "Motd", "default": '"new"'}]}],
+    }
+
+    silent = Applier(tmp_path).install(parse_manifest(body))
+    assert silent.rebuild_required is False
+    assert silent.restart_recommended is False, "the derivation cannot see a conf write"
+
+    asked = Applier(tmp_path).install(
+        parse_manifest({**body, "build": {"rebuild": False, "restart": True}})
+    )
+    assert asked.rebuild_required is False
+    assert asked.restart_recommended is True
+
+    # It is not a second spelling of `rebuild`: the two are independent.
+    both = parse_manifest({**body, "build": {"rebuild": True, "restart": True}})
+    assert both.build.rebuild is True and both.build.restart is True
+
+    # And `rebuild` has to be SPELLED OUT beside it, which is not obvious and is
+    # why it is asserted rather than left to be discovered: the FIELD defaults
+    # to True while `Manifest.build` defaults to the object `Build(rebuild=
+    # False)`. So omitting the block entirely means "no rebuild" and writing
+    # `"build": {"restart": true}` means "rebuild" — opposite answers, from two
+    # defaults one line apart in `manifest.py`, neither of which mentions the
+    # other. On a CMaNGOS game, where nothing can be rebuilt at all, that typo
+    # is an hour of compiling asked of a user for no change.
+    lopsided = parse_manifest({**body, "build": {"restart": True}})
+    assert lopsided.build.rebuild is True
+    assert parse_manifest(body).build.rebuild is False

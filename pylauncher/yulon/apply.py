@@ -1728,8 +1728,15 @@ class Applier:
             done=tuple(log.done),
             skipped=tuple(log.skipped),
             rebuild_required=manifest.build.rebuild and action != "configure",
+            # Declared first, then derived. The derivation reads three things
+            # that reach the database or the data volume, and a manifest whose
+            # whole content is `conf[].keys` reaches neither — so it answered
+            # "nothing further needed" over a value the emulator reads once, at
+            # startup. `build.restart` is that fact stated by the item; it can
+            # only ADD a yes, never take one away.
             restart_recommended=bool(
-                manifest.npcs
+                manifest.build.restart
+                or manifest.npcs
                 or any(s.applied_by == "direct" for s in manifest.sql)
                 or manifest.server_dbc
             ),

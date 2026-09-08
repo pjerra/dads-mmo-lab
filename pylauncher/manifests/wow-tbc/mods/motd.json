@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "motd",
+  "name": "Message of the Day",
+  "type": "mod",
+  "game": "wow-tbc",
+  "description": "The line every player is greeted with at login.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Motd",
+          "default": "\"{motd}\"",
+          "note": "mangosd reads this once, at startup; the console reports it with `.server motd`"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Motd[ \\t]*=.*$",
+      "replace": "Motd = \"Welcome to the Continued Massive Network Game Object Server.\"",
+      "regex": true,
+      "when": "remove",
+      "note": "the line mangos-tbc ships in mangosd.conf.dist.in"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "motd",
+      "question": "Message of the day",
+      "kind": "string",
+      "default": "Welcome!"
+    }
+  ],
+  "notes": [
+    "The one manifest whose effect the running server states back: `.server motd` on the",
+    "mangosd console prints `sWorld.GetMotd()` (Chat.cpp -> HandleServerMotdCommand), so a",
+    "restart followed by that command is proof the value arrived, with no client involved.",
+    "Do not put a double quote in the text: the value is written into a quoted conf field."
+  ]
+}
