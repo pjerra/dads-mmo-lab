@@ -947,7 +947,7 @@
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
       "status": "beta",
-      "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress and unverified with a real client.",
+      "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress; it has been driven with a real 1.18.1 client on the test box (8.3d, 8.5d), and the running build still lacks the command channel and the account-password fix that upstream has since shipped.",
       "emulator": {
         "name": "Shyalya/tortoise-wow (Turtle-WoW V2 + cmangos playerbots)",
         "sources": [
