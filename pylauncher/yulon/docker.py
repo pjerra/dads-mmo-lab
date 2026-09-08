@@ -1043,12 +1043,22 @@ def compose_container_id(
     return ids[0]
 
 
-def log_tail(container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | None = None) -> str:
-    """The last `lines` of a container's log, or `""` if it could not be read.
+def log_tail(
+    container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | None = None
+) -> str | None:
+    """The last `lines` of a container's log, or `None` if it could not be read.
 
     The bounded counterpart to `_logs()`, which reads everything on purpose
     because readiness needs a marker printed once. Nothing that keeps a file
     wants that read: see `LOG_TAIL_LINES`.
+
+    `None` and not `""`, because the two are different answers and the only
+    caller keeps a file. This used to return `""` on a non-zero exit -- which
+    is also the shape `_docker()` gives a TIMEOUT -- and `logsnap.capture()`
+    wrote that empty string to disk and reported it as a saved snapshot: a
+    zero-byte file, presented as evidence, on every stop whose log driver was
+    wedged (retrospective audit, 2026-09-08). A log that is genuinely empty is
+    `""`; a log that could not be read is nothing at all.
     """
     proc = _docker(
         ["logs", "--tail", str(lines), container],
@@ -1057,7 +1067,7 @@ def log_tail(container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | N
     )
     if proc.returncode != 0:
         logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
-        return ""
+        return None
     return proc.stdout
 
 

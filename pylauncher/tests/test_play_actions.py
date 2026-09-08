@@ -202,8 +202,10 @@ def test_a_tree_with_no_measured_play_block_offers_nothing(tmp_path) -> None:
     """The tab draws what the tree has, and a button drawn on a tree nobody has
     asked would send a command nobody has checked.
 
-    The unmeasured tree here was Vanilla until 8.4c measured it and Tortoise
-    until 8.4d did. Every shipped entry now carries a block, so the tree that
+    The unmeasured tree here was Vanilla until 8.4c measured it, and Tortoise
+    carries a block written from its source ahead of 8.4d's gate -- which has
+    not run, so this sentence must not say it did (audit, 2026-09-08).
+    Every shipped entry now carries a block, so the tree that
     stands here is SYNTHESISED -- which is what this guard's own note said to do
     when the last real one went, rather than delete the assertion the whole
     `NotMeasured` class exists for. The second half is what keeps it honest: it
@@ -397,7 +399,12 @@ def test_the_tortoise_block_carries_this_forks_own_numbers_and_not_a_siblings() 
     assert block.teleport_command == "tele name", "Chat.cpp:716/:869 -- `teleport` is no command"
     assert block.equipped.instance_table is None, "character_inventory carries item_template"
     assert block.equipped.template_column == "item_template"
-    assert block.revive_offline is True, "Commands.cpp:3040 -- ConvertCorpseForPlayer"
+    assert block.revive_offline is None, (
+        "Commands.cpp:3040 has a ConvertCorpseForPlayer branch, so 8.4d's gate is EXPECTED "
+        "to measure True -- but this field is null until a box has pressed it. 8.4a learned "
+        "that the source can say yes while the server does nothing, which is why "
+        "revive_offline is measured and never read (audit, 2026-09-08)"
+    )
     assert block.rename_command == "rename", "Chat.cpp:850 -- top level, not under `character`"
     assert block.set_level_command is None, "Chat.cpp:923 -- .levelup is AllowConsole=false"
 

@@ -71,6 +71,21 @@ def test_the_apps_own_account_is_left_out_because_it_is_not_the_users_to_change(
     assert "LEFT(a.username, 6) <> 'YULON_'" in sql.asked[0][1]
 
 
+def test_the_auction_house_bot_account_is_not_listed_as_a_person() -> None:
+    """`AHBOT` is a service account the module's own manifest tells the user to create.
+
+    rust-main excluded it (`crates/dml-wow/src/pages.rs:302`), and this port
+    dropped it -- so the accounts tab listed it beside real people and offered
+    to change its password, which would have silently broken the auction house
+    (retrospective audit, 2026-09-08: the concrete cost of building this feature
+    without reading the prior art first).
+    """
+    sql = _Reader("")
+    useraccounts.accounts(sql, WOTLK, MARKER, app_account="YULON_AB12CD34")
+
+    assert "a.username <> 'AHBOT'" in sql.asked[0][1]
+
+
 def test_a_row_the_read_cannot_parse_is_a_problem_rather_than_a_silent_gap() -> None:
     sql = _Reader("1\tALICE\t0\nnonsense\n")
 
