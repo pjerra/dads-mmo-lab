@@ -28,6 +28,7 @@ rebuild was run for this change.
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
@@ -659,3 +660,80 @@ def test_the_confirmation_says_what_the_rollback_does_not_cover(tmp_path: Path) 
     assert "database" in text.lower(), text
     low = text.lower()
     assert low.index("rollback") < low.index("database", low.index("rollback")), text
+
+
+# -- the address the ready wait asserts --------------------------------------
+
+
+def test_a_rebuild_waits_for_a_realm_line_whatever_address_it_advertises(
+    tmp_path: Path,
+) -> None:
+    """The defect the first live press of this control found, on yulon-ubuntu2 2026-09-09.
+
+    `rebuild_stages()` reuses the install's `ready` stage, whose auth marker is
+    `{{REALM_HOST}}:{{WORLD_PORT}}` filled with `INSTALL_REALM_HOST` -- the
+    loopback a FRESH install advertises. `_advertise_realm()` is the install's
+    LAST act and replaces that row with the machine's LAN address, so on every
+    install this button can be pressed on, the authserver's own line says the
+    LAN address while the marker says `127.0.0.1`. Measured live: the compile
+    finished, the containers were replaced, the new worldserver came up with
+    the module compiled in and answered a command over its own channel, and the
+    press sat in "Waiting for the world server" because `_auth_ready()` could
+    never match. Left alone it burns `READY_CEILING_SECONDS` -- six hours --
+    and then rolls a GOOD build back: the complaint this button exists to fix,
+    with six hours added to it.
+
+    What readiness needs from the auth server is that it advertised THIS
+    install's realm on THIS install's world port. Which address it advertises
+    is `_advertise_realm()`'s question and is asked there, against the row.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready_specs.clear()
+    list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert rec.ready_specs, "the rebuild never reached the ready wait"
+    auth = rec.ready_specs[-1].auth
+    assert auth is not None
+    advertised = f'Added realm "Whatever" at 192.168.1.25:{ENTRY.ports.world}.'
+    assert re.search(auth, advertised), (auth, advertised)
+    loopback = f'Added realm "Whatever" at 127.0.0.1:{ENTRY.ports.world}.'
+    assert re.search(auth, loopback), (auth, loopback)
+
+
+def test_the_ready_wait_still_refuses_a_realm_line_on_another_port(tmp_path: Path) -> None:
+    """The control for the test above, and the reason the marker is not just `\S+`.
+
+    Opening the ADDRESS is the change; opening the port would make the marker
+    match a realm this install is not, which is what the port is in it for. A
+    pattern that matched everything would pass the test above for the wrong
+    reason, so the same pattern is shown refusing something.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready_specs.clear()
+    list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    auth = rec.ready_specs[-1].auth
+    assert auth is not None
+    other = f'Added realm "Whatever" at 192.168.1.25:{ENTRY.ports.world + 1}.'
+    assert not re.search(auth, other), (auth, other)
+    assert not re.search(auth, "the auth server said nothing about a realm"), auth
+
+
+def test_a_fresh_install_waits_on_the_same_marker_the_rebuild_does(tmp_path: Path) -> None:
+    """One marker, both paths -- the install is not left on a rule of its own.
+
+    A fix that only touched `rebuild_stages()` would leave two ideas of what
+    ready means in one class, and the install's would still be the one that
+    goes stale the moment `_advertise_realm()` runs. This holds them equal.
+    """
+    rec = Recorder(images=True)
+    install(rec, tmp_path / "wow")
+    assert rec.ready_specs, "the install never reached the ready wait"
+    installed = rec.ready_specs[-1].auth
+    rec2 = Recorder(images=True)
+    server_dir = a_finished_install(rec2, tmp_path / "second")
+    rec2.ready_specs.clear()
+    list(engine(rec2).rebuild(InstallOptions(server_dir=server_dir)))
+    assert installed == rec2.ready_specs[-1].auth
+    assert installed is not None
+    assert re.search(installed, f'Added realm "W" at 127.0.0.1:{ENTRY.ports.world}.')

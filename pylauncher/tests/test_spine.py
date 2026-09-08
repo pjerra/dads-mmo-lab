@@ -1611,7 +1611,18 @@ def test_stage_import_without_a_service_still_refuses_an_unreadable_database(
 def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     tmp_path: Path,
 ) -> None:
-    """A3/A5: `{{REALM_HOST}}:{{WORLD_PORT}}` is filled from `INSTALL_REALM_HOST`, then escaped."""
+    r"""A3/A5: a literal marker is escaped, and `{{REALM_HOST}}` is a wildcard inside it.
+
+    The escaping is what A5 is about: without it the `.` in `127.0.0.1` is a
+    wildcard and `ready.world`'s own `ready...` matches `readyXYZ`.
+
+    The ADDRESS half stopped being a literal on 2026-09-09, and the reason is
+    in `native.REALM_ADDRESS_PATTERN`: filling it from `INSTALL_REALM_HOST`
+    described a fresh install and nothing after it, because `_advertise_realm()`
+    replaces that row as the install's last act -- so a rebuild waited six hours
+    for a line the auth server would never print again. The port stays exact,
+    and both halves of that are asserted below.
+    """
     assert native.INSTALL_REALM_HOST == "127.0.0.1"
     rec = Recorder(images=False)
     seen: list[docker.ReadySpec] = []
@@ -1631,9 +1642,15 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     assert seen[0].world == re.escape(composegen.fill(markers.world, tokens))
     assert markers.auth is not None
     filled_auth = composegen.fill(markers.auth, tokens)
-    assert seen[0].auth == re.escape(filled_auth)
+    assert seen[0].auth is not None
+    # The address is open, so the line a FRESH install prints and the line the
+    # same install prints after `_advertise_realm()` both match.
     assert re.search(seen[0].auth, filled_auth)
-    assert not re.search(seen[0].auth, filled_auth.replace(".", "x"))
+    assert re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world}.")
+    # The port is not: a realm on another port is another realm.
+    assert not re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world + 1}.")
+    # And the WORLD marker is still a literal, dots and all -- A5 unchanged.
+    assert not re.search(seen[0].world, markers.world.replace(".", "x"))
     assert seen[0].timeout == float(markers.timeout_s)
     assert seen[0].restart_loop == markers.restart_loop
 
