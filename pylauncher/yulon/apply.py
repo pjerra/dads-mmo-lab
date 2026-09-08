@@ -456,6 +456,60 @@ class DbcCopier(Protocol):
     def copy_dbc_dir(self, src: Path) -> None: ...
 
 
+class FolderCopier(Protocol):
+    """Put the folder at `src` at `dest`, replacing whatever is at `dest`.
+
+    The second way to fill `modules/<id>`, beside `Git.clone`, and a seam for
+    the reason `Git` is one: what it does reaches outside the process, and the
+    engine's own tests must be able to state what it was handed without a real
+    tree on disk. It is deliberately NOT a `Git` variant — a path is not a clone
+    URL, and routing a copy through `CloneSpec` would drag the HTTP/1.1 and
+    `core.autocrlf` pins, the container mount logic and a `file://` URL into a
+    job that is a directory copy.
+
+    Two obligations the implementation carries and this engine does not check:
+    the destination is REPLACED rather than merged into (a copy is a snapshot of
+    the folder, not a union with an older one), and no `.git` is carried across
+    (a copy has no upstream, and a half-copied one would answer `remote_url()`
+    with a repository this install has nothing to do with). Raising `OSError` is
+    how it reports failure; `Applier._copy_folder()` turns that into the
+    applier's own vocabulary.
+    """
+
+    def __call__(self, src: Path, dest: Path) -> None: ...
+
+
+@dataclass(frozen=True)
+class FolderSource:
+    """A folder to copy in, and the copier that will do it.
+
+    The two travel together because neither is usable alone: a path with no
+    copier is an install that silently puts nothing anywhere, and the engine
+    must not be able to be handed one. `install(folder=...)` is therefore all or
+    nothing, and the dataclass is what makes that true at the call site rather
+    than in a runtime check.
+    """
+
+    path: Path
+    copier: FolderCopier
+
+
+Completer = Callable[[Manifest, Path], Manifest]
+"""Finish a manifest from the content that is now at its clone path.
+
+A manifest DERIVED from a link or a folder — rather than shipped — knows its
+id, its name and its type, and cannot know one thing more until the content is
+on disk: which `conf/*.conf.dist` to activate, which `data/sql/<db>/` to report.
+So the derivation is completed here, inside the install that fetched the
+content, rather than by a second clone into a scratch directory followed by a
+second install. Handed the clone AFTER it is filled and before any step reads
+the manifest; whatever it returns is what every later step reads.
+
+`None` is the shipped case — a manifest whose author wrote every field — and
+then nothing is called and nothing changes.
+"""
+
+
 @dataclass(frozen=True)
 class DockerSql:
     """`SqlRunner` over `docker exec <db_container> mysql`, like wow-manage.sh does."""
@@ -1015,13 +1069,48 @@ class Applier:
         """Where this item's clone lives (`modules/<id>`, `ale_scripts/<id>`, ...)."""
         return self.server_dir / CLONE_DIRS[manifest.type] / manifest.id
 
-    def install(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
-        """Clone, deploy, patch, run install-time SQL, activate conf, copy client/DBC files."""
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+    ) -> ApplyReport:
+        """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
+
+        `folder` is the second way to fill `modules/<id>`: the bytes come from a
+        directory on the user's own disk through `FolderSource.copier` instead
+        of from a repository through `Git.clone`. It is the ONLY thing that
+        changes — the claim, `include.sh` and every step after them are the
+        same statements, over whatever is now at the clone path. A manifest that
+        also carries a `source` is a caller contradiction and is refused before
+        either route runs.
+
+        `complete` finishes a DERIVED manifest from the content that has just
+        landed; see `Completer`. It runs after the clone or the copy, and
+        everything from `_deploy()` onwards reads what it returned.
+
+        `_check_values()` is NOT re-run against the completed manifest: it is
+        the caller's answers that are being checked, and the fields a completer
+        fills (conf files to activate, SQL to report) carry no prompts to
+        answer. Named here because it is the one step the completed manifest
+        does not reach.
+        """
         vals = self._values(manifest, values)
         log = _Log()
         self._check_values(manifest, "install", vals, log)
         clone = self.clone_dir(manifest)
-        if manifest.source is None:
+        if folder is not None and manifest.source is not None:
+            raise ApplyError(
+                f"{manifest.id}: one source, not two — this manifest is cloned from "
+                f"{manifest.source.url} and was also handed the folder {folder.path} to copy. "
+                f"Nothing was changed."
+            )
+        if folder is not None:
+            self._require_own_clone(manifest, clone, "install")
+            self._copy_folder(folder, clone, log)
+        elif manifest.source is None:
             # A manifest with no source never clones, so the guard used to sit
             # entirely inside the branch below — and that left `install()` with
             # the hole `configure()` was given a guard for. An install-time
@@ -1048,8 +1137,15 @@ class Applier:
             except GitError as exc:  # one failure vocabulary for the whole applier
                 raise ApplyError(str(exc)) from exc
             log.done.append(f"clone {manifest.source.url} → {_rel(self.server_dir, clone)}")
+        if folder is not None or manifest.source is not None:
+            # This app filled the folder, by either route, so both of the files
+            # it writes INTO a checkout go in — and they are written here rather
+            # than in a helper each branch calls, because the ledger row
+            # `apply.py::install::touch` names this function and a walker that
+            # stopped finding it would report a write site that had gone.
+            url = manifest.source.url if manifest.source is not None else ""
             try:
-                write_clone_claim(clone, item_id=manifest.id, url=manifest.source.url)
+                write_clone_claim(clone, item_id=manifest.id, url=url)
             except OSError as exc:
                 # Never fatal — the clone is on disk and the rest of the install
                 # is what the user asked for — but never silent either: without
@@ -1065,6 +1161,8 @@ class Applier:
                 if not include.exists():
                     include.touch()
                     log.done.append("touch include.sh")
+        if complete is not None:
+            manifest = self._completed(manifest, clone, complete)
         self._deploy(manifest, clone, log)
         self._patches(manifest, clone, vals, "install", log)
         self._sql(manifest, clone, vals, "install", log)
@@ -1122,6 +1220,74 @@ class Applier:
             shutil.rmtree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         return self._report("remove", manifest, log)
+
+    # -- filling the clone from somewhere that is not git ------------------
+
+    def _copy_folder(self, folder: FolderSource, clone: Path, log: _Log) -> None:
+        """Run the copier, and refuse anything short of a folder at the clone path.
+
+        Two failures, one vocabulary. `OSError` — an unreadable source, a full
+        disk, a permission — becomes `ApplyError`, exactly as `GitError` does
+        for a clone: every caller of `install()` handles that one type, and a
+        bare `PermissionError` reaching the Modules tab arrives as an unhandled
+        worker exception rather than as a report line.
+
+        And a copier that returned having put NOTHING at `clone` is refused
+        too, rather than believed. It is the failure that costs most if it is
+        not caught here: the very next statements write this app's claim into
+        that path and touch `include.sh` in it, so the run would go on to
+        manufacture the evidence that the folder is a module this app
+        installed — and report a rebuild for content that is not there. The
+        check is `is_dir()` on the destination, which is the one thing every
+        implementation of this seam must have produced.
+        """
+        try:
+            folder.copier(folder.path, clone)
+        except OSError as exc:
+            raise ApplyError(
+                f"{folder.path} could not be copied into "
+                f"{_rel(self.server_dir, clone)}: {exc}. Nothing was changed."
+            ) from exc
+        if not clone.is_dir():
+            raise ApplyError(
+                f"copying {folder.path} left nothing at {_rel(self.server_dir, clone)}, so there "
+                f"is no module there to install. Nothing was changed."
+            )
+        log.done.append(f"copy {folder.path} → {_rel(self.server_dir, clone)}")
+
+    def _completed(self, manifest: Manifest, clone: Path, complete: Completer) -> Manifest:
+        """The completer's manifest, once it is still a manifest for the SAME item.
+
+        `id`, `type` and `game` are the three fields everything already done
+        depends on: `clone_dir()` is built from `type` and `id`, so they name
+        the folder that has just been filled and the claim written inside it,
+        and `game` is which install this manifest belongs to at all. A completer
+        that changed one of them would have this run report an install of an
+        item nothing installed, over another item's clone — so the difference is
+        raised rather than relabelled.
+
+        Only those three. A completer's whole job is to add conf files, SQL
+        steps and the rest from what it found on disk, and checking those would
+        be checking that it did nothing.
+
+        Exceptions out of `complete` itself are NOT wrapped: this seam is the
+        caller's own derivation code rather than a subprocess or a filesystem,
+        and its failures are its own to name. `_copy_folder()` wraps `OSError`
+        because a copier IS the filesystem.
+        """
+        finished = complete(manifest, clone)
+        changed = [
+            f"{field} ({getattr(manifest, field)!r} → {getattr(finished, field)!r})"
+            for field in ("id", "type", "game")
+            if getattr(finished, field) != getattr(manifest, field)
+        ]
+        if changed:
+            raise ApplyError(
+                f"{manifest.id}: finishing this manifest from what is at "
+                f"{_rel(self.server_dir, clone)} changed {', '.join(changed)}, so it is no longer "
+                f"the item that was installed there. Nothing further was changed."
+            )
+        return finished
 
     # -- the answers -------------------------------------------------------
 
@@ -1316,6 +1482,30 @@ class Applier:
             )
         url = manifest.source.url if manifest.source is not None else ""
         if not (clone / ".git").is_dir():
+            # A folder with no `.git` used to be somebody else's by definition,
+            # and the claim was never even read here. It is not any more: a
+            # module installed from a FOLDER is a copy, a copy carries no `.git`
+            # (see `FolderCopier`), and the only thing separating this app's own
+            # copy from a tarball somebody unpacked at this path is the claim
+            # inside it — the same evidence, in the same file, that authorises
+            # re-cloning and removing a checkout. Without this the app could
+            # install a module from a folder and then never uninstall it.
+            #
+            # It is the claim and nothing else. `origin` and the adoption facts
+            # below all need a repository, and a copy has none: git would either
+            # refuse to answer or answer about whatever checkout the folder was
+            # copied FROM, which is a repository this install has nothing to do
+            # with. So an unrecognised folder still falls through to the
+            # leftovers refusal exactly as it always did — and a damaged claim
+            # is itself one of the leftovers, which is why UNKNOWN needs no
+            # separate sentence here.
+            owned = read_clone_claim(clone, item_id=manifest.id)
+            if owned is Ownership.OWNED:
+                return
+            if owned is Ownership.UNKNOWN and self._relocation_licence(
+                manifest, clone, rel, action
+            ):
+                return
             leftovers = sorted(item.name for item in clone.iterdir())
             if leftovers:
                 raise ApplyError(
@@ -1350,12 +1540,7 @@ class Applier:
             )
             owned = Ownership.UNCLAIMED
         if owned is Ownership.UNKNOWN:
-            if action == "remove" and claim_written_by_this_app(clone, item_id=manifest.id):
-                logger.warning(
-                    f"{rel} holds this app's own claim for {manifest.id} naming a different "
-                    f"folder (this install was moved, renamed or copied); removing anyway, "
-                    f"because refusing would leave {manifest.id} in the database with no way out"
-                )
+            if self._relocation_licence(manifest, clone, rel, action):
                 return
             # "Move the folder aside" is offered to the two callers it is a
             # remedy for and withheld from `remove()`, for which it is the
@@ -1395,6 +1580,26 @@ class Applier:
         raise ApplyError(
             _no_adoption_message(refusal, rel, retry) + self._removal_note(action, manifest)
         )
+
+    def _relocation_licence(self, manifest: Manifest, clone: Path, rel: str, action: When) -> bool:
+        """May a `remove()` proceed over this app's own claim naming another folder?
+
+        The weaker proof `remove()` — and only `remove()` — accepts, argued in
+        `_require_own_clone()`'s docstring. One function rather than a paragraph
+        repeated in two branches: the checkout case and the copied-folder case
+        reach `UNKNOWN` by different routes and the licence is the same one, so
+        a rule stated twice would be a rule that can diverge (style-guide §4).
+
+        Never for `install()` or `configure()`, whatever the folder holds.
+        """
+        if action != "remove" or not claim_written_by_this_app(clone, item_id=manifest.id):
+            return False
+        logger.warning(
+            f"{rel} holds this app's own claim for {manifest.id} naming a different "
+            f"folder (this install was moved, renamed or copied); removing anyway, "
+            f"because refusing would leave {manifest.id} in the database with no way out"
+        )
+        return True
 
     def _removal_note(self, action: When, manifest: Manifest) -> str:
         """The sentence a `remove()` refusal must carry, and the other two must not.
