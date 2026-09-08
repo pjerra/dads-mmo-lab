@@ -31,9 +31,11 @@ from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -267,6 +269,71 @@ the answer — install with it, or change nothing at all.
 """
 
 
+LinkAsker = Callable[[QWidget, str], "str | None"]
+"""Puts the "paste a link" question to the user, or returns `None` for "cancel".
+
+A constructor seam for `PromptAsker`'s reason and by the same evidence: a test
+that reached the real `QInputDialog` would sit on a modal window forever. The
+part worth testing is what the tab does with the answer — derive and install
+it, or change nothing at all — and neither of those needs a window.
+"""
+
+FolderAsker = Callable[[QWidget, str], "Path | None"]
+"""Puts the "choose a folder" question to the user, or `None` for "cancel".
+
+A directory only. An archive is not taken in v1 (design §4): Qt's native
+pickers choose a directory or a file, never either, and a second control for a
+`.zip` doubles the surface for something the user does with one right-click.
+"""
+
+CustomModuleInstall = Callable[[Manifest, "Path | None"], ApplyReport]
+"""Install a manifest this app derived rather than shipped; `None` means "clone it".
+
+DEVIATION from the design (§3.3, §3.5), forced and recorded rather than quiet.
+The design has this view call `applier.install(m, None, folder=FolderSource(
+path, copier), complete=...)` — lane B's widened signature, over lane A's
+`copy_folder` and `complete`. Neither lane is on this branch, so the view would
+not type-check against them, and a view that constructs `apply.FolderSource`
+knows one thing more about the applier than `ui/*_view.py` is allowed to
+(style-guide §3: delegate, never hold the business logic). So the whole call
+sits behind one seam, wired from `controller_<acronym>/modules.py` — the file
+whose job is "binding the shared applier to that game" — and the view hands it
+the two things only the view can know: which manifest, and which folder the
+user chose. Everything the design lists as `module_complete` and
+`module_copy_folder` lives on the far side of it.
+"""
+
+
+def ask_module_link(parent: QWidget, title: str) -> str | None:
+    """The real `LinkAsker`: one line of text, or `None` if the user cancelled.
+
+    Cancel and an empty box are deliberately DIFFERENT answers. Cancel returns
+    `None` and the tab says it changed nothing; an empty box returns `""` and
+    goes to the deriving seam, which owns the "paste a link first" sentence —
+    one place decides what a link has to look like, and it is not this file.
+    """
+    text, accepted = QInputDialog.getText(
+        parent,
+        title,
+        MODULE_LINK_DIALOG_PROMPT,
+        QLineEdit.EchoMode.Normal,
+        "",
+    )
+    return text if accepted else None
+
+
+def ask_module_folder(parent: QWidget, title: str) -> Path | None:
+    """The real `FolderAsker`: a directory, or `None` if the user cancelled.
+
+    `getExistingDirectory` answers `""` for cancel, which as a `Path` would be
+    `Path(".")` — the process's working directory, which on a packaged build is
+    wherever the user launched it from. So the empty string is turned back into
+    a cancel here rather than handed on as a folder nobody chose.
+    """
+    chosen = QFileDialog.getExistingDirectory(parent, title)
+    return Path(chosen) if chosen else None
+
+
 ModuleSqlRoute = Callable[[Callable[[str], None]], docker.AttachedRun]
 """Apply the SQL of the modules on disk, reporting the importer's lines to a sink.
 
@@ -392,6 +459,41 @@ class ControllerServices:
 
     It costs one `git fetch` per installed checkout, which is why it is a button
     and not part of the status poll.
+    """
+    module_from_link: Callable[[str], Manifest] | None = None
+    """Derive a manifest from a link the user pasted, or raise with the refusal.
+
+    `None` for a game with no custom-module route, which greys the button. What
+    counts as a link, what the id may be called and which hosts are allowed are
+    all the deriving seam's (`module_source.derive_link`, lane A) — the view
+    passes the text through untouched and shows whatever sentence comes back.
+    It raises rather than returning a refusal object because every caller here
+    would immediately have to branch on one, and the applier next to it already
+    speaks exceptions.
+    """
+    module_from_folder: Callable[[Path], Manifest] | None = None
+    """Derive a manifest from a folder on this computer, or raise with the refusal.
+
+    Separate from `module_from_link` rather than one call with a union: they
+    refuse different things in different words (a host allow-list versus "this
+    folder has no src, conf or data"), and a seam that took either would have
+    to sort out which it was handed before it could say so.
+    """
+    module_install_custom: CustomModuleInstall | None = None
+    """Install a derived manifest, copying from the folder when one is given.
+
+    See `CustomModuleInstall` for why this is one seam rather than the
+    design's `applier.install(..., folder=..., complete=...)`.
+    """
+    module_forget: Callable[[Manifest], bool] | None = None
+    """Drop this app's record of a custom module, answering whether there was one.
+
+    Asked after EVERY successful remove, and its answer is the only thing that
+    tells this view a module was custom — the view reads no manifest field to
+    decide (design §3.3). A shipped manifest is an OFFER and stays listed
+    whether or not it is installed; a derived one is a RECORD of something the
+    user brought, and a record of a folder that is gone would be a list row
+    whose Install re-clones a link the user just decided against.
     """
     rebuild: install_wiring.RebuildSource | None = None
     """Recompile this install and restart it on the result; None when nothing can.
@@ -850,6 +952,23 @@ def _for_wotlk(
         module_updates=(
             (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
+        # NOT WIRED, and this is the honest state rather than an omission.
+        # `module_from_link`, `module_from_folder`, `module_install_custom` and
+        # `module_forget` are the design's lane C seams, and the objects that
+        # fill them are lanes A and B: `yulon/module_source.py` (derive,
+        # persist, forget, copy) and `apply.Applier.install`'s folder/complete
+        # keywords. Neither is on this branch -- grepped across every remote
+        # ref on 2026-09-08 -- so there is nothing to name here, and the two
+        # buttons are greyed for WotLK exactly as they are for the three
+        # CMaNGOS games. When the lanes land this becomes four lines:
+        #     module_from_link=wotlk_modules.derive_link,
+        #     module_from_folder=wotlk_modules.derive_folder,
+        #     module_install_custom=wotlk_modules.install_custom(server_dir, sql=sql),
+        #     module_forget=wotlk_modules.forget,
+        # each gated on `entry.has_manifests` the way `module_updates` above is.
+        # `store=` gains lane A's `user_root=` in the same edit, which is what
+        # puts a derived manifest into the list on the next start.
+        #
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
         # containers with `docker ps` — a second question, to the same daemon,
@@ -1620,6 +1739,75 @@ sentence `docker.apply_module_sql()` refuses with, said before the press
 instead of after it.
 """
 
+MODULE_LINK_BUTTON_LABEL = "Install from link…"
+"""The Modules tab's fifth button: a module this app does not ship, from a link.
+
+The ellipsis is this tab's convention for "this opens a dialog first" — the
+same difference `REBUILD_BUTTON_LABEL` carries and the two buttons beside it do
+not. Prior art: the rust launcher spelled the same control as a card headed
+"Install from URL" with a text field and its own button
+(`origin/rust-main:launcher/src/lib/pages/ModuleManager.svelte:1473-1491`).
+"""
+
+MODULE_FOLDER_BUTTON_LABEL = "Install from folder…"
+"""The sixth button: the same module from a folder already on this computer.
+
+No prior art at all — `origin/rust-main` had a URL route and nothing else,
+grepped 2026-09-08.
+"""
+
+MODULE_LINK_TIP = (
+    "Paste an https link to a module repository on github.com, gitlab.com or codeberg.org. "
+    "Its name must start with mod-. The module is cloned into this server's modules folder; "
+    "it does nothing until the server is rebuilt."
+)
+"""Named before the press, the way `MODULE_SQL_TIP` is.
+
+Three refusals a user meets before anything happens — the host, the `mod-`
+name, and the fact that a clone is inert until a rebuild — said where they cost
+nothing rather than after a dialog has been filled in. The rust page's version
+of this was the four-word hint `mod-* repos only`
+(`ModuleManager.svelte:1491`).
+"""
+
+MODULE_FOLDER_TIP = (
+    "Choose a folder on this computer holding a module (its name must start with mod-). "
+    "It is copied into this server's modules folder; the original is not touched, and it "
+    "does nothing until the server is rebuilt."
+)
+"""As `MODULE_LINK_TIP`, plus the one thing a copy has to promise: the folder
+the user points at is read, never moved and never written into."""
+
+MODULE_CUSTOM_NO_ROUTE = (
+    "Only WoW WotLK takes custom modules — on this game a module is a configuration key or a "
+    "SQL mod, and those ship as manifests."
+)
+"""Why the two buttons are dead on the three CMaNGOS games.
+
+Measured per tree, not inherited: 8.7b and 8.7c gated that on those cores a
+module is a conf activation or a SQL mod and never a directory, so there is no
+`modules/` folder for a clone or a copy to land in.
+"""
+
+MODULE_LINK_DIALOG_TITLE = "Install a module from a link"
+
+MODULE_LINK_DIALOG_PROMPT = "Link to the module's repository:"
+
+MODULE_LINK_DIALOG_PLACEHOLDER = "https://github.com/you/mod-my-thing"
+"""The example the rust CLI printed in its own refusal
+(`origin/rust-main:crates/dml-wow/src/modmgr.rs:1777`)."""
+
+MODULE_FOLDER_DIALOG_TITLE = "Choose the module's folder"
+
+MODULE_LINK_CANCELLED = "install from link: cancelled — nothing on this machine was changed."
+"""The tab's own cancel sentence, in the shape `_module_action()` already uses.
+
+"from link" rather than an id because there is no id yet: the dialog was closed
+before anything was derived, which is exactly what the sentence has to convey.
+"""
+
+MODULE_FOLDER_CANCELLED = "install from folder: cancelled — nothing on this machine was changed."
+
 _IMPORT_LINE_CHARS = 110
 """How much of the import's output the label carries: the last two lines, trimmed.
 
@@ -1668,6 +1856,8 @@ class ControllerView(QWidget):
         status_poll_ms: int = 5000,
         job_runner: JobRunner | None = None,
         prompt_asker: PromptAsker | None = None,
+        link_asker: LinkAsker | None = None,
+        folder_asker: FolderAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -1676,6 +1866,9 @@ class ControllerView(QWidget):
         # How the Modules tab asks a manifest's own questions. A seam, so a test
         # can answer them without a modal dialog; the real one is the dialog.
         self._prompt_asker: PromptAsker = prompt_asker or ask_manifest_prompts
+        # The same shape for the two custom-module dialogs, for the same reason.
+        self._link_asker: LinkAsker = link_asker or ask_module_link
+        self._folder_asker: FolderAsker = folder_asker or ask_module_folder
         # Every service call goes through this: on a worker thread in the app,
         # inline in tests (review finding, 2026-08-21 — the window used to
         # freeze for the length of a `docker compose up`).
@@ -1684,6 +1877,14 @@ class ControllerView(QWidget):
         self._status_pending = False
         self._verdict_pending = False
         self._module_pending: str | None = None
+        # Whether the module job in flight is a CUSTOM install. A flag rather
+        # than a reading of `_module_pending`'s text, and rather than
+        # re-listing after every module action: `reload_modules()` clears the
+        # list's selection, and a user who has just pressed "Install selected"
+        # would find the row they chose deselected under them. The rust page
+        # refreshed after every action (`ModuleManager.svelte:439`) because it
+        # had no selection to lose.
+        self._custom_install_pending = False
         self._console_pending = False
         self._tabs = QTabWidget(self)
         layout = QVBoxLayout(self)
@@ -2283,9 +2484,20 @@ class ControllerView(QWidget):
             # round trip per installed module: two of those in flight at once
             # would fetch the same clones twice and print one over the other.
             self.module_updates_button.setEnabled(False)
+            # And the two custom-module buttons. A clone or a copy writes into
+            # `modules/`, which is the directory a rebuild is reading while it
+            # compiles -- so this is the same rule as the importer's, not
+            # symmetry: one of these landing half-way through a build would put
+            # a module into the image that no report claims is in it.
+            self.module_link_button.setEnabled(False)
+            self.module_folder_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
             self.module_updates_button.setEnabled(self.services.module_updates is not None)
+            # Back to what this install can do, never unconditionally: a game
+            # with no custom-module route must not be handed a live button by
+            # any job of its own finishing.
+            self._set_custom_module_buttons()
             # Back to what this install can do, not unconditionally: a game
             # with no import service has no route, and re-enabling it here
             # would hand the three CMaNGOS games a live button the moment any
@@ -3986,6 +4198,16 @@ class ControllerView(QWidget):
         # part of the status poll because it costs one network round trip per
         # installed module, and a poll would pay that every few seconds.
         self.module_updates_button = QPushButton(MODULE_UPDATES_BUTTON_LABEL, tab)
+        # The fifth and sixth, and the only two whose subject is not already in
+        # the list above them: a module this app does not ship, named by the
+        # user. They sit after "Remove selected" and before the module-SQL
+        # button because that is the order the tab is read in — the two that
+        # act on the selection, then the two that add to it, then the two that
+        # act on everything installed.
+        self.module_link_button = QPushButton(MODULE_LINK_BUTTON_LABEL, tab)
+        self.module_folder_button = QPushButton(MODULE_FOLDER_BUTTON_LABEL, tab)
+        self.module_link_button.clicked.connect(self.install_module_from_link)
+        self.module_folder_button.clicked.connect(self.install_module_from_folder)
         self.install_module_button.clicked.connect(lambda: self._module_action("install"))
         self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
         self.module_sql_button.clicked.connect(self.apply_module_sql)
@@ -4026,6 +4248,8 @@ class ControllerView(QWidget):
         row = QHBoxLayout()
         row.addWidget(self.install_module_button)
         row.addWidget(self.remove_module_button)
+        row.addWidget(self.module_link_button)
+        row.addWidget(self.module_folder_button)
         row.addWidget(self.module_sql_button)
         row.addWidget(self.module_updates_button)
         row.addStretch(1)
@@ -4056,6 +4280,7 @@ class ControllerView(QWidget):
             if self.services.module_updates is not None
             else MODULE_UPDATES_NO_MODULES
         )
+        self._set_custom_module_buttons()
         # A separate gate from the two above, and it must stay separate: the
         # three CMaNGOS games have no manifest store at all, and their
         # worldservers are still compiled from a checkout somebody may have
@@ -4136,15 +4361,118 @@ class ControllerView(QWidget):
         answers = self._prompt_asker(self, manifest, needed)
         return (False, None) if answers is None else (True, answers)
 
+    def _custom_route(self) -> CustomModuleInstall | None:
+        """The install seam, or `None` where this game has no custom-module route."""
+        return self.services.module_install_custom
+
+    def _set_custom_module_buttons(self) -> None:
+        """Grey the two custom-module buttons where the game has no route for them.
+
+        Each button needs BOTH halves: something that can derive its kind of
+        source, and somewhere to install the result. Either missing is a game
+        that cannot do this at all, and a control that is visibly unavailable
+        beats one that is pressed and then explains itself (roadmap 6.1).
+        """
+        route = self._custom_route()
+        link = route is not None and self.services.module_from_link is not None
+        folder = route is not None and self.services.module_from_folder is not None
+        self.module_link_button.setEnabled(link)
+        self.module_folder_button.setEnabled(folder)
+        self.module_link_button.setToolTip(MODULE_LINK_TIP if link else MODULE_CUSTOM_NO_ROUTE)
+        self.module_folder_button.setToolTip(
+            MODULE_FOLDER_TIP if folder else MODULE_CUSTOM_NO_ROUTE
+        )
+
+    @Slot()
+    def install_module_from_link(self) -> None:
+        """Ask for a link, derive a manifest from it, and install it (design §3.3).
+
+        The derive runs HERE, on the GUI thread, before anything is queued: it
+        reads no disk and touches no network — it parses a string — so a
+        refusal is one sentence in the report with no job started and nothing
+        written. Only the install, which clones, goes to a worker.
+        """
+        derive, route = self.services.module_from_link, self._custom_route()
+        if derive is None or route is None:
+            return
+        text = self._link_asker(self, MODULE_LINK_DIALOG_TITLE)
+        if text is None:
+            self._module_pending = None
+            self.module_report.setPlainText(MODULE_LINK_CANCELLED)
+            return
+        self._install_custom_module("install from link", lambda: derive(text), None, route)
+
+    @Slot()
+    def install_module_from_folder(self) -> None:
+        """Ask for a folder, derive a manifest from it, and install it (design §3.3)."""
+        derive, route = self.services.module_from_folder, self._custom_route()
+        if derive is None or route is None:
+            return
+        folder = self._folder_asker(self, MODULE_FOLDER_DIALOG_TITLE)
+        if folder is None:
+            self._module_pending = None
+            self.module_report.setPlainText(MODULE_FOLDER_CANCELLED)
+            return
+        self._install_custom_module("install from folder", lambda: derive(folder), folder, route)
+
+    def _install_custom_module(
+        self,
+        what: str,
+        derive: Callable[[], Manifest],
+        folder: Path | None,
+        route: CustomModuleInstall,
+    ) -> None:
+        """Derive, then run the install through the same slots Install selected uses.
+
+        `_module_done` and `_module_failed` are reused rather than copied, so
+        the report is `_format_report`'s — the one that carries the C++ rebuild
+        sentence and the pending-SQL lines — and there is no second place for
+        that copy to drift.
+        """
+        try:
+            manifest = derive()
+        except Exception as exc:  # boundary: a refusal is a sentence, not a crash
+            # The seam's own words, verbatim and alone. Every one of them ends
+            # in "Nothing on this machine was changed", which is true here
+            # because nothing has run yet: prefixing them with a "FAILED:"
+            # line would put this view's vocabulary in front of a sentence
+            # written to be read on its own.
+            self._module_pending = None
+            self._custom_install_pending = False
+            self.module_report.setPlainText(str(exc))
+            self.action_failed.emit(str(exc))
+            return
+        self._module_pending = f"{what} {manifest.id}"
+        self._custom_install_pending = True
+        self.module_report.setPlainText(f"{self._module_pending}…")
+        self._run(lambda: route(manifest, folder), self._module_done, self._module_failed)
+
     @Slot(object)
     def _module_done(self, result: object) -> None:
         self._module_pending = None
-        if isinstance(result, ApplyReport):
-            self.module_report.setPlainText(_format_report(result))
+        custom, self._custom_install_pending = self._custom_install_pending, False
+        if not isinstance(result, ApplyReport):
+            return
+        self.module_report.setPlainText(_format_report(result))
+        # The list is re-read for exactly two outcomes, both of which changed
+        # what is in it: a custom module was just added, or a record was just
+        # dropped. Asked AFTER the report is on screen and after the remove
+        # returned -- a forget before the remove would drop the record of a
+        # remove that then failed, leaving a folder on disk with no row in the
+        # list to try again with (`purge.py`'s ordering, phase8-decisions).
+        forgotten = False
+        forget = self.services.module_forget
+        if result.action == "remove" and forget is not None:
+            manifest = self._manifests.get(result.item_id)
+            if manifest is not None:
+                forgotten = forget(manifest)
+        if custom or forgotten:
+            self.reload_modules()
 
     @Slot(object)
     def _module_failed(self, exc: object) -> None:
         what, self._module_pending = self._module_pending or "module action", None
+        self._custom_install_pending = False
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
