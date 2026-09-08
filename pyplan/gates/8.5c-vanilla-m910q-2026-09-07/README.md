@@ -332,7 +332,7 @@ and `gate85c.py` now says so at the `sys.path` line.
   install's volume holds both `logs` and **`classiclogs`** — visible again in
   the schema list above. Not on the bot path (which touches only `characters`
   and `realmd`), but a fact-versus-wiring disagreement of the kind 8.3c found.
-* `GATE83C`'s `gmlevel` reads **2** tonight; 8.3c's own transcript recorded it
+* `GATE83C`'s `gmlevel` reads **2** tonight, and it is not a mystery: 8.3c set it. Its own transcript records the write at 14:23:37Z and passes its clause 3 on the result. This note used to raise it as an unexplained change on a shared box — a confident reason with nothing behind it, when the record already held the answer (audit, 2026-09-08).
   as **1** on 2026-09-07. Something changed it between the two runs. Harmless
   here — the account has no character — but it is a shared box.
 

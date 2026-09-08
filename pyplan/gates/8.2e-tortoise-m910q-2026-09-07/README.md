@@ -16,7 +16,7 @@ wraps that in the one method every feature module is handed.
 |---|---|
 | The tab carries the console sentence | *"Commands reach this server through the worldserver console on the Console tab. This core has no remote command listener to turn on — it is built with neither SOAP nor the telnet console — so there is nothing to set up here."* |
 | No set-up button exists on this entry | `ENABLE button exists at all: False`, `REPAIR button exists at all: False` — screenshot `1-` |
-| A command from the Server tab's own probe answers through the attach console in about five seconds | **3.6 s**, twice — `Core revision: unknown / … Linux_x64 (little-endian)`, `Players online: 0. Max online: 0.`, `Server uptime: 41 Minutes 42 Seconds.` — screenshot `2-` |
+| A command from the Server tab's own probe answers through the attach console in about five seconds | **3.6 s** — once, not twice: run.txt records a single probe (`the probe took 3.6s`) (audit, 2026-09-08) — `Core revision: unknown / … Linux_x64 (little-endian)`, `Players online: 0. Max online: 0.`, `Server uptime: 41 Minutes 42 Seconds.` — screenshot `2-` |
 | A reply window with no prompt reads as could-not-ask, never as failure | *"Could not ask: the console printed no prompt inside the reply window, so nothing in it is this command's answer. The command may still have run, so nothing here is a failure."* — screenshot `3-` |
 | A mutation reports itself as confirmed only after its verify read answers | nothing on this tree is offered a mutation yet, and the reason is below |
 
