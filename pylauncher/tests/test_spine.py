@@ -2388,6 +2388,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the Rust launcher reported a success envelope when this listing found nothing, and "
         "My Party then silently did not work (`rust-main:bridge.rs:56-70`)"
     ),
+    ("party.py", "read_facts"): (
+        "lists the bridge directory under the server dir to say WHICH of the five scripts are "
+        "there, and decides no write at all - My Party never writes into that folder, `deploy()` "
+        "does. An unreadable folder answers an empty tuple, which draws the `deployed` "
+        "precondition's own sentence; reporting a scripts-are-there when the folder could not "
+        "be read is the one thing that would be worse, and this cannot"
+    ),
     ("apply.py", "_undeploy"): (
         "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
         "removes exactly those names; reads a folder this app filled, decides no write into it"

@@ -57,11 +57,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import platform, resources, runner
+from yulon import dbreads, platform, resources, runner
+from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
 
@@ -337,7 +339,12 @@ def preconditions(facts: Facts) -> tuple[Precondition, ...]:
         ),
         Precondition(
             "deployed",
-            tuple(sorted(facts.deployed)) == tuple(sorted(BRIDGE_SCRIPTS)),
+            # Every one of OURS is there — not "these files and no others".
+            # `mod-ale` installs its own example `LootPet.lua` into the same
+            # directory (measured on `yulon-ubuntu2` 2026-09-09, on the only
+            # install where the engine has ever run), and set equality made a
+            # complete bridge report as a partial one naming nothing missing.
+            set(BRIDGE_SCRIPTS) <= set(facts.deployed),
             _deployed_sentence(facts.deployed),
         ),
         Precondition(
@@ -432,6 +439,92 @@ def ready(facts: Facts) -> bool:
     return all(check.met for check in preconditions(facts))
 
 
+# -- reading the facts off one install -------------------------------------
+
+
+@dataclass(frozen=True)
+class ConfRead:
+    """`mod_ale.conf` as it is on disk, or the absence of it.
+
+    `enabled` and `script_path` are `None` when the file is not there at all:
+    a file nobody wrote has said nothing about the engine, and reporting that
+    as "switched off" sends a person to edit a key that does not exist. The
+    `conf_present` precondition above them is what names the real fix.
+    """
+
+    present: bool
+    enabled: bool | None
+    script_path: str | None
+
+
+def read_conf(path: Path) -> ConfRead:
+    """Read both of ALE's keys out of one conf file, column 0 only.
+
+    Column 0 is `conf.patch()`'s rule and it is here for the reason that rule
+    exists: the shipped `mod_ale.conf.dist` carries a commented `ALE.Enabled =
+    true` beside a compiled default of `false` (`ALEConfig.cpp:20`), so a
+    pattern that matches indented or commented lines reads the file's own
+    prose as its settings and reports an engine that is off as on.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ConfRead(False, None, None)
+    enabled = _conf_value(text, "ALE.Enabled")
+    script = _conf_value(text, "ALE.ScriptPath")
+    return ConfRead(True, None if enabled is None else enabled.strip() == "1", script)
+
+
+def _conf_value(text: str, key: str) -> str | None:
+    """The LAST active setting of `key`, unquoted, or `None`.
+
+    The last rather than the first: a conf file read top to bottom by the
+    server takes the last assignment, and an applier that appends a corrected
+    key leaves the old one above it.
+    """
+    found: str | None = None
+    for line in text.splitlines():
+        head, sep, tail = line.partition("=")
+        if sep and head.strip() == key and head[:1] not in ("#", " ", "\t"):
+            found = tail.strip().strip('"')
+    return found
+
+
+def read_facts(
+    server_dir: Path,
+    *,
+    world_running: bool,
+    engine: BinaryRead,
+    probe: Probe,
+) -> Facts:
+    """Every fact the sentences are decided from, read once off one install.
+
+    The two answers this cannot get from the disk are passed in, because both
+    cost a subprocess and the caller is what knows whether it may spend one:
+    `engine` comes from `read_engine_in_binary` and `probe` from asking the
+    SERVER `dml_bridge_ping`. Asking the server is not decoration — the deploy
+    reporting success is precisely what was believed on 2026-08-20, and the
+    scripts were on disk that day too.
+    """
+    installed = server_dir.is_dir()
+    conf = read_conf(server_dir / ALE_CONF)
+    try:
+        deployed = tuple(sorted(p.name for p in dest_dir(server_dir).glob("*.lua")))
+    except OSError:
+        deployed = ()
+    return Facts(
+        server_installed=installed,
+        world_running=world_running,
+        engine_cloned=(server_dir / "modules" / "mod-ale").is_dir(),
+        engine_in_binary=engine.engine,
+        conf_present=conf.present,
+        engine_enabled=conf.enabled,
+        script_path=conf.script_path,
+        deployed=deployed,
+        bridge_answered=probe.arrived,
+    )
+
+
 # -- the proof -------------------------------------------------------------
 
 
@@ -491,3 +584,587 @@ def read_probe(answer: Answer) -> Probe:
             answer.text,
         )
     return Probe(True, "the bridge answered, in its own words.", answer.text)
+
+
+# -- the party itself ------------------------------------------------------
+#
+# Everything above proves the bridge is there. This is what the bridge is FOR:
+# a bot of a chosen class in the party frame, geared and specced, and gone
+# again on request.
+#
+# The command strings are `rust-main`'s, cited at their lines, because the Lua
+# on the other side of the wire is the same Lua and a second spelling of
+# `dml_addclass` would be a second protocol. The class LIST is not inherited:
+# `dk` is a tenth class this tree's `addclass` accepts (`mod-playerbots
+# PlayerbotMgr.cpp:1089`, read on `yulon-ubuntu` 2026-09-08, gated on the
+# master reaching the heroic start level at `:1156`), and the bash launcher's
+# `_valid_bot_class` deliberately excluded it. That was its tree's fact.
+
+
+class BadRequest(ValueError):
+    """A class or a name that must never reach the channel.
+
+    Raised rather than returned, and raised BEFORE anything is sent: these
+    strings are interpolated into a command line the world server parses, so
+    the check is a boundary and not a courtesy.
+    """
+
+
+BOT_CLASSES = (
+    "warrior",
+    "paladin",
+    "hunter",
+    "rogue",
+    "priest",
+    "shaman",
+    "mage",
+    "warlock",
+    "druid",
+    "dk",
+)
+"""The classes THIS tree's `addclass` accepts. See the note above for `dk`."""
+
+MAX_NAME = 12
+"""A WoW character name's own limit. `characters.name` is `varchar(12)`."""
+
+POLL_TRIES = 12
+POLL_SLEEP = 0.5
+"""The poll window a bot has to appear in: 12 reads half a second apart, six
+seconds. The prior art's numbers (`rust-main:crates/dml-wow/src/party.rs:321`
+and `:327`, both env-overridable there) rather than a guess of our own; what
+this tree actually took is recorded in 8.6's gate folder beside the press."""
+
+
+MASTER = "character's"
+BOT = "bot's"
+"""What a rejected name is called in its own refusal, so "Invalid bot name" is
+not said about the master. The prior art keeps two error builders for the same
+reason (`rust-main:.../party.rs:138,143`)."""
+
+
+def valid_name(name: str) -> bool:
+    """A character name, and nothing that is also a command separator."""
+    return 1 <= len(name) <= MAX_NAME and name.isalpha()
+
+
+def _check_name(name: str, what: str) -> str:
+    if not valid_name(name):
+        raise BadRequest(
+            f"{name!r} is not a {what} name: a character's name is 1 to {MAX_NAME} letters, and "
+            "this one goes into a command the world server parses."
+        )
+    return name
+
+
+def add_command(player: str, klass: str, *, gender: str = "") -> str:
+    """`dml_addclass <player> <class> [gender]`
+    (`rust-main:crates/dml-wow/src/party.rs:163`).
+
+    NOT `.playerbots bot addclass`. That one is `SEC_PLAYER, Console::No` and a
+    console or SOAP caller cannot even see it — sending it over this channel is
+    the 2026-08-20 failure spelled out by hand. The bridge exists to run it
+    inside the master's own session; see this module's header.
+    """
+    _check_name(player, MASTER)
+    if klass.strip().lower() not in BOT_CLASSES:
+        raise BadRequest(
+            f"{klass!r} is not a class this server's addclass accepts. It has: "
+            f"{', '.join(BOT_CLASSES)}."
+        )
+    if gender not in ("", "male", "female"):
+        raise BadRequest(f"{gender!r} is not a gender: it is male, female, or left out.")
+    tail = f" {gender}" if gender else ""
+    return f"dml_addclass {player} {klass.strip().lower()}{tail}"
+
+
+def uninvite_command(bot: str) -> str:
+    """`dml_uninvite <bot>` (`rust-main:.../party.rs:184`)."""
+    return f"dml_uninvite {_check_name(bot, BOT)}"
+
+
+def logout_command(player: str, bot: str) -> str:
+    """The logout whisper that follows an uninvite (`.../party.rs:192`).
+
+    Best-effort at every call site in the prior art and here: an uninvited bot
+    has already left the party, and a whisper that does not land leaves it
+    standing in the world rather than leaving it in the group.
+    """
+    return f"{_whisper(player, bot)} logout"
+
+
+def autogear_command(player: str, bot: str) -> str:
+    """`.../party.rs:249`. "Geared" is this whisper, not `addclass`."""
+    return f"{_whisper(player, bot)} autogear"
+
+
+def talents_command(player: str, bot: str) -> str:
+    """`.../party.rs:246`. "Specced" is this whisper, not `addclass`."""
+    return f"{_whisper(player, bot)} talents autopick"
+
+
+def _whisper(player: str, bot: str) -> str:
+    """`dml_whisper <master> <bot>`, with BOTH names checked.
+
+    One place, because the three whispers differ only in their tail and a name
+    check spelled three times is a name check that will one day be spelled
+    twice.
+    """
+    return f"dml_whisper {_check_name(player, MASTER)} {_check_name(bot, BOT)}"
+
+
+@dataclass(frozen=True)
+class Member:
+    """One bot in the master's party, as the group table has it."""
+
+    name: str
+    guid: int
+    klass: int
+    level: int
+
+
+def group_rows_sql(entry: CatalogEntry, marker: dbreads.Marker, *, master_guid: int) -> str:
+    """The bot members of the group `master_guid` is in.
+
+    Two things this query is careful about, and both are the reason it is not
+    `SELECT * FROM group_member`:
+
+    * **`group_member.guid` is the GROUP, `memberGuid` is the member** on this
+      tree (`describe group_member`, `yulon-ubuntu2` 2026-09-08). The sub-select
+      turns the master's guid into his group's id; without it this reads every
+      group on the server.
+    * **The marker's clause decides which rows are bots.** The master has a
+      `group_member` row of his own, and a read that returned him would report a
+      party of one before any bot joined. `dbreads.bot_clause` is the same
+      two-armed clause the Bots tab counts with — registry OR account prefix —
+      so a party of bots cannot read back as empty the way `preset-save`'s
+      registry-only version did (`rust-main:.../party.rs:277`).
+    """
+    schemas = entry.schema_map()
+    chars = schemas["characters"]
+    clause = dbreads.bot_clause(entry, marker)
+    return (
+        "SELECT c.name, c.guid, c.class, c.level "
+        f"FROM {chars}.group_member gm "
+        f"JOIN {chars}.characters c ON c.guid = gm.memberGuid "
+        f"WHERE gm.guid = (SELECT guid FROM {chars}.group_member "
+        f"WHERE memberGuid = {int(master_guid)} LIMIT 1) "
+        f"AND ({clause}) "
+        "ORDER BY c.name"
+    )
+
+
+def read_members(raw: str) -> tuple[Member, ...] | str:
+    """The group read's rows, or the sentence saying why they are not rows.
+
+    A row that does not parse is REPORTED and not skipped: a party silently one
+    bot short reads exactly like a party that never filled, and telling those
+    two apart is the only thing this whole module is for.
+    """
+    out: list[Member] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4 or not all(f.strip().lstrip("-").isdigit() for f in fields[1:]):
+            return f"a party row came back as {line.strip()!r}, which is not a group member"
+        out.append(
+            Member(
+                name=fields[0].strip(),
+                guid=int(fields[1]),
+                klass=int(fields[2]),
+                level=int(fields[3]),
+            )
+        )
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class Addition:
+    """What one press of "add a bot" did, in four states rather than two.
+
+    `added` and `joined` are separate because the server can accept the command
+    and the bot can still not be in the party six seconds later: that is a
+    third outcome, and reporting it as success is what "My Party works" used to
+    mean. `blocker` is set only when nothing was sent at all.
+    """
+
+    added: bool
+    joined: bool
+    bot: str | None
+    geared: bool
+    specced: bool
+    sentence: str
+    blocker: str = ""
+
+
+def add_bot(
+    *,
+    facts: Facts,
+    player: str,
+    klass: str,
+    send: Callable[[str], Answer],
+    members: Callable[[], tuple[Member, ...]],
+    gender: str = "",
+    tries: int = POLL_TRIES,
+    pause: float = POLL_SLEEP,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Addition:
+    """Add one bot of `klass` to `player`'s party, and say what actually happened.
+
+    **The ground is read before the press.** `members()` is called once before
+    the command goes out and the new bot is the guid that was not in that
+    reading — not "there is a bot in the party", which is already true on a
+    server where one is. A poll whose assertion holds before its action is a
+    poll that proves nothing, and 500 of the characters on this install are
+    bots.
+
+    **Nothing is sent while a precondition is unmet.** `blocker()` names the
+    first one in its own words and this returns without touching the channel.
+    That is the whole difference from 2026-08-20, when a control pressed
+    happily into a bridge that was not there and reported success.
+    """
+    stop = blocker(facts)
+    if stop is not None:
+        return Addition(False, False, None, False, False, stop, blocker=stop)
+    command = add_command(player, klass, gender=gender)
+    before = {member.guid for member in members()}
+    answer = send(command)
+    if answer.outcome != "yes":
+        said = (answer.text or answer.reason).strip()
+        return Addition(
+            False,
+            False,
+            None,
+            False,
+            False,
+            f"the server did not run {command!r}: {said}",
+        )
+    joined: Member | None = None
+    for attempt in range(tries):
+        if attempt:
+            sleep(pause)
+        joined = next((m for m in members() if m.guid not in before), None)
+        if joined is not None:
+            break
+    if joined is None:
+        window = tries * pause
+        return Addition(
+            True,
+            False,
+            None,
+            False,
+            False,
+            f"the server accepted the command and no bot joined the party within {window:g} "
+            "seconds. It may still arrive; nothing here says it will.",
+        )
+    geared = send(autogear_command(player, joined.name)).outcome == "yes"
+    specced = send(talents_command(player, joined.name)).outcome == "yes"
+    return Addition(
+        True,
+        True,
+        joined.name,
+        geared,
+        specced,
+        f"{joined.name} joined the party" + _finish(geared, specced),
+    )
+
+
+def _finish(geared: bool, specced: bool) -> str:
+    if geared and specced:
+        return ", geared and specced."
+    if geared:
+        return ", geared. The talents whisper was refused, so it is not specced."
+    if specced:
+        return ", specced. The autogear whisper was refused, so it is not geared."
+    return ". Neither the autogear nor the talents whisper was accepted."
+
+
+@dataclass(frozen=True)
+class Dismissal:
+    """What one press of "dismiss" did. `removed` is read back, not assumed."""
+
+    removed: bool
+    logged_out: bool
+    sentence: str
+
+
+def dismiss(
+    *,
+    player: str,
+    bot: str,
+    send: Callable[[str], Answer],
+    members: Callable[[], tuple[Member, ...]],
+    tries: int = POLL_TRIES,
+    pause: float = POLL_SLEEP,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Dismissal:
+    """Uninvite `bot`, whisper it to log out, and read the group table back.
+
+    The whisper is best-effort, as it is at every call site in the prior art
+    whose own comment says its failure "never aborts the caller"
+    (`rust-main:.../party.rs:189-192`): the uninvite is what empties the row,
+    and a bot that stays logged in is standing in the world, not in the group.
+
+    `removed` is the group table read AFTER, never the uninvite's own `yes`.
+    """
+    answer = send(uninvite_command(bot))
+    if answer.outcome != "yes":
+        said = (answer.text or answer.reason).strip()
+        return Dismissal(False, False, f"the server did not uninvite {bot}: {said}")
+    logged_out = send(logout_command(player, bot)).outcome == "yes"
+    for attempt in range(tries):
+        if attempt:
+            sleep(pause)
+        if all(member.name != bot for member in members()):
+            return Dismissal(
+                True,
+                logged_out,
+                f"{bot} left the party" + ("." if logged_out else ", and is still logged in."),
+            )
+    window = tries * pause
+    return Dismissal(
+        False,
+        logged_out,
+        f"the server accepted the uninvite and {bot} is still in the group table "
+        f"{window:g} seconds later.",
+    )
+
+
+# -- the tab's seam --------------------------------------------------------
+
+
+SqlReader = dbreads.SqlReader
+"""The database read seam, and it is `dbreads`' own rather than a second one.
+
+A Protocol re-declared here with `db: str` looks identical and is not: the real
+reader's `db` is a `Literal` of the five schema aliases, and a Protocol widening
+it to `str` is not satisfied by the object every caller actually has -- mypy
+said so on all three platforms, and the wrong fix was to widen the real one.
+The read half is all that is wanted (`run_statement` is not reachable through
+it), which is exactly what `dbreads.SqlReader` already is."""
+
+
+@dataclass(frozen=True)
+class PartyState:
+    """What the My Party group shows: the rows, or which precondition stopped it.
+
+    `ready` is never a default. `checks` carries ALL nine rather than only the
+    blocking one, because a person fixing this wants to see how far down the
+    list they have got — but `blocker` is the FIRST unmet one, because that is
+    the only one worth acting on next.
+    """
+
+    ready: bool
+    blocker: str
+    checks: tuple[Precondition, ...]
+    members: tuple[Member, ...] = ()
+    problem: str = ""
+
+
+class InstallParty:
+    """One install's My Party, as the tab presses it.
+
+    Reads go to the database and every write goes to the SERVER over the
+    command channel, which is owner answer 7 and also the only route there is:
+    `.playerbots bot addclass` resolves its master from a live session, so
+    there is no SQL spelling of adding a bot to a party.
+
+    **Nothing is pressed until the server has said the bridge is there.** The
+    facts are re-read on every press rather than cached at start-up: the world
+    can be restarted, the module reinstalled and `mod_ale.conf` edited while
+    the tab is open, and a control that presses on a five-minute-old reading is
+    the 2026-08-20 failure with a delay in front of it.
+    """
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        server_dir: Path,
+        *,
+        sql: SqlReader,
+        channel_for_saved: Callable[[], object | None],
+        container: str,
+        world_running: Callable[[], bool],
+        wsl_distro: str | None = None,
+        engine: Callable[[], BinaryRead] | None = None,
+    ) -> None:
+        self.entry = entry
+        self.server_dir = server_dir
+        self._sql = sql
+        self._channel_for_saved = channel_for_saved
+        self._container = container
+        self._world_running = world_running
+        self._wsl_distro = wsl_distro
+        # A seam for the same reason `world_running` is one: reading it costs a
+        # `docker exec`, and the tests for every sentence this object says must
+        # not be tests that need a container. The default is the real reader.
+        self._engine = engine or (lambda: read_engine_in_binary(container, wsl_distro=wsl_distro))
+
+    @staticmethod
+    def for_entry_is_possible(entry: CatalogEntry) -> bool:
+        """Whether this tree has measured what My Party would need.
+
+        Two things, and neither is optional: a bot marker (the group read has
+        to know which rows are bots) and the `mod-ale` route itself, which is
+        an AzerothCore module. A CMaNGOS tree gets no My Party control rather
+        than a control that sends AzerothCore's commands at it.
+        """
+        return entry.observability is not None and entry.id == "wow-wotlk"
+
+    # -- reads ---------------------------------------------------------------
+
+    def facts(self) -> Facts:
+        """The nine facts, read fresh, and the two subprocesses they cost.
+
+        Ordered so the expensive halves are skipped once something above them
+        has already decided the answer: a stopped world is asked nothing, and a
+        server folder that is not there is not grepped for a Lua engine.
+        """
+        if not self.server_dir.is_dir() or not self._world_running():
+            return read_facts(
+                self.server_dir,
+                world_running=self._world_running(),
+                engine=BinaryRead(None, _unreadable("the world server is not running")),
+                probe=Probe(None, "the server was not asked: it is not running", ""),
+            )
+        return read_facts(
+            self.server_dir,
+            world_running=True,
+            engine=self._engine(),
+            probe=self._probe(),
+        )
+
+    def _probe(self) -> Probe:
+        channel = self._channel_for_saved()
+        if channel is None:
+            return Probe(
+                None,
+                "the bridge could not be asked about: this install has no command channel set "
+                "up yet, and My Party has no other way to reach the server.",
+                "",
+            )
+        try:
+            answer = channel.send(PROBE_COMMAND)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
+            logger.warning(f"could not ask {self.entry.id} about the bridge: {exc}")
+            return Probe(None, f"the bridge could not be asked about: {exc}", "")
+        return read_probe(answer)
+
+    def state(self, master: str) -> PartyState:
+        """The group, or the first precondition that is not met.
+
+        The rows are read only when everything above them is met. A group table
+        drawn under an unmet precondition would be an empty list beside a
+        sentence saying why — and an empty list is what a working party with no
+        bots in it looks like.
+        """
+        facts = self.facts()
+        checks = preconditions(facts)
+        stop = blocker(facts)
+        if stop is not None:
+            return PartyState(False, stop, checks)
+        rows = self.members(master)
+        if isinstance(rows, str):
+            return PartyState(True, "", checks, problem=rows)
+        return PartyState(True, "", checks, members=rows)
+
+    def online_guid(self, name: str) -> int | None:
+        """This character's guid while it is logged in, or `None`.
+
+        `online = 1` is part of the question and not a detail: the bridge
+        resolves its master with `GetPlayerByName` and prints
+        "player not found/offline" for a character who is not there, which
+        arrives back over the channel as a command that succeeded and a bot
+        that never comes.
+        """
+        if not valid_name(name):
+            return None
+        chars = self.entry.schema_map()["characters"]
+        raw = self._sql.query(
+            "characters",
+            f"SELECT guid FROM {chars}.characters WHERE name = '{name}' AND online = 1 LIMIT 1;",
+        )
+        text = raw.strip()
+        return int(text) if text.isdigit() else None
+
+    def members(self, master: str) -> tuple[Member, ...] | str:
+        """The bots in `master`'s party, or the sentence saying why not."""
+        answer = dbreads.resolve_marker(self.entry, self.server_dir)
+        if answer.marker is None:
+            return answer.problem or "this install's bot marker is unreadable"
+        guid = self.online_guid(master)
+        if guid is None:
+            return _not_online(master)
+        try:
+            raw = self._sql.query(
+                "characters", group_rows_sql(self.entry, answer.marker, master_guid=guid) + ";"
+            )
+        except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
+            logger.warning(f"could not read {master}'s party: {exc}")
+            return f"could not read this character's party: {exc}"
+        return read_members(raw)
+
+    # -- writes --------------------------------------------------------------
+
+    def add(self, master: str, klass: str, *, gender: str = "") -> Addition:
+        """Add one bot of `klass` to `master`'s party, over the channel."""
+        facts = self.facts()
+        stop = blocker(facts)
+        if stop is not None:
+            return Addition(False, False, None, False, False, stop, blocker=stop)
+        if self.online_guid(master) is None:
+            return Addition(False, False, None, False, False, _not_online(master))
+        send = self._send_or_none()
+        if send is None:
+            return Addition(False, False, None, False, False, _no_channel())
+        return add_bot(
+            facts=facts,
+            player=master,
+            klass=klass,
+            gender=gender,
+            send=send,
+            members=lambda: _rows_only(self.members(master)),
+        )
+
+    def remove(self, master: str, bot: str) -> Dismissal:
+        """Uninvite `bot` from `master`'s party and read the group table back."""
+        send = self._send_or_none()
+        if send is None:
+            return Dismissal(False, False, _no_channel())
+        return dismiss(
+            player=master,
+            bot=bot,
+            send=send,
+            members=lambda: _rows_only(self.members(master)),
+        )
+
+    def _send_or_none(self) -> Callable[[str], Answer] | None:
+        channel = self._channel_for_saved()
+        if channel is None:
+            return None
+        return channel.send  # type: ignore[attr-defined,no-any-return]
+
+
+def _rows_only(answer: tuple[Member, ...] | str) -> tuple[Member, ...]:
+    """A read that failed is an EMPTY party for polling purposes, deliberately.
+
+    The poll is looking for a guid that was not there before; a read that could
+    not be done adds nothing to either side of that comparison, and treating it
+    as "the bot is not here yet" makes the press time out and say so rather
+    than announce a bot it never saw.
+    """
+    return () if isinstance(answer, str) else answer
+
+
+def _not_online(name: str) -> str:
+    return (
+        f"{name} is not logged in. A bot is added to a live session — the server resolves the "
+        "master by name in the world, so log the character in and press again."
+    )
+
+
+def _no_channel() -> str:
+    return (
+        "this install has no command channel set up yet, and My Party has no other way to reach "
+        "the server. Set it up on the Server tab."
+    )

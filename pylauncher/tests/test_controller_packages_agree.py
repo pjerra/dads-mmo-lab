@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon import party
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -432,6 +433,17 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             "module_forget",
         }
         uncounted = set() if counted else {"module_updates"} | custom
+        # 8.6's My Party, and the one seam whose absence is decided by the
+        # ENGINE rather than by a measurement. The route is `mod-ale`, an
+        # AzerothCore Lua module hooking AzerothCore's command table, and the
+        # bot it adds is `mod-playerbots`' `addclass`. A CMaNGOS tree has
+        # neither, so there is nothing to wire and nothing a later box could
+        # measure that would change it -- wiring it there would be a control
+        # that sends AzerothCore's commands at a server that has never heard of
+        # them. `InstallParty.for_entry_is_possible` is the same rule spelled
+        # once in the module, and this reads it rather than repeating it, so a
+        # tree that ever gains the route fails this until its wiring lands.
+        unpartied = set() if party.InstallParty.for_entry_is_possible(entry) else {"my_party"}
         allowed = (
             unstocked
             | unmeasured
@@ -441,6 +453,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unprobed
             | unplayed
             | unremovable
+            | unpartied
             | uncounted
         )
         if game == "wow-wotlk":
