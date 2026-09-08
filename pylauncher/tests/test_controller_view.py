@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -523,11 +523,14 @@ class _FakeImporter:
         self.sinks: list[object] = []
         self.enabled_in_flight: list[bool] = []
         self.view: ControllerView | None = None
+        self.during: Callable[[], object] | None = None
 
     def __call__(self, output: object = None) -> docker.AttachedRun:
         self.sinks.append(output)
         if self.view is not None:
             self.enabled_in_flight.append(self.view.module_sql_button.isEnabled())
+        if self.during is not None:
+            self.during()
         for line in self.says:
             if callable(output):
                 output(line)
@@ -641,6 +644,34 @@ def test_the_module_sql_button_is_locked_while_the_importer_runs(
 
     assert importer.enabled_in_flight == [False, False], importer.enabled_in_flight
     assert view.module_sql_button.isEnabled(), "the button never came back"
+
+
+def test_the_window_will_not_close_while_the_module_importer_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same one-shot service, so the same close guard — which it did not have.
+
+    `busy_reason()` covered the repair alone and said so ("Only the import"),
+    because until this tab had a second button that runs `ac-db-import` that
+    was true. `_JobWorker.run()` calls its work synchronously, `quit()` cannot
+    preempt a blocking `subprocess`, and a QThread destroyed while running
+    aborts the process (0xC0000409) — so a close during a module import that
+    outlives the join is the recorded crash, not a slow exit.
+
+    Shorter than a full import, and that is not a defence: how many pending
+    files a module set has is not something this tab gets to assume.
+    """
+    reasons: list[str | None] = []
+    importer = _FakeImporter(says=("one",))
+    view, _ = _importer_view(ps, tmp_path, importer)
+    assert view.busy_reason() is None, "a quiet tab refused to close"
+
+    importer.during = lambda: reasons.append(view.busy_reason())
+    view.apply_module_sql()
+
+    assert reasons and reasons[0], "the close guard had nothing to say mid-run"
+    assert "importer" in reasons[0]
+    assert view.busy_reason() is None, "the tab stayed unclosable afterwards"
 
 
 def test_a_game_with_no_importer_is_offered_no_module_sql_button(

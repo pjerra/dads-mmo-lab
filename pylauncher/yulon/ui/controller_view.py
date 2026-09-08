@@ -808,6 +808,11 @@ class ControllerView(QWidget):
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
         self._remove_armed = False
         self._import_running = False
+        # The Modules tab's run of the SAME one-shot service. A second flag
+        # rather than a second meaning for `_import_running`, which also
+        # decides whether the repair offer is hidden and whether Refresh is
+        # locked -- overloading it would change the Server tab from here.
+        self._module_sql_running = False
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -900,7 +905,14 @@ class ControllerView(QWidget):
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
 
-        Only the import. Everything else here finishes inside `shutdown()`'s
+        Both runs of the one-shot import service: the Server tab's repair and
+        the Modules tab's `apply_module_sql()`. It said "only the import" and
+        meant it until 8.7a gave that service a second button; the module run
+        is the shorter of the two, which is not a defence, because how many
+        pending SQL files a module set has is not something this tab gets to
+        assume.
+
+        Everything else here finishes inside `shutdown()`'s
         join; a database import runs for 10-30 minutes, which is long enough
         that a user WILL close the window during one — and closing during one
         froze the window for `STOP_GRACE_SECONDS + 30` seconds and then aborted
@@ -911,6 +923,13 @@ class ControllerView(QWidget):
         outcome: the import cannot be stopped, so the only choice available was
         ever between waiting and a crash (review, 2026-08-23).
         """
+        if self._module_sql_running:
+            return (
+                "The module importer is still running. It cannot be stopped, and closing now "
+                "would leave the world database part-way through a module's SQL. This window "
+                "will close normally once it finishes — the Modules tab shows what it is "
+                "printing."
+            )
         if not self._import_running:
             return None
         return (
@@ -1955,6 +1974,7 @@ class ControllerView(QWidget):
         # button as well as the Server tab's, so the two cannot drift into
         # disagreeing about whether an importer is running.
         self._set_busy(True)
+        self._module_sql_running = True
         self._module_pending = "apply module SQL"
         self.module_report.setPlainText(MODULE_SQL_RUNNING)
         # The sink is the relay's emitter, not `_module_sql_line`: this lambda
@@ -1983,6 +2003,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _module_sql_done(self, result: object) -> None:
         self._set_busy(False)
+        self._module_sql_running = False
         self._module_pending = None
         self.module_sql_button.setEnabled(self.services.module_sql is not None)
         # Deliberately not "N modules applied". This tab cannot count that: the
@@ -2000,6 +2021,7 @@ class ControllerView(QWidget):
     @Slot(object)
     def _module_sql_failed(self, exc: object) -> None:
         self._set_busy(False)
+        self._module_sql_running = False
         self._module_pending = None
         self.module_sql_button.setEnabled(self.services.module_sql is not None)
         # The refusal verbatim and under whatever the importer had already
