@@ -1559,7 +1559,8 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
     rmtrees `spec.dest` when `(spec.dest / ".git").is_dir()` is False and
     `spec.dest.exists()` is True; `yulon/apply.py` `Applier.clone_dir` returns
     `server_dir / CLONE_DIRS[type] / id`; `catalog.json` gives `wow-wotlk`
-    `"has_manifests": true` and it is the only entry that has it;
+    `"has_manifests": true` (`wow-tbc` carries it too since 8.7b, and this
+    walk is about the WotLK entry the test drives);
     `yulon/ui/controller_view.py` passes that same `server_dir` to
     `wotlk_modules.applier()`.
 

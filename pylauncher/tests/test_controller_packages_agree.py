@@ -281,9 +281,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     What the view actually depends on is `ControllerServices`: one field per
     operation the Server tab can perform. So every field is required to arrive
     for every game, with exactly one documented exception -- `store` and
-    `applier` are the module surface, and `manifests/` holds `wow-wotlk` alone,
-    so for the other three they are legitimately None and `_no_manifest_store()`
-    warns if the catalog ever says otherwise.
+    `applier` are the module surface, and a game has them only if the catalog
+    says `has_manifests` and a `manifests/<game>/` tree exists for it. That was
+    `wow-wotlk` alone until 8.7b added `wow-tbc`; for the two that still have
+    none the pair is legitimately None, and `_no_manifest_store()` warns if the
+    catalog ever says otherwise. The exception is keyed on the ENTRY rather
+    than on a list of game ids here, so the next game to get manifests needs no
+    edit in this file -- and cannot silently keep the exemption either.
 
     Enumerated from the dataclass rather than listed here, so a sixteenth
     capability added to the view cannot be wired for WotLK and forgotten for
@@ -319,8 +323,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
 
         services = ControllerServices.for_entry(entry, server_dir)
         absent = sorted(name for name in every_field if getattr(services, name, None) is None)
-        if game == "wow-wotlk":
-            assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
+        if entry.has_manifests:
+            assert absent == [], f"{game} says it has manifests but is missing {absent}"
+            # `is not None` is completeness and nothing more -- see the
+            # paragraph above. WHOSE manifests arrived is
+            # `test_controller_view.test_a_tab_gets_a_manifest_store_exactly_
+            # when_the_catalog_says_it_has_one`, which asserts the store's own
+            # game id; that is the half this file deliberately does not do.
         else:
             assert set(absent) <= module_surface, (
                 f"{game} is missing {sorted(set(absent) - module_surface)}, which is not the "
@@ -328,11 +337,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             )
             # And the exception has to be REAL. Without this the test would
             # pass just as happily on an implementation where nothing is ever
-            # None -- including one that handed the three games WotLK's own
-            # manifest store, which is the mistake `_no_manifest_store()`
-            # exists to prevent.
+            # None -- including one that handed a game somebody else's manifest
+            # store, which is the mistake `_no_manifest_store()` exists to
+            # prevent.
             assert set(absent) == module_surface, (
-                f"{game} reports {absent} rather than the module surface; `manifests/` holds "
-                "wow-wotlk alone, so a non-None store here means this game was handed "
+                f"{game} reports {absent} rather than the module surface; its entry carries no "
+                "`has_manifests`, so a non-None store here means this game was handed "
                 "somebody else's manifests"
             )

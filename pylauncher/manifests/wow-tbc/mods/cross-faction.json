@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "id": "cross-faction",
+  "name": "Cross-Faction Play",
+  "type": "mod",
+  "game": "wow-tbc",
+  "description": "Horde and Alliance can talk, group, guild, trade and mail each other.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "AllowTwoSide.Accounts",
+          "default": "1",
+          "note": "both factions on one account, which is what a friends-and-family realm wants"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Chat",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Channel",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Group",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Guild",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Auction",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.Interaction.Mail",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.WhoList",
+          "default": "1"
+        },
+        {
+          "key": "AllowTwoSide.AddFriend",
+          "default": "1"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Accounts[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Accounts = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Chat[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Chat = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Channel[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Channel = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Group[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Group = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Guild[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Guild = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Auction[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Auction = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.Interaction\\.Mail[ \\t]*=.*$",
+      "replace": "AllowTwoSide.Interaction.Mail = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.WhoList[ \\t]*=.*$",
+      "replace": "AllowTwoSide.WhoList = 0",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllowTwoSide\\.AddFriend[ \\t]*=.*$",
+      "replace": "AllowTwoSide.AddFriend = 0",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "notes": [
+    "Nine keys and nine remove patches, one pair each: mangosd has no single cross-faction",
+    "switch, and a set that turns eight of them on is a realm where players can group but",
+    "not speak. `Interaction.Trade` is deliberately absent - mangos-tbc has no such key.",
+    "AllowTwoSide.Accounts changes what the CHARACTER CREATION screen allows; characters",
+    "already made are unaffected either way, and removing this mod does not delete them."
+  ]
+}

@@ -588,12 +588,20 @@ class CatalogView(QWidget):
             # The cost sentence is CONDITIONAL, because the flat version was not
             # true. "Installing or removing a module writes into that folder and
             # deletes files under it" describes `Applier`, which only exists for an
-            # entry with `has_manifests` - `wow-wotlk` alone of the four. For TBC,
-            # Vanilla and Tortoise `controller_view` passes `applier=None` and
-            # DISABLES both module buttons, so the user was being warned about an
-            # action they cannot perform. It errs safe, which is exactly why it
-            # survived review of the previous wording: a sentence spelled like a
-            # true one, aimed at the cost this time instead of the remedy.
+            # entry with `has_manifests` - `wow-wotlk` alone of the four when this
+            # was written, and `wow-tbc` as well since 8.7b. For Vanilla and
+            # Tortoise `controller_view` still passes `applier=None` and DISABLES
+            # both module buttons, so the user was being warned about an action
+            # they cannot perform. It errs safe, which is exactly why it survived
+            # review of the previous wording: a sentence spelled like a true one,
+            # aimed at the cost this time instead of the remedy.
+            # The condition is the reason this needed no edit when TBC gained
+            # manifests: it asks the entry, not a list of game ids. What DID need
+            # saying is that TBC's cost is smaller than the sentence implies -
+            # every `manifests/wow-tbc/` item is a conf activation or a SQL mod,
+            # so nothing there clones and nothing there is deleted. The sentence
+            # over-warns rather than under-warns, which is the right way round,
+            # and one TBC manifest with a `source` would make it exact again.
             cost = (
                 "Installing or removing a module from its tab writes into that "
                 "folder and deletes files under it."

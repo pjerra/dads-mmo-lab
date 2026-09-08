@@ -453,7 +453,8 @@
         "notes": [
           "A Vanilla client is the wrong version — the installer checks for this."
         ]
-      }
+      },
+      "has_manifests": true
     },
     {
       "id": "wow-vanilla",

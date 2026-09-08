@@ -1521,7 +1521,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:323 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:324 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1535,11 +1535,11 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
-    assert "networking.apply:323" in calls, "the call this test pins has moved; re-pin it"
+    assert "networking.apply:324" in calls, "the call this test pins has moved; re-pin it"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:323" not in missing, missing
+    assert "apply() at controller_view.py:324" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -2061,15 +2061,33 @@ def test_each_game_s_restore_plan_censuses_its_own_containers(
             assert "ac-database" not in refusals, (entry.id, refusals)
 
 
-def test_a_cmangos_tab_has_no_manifest_store_and_says_so(tmp_path: Path) -> None:
-    """`manifests/` holds `wow-wotlk` only, and only that package has a `modules.py`."""
+def test_a_tab_gets_a_manifest_store_exactly_when_the_catalog_says_it_has_one(
+    tmp_path: Path,
+) -> None:
+    """`has_manifests` is the whole gate, in both directions, and the store must be its OWN.
+
+    `manifests/` held `wow-wotlk` alone until 8.7b added `manifests/wow-tbc/`
+    (a CMaNGOS "module" is a conf activation or a SQL mod — there is nothing to
+    compile), so this test can no longer say "CMaNGOS means no store". It asks
+    the catalog instead, which is what `_no_manifest_store()` warns about when
+    the two drift apart.
+
+    The second assertion is the one with teeth. `is not None` would be satisfied
+    by a tab handed `wotlk_modules.store()`, which would offer a CMaNGOS server
+    twenty-one AzerothCore C++ modules, every one of which would fail at the
+    clone or the rebuild. So the store is required to answer with THIS game's
+    id, and the ids it serves are required to be disjoint from the other's.
+    """
     for entry in _every_game():
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
-        if entry.id in CMANGOS_GAMES:
-            assert entry.has_manifests is False, f"{entry.id} gained manifests; wire it a store"
+        if not entry.has_manifests:
             assert services.store is None and services.applier is None, entry.id
-        else:
-            assert services.store is not None and services.applier is not None, entry.id
+            continue
+        assert services.store is not None and services.applier is not None, entry.id
+        assert (
+            services.store.game == entry.id
+        ), f"{entry.id}'s tab was handed {services.store.game}'s manifests"
+        assert services.store.game_dir.is_dir(), f"{entry.id} has no manifests/<game>/ on disk"
 
 
 def test_a_game_that_names_no_import_service_is_offered_no_repair_button(

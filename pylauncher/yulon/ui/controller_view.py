@@ -52,6 +52,7 @@ from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
+from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
 from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
@@ -441,8 +442,11 @@ def _for_tbc(
 ) -> ControllerServices:
     """WoW TBC (CMaNGOS), through `controller_wow_tbc`.
 
-    `client_dir` is accepted and unused: it exists to copy a manifest's client
-    files, and this entry has no manifests (`_no_manifest_store()`).
+    `client_dir` is accepted and passed on. Nothing in `manifests/wow-tbc/`
+    has a `client[]` step today — a CMaNGOS "module" is a conf activation or a
+    SQL mod (roadmap 8.7b, `controller_wow_tbc.modules`) — but the applier is
+    real now, so handing it the folder the user picked is one binding rather
+    than a `del` that a future manifest would have to come back and undo.
 
     No `import_probe` is handed to the controller, which is `TbcController`'s
     own decision restated at the call site: the Repair button's only action is
@@ -452,7 +456,6 @@ def _for_tbc(
     `repairable`, so nothing is offered; `_show_repair()` gates on the same
     fact a second time.
     """
-    del client_dir
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -469,8 +472,19 @@ def _for_tbc(
             cmd, container=entry.container_spec().world, wsl_distro=wsl_distro
         ),
         create_account=lambda name, pw, gm: tbc_accounts.create_account(sql, name, pw, gm_level=gm),
-        store=_no_manifest_store(entry),
-        applier=None,
+        store=tbc_modules.store() if entry.has_manifests else None,
+        # `sql=sql`, the SAME runner the console and the account tile use, and
+        # that is the point of `tbc_modules.applier()` requiring it: it carries
+        # this install's generated password (read once, above) and this game's
+        # schema map, so a SQL mod reaches `mangos` and not `acore_world`. The
+        # WotLK sibling can default its own runner because that game's password
+        # is a fixed catalog value; re-deriving one here is the closed bug
+        # `_db_password()` describes.
+        applier=(
+            tbc_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+            if entry.has_manifests
+            else None
+        ),
         backup=lambda: tbc_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
         plan_restore=lambda path: tbc_maintenance.plan_restore(
             path, server_dir, wsl_distro=wsl_distro

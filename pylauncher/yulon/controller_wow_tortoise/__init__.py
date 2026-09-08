@@ -33,10 +33,12 @@ What differs from the WotLK package, by module:
   `sqlplan.MarkerGate` is the probe that reads it — so this module wires that
   gate rather than re-answering the question.
 * there is no `modules.py`. That module binds a manifest tree at
-  `manifests/<game>/`, and `manifests/` holds `wow-wotlk` only; the entry says
+  `manifests/<game>/`, and there is no `manifests/wow-tortoise/`; the entry says
   `has_manifests` false, and every caller already asks the entry before
   building a store. A copy pointed at a directory that does not exist would be
-  a feature that fails at the first click.
+  a feature that fails at the first click. `manifests/` is no longer WotLK's
+  alone — 8.7b added `wow-tbc`, whose items are conf activations and SQL mods
+  rather than repositories, which is the shape this game would take too.
 
 Public entry points, for the code that wires the Server tab:
 

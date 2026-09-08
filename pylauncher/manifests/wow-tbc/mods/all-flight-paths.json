@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "all-flight-paths",
+  "name": "All Flight Paths Known",
+  "type": "mod",
+  "game": "wow-tbc",
+  "description": "Every flight master is already discovered on a new character.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "AllFlightPaths",
+          "default": "1",
+          "note": "applies to characters created after the restart, not to existing ones"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllFlightPaths[ \\t]*=.*$",
+      "replace": "AllFlightPaths = 0",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "notes": [
+    "No prompt: the key is a flag, and a mod you install to turn something on has already",
+    "been asked its question by being installed."
+  ]
+}
