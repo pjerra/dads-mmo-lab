@@ -3616,14 +3616,17 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       `The server is up.` belongs to this gate; it did not compile.
       `pyplan/gates/bug43-keepawake-win11-2026-09-05/README.md`.
 
-### 44. Four defects in the module manifest layer, found while gating 8.7a — 2026-09-08, OPEN
+### 44. Four defects in the module manifest layer, found while gating 8.7a — 2026-09-08, OPEN; **a fifth added and `a`'s silence half fixed 2026-09-09**
 
 Found on `yulon-ubuntu` by pressing the Modules tab against the live AzerothCore install; the
 readings are in `pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`. All four are about what a
 manifest DECLARES versus what the install does, which is the same shape as the defect 8.7a's own
-text was opened for.
+text was opened for. **`e` was added on 2026-09-09** from the fifth clause's press on
+`yulon-ubuntu2` (`pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/`), and is the same shape one
+layer along: a fact the manifest never stated, so the report told a user nothing was owed.
 
-- [ ] **a. A conf key declared with no value is never written.**
+- [ ] **a. A conf key declared with no value is never written.** *(the SILENCE half fixed
+      2026-09-09; the value half stays open)*
       `manifests/wow-wotlk/modules/mod-npc-beastmaster.json` names `Creatures.CustomIDs` on
       `env/dist/etc/worldserver.conf` with a note and no `default`. Installing the module reports
       `activate … mod_npc_beastmaster.conf` and says nothing about `worldserver.conf`; the file is
@@ -3633,6 +3636,22 @@ text was opened for.
       module's own creature row carries `flags_extra = 2` (`CREATURE_FLAG_EXTRA_MODULE`), which
       suppresses the warning the key exists to silence (`ObjectMgr.cpp:1219-1229`, read on the
       box), and the boot logged no gossip complaint at all.
+      **2026-09-09:** `Applier._conf` built its write list from the keys that HAVE a value and
+      `continue`d, so that conf entry reached neither `done` nor `skipped` — the tab showed nothing
+      at all where a step had been skipped. It now reports
+      `conf env/dist/etc/worldserver.conf: no value in the catalog for Creatures.CustomIDs — not
+      written`, driven by a failing test first
+      (`test_a_conf_key_the_catalog_names_with_no_value_is_reported_not_dropped`, RED message in the
+      8.7a-ubuntu2 README). **Reported, not filled in**: which value belongs in a user's core
+      configuration is the catalog's sentence to write, and this key in particular is an APPEND to a
+      comma-separated list that the applier has no syntax for. And on 601026 the key cannot be shown
+      by a running server whatever we write, for the `flags_extra = 2` reason above — so the
+      manifest's note ("add 601026 to silence a harmless gossip warning") describes a warning that
+      does not occur. Whoever closes the value half decides that first.
+      Prior art for the shape: `origin/rust-main:crates/dml-wow/src/moduletail.rs:31-47` gives every
+      not-done outcome a name (*"Only `Activated` wrote anything; the other three are QUIET
+      outcomes"*), and `tuning.rs:596-616` re-reads the file to answer `NOT_FOUND` rather than
+      shrugging.
 
 - [ ] **b. Two shipped manifests declare a SQL step for a module that ships no SQL.**
       `mod-junk-to-gold` and `mod-learn-spells` both declare `data/sql/db-world/*.sql` with
@@ -3654,6 +3673,25 @@ text was opened for.
       AzerothCore does not open a conf for a module it was not compiled with (see below) — but it
       is a file this app wrote and does not take back.
 
+- [x] **e. `configure` on a conf-only module reported that nothing further was needed.** — 2026-09-09,
+      FIXED. Measured live on `yulon-ubuntu2` (`8.7a-wotlk-yulon-ubuntu2-2026-09-09/3-press.log`):
+      `applier.configure('mod-ale')` wrote `ALE.Enabled` and `ALE.ScriptPath` and reported
+      `2 step(s), 0 skipped, rebuild=False, restart_recommended=False`, while the running world went
+      on loading scripts from the PREVIOUS `ALE.ScriptPath` — `dml_bridge_ping` still answered
+      *Command 'dml_bridge_ping' does not exist* after the write and `DML-BRIDGE-READY` only after a
+      restart. `configure` never sets `rebuild_required` (`apply.py::_report`, `action !=
+      "configure"`) and the `restart_recommended` derivation reads NPCs, direct SQL and server DBCs,
+      none of which a conf write touches — so with nothing declared, the report recommends nothing.
+      The field that exists for exactly this is `build.restart`, whose schema description names the
+      shape in advance ("a file the emulator reads once, at startup"); TBC's five conf mods declare
+      it and this WotLK module did not. Fixed in
+      `manifests/wow-wotlk/modules/mod-ale.json` (`build.restart: true`, with the measurement in its
+      notes), test first
+      (`test_configuring_ale_asks_for_the_restart_the_engine_needs`). **Not** fixed by widening the
+      derivation: what an item needs after a conf write is the item's own fact. **Worth a sweep
+      nobody has done:** every other manifest whose `configure` is a conf write and which declares no
+      `build.restart` has the same silence.
+
 **And one fact that is not a defect but decides a definition-of-done clause.** 8.7a asks that "a
 configuration change the module needs is shown by the running server". On AzerothCore it cannot
 be, until the worldserver is rebuilt with the module: `Loading Modules Configuration...` looks
@@ -3662,6 +3700,14 @@ conf files up by the names of the modules **compiled into the binary**
 activated module conf files sitting in `env/dist/etc/modules/`: the server asked for
 `playerbots.conf` by name, failed to open it, and answered `> Not found modules config files`
 without looking at either. The rebuild is the owner's to run.
+
+**2026-09-09: the other side of that was measured.** After the rebuild lane compiled `mod-ale` into
+the binary on `yulon-ubuntu2`, the same server named the module and named the conf file it opened
+(`> mod_ale.conf`), and a value the app's own `configure()` wrote into that file changed what the
+running server did — five named scripts loaded from the path it wrote, and a console command that
+did not exist a minute earlier. The control (the same file pointed at a decoy directory, the same
+restart) is in the same folder. So the clause is answerable on this tree; what it needs first is the
+rebuild, per module.
 ---
 
 ### 45. The Modules tab can never ask for a value that has a default — 2026-09-08, OPEN

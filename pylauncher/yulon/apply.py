@@ -1676,6 +1676,21 @@ class Applier:
                 shutil.copy2(template, target)
                 log.done.append(f"activate {conf.file} from {conf.template}")
             writes = [(k.key, k.default) for k in conf.keys if k.default is not None]
+            # A key the catalog names with no `default` is a step nobody takes.
+            # Measured on yulon-ubuntu 2026-09-08 (8.7a, defect 1): the four
+            # `mod_npc_beastmaster.conf` keys and `Creatures.CustomIDs` on the
+            # core's own `worldserver.conf` were dropped here in silence — absent
+            # from `done`, absent from `skipped`, with the file byte-identical
+            # afterwards. Reported rather than filled in: which value belongs in
+            # a user's core configuration is the catalog's sentence to write, and
+            # `Creatures.CustomIDs` in particular is an APPEND to a list this
+            # applier has no syntax for.
+            valueless = [k.key for k in conf.keys if k.default is None]
+            if valueless:
+                log.skipped.append(
+                    f"conf {conf.file}: no value in the catalog for "
+                    f"{', '.join(valueless)} — not written"
+                )
             if not writes:
                 continue
             if not target.is_file():
