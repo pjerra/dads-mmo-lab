@@ -1801,7 +1801,17 @@ def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
     dockerfile = dockerfile_text(entry)
     core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
     assert f"COPY --from=builder {core_dir} {core_dir}" in dockerfile
-    assert dockerfile.count("FROM ubuntu:22.04") == 2, "a builder stage and a slim runtime"
+    # Two stages ON THE SAME BASE, rather than two stages on a version spelled
+    # here. The invariant is that the runtime can run what the builder built --
+    # a builder-only bump produces a binary whose glibc the runtime does not
+    # have, which is exactly the trap Tortoise walked into on 2026-09-08 when
+    # its vendored gsoap archive forced a move to ubuntu:24.04 while its
+    # siblings stayed on 22.04. Pinning the version here would have made this
+    # test the thing that had to be edited, rather than the thing that caught a
+    # half-done bump.
+    bases = re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE)
+    assert len(bases) == 2, f"a builder stage and a slim runtime, not {bases}"
+    assert bases[0] == bases[1], f"the runtime must be the builder's base: {bases}"
     for tool in native.cmangos.extract.tools:
         assert tool.argv[0].startswith(f"{core_dir}/bin/"), tool.argv[0]
 

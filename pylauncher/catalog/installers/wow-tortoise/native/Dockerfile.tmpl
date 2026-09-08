@@ -23,7 +23,7 @@
 #   * tools/mmap at {{CORE_DIR}}/src/tools/mmap — MoveMapGen's off-mesh and
 #     settings inputs, named by the mmaps argv in catalog.json. The script fed
 #     them from a host bind of src/; there is no such bind at run time here.
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
@@ -130,11 +130,18 @@ WORKDIR /src/_build
 # builder-only: the RUNTIME stage must also be >= glibc 2.38, or the binary will
 # not start. Both `FROM` lines move together or neither does.
 #
-# NOT DONE HERE, deliberately, because it is a shipped installer change with
-# user-visible consequences -- a newer compiler under a 2005-era codebase and a
-# raised glibc floor for every Tortoise user -- and that is the owner's call, not
-# a fix to make quietly at three in the morning. The stack on m910q still runs
-# the image built from 7f2957e, which has no SOAP and still locks accounts out.
+# DONE, on the owner's decision, 2026-09-08. Both FROM lines are ubuntu:24.04 and
+# they move together for the reason above: a builder-only bump produces a binary
+# the runtime cannot start.
+#
+# What this costs, stated plainly because it is a shipped installer change: this
+# game's server image now needs glibc 2.38 or newer, and its C++ is compiled by
+# GCC 13 rather than 11. Both were measured on this exact Dockerfile before the
+# change was made, not after.
+#
+# The other three games are NOT touched. wow-tbc and wow-vanilla have their own
+# templates on ubuntu:22.04 and no reason to move; a per-tree fact is measured
+# per tree, and this one is a fact about Tortoise's vendored gsoap.
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
@@ -150,7 +157,7 @@ RUN mkdir -p {{CORE_DIR}}/sql {{CORE_DIR}}/src/tools && \
     cp -r /src/sql/. {{CORE_DIR}}/sql/ && \
     cp -r /src/tools/mmap {{CORE_DIR}}/src/tools/mmap
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
