@@ -3834,3 +3834,16 @@ good news in the entry.
   yields changes. Pinned by
   `test_uninstall_second_family.py::test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown`,
   which also requires the warning to still fire for a caller that did supply a list.
+- [ ] **LOW — The Server tab's caption keeps saying "stopped" above a status line that says
+  everything is up.** `pyplan/gates/8.7b-tbc-m910q-2026-09-08/7-server-tab-started.png`: the
+  caption reads "stopped" while the line under it reads "status: db up, auth up, world up". The
+  entry above (`:552`) covers only the first-poll "unknown"; this is the caption not following a
+  later poll after a Start pressed from the Modules tab's advice. Found by the retrospective
+  audit's read of every frame in the range, 2026-09-08; not pressed again, so the trigger is not
+  narrowed beyond "Start after Stop, watched from the Server tab".
+- [ ] **LOW — A purge refusal that names three running containers sits beside "status: unknown".**
+  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/3-refused-server-running.png` and every other frame
+  of that gate: the refusal says `vanilla-mangosd, vanilla-realmd, vanilla-db: still running` and
+  the status label two lines up still says unknown. Same family as `:552` (the label is only
+  written by the poll handler), seen here on a tab that was opened and pressed within its first
+  poll interval. The refusal is right; the label beside it is not. Audit, 2026-09-08.
