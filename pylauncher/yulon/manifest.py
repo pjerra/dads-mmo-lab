@@ -101,9 +101,22 @@ class Source(_Strict):
 
 
 class Build(_Strict):
-    """Whether installing/removing needs the worldserver rebuilt."""
+    """What must happen after installing/removing before the change is live."""
 
     rebuild: bool = True
+    restart: bool = Field(
+        default=False,
+        description=(
+            "Declare that this item needs the worldserver restarted. `ApplyReport."
+            "restart_recommended` is otherwise DERIVED — from NPCs, direct SQL and server "
+            "DBCs, all of which reach the database or the data volume — and that derivation "
+            "cannot see a conf write. An item whose whole content is `conf[].keys` reported "
+            "'nothing further needed' while the value it had just written sat in a file the "
+            "emulator reads once, at startup. On CMaNGOS that IS the whole shape of a module "
+            "(roadmap 8.7b), so it is declared here rather than guessed at. False by default, "
+            "and it never suppresses a derived yes — only adds one."
+        ),
+    )
 
 
 class SqlStep(_Strict):
