@@ -1,11 +1,19 @@
 # Run one 8.5d Turtle-client session in the INTERACTIVE session and wait for it.
 #
-# STILL NOT RUN as of 2026-09-07 23:19Z: the 8.5d run held m910q but not the
-# client box, so the server side of the box is gated and this half is not.
-# 8.5b's `drive-who-tbc.ps1` with this tree's parameters, plus one fix made
-# after that run -- it now DELETES its scheduled task in a `finally`. Use
-# `-Account TORTGATE -Password 'T0RT-G@TE12'`: GATE83D has no character, and
-# TORTGATE is the only account on this server that owns one (`README.md`).
+# RUN THREE TIMES on 2026-09-08 (09:43, 09:47, 09:56Z) and clause (4) is proved.
+# It deleted its own scheduled task every time -- `schtasks /query` found no
+# `yulon-who-turtle` after any of the three.
+#
+# 8.5b's `drive-who-tbc.ps1` with this tree's parameters, plus the `finally`
+# that deletes the task. Use `-Account TORTGATE -Password 'T0RT-G@TE12'`:
+# GATE83D has no character, and TORTGATE is the only account on this server that
+# owns one. **Its character is now `Dortagate`, not `Dorta`** -- 8.4d renamed it
+# in the client, through the app's own button, to gate that box's rename clause.
+#
+# The three that mattered, as typed:
+#   -Label t84d-dry -DryRealm                          (learn the realm flow)
+#   -Label t84d-r2 -EnterWorld -RenameTo Dortagate `
+#     -LeaveChannels "World" -Who "Sietta,Caterinny,Gwenora" -WorldSeconds 30
 #
 # schtasks rather than Start-Process: a process started from an ssh session
 # lands in session 0, where there is no desktop, so the client draws nothing and
@@ -18,6 +26,9 @@ param(
   [Parameter(Mandatory = $true)][string]$Password,
   [Parameter(Mandatory = $true)][string]$Label,
   [string]$Who = '',
+  # Comma-separated, forwarded verbatim: the World channel drowns a /who answer
+  # on this server (500 bots), so a run that wants to READ one leaves it first.
+  [string]$LeaveChannels = '',
   [string]$RenameTo = '',
   [string]$CharacterName = '',
   [switch]$EnterWorld,
@@ -42,7 +53,8 @@ $line = 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\PK\client-
         $(if ($CreateCharacter) { " -CreateCharacter" }          else { "" }) +
         $(if ($CharacterName)   { " -CharacterName $CharacterName" } else { "" }) +
         $(if ($RenameTo)        { " -RenameTo $RenameTo" }       else { "" }) +
-        $(if ($Who)             { " -Who $Who" }                 else { "" })
+        $(if ($Who)             { " -Who $Who" }                 else { "" }) +
+        $(if ($LeaveChannels)   { " -LeaveChannels $LeaveChannels" } else { "" })
 Set-Content -Path $runner -Value $line -Encoding ascii
 "the command that will run: $line"
 

@@ -22,7 +22,14 @@ is found by the in-game who-list."*
 | (1) the total equals the same clause run by hand | **PASSED** | `transcript.txt`, stage `total`, 23:13:20Z and again 23:18:34Z |
 | (2) an unreadable marker refuses rather than reporting zero | **PASSED** | stage `refuse`, 23:13:27Z; `2-refused.png` |
 | (3) a readable marker matching nothing WARNS rather than reporting zero | **PASSED** | stage `warn`, 23:13:32Z; `3-warned.png` |
-| (4) a listed online bot is found by the in-game who-list | **NOT PROVED — the client was never started** | stage `who` chose the subjects at 23:14:02Z; no `/who` was ever typed |
+| (4) a listed online bot is found by the in-game who-list | **PASSED 2026-09-08 09:58–10:01Z** — three subjects, three answers | `client-t84d-r2.log`; `8-who-found-sietta.png`, `9-who-found-all-three.png` |
+
+> **Clause (4) was closed on 2026-09-08 by the 8.4d lane**, which held m910q and
+> `vmhost` at once — the reason the two boxes were run as one job. Everything
+> below the line that says "the client was never started" was written on
+> 2026-09-07 and is left standing as it was; the run that closed the clause is
+> **[the section at the end of this file](#clause-4-closed-2026-09-08)**, and the
+> two `.ps1` files in this folder were changed by it.
 
 ---
 
@@ -412,3 +419,109 @@ nothing was created: one outbound TCP connect, no process, no scheduled task.
 * Every line number here is a claim like any other. The ones above were re-read
   on the box on 2026-09-07 at 23:16Z; re-check them again before quoting this
   file, because the Python ones are bound to commit `42008131` and will move.
+
+---
+
+## Clause (4), closed 2026-09-08
+
+Run by the **8.4d lane**, which needed the same server and the same client
+session, on `m910q` (server) and `vmhost` (client). Three client sessions, all
+driven through `schtasks /it`; each deleted its own task, and `schtasks /query`
+showed no `yulon-who-turtle` afterwards. The full driver logs are
+`client-t84d-dry.log`, `client-t84d-who.log` and `client-t84d-r2.log`, and every
+capture in them carries the client's alive/dead reading beside it — **the client
+was alive at all 21 captures of the run that proved this.**
+
+### The answers, in the client's own words
+
+`9-who-found-all-three.png`, 10:00:51Z — three `/who` answers still on the chat
+frame at once, 35 s and 55 s apart:
+
+```
+1 player total
+[Caterinny]: Level 7 Goblin Hunter <Within Reason> - Durotar
+1 player total
+[Gwenora]: Level 5 High Elf Warrior - Elwynn Forest
+1 player total
+```
+
+and `8-who-found-sietta.png`, 09:59:05Z, the first of them with the line that
+made it readable:
+
+```
+Left Channel: [4. World]
+[Sietta]: Level 5 Goblin Rogue <Tainted Bunnies> - Durotar
+1 player total
+```
+
+All three had been **listed as online by the app** and re-checked through
+`gate85d.py still-online` at 07:55:2xZ, minutes before the client was started.
+The asking character is `Dortagate` (guid 901, the renamed `Dorta`), a level-1
+Goblin — `rank 0`, so the 30-second cooldown fully applied and the driver's
+35-second gap is what the three separate answers rest on.
+
+### Three predictions this run settled
+
+1. **`AllowTwoSide.WhoList = 1` holds in the client.** `Gwenora` is a High Elf
+   (race 10, ALLIANCE) and was found by a HORDE asker — the reverse of the
+   Vanilla install 8.5c gated, and what stage `wholaw` predicted from
+   `etc/mangosd.conf:919`. So the faction filter really is a config line on
+   these trees and not a property of the family.
+2. **`/who` on 1.18.1 is not level-filtered for a bare name.** A level-**1**
+   asker found subjects at levels 5, 5 and 7. `MiscHandler.cpp`'s level-range
+   check is real; what this client puts in a bare `/who Name` does not exclude
+   them.
+3. **`1 player total` is this client's wording too.** 8.5b measured that string
+   on 2.4.3 and this record refused to assert it in advance. It is the same.
+
+### What went wrong first, and why the fix is in the driver
+
+**The first session found all three names and photographed none of the
+answers.** `client-t84d-who.log`, 09:50–09:52Z: three `/who` commands sent, three
+frames taken 12 s later, and every frame shows `[4. World]` bot small-talk with
+no answer in it. **500 playerbots talk in the World channel at about eight lines
+every twelve seconds**, so each answer had scrolled off the chat frame before the
+shutter. `7b-the-first-run-drowned-by-world-chat.png` is one of those frames, kept
+because it is exactly what a miss looks like and is not one.
+
+Two changes to `client-who-turtle.ps1`, both live-proved by the second session:
+
+* **`-LeaveChannels`** sends `/leave <channel>` before asking. `-LeaveChannels
+  World` produced `Left Channel: [4. World]` in the frame, and the chat was quiet
+  enough that three answers 55 s apart were all still on screen at the end.
+* **two shots per name, at 4 s and at 12 s.** The early one is the evidence and
+  the late one is the control: an answer in the early frame and none in the late
+  one is the chat scrolling rather than the server refusing — which is the pair
+  the first run did not have and could not have told apart.
+
+### The realm flow past the realm list, measured at last
+
+The record's own note said *"everything past the realm list on 1.18.1 is
+UNMEASURED"*. One `-DryRealm` run bought it (`client-t84d-dry.log`, 09:43–09:46Z):
+
+* **there is no realm-selection dialog and no language panel on this client.**
+  Login goes **straight to the character screen** — see
+  `../8.4d-tortoise-m910q-2026-09-08/client-1-realm-flow-is-the-character-screen.png`.
+  `-RealmStyle` (the 2.4.3 language + Suggest Realm + Accept sequence) is
+  therefore wrong here and was never used.
+* the driver's "Okay on the realm dialog" click at `0.616, 0.788` lands on
+  **empty floor** on that screen and is harmless. It was left in rather than
+  removed, because it is the one step no run has had to press here and removing
+  it on one client's evidence is how the next fork's run loses an evening.
+* login to character screen took **62 s**; character screen to standing in the
+  world took **44 s**.
+* `ENTER` on the character screen enters the world, as assumed.
+
+### What was left on each box
+
+* **`vmhost`**: no client running, no scheduled task (`yulon-who-turtle` deleted
+  by the driver's own `finally`, confirmed absent), 21 frames and three logs
+  under `C:\Users\PK\client-login\` with the `t84d-` prefix. The stale
+  `yulon-*` tasks that were there before this run (`yulon-anykey`,
+  `yulon-login`, `yulon-van84c` and nine more) are **other lanes' and were not
+  touched**.
+* **`m910q`**: the Tortoise stack up, as this lane found it.
+* **the character**: `Dorta` is now **`Dortagate`** — renamed *in the client*, by
+  8.4d's own button, to prove that box's rename clause. Guid 901, account
+  `TORTGATE`, password unchanged. **The next lane that wants this route asks for
+  `Dortagate`.**

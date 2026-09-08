@@ -457,6 +457,17 @@ def test_the_sentence_in_place_of_the_level_control_names_what_this_fork_has() -
     assert "NEW" in said, said
     assert "existing character" in said, said
     assert "no command that puts a character at a level you pick" not in said, said
+    # 8.4d's live gate, m910q 2026-09-08 07:27-07:30Z. The sentence named the
+    # command in an argument order this server REFUSES. Sent as spelled --
+    # `rndbot Aniel level 60` -- the console answered
+    #     Aniel: level - character not found
+    # and sent verb-first -- `rndbot level Aniel 60` -- it answered
+    #     level: Aniel - ok
+    # and left Aniel at level 18, which is the behaviour the sentence describes.
+    # So the description was right about what happens and wrong about what to
+    # type, and somebody following it would read the refusal as the feature.
+    assert ".rndbot level <bot>" in said, said
+    assert ".rndbot <bot> level" not in said, said
 
 
 def test_the_offline_rename_this_fork_would_destroy_a_name_with_is_refused(tmp_path) -> None:

@@ -1,11 +1,34 @@
 # Drive the real Turtle 1.18.1 client into the world and ask the in-game
 # who-list about a name. 8.5d's clause (4).
 #
-# NOT YET RUN. Written 2026-09-08 from 8.3d's `client-login.ps1` (the driver
-# that actually drove THIS client, as far as the realm list) with 8.5b's `/who`
-# tail grafted on. Everything past the realm list is UNMEASURED on this client
-# and every such step below says so in its own comment. Read the log and the
-# frames before believing any of it.
+# RUN, THREE TIMES, 2026-09-08 09:43-10:01Z on vmhost against the live Tortoise
+# server on m910q. Clause (4) is PROVED and the record is in `README.md`.
+# Written 2026-09-08 from 8.3d's `client-login.ps1` (the driver that actually
+# drove THIS client, as far as the realm list) with 8.5b's `/who` tail grafted
+# on -- which is why the header used to say NOT YET RUN.
+#
+# What those three runs turned from ASSUMED into MEASURED on this 1.18.1 client:
+#
+#  * there is NO realm-selection dialog and NO language panel. Login goes
+#    straight to the character screen, so `-RealmStyle` is WRONG here and was
+#    never used. The "Okay on the realm dialog" click at 0.616,0.788 lands on
+#    empty floor and is harmless; it is left in rather than deleted, because
+#    removing a step on one client's evidence is how the next fork loses an
+#    evening.
+#  * login -> character screen takes about 62 s; character screen -> standing in
+#    the world about 44 s.
+#  * ENTER on the character screen enters the world, as assumed.
+#  * the rename prompt appears at ENTER WORLD, not at the character screen --
+#    the 2.4.3 behaviour, not the 3.3.5a one -- and `-RenameTo` drove it.
+#  * `1 player total` IS this client's /who wording, the same string 8.5b
+#    measured on 2.4.3.
+#  * THE WORLD CHANNEL DROWNS THE ANSWER. 500 bots talk at about eight lines
+#    every twelve seconds, and the first run's three /who answers had all
+#    scrolled off before the shutter -- bot small-talk photographed exactly as a
+#    miss. `-LeaveChannels World` and the two-shot capture below are the fix,
+#    and both are proved by the second run.
+#
+# Read the log and the frames before believing any of it.
 #
 # Runs in the INTERACTIVE session (schtasks /it): a client started from an ssh
 # session lands in session 0, where there is no desktop, so it draws nothing and
@@ -99,7 +122,13 @@ param(
   # what a real miss looks like.
   [string[]]$Who = @(),
   # MEASURED on the server: 30-second cooldown. Never set this below 35.
-  [int]$WhoSeconds = 35
+  [int]$WhoSeconds = 35,
+  # Chat channels to leave before asking, by name or by number. MEASURED
+  # 2026-09-08 on the live Tortoise server: 500 playerbots talk in `[4. World]`
+  # at about eight lines every twelve seconds, and the first run's three /who
+  # answers had all scrolled off the chat frame before the shot was taken --
+  # bot small-talk photographed exactly as a miss would.
+  [string[]]$LeaveChannels = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -425,6 +454,25 @@ if ($EnterWorld) {
   #
   # THE 30-SECOND COOLDOWN IS THE REASON FOR THE WAIT: a second /who inside it
   # is dropped by the server with no reply, and that photographs as a miss.
+  # Leave the noisy channels first, one ENTER-command-ENTER each, and
+  # photograph the quiet frame so the next stage's evidence is not being read
+  # against an unknown amount of scrolling.
+  foreach ($chan in $LeaveChannels) {
+    Raise
+    [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+    Start-Sleep -Milliseconds 700
+    [System.Windows.Forms.SendKeys]::SendWait("/leave $chan")
+    Start-Sleep -Milliseconds 500
+    [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+    Say "left channel $chan"
+    Start-Sleep -Seconds 2
+  }
+  if ($LeaveChannels.Count) {
+    Start-Sleep -Seconds 6
+    Raise
+    Shoot "$Label-3d-channels-left"
+  }
+
   $names = @($Who) -split ',' | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
   Say "who-list names: $($names -join ' | ') (>= $WhoSeconds s apart, server cooldown is 30 s)"
   $n = 0
@@ -442,9 +490,17 @@ if ($EnterWorld) {
     Shoot ("{0}-who{1:d2}-{2}-typed" -f $Label, $n, $name)
     [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
     Say "asked /who $name"
-    Start-Sleep -Seconds 12
+    # TWO shots, at 4 s and again at 12 s. The answer arrives within a second or
+    # two and anything still talking pushes it up the frame, so the early one is
+    # the evidence and the late one is the control: an answer in the early frame
+    # and none in the late one is the chat scrolling, not the server refusing --
+    # which is exactly the pair the first run did not have.
+    Start-Sleep -Seconds 4
     Raise
     Shoot ("{0}-who{1:d2}-{2}" -f $Label, $n, $name)
+    Start-Sleep -Seconds 8
+    Raise
+    Shoot ("{0}-who{1:d2}-{2}-late" -f $Label, $n, $name)
   }
 }
 
