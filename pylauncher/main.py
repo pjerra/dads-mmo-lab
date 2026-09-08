@@ -191,20 +191,25 @@ def build_window() -> object:
 
         Same reason as that function: a `QThread` destroyed while running ABORTS
         the process (0xC0000409, verified), so the view's own `shutdown()` and
-        its console panel's stop+join have to happen BEFORE the widget leaves
+        its log panels' stop+join have to happen BEFORE the widget leaves
         the tab bar. The three registries are cleaned out with it, because a
         stale entry in any of them is what `_stop_background_threads()` would
         later call `shutdown()`/`wait()` on at exit.
         """
         view = controllers.pop(key)
         view.shutdown()
-        panel = view.console_log
-        panel.stop()
-        panel.wait(5000)
+        # EVERY panel the view owns, not the console one by name. It grew a
+        # second (the rebuild's) on 2026-09-08, and a panel this loop cannot see
+        # is a QThread nobody joins - the abort this function exists to prevent.
+        # `log_panels()` is the view's own list, so a third is picked up here
+        # without an edit.
+        for panel in view.log_panels():
+            panel.stop()
+            panel.wait(5000)
+            if panel in panels:
+                panels.remove(panel)
         if view in controller_views:
             controller_views.remove(view)
-        if panel in panels:
-            panels.remove(panel)
         index = tabs.indexOf(view)
         if index != -1:
             tabs.removeTab(index)
@@ -331,7 +336,7 @@ def build_window() -> object:
         )
         controllers[key] = view
         controller_views.append(view)
-        panels.append(view.console_log)
+        panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,

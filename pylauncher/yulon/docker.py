@@ -699,7 +699,61 @@ def volume_exists(name: str, *, wsl_distro: str | None = None) -> bool:
     raise DockerCommandError(f"docker volume inspect {name} exited {proc.returncode}: {said}")
 
 
-def start_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
+def staged_up_argv(spec: ContainerSpec, *, force_recreate: bool = False) -> list[str]:
+    """The argv of the one `compose up` this app runs, with and without the rebuild's force.
+
+    One builder for both spellings, so the service selection and `--no-deps`
+    cannot be respelled a second, wrong way — the discipline
+    `build_staged()`'s docstring holds for the `-f` set, applied to the other
+    command that must never select the one-shot import.
+
+    `force_recreate` is the rebuild's, and only the rebuild's. Without it
+    compose decides for itself whether a container needs replacing, and what it
+    was measured to decide on (`start_staged()` below, Docker 29.1.3) is
+    "a service whose CONFIGURATION changed". A rebuild changes neither the
+    compose files nor the image TAG — `composegen.image_tag()` is derived from
+    the folder — only the image the tag points at, and nothing in this
+    repository records what compose does with that. So the rebuild asks for the
+    replacement outright rather than hoping: the failure mode of hoping is an
+    hour of correct compiler output followed by the old binary still running,
+    which is the exact report this control exists to answer.
+    """
+    argv = ["compose", "up", "-d"]
+    if force_recreate:
+        argv.append("--force-recreate")
+    return [*argv, "--no-deps", *spec.compose_services()]
+
+
+def recreate_argv(spec: ContainerSpec) -> list[str]:
+    """`staged_up_argv()` as the rebuild spells it — the name a test can assert on."""
+    return staged_up_argv(spec, force_recreate=True)
+
+
+def recreate_staged(
+    spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None
+) -> bool:
+    """Replace this install's long-running containers from the images on disk now.
+
+    `start_staged()` with the force, under a name that says what the caller
+    wants: after a rebuild the point is not "make sure it is up" — it very
+    probably already is — but "stop running the binary that was there before".
+    Everything else is that function's, including the check that the named
+    services really are running afterwards.
+
+    The named volumes are untouched: this replaces containers, not data. That
+    is the same guarantee `start_staged()` already relies on every time compose
+    recreates a service whose configuration changed.
+    """
+    return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
+
+
+def start_staged(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    force_recreate: bool = False,
+) -> bool:
     """Start this install's long-running services, and only those.
 
     `docker compose up -d` with no arguments starts every service that has no
@@ -761,9 +815,9 @@ def start_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | Non
         DockerCommandError: compose failed, or a named service is not running
             once it returned.
     """
-    services = spec.compose_services()
-    logger.info(f"start_staged(): `compose up -d --no-deps {' '.join(services)}` in {server_dir}")
-    _run(["compose", "up", "-d", "--no-deps", *services], cwd=server_dir, wsl_distro=wsl_distro)
+    argv = staged_up_argv(spec, force_recreate=force_recreate)
+    logger.info(f"start_staged(): `{' '.join(argv)}` in {server_dir}")
+    _run(argv, cwd=server_dir, wsl_distro=wsl_distro)
     listed = _status_safe(wsl_distro=wsl_distro)
     if listed is None:
         logger.warning("start_staged(): could not confirm what is running; taking compose's word")

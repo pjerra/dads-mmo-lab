@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -26,6 +27,7 @@ from yulon import (
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -547,24 +549,6 @@ def test_modules_tab_lists_manifests_and_installs_selected(
     assert "C++ module" in view.module_report.toPlainText()
 
 
-def test_the_report_never_names_a_rebuild_control_because_the_app_has_none() -> None:
-    """FACT 4, 2026-09-07: every `QPushButton` in `yulon/ui/` was listed; none rebuilds.
-
-    `native.stage_build()` skips the compile whenever `built_images()` is true
-    and the image tag comes off the folder name, so installing a module cannot
-    even change the tag. The old line — "⚠ worldserver REBUILD required before
-    this takes effect" — reads as an instruction to press something, and there
-    is nothing to press. What is asserted here is the absence, because a
-    rewrite that reintroduced the imperative would still pass a test that only
-    checked for new words.
-    """
-    text = controller_view_module._format_report(
-        ApplyReport("install", "mod-solocraft", done=("clone",), rebuild_required=True)
-    )
-    assert "REBUILD required" not in text
-    assert "nothing in this app rebuilds" in text
-
-
 def test_the_report_says_which_kind_of_module_this_is() -> None:
     """21 of the 41 shipped manifests need no recompile; 20 do. Different sentences.
 
@@ -591,7 +575,7 @@ def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
     been installed minutes earlier and never built, and a draft that said "its
     code was compiled into the worldserver" asserted of both something that was
     false of both. The app cannot know what went into the last build — that is
-    the same ignorance `NO_REBUILD_CONTROL` records — so it says which case
+    the same ignorance `REBUILD_HISTORY` records — so it says which case
     would be bad rather than claiming to know which case this is.
     """
     text = controller_view_module._format_report(
@@ -625,7 +609,10 @@ def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
     assert "NOT applied" in text
     assert "1 file" in text
     assert "left to ac-db-import" not in text
-    assert "No button here applies that SQL" in text
+    assert "has not been applied" in text
+    assert controller_view_module.MODULE_SQL_BUTTON_LABEL in text, (
+        "the line tells the user to press something whose name is not on the tab: " f"{text!r}"
+    )
 
 
 def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
@@ -651,7 +638,10 @@ def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> N
     )
     assert "nothing to apply" not in text
     assert "NOT applied" in text
-    assert "No button here applies that SQL" in text
+    assert "has not been applied" in text
+    assert controller_view_module.MODULE_SQL_BUTTON_LABEL in text, (
+        "the line tells the user to press something whose name is not on the tab: " f"{text!r}"
+    )
 
 
 def _select_module(view: ControllerView, item_id: str) -> None:
@@ -4239,3 +4229,323 @@ def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
     """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
     view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
     assert view.uninstall_button is None
+
+
+# -- the rebuild control (the action `_format_report` has always named) --------
+
+
+def _rebuild_services(
+    ps: _Ps, tmp_path: Path, lines: Sequence[str] = ("--- build", "done")
+) -> tuple[ControllerServices, list[object]]:
+    """Services whose rebuild seam records that it was asked, and what with.
+
+    A list of the cancel events it was handed, so "was it started?" and "was it
+    given a way to stop?" are two separate assertions rather than one flag.
+    """
+    started: list[object] = []
+    services = _services(ps, tmp_path, [])
+
+    def rebuild(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.rebuild = rebuild
+    return services, started
+
+
+def test_the_modules_tab_offers_a_rebuild_beside_the_sentence_that_demands_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Until 2026-09-08 a grep for a rebuild button across `yulon/ui/` found NOTHING.
+
+    `_format_report` has always printed "worldserver REBUILD required before
+    this takes effect" — for 20 of the 41 shipped manifests, every one of them a
+    `module` — naming an action the app did not have. The button lives on this
+    tab because that is where the sentence is printed; a control the user has to
+    go looking for on another tab is most of the way back to not having one.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert "ebuild" in view.rebuild_button.text()
+
+
+def test_declining_the_rebuild_confirmation_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half a warning label could not have: the user says no and nothing runs.
+
+    `conftest._no_modal_dialogs` answers every `question()` with No, so this is
+    also what every other test in this file asserts implicitly whenever it
+    builds a view. Asserted three ways, because "the seam was not called" alone
+    would be just as true of a button that is broken: the question really was
+    asked, nothing was started, and the panel is not left claiming a job.
+    """
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert started == [], "declined, and the rebuild ran anyway"
+    assert asked, "the user was never asked"
+    assert str(tmp_path) in asked[0], "the question did not say which install it is about"
+    assert view.rebuild_log.running is False
+
+
+def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Requirement 5: what a person watches is a panel with the engine's own lines in it.
+
+    A `QPlainTextEdit` that says "rebuilding…" and then nothing for an hour is
+    indistinguishable from a hang, which is the state this app has already put a
+    user in once. `LogPanel` is the widget that solves it — timestamped lines, a
+    ticking elapsed field beside a Stop button — and it is reused rather than
+    respelled.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started = _rebuild_services(ps, tmp_path, lines=("--- build", "compiling"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    # The panel's lines cross from its worker thread by a QUEUED connection, so
+    # the thread ending is not the same as the text having arrived; `pump_until`
+    # is what makes the difference, and it reports an expiry rather than
+    # returning silently on the deadline.
+    pump_until(
+        lambda: "compiling" in view.rebuild_log.text(),
+        "the rebuild's output reached the panel",
+    )
+    assert len(started) == 1, started
+    assert started[0] is not None, "the panel's Stop button has nothing to set"
+    text = view.rebuild_log.text()
+    assert "--- build" in text and "compiling" in text, text
+
+
+def test_the_rebuild_confirmation_offers_yes_and_no_and_defaults_to_refusing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirm whose default is Yes is a notice with extra steps.
+
+    Neither the buttons nor the default is observable from the outcome, so this
+    is the one place the call's ARGUMENTS are the subject. An hour of compiling
+    and a server going down is not something Enter should be able to start.
+    """
+    calls: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        calls.append(a)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, _ = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.rebuild_server()
+
+    buttons, default = calls[0][-2], calls[0][-1]
+    yes = controller_view_module.QMessageBox.StandardButton.Yes
+    no = controller_view_module.QMessageBox.StandardButton.No
+    assert buttons == yes | no
+    assert default is no, "Enter would start an hour of compiling"
+
+
+def test_a_game_with_no_rebuild_wiring_greys_the_button_instead_of_failing_on_click(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.rebuild` is None when nothing wired one; the tab says so up front.
+
+    The same rule the console tab applies to a missing pty and the catalog tile
+    to an unsupported platform (roadmap 6.1): refusing on click and printing the
+    error afterwards is not the same as saying so before it is pressed.
+    """
+    services = _services(ps, tmp_path, [])
+    services.rebuild = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_button.isEnabled() is False
+    assert view.rebuild_server() is False
+
+
+def test_the_rebuild_panel_is_joined_at_shutdown_like_every_other_worker(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A `QThread` destroyed while running ABORTS the process (0xC0000409, verified).
+
+    Every LogPanel this view owns has to be reachable from the exit path, and
+    the view grew a second one with this feature. `log_panels()` is what
+    `main.py` walks, so a third panel added later is registered by existing
+    code rather than by remembering to edit two files.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert set(view.log_panels()) == {view.console_log, view.rebuild_log}
+    view.shutdown()
+    assert view.rebuild_log.running is False
+
+
+def test_a_server_adopted_from_wsl_is_refused_a_rebuild_by_name(tmp_path: Path) -> None:
+    """The wiring's own refusal, and the one this app is least able to notice going wrong.
+
+    `native.Seams` addresses the LOCAL daemon: four of its five 7.3 primitives
+    take a `wsl_distro` the field types do not carry, and its own docstring
+    records that a repair reaching a stage on an adopted install "would hand
+    these seams a container living on another daemon, and the erasure would then
+    send all of them to the wrong one silently". A rebuild is exactly that
+    repair. So it is refused in the wiring, where the distro is known, rather
+    than left to build images on the Windows-local daemon and then fail to find
+    containers that live inside the distro.
+    """
+    services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu-22.04")
+    assert services.rebuild is not None
+    with pytest.raises(InstallerError) as raised:
+        list(services.rebuild(None))
+    message = str(raised.value)
+    assert "Ubuntu-22.04" in message
+    assert "Nothing was started" in message
+
+
+def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> None:
+    """Every tab this app can open offers the control, not just the one with modules.
+
+    A CMaNGOS install has no manifest store and so never prints the REBUILD
+    sentence, but its worldserver is compiled from the same kind of checkout and
+    its users patch it the same way. Wiring the seam in `_assemble()` — the
+    shared half — is what makes that true by construction rather than by
+    remembering it four times.
+    """
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.rebuild is not None, entry.id
+
+
+def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence and the control, asserted against each other rather than separately.
+
+    "worldserver REBUILD required before this takes effect" was printed for 20
+    of the 41 shipped manifests while a grep for a rebuild button across
+    `yulon/ui/` returned nothing. Two tests — one that the sentence appears and
+    one that a button exists — would both have been green with the sentence
+    pointing at a control on another tab, or at one renamed since. This reads
+    the label off the widget and looks for it in the report the user is shown.
+    """
+    # The asker is injected for the reason `test_modules_tab_lists_manifests_and
+    # _installs_selected` injects it: `mod-ah-bot` is one of the two manifests that
+    # HAS a question, and with the real one this test sits on a modal dialog for
+    # ever. It was written on a branch whose base predates that seam, and this is
+    # what it did when it was first run on a tree that has it.
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) == "mod-ah-bot":
+            view.module_list.setCurrentRow(i)
+            break
+    view._module_action("install")
+
+    report = view.module_report.toPlainText()
+    assert "REBUILD required" in report
+    assert view.rebuild_button.text() in report, (
+        "the report tells the user to press something whose name is not on this tab: " f"{report!r}"
+    )
+
+
+def test_a_running_rebuild_locks_the_server_tab_and_unlocks_it_afterwards(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start, Stop and Remove act on the containers a rebuild is replacing.
+
+    Both directions, because either alone is a hole: a Stop pressed mid-rebuild
+    fights the recreate, and a Rebuild pressed during the 10-30 minute import
+    (which `busy_reason()` records cannot be stopped at all) tears down the
+    database it is writing into. The unlock is asserted after a job that FAILS,
+    which is the shape a hand-placed `_set_busy(False)` misses.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    def refuses(cancel: object = None) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("that folder has no install record")
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = refuses
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    assert view.start_button.isEnabled()
+    assert view.rebuild_server() is True
+    pump_until(lambda: bool(failures), "the failed rebuild reported itself")
+
+    assert view.start_button.isEnabled() is False
+    assert view.stop_button.isEnabled() is False
+    assert "no install record" in failures[0], failures
+    # The panel's own header is one wrapped label; the refusal also has to reach
+    # the channel `main.py` writes to the app log.
+    assert "FAILED" in view.rebuild_log.status_text()
+
+    # And the lock comes off — including for the buttons `_set_busy` re-enables
+    # rather than the ones it left alone.
+    view.refresh_status()
+    assert view.rebuild_button.isEnabled() is True
+    assert view.repair_button.isEnabled() is True
+
+
+def test_a_rebuild_is_refused_while_another_action_of_this_tab_is_running(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror of the lock above, and the one that protects a running import."""
+    answered: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        answered.append(title)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._set_busy(True)
+
+    assert view.rebuild_server() is False
+    assert started == [], "a rebuild started on top of another action"
+    assert answered == [], "the confirmation was shown for a press that could not run"
+    assert view.rebuild_button.isEnabled() is False
+
+
+def test_a_job_ending_never_hands_back_a_button_the_game_cannot_use(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Unlocking must not re-enable a control a standing fact disabled.
+
+    Exactly the bug `catalog_view._set_buttons_enabled()` carries its own
+    paragraph about: that pass knows only whether a job is running, while
+    "this game has no rebuild wiring" is a fact about the TAB. A blanket
+    `setEnabled(True)` on the way out survives every other test in this file —
+    measured as a surviving mutation on 2026-09-08 — because nothing else ever
+    unlocks a tab whose rebuild is None.
+    """
+    services = _services(ps, tmp_path, [])
+    services.rebuild = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_button.isEnabled() is False
+
+    view._set_busy(True)
+    view._set_busy(False)
+
+    assert (
+        view.rebuild_button.isEnabled() is False
+    ), "a job ending handed back a button whose action does not exist"

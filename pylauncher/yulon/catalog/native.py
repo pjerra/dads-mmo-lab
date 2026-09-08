@@ -78,6 +78,7 @@ from yulon.catalog.installer import (
     InstallOptions,
     UnsupportedPlatformError,
     docker_unavailable,
+    generated_compose_files,
     provision_lines,
     unsupported_platform_message,
 )
@@ -162,6 +163,49 @@ So each clause is now a claim something is responsible for keeping:
   `curl --continue-at -` plus its data-version comparison;
 * *the database and server are started and waited for* — the three
   `recorded=False` stages, which is why a resume always ends with a live server.
+"""
+
+REBUILD_OPENING_NOTE = (
+    "You can stop this at any time; stopping before the containers are replaced leaves the "
+    "server you have now exactly as it is. This does three things and nothing else: it "
+    "compiles the server again from the source and modules in the folder below, it replaces "
+    "the running containers so the new build is what starts, and it waits for the server to "
+    "come back up. It does not fetch anything, does not rewrite your settings, and does not "
+    "touch your database — your characters, accounts and the module SQL already applied are "
+    "not read or written by this. The server is DOWN from the moment the containers are "
+    "replaced until it reports ready."
+)
+"""What a rebuild costs and what it leaves alone, said before the first stage.
+
+`OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
+because almost none of that one is true here: a rebuild clones nothing,
+generates no compose files, downloads nothing and runs no import. Its own
+docstring records what it cost to have one sentence claim more than the stages
+keep, so the rule is the same — every clause names something
+`rebuild_stages()` is responsible for, and the tuple is three stages long
+precisely so the list stays checkable.
+
+The downtime clause is the one a user is most likely to be surprised by and is
+the reason it is stated twice: here, and in `rebuild_confirmation()` before
+they agree to it.
+"""
+
+REBUILD_CLOSING_NOTE = (
+    "The server is running the build that was just made, with every module in this folder "
+    "compiled into it. This rebuild ran no SQL: if a module you added still does not seem to "
+    "be there in-game, check the worldserver log for its own startup line and for database "
+    "updates it applied — that part is the server's own doing, not this button's."
+)
+"""The last thing said before the closing line, and the honest half of it.
+
+The reported behaviour is that AzerothCore's updater applies a module's SQL for
+the modules in `AC_MODULES_LIST`, so a module compiled in by this rebuild is
+covered from this build onward. NOTHING in this repository measures that, and
+this sentence therefore does not claim it: it says what the rebuild did (the
+binary), says what it did not do (any SQL), and points at the one place that
+can answer the rest. A closing line that promised the module was "fully
+installed" would be repeating, one layer up, the mistake this whole feature
+exists to fix — telling a user something took effect when nobody checked.
 """
 
 BUILD_CANCEL_NOTE = (
@@ -599,6 +643,21 @@ class StageContext:
     state: InstallState
     cancel: threading.Event | None
     secrets: Secrets
+    force_build: bool = False
+    """The press was a REBUILD, so the build stage's skip rule does not apply.
+
+    On the context rather than on the installer because it is a fact about
+    THIS press, not about this install: the same engine object serves Install
+    and Rebuild, and a flag on the object would outlive the press that set it.
+
+    It is read in exactly two places — `build_would_be_skipped()` and
+    `stage_build()` — and those two are one rule asked from two sides, which is
+    why the six-state test in `test_spine.py` drives them together and
+    `test_rebuild.py` drives all six again with this set. Anything else that
+    learns to read it has to join that pairing or the prediction and the
+    outcome can disagree, which is a refusal firing on a press that is about to
+    compile.
+    """
 
 
 @dataclass(frozen=True)
@@ -1238,6 +1297,16 @@ class Seams:
     container_project: Callable[[str], str | None] = docker.container_project
     start_db: Callable[[docker.ContainerSpec, Path], None] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
+    recreate: Callable[[docker.ContainerSpec, Path], bool] = docker.recreate_staged
+    """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
+
+    A separate field rather than a keyword on `start`, because the two are
+    different requests and a test that could not tell them apart could not see
+    the bug: a rebuild that recreated nothing would leave the pre-rebuild
+    binary running behind an hour of perfectly correct compiler output.
+    `docker.staged_up_argv()` holds why the force is asked for rather than left
+    to compose.
+    """
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     world_output: Callable[[docker.ContainerSpec], WorldOutput] = _world_output
@@ -1487,26 +1556,75 @@ class StagedInstaller:
             secrets=self.resolve_secrets(server_dir),
         )
 
+        # The failure record for anything in here is written by `_staged()`,
+        # which is the only frame holding the state each finished stage
+        # produced; see its docstring for what reading a stale copy cost.
+        state = yield from self._staged(self.stages(), ctx)
+        # OUTSIDE the staged loop, and after the last stage, on purpose. Outside,
+        # because everything in there is a reason to fail the install and this
+        # is not one — a realm row that could not be written is a sentence, not
+        # a failed install (`_advertise_realm()` raises nothing at all), and it
+        # is deliberately not a `Stage` for that reason. After,
+        # because `ready` waits for an auth log line that is `INSTALL_REALM_HOST`
+        # plus the world port, so advertising the LAN address any earlier would
+        # make a working server time out. Before the closing line, because that
+        # line is asserted to be LAST.
+        yield from self._advertise_realm(replace(ctx, state=state))
+        # The bash path logs `install of <id> finished` (installer.py); this path
+        # logged nothing at the end, so the only sign a run had ended was the
+        # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
+        # read a seven-minute readiness wait as "the install was not remembered".
+        logger.info(f"install of {self.entry.id} finished")
+        self._clear_error(server_dir, state)
+        yield f"{self.entry.name} is installed and running in {server_dir}"
+
+    def _staged(
+        self, stages: Sequence[Stage], ctx: StageContext
+    ) -> Generator[str, None, InstallState]:
+        """Run `stages` in order, saying where the user is. The ONE progress reporter.
+
+        Extracted from `run()` on 2026-09-08 so the rebuild reports through it
+        rather than beside it. That is not tidiness: `^--- <name>` is what gate
+        scripts, log captures and the interrupted-import watchers match on, and
+        a second loop printing its own nearly-identical marker is a second place
+        for that format to drift. One run WAS missed on 2026-09-03 by a watcher
+        that could not see the stage it was armed for.
+
+        The percentage is of STAGES BEHIND YOU, not of work done: the twelve are
+        wildly unequal -- `conf` is seconds and `build` is an hour -- so this
+        says "9 of 12 started", which is true, rather than implying three
+        quarters of the time is gone, which it is not. A resumed install counts
+        the same way, because the stages it skips are done. A rebuild's three
+        count the same way again, and the denominator is ITS length: "Step 1 of
+        3" over a rebuild is honest, where "Step 4 of 9" would describe an
+        install that is not happening.
+
+        `ctx.state` threads through the loop and is RETURNED, because
+        `_run_one()` writes the state file and the caller needs what was written
+        -- `run()` clears the error record against it and advertises the realm
+        with it.
+
+        **The failure record is written HERE, and that is not a tidy-up.** It
+        used to be a `try` in `run()` around this loop, reading the `state`
+        variable the loop assigned on each pass. Moving the loop into a function
+        moved that variable with it, and the caller's copy stayed at the state
+        the run STARTED with -- so a stage-three failure wrote a state file
+        whose `completed` was empty, throwing away the record of the two stages
+        that had finished and turning the next press into a re-clone. Caught by
+        `test_a_moved_upstream_refuses_by_file_and_line_before_anything_is_built`
+        during the extraction, 2026-09-08. The record belongs to whoever holds
+        the current state, and after this change that is exactly one function.
+        """
+        state = ctx.state
         try:
             with self._held_awake() as note:
                 if note:
                     yield note
-                stages = self.stages()
                 for number, stage in enumerate(stages, start=1):
-                    self._check_cancel(cancel)
+                    self._check_cancel(ctx.cancel)
                     # WHERE THE USER IS, on its own line and never folded into
-                    # the `--- <name>` marker. That marker is what gate scripts,
-                    # log captures and the interrupted-import watchers match on
-                    # (`^--- import`), and one run WAS missed on 2026-09-03 by a
-                    # watcher that could not see the stage it was armed for. A
-                    # format everything greps is not a place to add fields.
-                    #
-                    # The percentage is of STAGES BEHIND YOU, not of work done:
-                    # the twelve are wildly unequal -- `conf` is seconds and
-                    # `build` is an hour -- so this says "9 of 12 started",
-                    # which is true, rather than implying three quarters of the
-                    # time is gone, which it is not. A resumed install counts
-                    # the same way, because the stages it skips are done.
+                    # the `--- <name>` marker. A format everything greps is not
+                    # a place to add fields.
                     yield (
                         f"Step {number} of {len(stages)} "
                         f"({number * 100 // len(stages)}%): {stage.name}"
@@ -1525,29 +1643,194 @@ class StagedInstaller:
             # Not quite every: measured m910q 2026-09-05, a `clone-core` failure
             # has no file to write into either. That stage clones INTO the
             # server dir, and `git.py`'s two seams empty a destination with no
-            # `.git` before cloning, so the claim written twenty lines above is
-            # gone by the time this runs and the failure sentence is dropped on
-            # the floor. Pinned in
+            # `.git` before cloning, so the claim `run()` wrote before stage one
+            # is gone by the time this runs and the failure sentence is dropped
+            # on the floor. Pinned in
             # `test_the_clone_that_fills_the_server_dir_takes_the_ownership_record_with_it`;
             # closing it means changing the clone, not this line.
-            self._record_error(server_dir, state, str(exc))
+            self._record_error(ctx.server_dir, state, str(exc))
             raise
-        # OUTSIDE the `try`, and after the last stage, on purpose. Outside,
-        # because everything in there is a reason to fail the install and this
-        # is not one — a realm row that could not be written is a sentence, not
-        # a failed install (`_advertise_realm()` raises nothing at all). After,
-        # because `ready` waits for an auth log line that is `INSTALL_REALM_HOST`
-        # plus the world port, so advertising the LAN address any earlier would
-        # make a working server time out. Before the closing line, because that
-        # line is asserted to be LAST.
-        yield from self._advertise_realm(replace(ctx, state=state))
-        # The bash path logs `install of <id> finished` (installer.py); this path
-        # logged nothing at the end, so the only sign a run had ended was the
-        # compose-project pin - which is how a tester on yulon-win11 (2026-08-28)
-        # read a seven-minute readiness wait as "the install was not remembered".
-        logger.info(f"install of {self.entry.id} finished")
+        return state
+
+    def stage_named(self, name: str) -> Stage:
+        """This family's stage called `name`, or a loud failure.
+
+        `rebuild_stages()` selects by name out of the family's own tuple rather
+        than naming methods, so a family that renames or drops `build` gets an
+        error here instead of a rebuild that quietly runs two stages and reports
+        success. `Stage.name` is already load-bearing -- it is what the state
+        file records -- so selecting on it adds no new coupling.
+        """
+        for stage in self.stages():
+            if stage.name == name:
+                return stage
+        raise InstallerError(
+            f"{self.entry.name} has no `{name}` stage, so this app cannot rebuild it. "
+            f"That is a bug in this build, not something you did. Nothing was started."
+        )
+
+    def rebuild_stages(self) -> tuple[Stage, ...]:
+        """What a rebuild runs: compile, replace the containers, wait for the server.
+
+        Deliberately NOT the install's tuple with the finished stages skipped.
+        A rebuild is a different act with a different failure surface, and three
+        of the install's stages would be actively wrong to re-enter here:
+        `clone-*` fetches, `generate-compose` rewrites files a running server is
+        using, and `import` reaches for a database that has a player's
+        characters in it. None of the three has anything to do with "the
+        worldserver does not contain the module I just installed".
+
+        `recreate` is this tuple's own stage rather than the install's `up`,
+        and `docker.staged_up_argv()` holds the argument: `up -d` was measured
+        to replace a container whose CONFIGURATION changed, and a rebuild
+        changes neither the compose files nor the image tag. Never recorded --
+        `up` is not either, and a rebuild must not be able to leave a state file
+        claiming a stage the install's own resume would then skip.
+        """
+        return (
+            self.stage_named("build"),
+            Stage("recreate", self.stage_recreate, recorded=False),
+            self.stage_named("ready"),
+        )
+
+    def stage_recreate(self, ctx: StageContext) -> Iterator[str]:
+        """Replace the long-running containers so the binary just built is the one running.
+
+        The stage the whole feature turns on. Everything above it can be
+        perfect -- an hour of compiler output, four fresh images -- and if the
+        containers created before the rebuild keep running, the user logs back
+        in to exactly what they had, which is the report this control exists to
+        answer.
+        """
+        yield "Replacing the running containers so the new build is what starts."
+        try:
+            self._seams.recreate(self.entry.container_spec(), ctx.server_dir)
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The server was rebuilt, but its containers could not be replaced, so the "
+                f"old build is still what is running: {exc}"
+            ) from exc
+        yield "The containers were replaced."
+
+    def rebuild(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Recompile this install and restart it on what was compiled. Yields output live.
+
+        The action `apply.ApplyReport.rebuild_required` has named since it was
+        written -- "worldserver REBUILD required before this takes effect",
+        printed by the Modules tab after 20 of the 41 shipped manifests -- and
+        which nothing in `yulon/ui/` offered until 2026-09-08.
+
+        **Why re-pressing Install was never it.** `stage_build()` skips the
+        compile when the state file records a build and the daemon holds every
+        image, and `composegen.image_tag()` is derived from the FOLDER, so
+        adding a module changes no tag and the images all still exist. Measured
+        through this app's own predicates on yulon-ubuntu: `state.has("build")`
+        True, `built_images()` True, `build_would_be_skipped()` True. A user who
+        pressed Install again got a few seconds of output and no change, which
+        is very probably what "i used the this thing to rebuild the server but
+        nothing changes when i log back in" (2026-09-07) is a report of.
+
+        **What it deliberately does not do: SQL.** One press does the compile
+        and the restart, and touches no database. Three reasons, in the order
+        they decided it:
+
+        1. a database write behind a confirmation whose entire subject is a
+           compile is a write nobody agreed to, and it would leave no way to ask
+           for the compile alone -- which is what somebody re-testing a build
+           wants;
+        2. the databases here hold a player's characters. Every other path in
+           this app that writes to them (`repair_import`, `restore`) is a
+           separate, separately-confirmed action, and one of them arms on two
+           presses;
+        3. the reported reason it would be unnecessary is CARRIED, not
+           verified here: AzerothCore applies a module's SQL through its own
+           updater for the modules in `AC_MODULES_LIST`, which CMake bakes in
+           at configure time, so a module compiled in by this rebuild is in
+           that list from this build onward. Nothing in this repository
+           measures that, and nothing in this function depends on it -- the
+           closing line tells the user to look rather than promising it
+           happened.
+
+        Raises:
+            InstallerError: any refusal (see `_refuse_unless_rebuildable`), any
+                stage that failed, or a cancel. The message is the sentence a
+                user reads.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        state = self._refuse_unless_rebuildable(server_dir)
+        yield f"Rebuilding {self.entry.name} in {server_dir}"
+        yield REBUILD_OPENING_NOTE
+        self._check_cancel(cancel)
+        ctx = StageContext(
+            server_dir=server_dir,
+            client_dir=opts.client_dir,
+            state=state,
+            cancel=cancel,
+            secrets=self.resolve_secrets(server_dir),
+            force_build=True,
+        )
+        state = yield from self._staged(self.rebuild_stages(), ctx)
+        logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
-        yield f"{self.entry.name} is installed and running in {server_dir}"
+        yield REBUILD_CLOSING_NOTE
+        yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
+
+    def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
+        """The two folders this button cannot help, refused by name before anything runs.
+
+        **No record.** A rebuild needs a state file for the same reason the
+        install's resume does -- it is this app's claim on the folder -- and its
+        absence is the honest signal for "somebody else built this". Adopting a
+        server through "Use existing…" never writes one (`attach_existing()`
+        checks for a compose file and stops there), and neither does any other
+        tool.
+
+        **A compose file this app did not write.** The `build:` blocks live in
+        `docker-compose.build.yml` and compose never auto-loads it, so without
+        that file a `docker compose build` in this folder builds NOTHING and
+        exits 0 -- and this app cannot put one there, because
+        `composegen.write_plan()` refuses to overwrite a compose file it did not
+        write rather than orphan somebody's character volumes. So the honest
+        answer to "can this button rebuild an adopted DML-built install?" is no,
+        and it says so with the reason rather than failing later with a build
+        that succeeded and changed nothing.
+
+        Both refusals are made BEFORE the confirmation's cost is spent and
+        before any container is touched, and both name the folder: a user with
+        two installs needs to know which one was refused.
+
+        Returns:
+            The install's recorded state, for the context the stages run under.
+        """
+        state = read_state(server_dir, valid=self.stage_names())
+        if state is None:
+            raise InstallerError(
+                f"{server_dir} has no {STATE_FILE}, so Yu'lon has no record of building a "
+                f"server there and cannot rebuild one. Nothing was started. A server this "
+                f'app installed carries that file; one adopted through "Use existing…", or '
+                f"built by another launcher, does not — rebuild that one the way it was "
+                f"built."
+            )
+        ours = generated_compose_files(server_dir)
+        missing = [name for name in composegen.COMPOSE_FILES if name not in ours]
+        if missing:
+            raise InstallerError(
+                f"{server_dir} is missing the compose files Yu'lon builds with, or they were "
+                f"not written by Yu'lon: {', '.join(missing)}. Nothing was started. "
+                f"{composegen.BUILD_FILE} is the only file that carries the build "
+                f"instructions — compose never loads it on its own, so without it "
+                f"`docker compose build` here builds nothing and reports success — and this "
+                f"app will not overwrite a compose file it did not write, because doing that "
+                f"can orphan the volumes your characters are in. A server built by another "
+                f"launcher has to be rebuilt by that launcher."
+            )
+        return state
 
     def _claim_before_writing(
         self, server_dir: Path, state: InstallState, started_empty: bool
@@ -2365,7 +2648,15 @@ class StagedInstaller:
         Asked one stage earlier by `CmangosInstaller._patch_sources()`, which
         refuses to edit a source tree whose compiled form this press is not
         going to rebuild.
+
+        `force_build` short-circuits ahead of the daemon question on purpose:
+        a forced press compiles whatever the daemon says, so asking would be a
+        `docker image inspect` per image whose answer changes nothing — and, on
+        a daemon that will not answer, a warning about an unknown that is not
+        this press's problem.
         """
+        if ctx.force_build:
+            return False
         return ctx.state.has("build") and self.built_images(ctx) is True
 
     def stage_build(self, ctx: StageContext) -> Iterator[str]:
@@ -2383,16 +2674,44 @@ class StagedInstaller:
         every resume re-ran the compile (measured 2026-08-24; see
         `docker.images_built()`).
 
+        `ctx.force_build` is the rebuild press, and it takes the whole skip
+        decision out of play rather than adding a fourth case to it: the daemon
+        is not asked (its answer changes nothing), the state file is not
+        consulted, and the reason is SAID — the panel is about to show an hour
+        of compiler output for a server that is installed and running, and
+        output like that with nothing above it explaining itself reads as a bug
+        rather than as the thing the user confirmed thirty seconds ago.
+
         The `BUILD_CANCEL_NOTE` this stage used to yield is gone from the body:
         the spine says a stage's cancel note right after `--- <name>` (A4).
         """
-        built = self.built_images(ctx)
-        if ctx.state.has("build") and built:
-            yield "The server is already built; skipping the compile."
-            return
-        if ctx.state.has("build") and built is None:
-            yield "Docker would not say whether this install is built, so it is being rebuilt."
-        yield "Building the server. This takes hours on a first install; the output below is live."
+        if ctx.force_build:
+            yield (
+                "This server is already built; a rebuild was asked for, so the compile runs "
+                "anyway. That is the whole point of the button — a module added after the "
+                "last build is only in the worldserver once it has been compiled in."
+            )
+        else:
+            built = self.built_images(ctx)
+            if ctx.state.has("build") and built:
+                yield "The server is already built; skipping the compile."
+                return
+            if ctx.state.has("build") and built is None:
+                yield (
+                    "Docker would not say whether this install is built, so it is being rebuilt."
+                )
+        # Two sentences for one action, because "on a first install" is the
+        # wrong half of the truth for the press that is deliberately rebuilding
+        # a finished one, and this feature is about not telling a user something
+        # that does not match what they just did.
+        yield (
+            "Building the server. The output below is live. "
+            + (
+                "This is the same compile an install does, and it takes as long."
+                if ctx.force_build
+                else "This takes hours on a first install."
+            )
+        )
         run = yield from self._pump(
             lambda sink: self._seams.build(
                 ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel

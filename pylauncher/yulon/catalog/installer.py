@@ -303,6 +303,79 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
     )
 
 
+MEASURED_BUILD_TIMES = (
+    "about 15 minutes on an Apple M4 Pro, 35-72 minutes on the Linux boxes this project is "
+    "usually built on, and 68 minutes on a Windows machine that gave Docker 11.7 GB and two "
+    "compiler jobs"
+)
+"""How long the compile took, on machines this project actually timed it on.
+
+Every number is a citation, and `test_rebuild.py` pins each one to the page it
+came from so a friendlier figure cannot be substituted quietly:
+
+* *35-72 minutes* — `pyplan/hunt-rounds.md`, the range across the boxes the
+  hunt rounds were planned around;
+* *68 minutes* — `pyplan/checklist.md`, the native-Windows gate of 2026-09-04,
+  which also records the Docker VM it was given (11.7 GB, 2 jobs) because the
+  number means nothing without it;
+* *15 minutes* — `pyplan/checklist.md`, the macOS gate of 2026-08-29 on an
+  Apple M4 Pro, 12 CPU, 25.7 GB.
+
+Deliberately not averaged into one number. The spread is a factor of five and
+it is explained by the machine, so a user reading this can place their own
+between the two ends; a single "about 45 minutes" would be a figure nobody
+measured, and would be wrong by half an hour in both directions.
+
+The ccache figure — a resume that recovered ~1315 of 1829 edges from the
+BuildKit cache mount and finished in 610.7 s (`pyplan/checklist.md`) — is
+deliberately NOT quoted as a rebuild time. It was measured on a resume after a
+mid-compile kill, the cache is evictable, and a confirmation that offered "or
+about ten minutes" would be read as the likely case rather than the lucky one.
+"""
+
+
+def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
+    """The question asked before a rebuild starts. Nothing here is invented.
+
+    A rebuild is the most expensive thing this app can be asked to do to an
+    install that is already working, so the question carries the three facts a
+    person needs in order to answer it, and each is a fact rather than a
+    reassurance:
+
+    * *how long* — `MEASURED_BUILD_TIMES`, quoted from this project's own gates
+      with the machines attached, because "this may take a while" is not
+      something anybody can plan an evening around;
+    * *what happens to the server* — it goes down when the containers are
+      replaced and comes back when it reports ready. Users are told this
+      BEFORE they agree, not in the log afterwards;
+    * *what saying no costs* — nothing at all, said in as many words. A
+      confirmation that does not say so is answered by the people who are
+      unsure, and the unsure ones are the ones who most need to be able to
+      decline.
+
+    It names the folder: two installs of the same game get identical container
+    names and near-identical tabs, and "which one is this about" is not a
+    question to leave to the tab title.
+
+    The sentence lives here rather than in the view for the reason every other
+    user sentence in this module does — `ui/` may not be the author of copy
+    that has to be tested, and this one has assertions on it in
+    `test_rebuild.py` that a Qt-less environment still runs.
+    """
+    return (
+        f"Rebuild {entry.name} in {server_dir}?\n\n"
+        f"This compiles the server again from the source and modules in that folder. It is "
+        f"the same compile an install does, and this project has timed it at "
+        f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
+        f"predict it better than that range does.\n\n"
+        f"Your server will be STOPPED and its containers replaced once the compile finishes, "
+        f"and it will be down until it reports ready. Your characters, accounts and databases "
+        f"are not touched.\n\n"
+        f"Say no and nothing happens at all — the server you have now keeps running, exactly "
+        f"as it is."
+    )
+
+
 def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     """What Stop actually did, what it did not, and which button to press next.
 
@@ -667,6 +740,22 @@ class InstallEngine(Protocol):
         cancel: threading.Event | None = None,
         ask: runner.Prompter | None = None,
     ) -> Iterator[str]: ...
+
+    def rebuild(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Recompile an install this app made and restart it on the result.
+
+    No `ask`: a rebuild provisions nothing, so there is no question for it to
+    forward. That is not an omission to be filled in later — a stage that turns
+    out to need an answer is a design failure to fix rather than a dialog to
+    add (`native.py`), and the two questions an install can raise are both
+    inside Docker provisioning, which a rebuild does not enter.
+    """
 
 
 def installer_for(

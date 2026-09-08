@@ -25,7 +25,7 @@ import getpass
 import logging
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from yulon import docker, platform
@@ -151,6 +151,63 @@ def installer_for_app(
         import_probe=probe,
         reset_unfinished=reset,
     )
+
+
+RebuildSource = Callable[[threading.Event | None], Iterator[str]]
+"""What a controller tab drives to rebuild its install: cancel in, lines out.
+
+Deliberately not the `InstallEngine` itself. The tab holds a server dir and a
+distro and nothing else; handing it an engine would make it responsible for
+`InstallOptions`, for the factory and for the WSL question below, none of which
+is a view's business (style-guide §3).
+"""
+
+
+def rebuild_for_app(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+) -> RebuildSource:
+    """The rebuild a controller tab presses, wired for the install at `server_dir`.
+
+    The engine is built PER PRESS, inside the generator, not here. Building it
+    eagerly would run `import_gate_for()` and construct four seams for every tab
+    the app opens, for a button most of them will never be pressed; building it
+    on the press also means a rebuild after a Docker reinstall gets a fresh
+    engine rather than one bound at startup.
+
+    **A server living inside a WSL distro is refused, and that refusal is this
+    function's whole reason for existing.** `native.Seams` addresses the local
+    daemon: its own docstring records that a repair reaching a stage on an
+    adopted install "would hand these seams a container living on another
+    daemon, and the erasure would then send all of them to the wrong one
+    silently". A rebuild is exactly such a repair. Left to run it would compile
+    four images on the Windows-local daemon, then ask that daemon to recreate
+    containers it has never heard of — the loud half — and the quiet half is
+    worse: the folder is reachable from Windows as `\\\\wsl.localhost\\...`, so
+    the build would very probably SUCCEED, spend an hour, and leave the distro's
+    server running exactly the binary it was running before. That is the user's
+    original complaint, reproduced by the fix for it.
+
+    Refused here rather than in the engine because this is where the distro is
+    known. `installer_for_app()` takes none and says why: an install creates the
+    server on whatever daemon this process reaches.
+    """
+
+    def rebuild(cancel: threading.Event | None = None) -> Iterator[str]:
+        if wsl_distro is not None:
+            raise InstallerError(
+                f"{entry.name} in {server_dir} was adopted from the WSL distro "
+                f"{wsl_distro}, and Yu'lon cannot rebuild a server that lives inside a "
+                f"distro: it would compile on Windows' own Docker and leave the server in "
+                f"{wsl_distro} running the build it already has. Nothing was started. "
+                f"Rebuild it from inside {wsl_distro}, where its Docker is."
+            )
+        engine = installer_for_app(entry)
+        yield from engine.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
+
+    return rebuild
 
 
 def _terminal_prompter(prompt: str) -> str:
