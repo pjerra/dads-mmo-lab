@@ -96,6 +96,32 @@ WORKDIR /src/_build
 # `ModuleNameToVariable()` upper-cases and replaces every non-alphanumeric with an
 # underscore, so `mod-playerbots` becomes `MODULE_MOD_PLAYERBOTS`, and a per-module value
 # beats the global default (CMakeLists.txt:459-464).
+# WHY THIS IMAGE CANNOT YET BE REBUILT ONTO THEIR CURRENT HEAD (measured on
+# m910q, 2026-09-08, three attempts).
+#
+# Their SOAP commit 3f9a062 -- the one that would turn wow-tortoise's operations
+# block from `attach` into a real command channel -- ships gsoap as a PREBUILT
+# static library, `dep/lib/gsoap/libgsoap++.a`, and `src/mangosd/CMakeLists.txt`
+# links that path directly. Two things follow, and both were measured:
+#
+#   1. The archive was compiled against glibc >= 2.38. Linking it here fails
+#      after ~39 minutes with hundreds of `undefined reference to 'strlcpy'`
+#      (glibc 2.38) and `'__isoc23_strtoul'` (the C23 ABI, same release). This
+#      image builds on ubuntu:22.04, which is glibc 2.35.
+#
+#   2. Building gsoap from the source beside it does NOT work either, which is
+#      the non-obvious half. `dep/include/gsoap/stdsoap2.h` is 2.8.125 and was
+#      added by that same commit; `dep/src/gsoap/stdsoap2.cpp` is 2.7.15 and was
+#      last touched by an unrelated one. Wiring the source in (add_subdirectory
+#      plus linking the target) applies cleanly and then fails in 29 seconds on
+#      `'struct soap_blist' has no member named 'ptr'`, `soap_dime_forward was
+#      not declared`, and a dozen more of the same shape: a 2.7 implementation
+#      against a 2.8 header.
+#
+# So the choice is theirs to make or ours to work around, and the workaround is
+# a base-image bump -- which swaps the compiler under a 2005-era codebase at the
+# same time, and is a decision rather than a fix. Left undone deliberately; the
+# stack on m910q still runs the image built from 7f2957e, which has no SOAP.
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
