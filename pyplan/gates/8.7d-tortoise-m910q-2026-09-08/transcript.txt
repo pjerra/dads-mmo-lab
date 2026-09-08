@@ -1,0 +1,176 @@
+########## ground
+[11:13:53Z] GROUND -- nothing below has run yet
+[11:13:53Z] tortoise-mangosd: status=running restarts=0
+[11:13:54Z] compose ps:
+NAME               IMAGE                                                 COMMAND                  SERVICE            CREATED        STATUS                   PORTS
+tortoise-db        mariadb:10.6                                          "docker-entrypoint.s…"   tortoise-db        12 hours ago   Up 3 minutes (healthy)   127.0.0.1:3306->3306/tcp
+tortoise-mangosd   yulon.local/cmangos-tortoise-server:native-58c6fd1c   "./mangosd"              tortoise-mangosd   7 hours ago    Up 3 minutes             0.0.0.0:8090->8090/tcp, [::]:8090->8090/tcp
+tortoise-realmd    yulon.local/cmangos-tortoise-server:native-58c6fd1c   "./realmd"               tortoise-realmd    7 hours ago    Up 3 minutes             0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+[11:13:54Z] etc/mangosd.conf sha256 = cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5; copy kept at mangosd.conf.before-87d
+[11:13:54Z]   conf now says: Perf.Enable = 1
+[11:13:54Z]   conf now says: Perf.ReportInterval = 600
+[11:13:54Z] store.game = wow-tortoise
+[11:13:54Z] applier    = yulon.controller_wow_tortoise.autoupdate.GuardedApplier
+[11:13:54Z] manifests  = ['perf-report', 'motd', 'xp-rates', 'all-stackables']
+[11:13:54Z] sql        = client=mariadb container=tortoise-db schemas={'auth': 'tw_logon', 'characters': 'tw_char', 'world': 'tw_world'}
+[11:13:54Z] updater settings: enabled=True declared=True path='/opt/tortoise/sql/database_updates/' folders={'auth': 'auth', 'characters': 'character', 'world': 'world'}
+[11:13:54Z] updater arming (through the app): enabled=True, outstanding by database: auth 0, characters 0, world 0  armed=False
+[11:13:54Z]   by hand: world/*.sql = 125 file(s); tw_world.migrations rows = ?
+[11:13:55Z]   by hand: character/*.sql = 1 file(s); tw_char.migrations rows = ?
+[11:13:55Z]   by hand: auth/*.sql = 0 file(s); tw_logon.migrations rows = ?
+2026-09-08 13:13:55 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:13:58Z] the running server, before anything: Performance report interval is 600
+[11:13:58Z] the tab lists 4 item(s); selected = "[mod] Performance Stats — Turn on the worldserver's own timing instrumentation, so `.perf cpu` and `.perf memory` report real numbers, and set how often its interval timer fires."
+[11:13:58Z]   screenshot 1-modules-listed.png taken; tortoise-mangosd: status=running restarts=0
+[11:13:58Z] GROUND RECORDED
+########## install
+[11:13:59Z] INSTALL -- the press a user makes, on the object the tab holds
+[11:13:59Z] tortoise-mangosd: status=running restarts=0
+[11:13:59Z] conf sha before = cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5
+2026-09-08 13:13:59 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:14:03Z] the running server, before the press: Performance report interval is 600
+2026-09-08 13:14:03 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[11:14:03Z] the report box says:
+[11:14:03Z]     install perf-report:
+[11:14:03Z]       ✓ set 2 key(s) in etc/mangosd.conf
+[11:14:03Z]       ✓ auto-update guard: a restart is safe (enabled=True, outstanding by database: auth 0, characters 0, world 0)
+[11:14:03Z]       ⚠ Press Stop and then Start on the Server tab to apply this.
+[11:14:03Z]   screenshot 2-installed.png taken; tortoise-mangosd: status=running restarts=0
+[11:14:03Z] conf sha after  = 4e469bbd1c09469f82832ab754175271a36ec37f81e2fb0220d5097cdf2923bb
+[11:14:03Z] diff against the ground copy:
+2196c2196
+< Perf.ReportInterval = 600
+---
+> Perf.ReportInterval = 120
+[11:14:03Z] and now the whole point of the restart:
+2026-09-08 13:14:03 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:14:07Z] the RUNNING server still reports: Performance report interval is 600
+[11:14:07Z] INSTALL PASSED: the file changed, the running server has not
+=== the same subtraction by hand, no yulon code on either side ===
+2026-09-08T11:08:03Z
+world/*.sql = 125 file(s); tw_world.migrations rows = 158; file-hashes with no row = 0
+character/*.sql = 1 file(s); tw_char.migrations rows = 1; file-hashes with no row = 0
+auth/*.sql = 0 file(s); tw_logon.migrations rows = 0; file-hashes with no row = 0
+[11:14:13Z] RESTART -- through the app's own controller, which is what the tab presses
+[11:14:13Z] before: tortoise-mangosd: status=running restarts=0
+[11:14:13Z] controller.stop() ...
+2026-09-08 13:14:13 INFO [yulon.logsnap] saved tortoise-mangosd's log to /home/pk/.local/share/yulon/logs/wow-tortoise-58c6fd1c-20260908T111413Z.log
+2026-09-08 13:14:16 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+[11:14:16Z]   stop returned True
+[11:14:16Z] after stop: tortoise-mangosd: status=exited restarts=0
+[11:14:16Z] controller.start() ...
+2026-09-08 13:14:16 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
+[11:14:22Z] after start: tortoise-mangosd: status=running restarts=0
+[11:15:23Z]   ready line seen after 69s
+[11:15:23Z] ready: tortoise-mangosd: status=running restarts=0
+2026-09-08 13:15:23 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:15:26Z] THE DEFINITION OF DONE: the running server now reports: Performance report interval is 120
+2026-09-08 13:15:26 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:15:30Z] the Console tab shows:
+vents.csv (No such file or directory). Logging to it is off for this run.
+[13:15:30] Performance report interval is 120
+[13:15:30] Incorrect syntax.
+[11:15:30Z]   screenshot 3-reported-after-restart.png taken; tortoise-mangosd: status=running restarts=0
+[11:15:30Z] RESTART PASSED: the key this install wrote is reported by the running server
+########## armed
+[11:15:36Z] ARMED -- checklist 2504: nothing may run this fork's auto-update path
+[11:15:36Z] tortoise-mangosd: status=running restarts=0
+[11:15:36Z] GROUND: the updater as it stands
+[11:15:37Z]   enabled=True, outstanding by database: auth 0, characters 0, world 0  armed=False
+[11:15:37Z]   conf sha = 4e469bbd1c09469f82832ab754175271a36ec37f81e2fb0220d5097cdf2923bb
+2026-09-08 13:15:37 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[11:15:37Z]   the same press, permitted: 'install perf-report:'
+[11:15:37Z] ACTION: put ONE file the ledger has no hash for into the updater's world folder
+[11:15:38Z]   the probe file is now: /opt/tortoise/sql/database_updates/world/zzzz_yulon_87d_probe.sql
+[11:15:38Z]   the app now reads: enabled=True, outstanding by database: auth 0, characters 0, world 1  armed=True
+[11:15:38Z] ASSERTION: the identical press is now refused
+[11:15:39Z]     install perf-report FAILED: perf-report: refused while the world is up. This item asks for a restart, and that restart would hand 1 migration(s) to this fork's own auto-updater, which runs inside the worldserver at startup and cancels the whole world on one failure: zzzz_yulon_87d_probe.sql. Stop the world first, or set Database.AutoUpdate.Enabled = 0 in etc/mangosd.conf and start it by hand once.
+[11:15:39Z]   conf sha unchanged = 4e469bbd1c09469f82832ab754175271a36ec37f81e2fb0220d5097cdf2923bb
+[11:15:39Z]   tortoise-mangosd: status=running restarts=0  <-- the world is UP and stays up; nothing restarted it
+[11:15:39Z]   screenshot 4-refused-while-armed.png taken; tortoise-mangosd: status=running restarts=0
+[11:15:39Z] DISARM: the probe file is removed BEFORE anything can restart into it
+[11:15:39Z]   the probe file is now: ls: cannot access '/opt/tortoise/sql/database_updates/world/zzzz_yulon_87d_probe.sql': No such file or directory
+[11:15:40Z]   the app reads: enabled=True, outstanding by database: auth 0, characters 0, world 0  armed=False
+2026-09-08 13:15:41 INFO [yulon.apply] install perf-report: 1 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[11:15:41Z]   the same press, permitted again: 'install perf-report:'
+[11:15:41Z]   screenshot 5-permitted-again.png taken; tortoise-mangosd: status=running restarts=0
+[11:15:41Z] ARMED PASSED: permitted, refused, permitted -- one file was the only difference
+########## remove
+[11:15:41Z] REMOVE -- the manifest's own `when: remove` patches, then a restart
+2026-09-08 13:15:42 INFO [yulon.apply] remove perf-report: 2 step(s), 0 skipped, 0 left unapplied, rebuild=False
+[11:15:42Z]     remove perf-report:
+[11:15:42Z]       ✓ patch etc/mangosd.conf (already applied)
+[11:15:42Z]       ✓ patch etc/mangosd.conf (changed)
+[11:15:42Z]       ✓ auto-update guard: a restart is safe (enabled=True, outstanding by database: auth 0, characters 0, world 0)
+[11:15:42Z]       ⚠ Press Stop and then Start on the Server tab to apply this.
+[11:15:42Z]   screenshot 6-removed.png taken; tortoise-mangosd: status=running restarts=0
+[11:15:42Z] conf sha after remove = cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5
+[11:15:42Z] ground copy sha       = cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5
+[11:15:42Z] diff:
+(byte-identical)
+2026-09-08 13:15:42 INFO [yulon.logsnap] saved tortoise-mangosd's log to /home/pk/.local/share/yulon/logs/wow-tortoise-58c6fd1c-20260908T111542Z.log
+2026-09-08 13:15:47 INFO [yulon.docker] stop_staged(): stopped; containers kept for a fast restart
+2026-09-08 13:15:47 INFO [yulon.docker] start_staged(): `compose up -d --no-deps tortoise-db tortoise-realmd tortoise-mangosd` in /home/pk/tortoise-server
+[11:16:54Z]   ready line seen after 72s
+[11:16:54Z] after the restart: tortoise-mangosd: status=running restarts=0
+2026-09-08 13:16:54 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'intervalreport']
+[11:16:58Z] the running server reports: Performance report interval is 600
+[11:16:58Z] REMOVE PASSED: the shipped value is back and the server says so
+[11:12:43Z] the visible effect of Perf.Enable = 1: gathered stats the console can print
+2026-09-08 13:12:43 INFO [yulon.controller_wow_wotlk.console] console → tortoise-mangosd: ['perf', 'cpu']
+[11:12:47Z] prompted=True; 21 non-log lines:
+[11:12:47Z]     CPU Performance report
+[11:12:47Z]     QPC counter: 52
+[11:12:47Z]     Tick: 192.34
+[11:12:47Z]     WorldSleep: 0.00
+[11:12:47Z]     ->  TEST0: [0] 0.00ms, 0.0%, min: 0.00ms, max: 0.00ms
+[11:12:47Z]     ->  WorldTick: [1] 192.34ms, 100.0%, min: 3.37ms, max: 1364.01ms
+[11:12:47Z]     -> ->  UpdateSession: [1] 0.00ms, 0.0%, min: 0.00ms, max: 0.00ms
+[11:12:47Z]     -> ->  MapManager: [1] 188.31ms, 97.9%, min: 2.94ms, max: 810.67ms
+[11:12:47Z]     Map performance report. Some maps update async
+[11:12:47Z]     Map: 0, InstanceID: 0
+[11:12:47Z]     ->  Update: [1] 185.65ms, 98.6%, min: 0.61ms, max: 805.46ms
+[11:12:47Z]     -> ->  Movement: [2] 0.16ms, 0.1%, min: 0.07ms, max: 1.44ms
+[11:12:47Z]     -> ->  Spell: [2] 0.02ms, 0.0%, min: 0.00ms, max: 0.38ms
+[11:12:47Z]     Map: 1, InstanceID: 0
+[11:12:47Z]     ->  Update: [1] 185.79ms, 98.7%, min: 0.67ms, max: 803.00ms
+[11:12:47Z]     -> ->  Movement: [2] 0.21ms, 0.1%, min: 0.05ms, max: 0.51ms
+[11:12:47Z]     -> ->  Spell: [2] 0.01ms, 0.0%, min: 0.00ms, max: 0.06ms
+[11:12:47Z]     Map: 369, InstanceID: 0
+[11:12:47Z]     ->  Update: [1] 185.65ms, 98.6%, min: 0.60ms, max: 702.87ms
+[11:12:47Z]     -> ->  Movement: [2] 0.00ms, 0.0%, min: 0.00ms, max: 0.02ms
+[11:12:47Z]     -> ->  Spell: [2] 0.00ms, 0.0%, min: 0.00ms, max: 0.00ms
+Initiating auto-updater...
+[DB Auto-Updater] Found 0 possible migrations for auth.
+[DB Auto-Updater] No DB migrations found, table migrations is empty.
+[DB Auto-Updater] Found 1 possible migration for character.
+[DB Auto-Updater] Found 125 possible migrations for world.
+[DB Auto-Updater] Migration 20260902074750_world with hash AC4F8000412AA99A043CA1CAAF8A25DE4C3EC0E3 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260901174017_world with hash 15A1113BC25CF1BE0B54D2004F20F99E3D0B622B exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260901101113_world with hash C150D31E61777775A2A3AEB6F366FDDDCFE60099 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260817211652_world with hash 3812702FBFADEDBA148FEB87D0336964AEF1DE1A exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260805120000_world with hash C2549CDADA860C03F662DCC9DFCE7137408E6738 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802220000_world with hash 44855044AB1F0CF9DA0E56423B67F46176799A65 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802210000_world with hash 859C1A84514345BEEAA72B4865825F7C84776BD0 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802190000_world with hash 3025467678A0CCF5E9109E7280E510971074BA86 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802180000_world with hash EBF7B65C0EE4A2D0F57C98944C18D58B35A84F03 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802170000_world with hash 2CD0243B6416383D44E801A5EAE00083BABAC87B exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260802160000_world with hash B62D3CA66C0D65818ED5E6EA3AE4EA37564D3847 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260731180000_world with hash 2D93CA25608007ED13B60C0C0B3E4D4DFA936291 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260730120300_world with hash 147D3A1B1E1DD1E1BA6957F18F29328D25D5E425 exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260730120100_world with hash D29653C59B698774184014826D4970C0347470CB exists in DB but not as file, old migration?
+[DB Auto-Updater] Migration 20260730120000_world with hash 74AE640F498E777BBDBF7D2842855972B71EFC88 exists in DB but not as file, old migration?
+[11:17:04Z] TEARDOWN
+[11:17:04Z] tortoise-mangosd: status=running restarts=0
+[11:17:04Z] conf sha = cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5 (ground was cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5)
+[11:17:05Z] the probe file: ls: cannot access '/opt/tortoise/sql/database_updates/world/zzzz_yulon_87d_probe.sql': No such file or directory
+[11:17:05Z] compose ps:
+NAME               IMAGE                                                 COMMAND                  SERVICE            CREATED        STATUS                        PORTS
+tortoise-db        mariadb:10.6                                          "docker-entrypoint.s…"   tortoise-db        13 hours ago   Up About a minute (healthy)   127.0.0.1:3306->3306/tcp
+tortoise-mangosd   yulon.local/cmangos-tortoise-server:native-58c6fd1c   "./mangosd"              tortoise-mangosd   7 hours ago    Up About a minute             0.0.0.0:8090->8090/tcp, [::]:8090->8090/tcp
+tortoise-realmd    yulon.local/cmangos-tortoise-server:native-58c6fd1c   "./realmd"               tortoise-realmd    7 hours ago    Up About a minute             0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+[11:17:06Z] updater arming: enabled=True, outstanding by database: auth 0, characters 0, world 0  armed=False
+[11:17:06Z] {
+ "conf_sha": "cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5",
+ "ground_sha": "cf679be72b67bd4e85ddf079709b565f8b8df0ea1a13048d2d1660e91987fda5"
+}

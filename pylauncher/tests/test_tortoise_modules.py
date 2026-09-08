@@ -42,9 +42,10 @@ from pathlib import Path
 
 import pytest
 
-from yulon.apply import ApplyError, Applier
+from yulon.apply import Applier, ApplyError
 from yulon.catalog.catalog import load_catalog
-from yulon.controller_wow_tortoise import autoupdate, modules as tortoise_modules
+from yulon.controller_wow_tortoise import autoupdate
+from yulon.controller_wow_tortoise import modules as tortoise_modules
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.manifest import Db, Manifest, parse_manifest
 from yulon.manifest_store import FAMILY_FILES
@@ -214,9 +215,9 @@ def test_no_tortoise_manifest_asks_for_a_rebuild_and_all_of_them_ask_for_a_resta
     """`build.rebuild` DEFAULTS to True, so an omitted block asks for an hour of compiling."""
     for manifest in _mods():
         assert manifest.build.rebuild is False, f"{manifest.id}: this fork compiles no modules"
-        assert manifest.build.restart is True, (
-            f"{manifest.id}: mangosd reads etc/*.conf and loads tw_world once, at startup"
-        )
+        assert (
+            manifest.build.restart is True
+        ), f"{manifest.id}: mangosd reads etc/*.conf and loads tw_world once, at startup"
 
 
 # ------------------------------------------------------------ the real ones
@@ -476,7 +477,7 @@ def test_an_install_is_refused_while_the_updater_is_armed_and_the_world_is_up(
 
 
 def test_the_same_install_is_allowed_once_the_world_is_down(tmp_path: Path) -> None:
-    """"While the world is up" is the clause's own scope, and it is load-bearing.
+    """ "While the world is up" is the clause's own scope, and it is load-bearing.
 
     With the world already stopped there is no running world for the updater to
     cancel; the operator is starting one, and the start's own log is where they
@@ -495,9 +496,9 @@ def test_the_same_install_is_allowed_once_the_world_is_down(tmp_path: Path) -> N
     assert "Perf.ReportInterval = 120" in (server_dir / "etc" / "mangosd.conf").read_text(
         encoding="utf-8"
     )
-    assert any("auto-update" in line.lower() for line in report.done + report.skipped), (
-        "the world being down is why this was allowed; the report has to say so"
-    )
+    assert any(
+        "auto-update" in line.lower() for line in report.done + report.skipped
+    ), "the world being down is why this was allowed; the report has to say so"
 
 
 def test_an_unreadable_updater_refuses_rather_than_assuming_the_best(tmp_path: Path) -> None:

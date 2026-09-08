@@ -96,7 +96,7 @@ def arming() -> autoupdate.Arming:
         SERVER_DIR,
         world_container=SPEC.world,
         schemas=ENTRY.schema_map(),
-        sql=services().sql,
+        sql=services().applier.sql,
     )
 
 
@@ -190,9 +190,10 @@ def stage_ground() -> None:
     assert isinstance(made.applier, autoupdate.GuardedApplier), made.applier
     ids = [m.id for m in made.store.load_all("mod")]
     say(f"manifests  = {ids}")
-    say(f"sql        = client={made.sql.client} container={made.sql.db_container} "
-        f"schemas={dict(made.sql.schemas)}")
-    assert made.sql.schemas["world"] == "tw_world"
+    runner = made.applier.sql
+    say(f"sql        = client={runner.client} container={runner.db_container} "
+        f"schemas={dict(runner.schemas)}")
+    assert runner.schemas["world"] == "tw_world"
 
     settings = autoupdate.read_settings(SERVER_DIR)
     say(f"updater settings: enabled={settings.enabled} declared={settings.declared} "

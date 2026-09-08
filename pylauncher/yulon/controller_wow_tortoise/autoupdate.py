@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import docker
-from yulon.apply import ApplyError, Applier, ApplyReport, SqlRunner
+from yulon.apply import Applier, ApplyError, ApplyReport, SqlRunner
 from yulon.dbreads import SqlReader
 from yulon.git import Git
 from yulon.log import get_logger
@@ -151,7 +151,7 @@ def _conf_value(text: str, key: str) -> str | None:
     the line with only whitespace allowed in front.
     """
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=[ \t]*(.*?)[ \t]*$", re.MULTILINE)
-    found = pattern.findall(text)
+    found: list[str] = pattern.findall(text)
     if not found:
         return None
     value = found[-1]
@@ -186,7 +186,9 @@ def read_settings(server_dir: Path) -> Settings:
         enabled=enabled,
         declared=declared,
         path=_conf_value(text, PATH_KEY) or "",
-        folders={db: (_conf_value(text, key) or default) for db, (key, default) in FOLDER_KEYS.items()},
+        folders={
+            db: (_conf_value(text, key) or default) for db, (key, default) in FOLDER_KEYS.items()
+        },
         conf=conf,
     )
 
@@ -322,7 +324,7 @@ def _list_update_files(
     """
     script = (
         f'cd "{folder}" 2>/dev/null || exit 3; echo OK; '
-        "for f in *.sql; do [ -e \"$f\" ] || continue; sha1sum \"$f\"; done"
+        'for f in *.sql; do [ -e "$f" ] || continue; sha1sum "$f"; done'
     )
     proc = docker.exec_output(container, ["sh", "-c", script], wsl_distro=wsl_distro)
     if proc.returncode != 0:
@@ -369,7 +371,11 @@ def check_manifest(manifest: Manifest) -> None:
     the store then reads, so a test over the files in this repository cannot
     cover the file the applier is actually handed.
     """
-    deferred = [step.path or step.statement or "?" for step in manifest.sql if step.applied_by == "db-import"]
+    deferred = [
+        step.path or step.statement or "?"
+        for step in manifest.sql
+        if step.applied_by == "db-import"
+    ]
     if deferred:
         raise AutoUpdateRefused(
             f"{manifest.id}: this item defers SQL to the server's own importer "
@@ -400,10 +406,7 @@ def check_restart_is_survivable(
     the world reads at startup, so nothing about it brings the updater forward.
     """
     if not world_running:
-        return (
-            f"auto-update guard: not applied, the world is not running "
-            f"({arming.summary()})"
-        )
+        return f"auto-update guard: not applied, the world is not running " f"({arming.summary()})"
     if not manifest.build.restart:
         return f"auto-update guard: this item asks for no restart ({arming.summary()})"
     armed = arming.armed

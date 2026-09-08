@@ -76,8 +76,8 @@ from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
-from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import autoupdate as tortoise_autoupdate
+from yulon.controller_wow_tortoise import console as tortoise_console
 from yulon.controller_wow_tortoise import controller as tortoise_controller
 from yulon.controller_wow_tortoise import maintenance as tortoise_maintenance
 from yulon.controller_wow_tortoise import modules as tortoise_modules
