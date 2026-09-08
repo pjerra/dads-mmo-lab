@@ -2374,18 +2374,14 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "so an unreadable folder leaves the install doing exactly what it did before. The one "
         'answer it must never give is `""`: measured on the real ac-db-import image '
         "2026-09-07, an empty value means `Loading modules: none` and switches module updates "
-        "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string"
+        "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string. "
+        "Nothing is written on the strength of it either way -- the answer travels in argv "
+        "to a container that then decides file by file"
     ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
-    ),
-    ("docker.py", "allowed_modules"): (
-        "lists the install's `modules/` to name them to the importer; its own `except OSError` "
-        "warns and answers upstream's own default, which leaves an unreadable folder "
-        "behaving exactly as it was found. Nothing is written on the strength of it - the "
-        "answer travels in argv to a container that then decides file by file"
     ),
     ("networking.py", "write_client_realmlist"): (
         "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
