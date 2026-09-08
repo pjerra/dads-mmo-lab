@@ -1,4 +1,4 @@
-# 8.7d — Modules, WoW Tortoise — **RUN 2026-09-08 11:07Z–11:17Z on m910q**
+# 8.7d — Modules, WoW Tortoise — **RUN 2026-09-08 11:25Z–11:30Z on m910q**
 
 > **This file is a record, not a plan.** Every line below was produced against the
 > **live** Tortoise stack on m910q — `tortoise-db` / `tortoise-realmd` /
@@ -10,7 +10,7 @@
 >
 > **All five clauses passed.** Nothing was rebuilt, the source checkout was not
 > moved, and the box was left with the Tortoise stack up and
-> `etc/mangosd.conf` byte-identical to what it was at 11:07Z.
+> `etc/mangosd.conf` byte-identical to what it was at 11:25Z.
 
 **The box.** `pyplan/checklist.md:2504` — *"Modules, WoW Tortoise — as 8.7b, and
 nothing may run this fork's own database auto-update path while the world is up.
@@ -21,17 +21,41 @@ own in-game effect after the restart it asks for."*
 
 | clause | verdict | where |
 |---|---|---|
-| (1) a manifest set and a binding for this game | **PASSED** | `transcript.txt` 11:13:54Z; `1-modules-listed.png` |
-| (2) at least one manifest installs | **PASSED** | 11:14:03Z; `2-installed.png` |
-| (3) its key is reported by the running server **after the restart it asks for** | **PASSED** | 11:14:07Z (still 600, no restart) → 11:15:26Z (120, after); `3-reported-after-restart.png` |
-| (4) **nothing may run this fork's auto-update path while the world is up** | **PASSED** | 11:15:37Z–11:15:41Z; `4-refused-while-armed.png`, `5-permitted-again.png` |
-| (5) the item is reversible | **PASSED** | 11:15:42Z, byte-identical conf; `6-removed.png` |
+| (1) a manifest set and a binding for this game | **PASSED** | `transcript.txt` 11:25:48Z; `1-modules-listed.png` |
+| (2) at least one manifest installs | **PASSED** | 11:25:57Z; `2-installed.png` |
+| (3) its key is reported by the running server **after the restart it asks for** | **PASSED** | 11:26:01Z (still 600, no restart) → 11:27:23Z (120, after); `3-reported-after-restart.png` |
+| (4) **nothing may run this fork's auto-update path while the world is up** | **PASSED** | 11:29:07Z–11:29:11Z; `4-refused-while-armed.png`, `5-permitted-again.png` |
+| (5) the item is reversible | **PASSED** | 11:29:12Z, byte-identical conf; `6-removed.png` |
 | visible effect | **PASSED, and narrower than the manifest first claimed** | 11:12:47Z, `.perf cpu` — see *What the visible effect really is* |
 
-The tree that ran is the committed worktree tip, exported with `git archive` and
-unpacked to `~/gate87d/pylauncher`, with `manifests/wow-tortoise/mods/perf-report.json`
-replaced mid-run by its corrected version and **every stage then re-run against
-it** — the screenshots and the transcript are all from that second pass.
+**Which tree ran.** The gate was run three times and only the third is recorded
+here. Run 1 (11:07Z–11:17Z) passed every clause and then produced the finding
+below — that `Perf.ReportInterval` fires an empty function — so the manifest's
+name, description and notes were corrected. Run 2 (11:13Z–11:17Z) re-took the
+screenshots against the corrected manifest. Run 3, **this one**, is against the
+final committed tip, after `black`, `ruff --fix` and one mypy annotation touched
+`autoupdate.py`; nothing behavioural changed between runs 2 and 3, and re-running
+rather than asserting that is the point. The tree was exported with `git archive`
+and unpacked to `~/gate87d/pylauncher`:
+
+```
+bea06c21aa99cbdb47c02405eda0d0c2  yulon/controller_wow_tortoise/autoupdate.py
+f877e68d1c441d82744ad84d46b02b73  yulon/controller_wow_tortoise/modules.py
+4219085e7e2c9d6d3446051747449a8d  yulon/ui/controller_view.py
+677a6c807694f09cd21f065b18396d5c  manifests/wow-tortoise/mods/perf-report.json
+```
+
+Three readings in `transcript.txt` are still run 1's, because no later run could
+improve them and each is labelled where it appears: the by-hand migration
+subtraction (11:08:03Z), the worldserver's own `[DB Auto-Updater]` lines from the
+11:08:34Z start, and the `.perf cpu` capture (11:12:47Z).
+
+**A warning for the next lane, paid for here.** The first `--checks` run of this
+lane reported `ALL GREEN` over a tree that **did not contain any of the new
+files** — it was launched before the commit, and the helper syncs tracked files
+only, so it linted 183 files instead of 186. The same command after the commit
+found five ruff errors, one mypy error and two files black would reformat.
+Commit first, then gate, and read the file count.
 
 ---
 
@@ -74,19 +98,19 @@ same instants read 13:xx in `claude-say`'s output.
 
 | when | what | the server's own words |
 |---|---|---|
-| 11:13:58Z | ground, nothing installed | `Performance report interval is 600` |
-| 11:14:03Z | Install pressed **on the Modules tab** | `✓ set 2 key(s) in etc/mangosd.conf` |
-| 11:14:03Z | the file | `2196c2196 < Perf.ReportInterval = 600 --- > Perf.ReportInterval = 120` |
-| 11:14:07Z | asked again, **without restarting** | `Performance report interval is 600` |
-| 11:14:13–11:15:23Z | `controller.stop()` then `controller.start()`, ready in 69 s | |
-| **11:15:26Z** | **asked again** | **`Performance report interval is 120`** |
+| 11:25:56Z | ground, nothing installed | `Performance report interval is 600` |
+| 11:25:57Z | Install pressed **on the Modules tab** | `✓ set 2 key(s) in etc/mangosd.conf` |
+| 11:25:57Z | the file | `2196c2196 < Perf.ReportInterval = 600 --- > Perf.ReportInterval = 120` |
+| 11:26:01Z | asked again, **without restarting** | `Performance report interval is 600` |
+| 11:26:05–11:27:19Z | `controller.stop()` then `controller.start()`, ready in 73 s | |
+| **11:27:23Z** | **asked again** | **`Performance report interval is 120`** |
 
-The 11:14:07Z line is the one that makes the restart load-bearing rather than
+The 11:26:01Z line is the one that makes the restart load-bearing rather than
 decorative: the file had already changed and the running server had not moved.
 `build.restart` on this manifest is therefore a fact and not a guess.
 
 **Ground, read before the action and recorded:** `Perf.ReportInterval = 600` was
-already in `etc/mangosd.conf` at 11:13:54Z and `.perf intervalreport` already
+already in `etc/mangosd.conf` at 11:25:48Z and `.perf intervalreport` already
 said 600, so the step's assertion (`120`) was not true before it ran.
 
 Two honest details about that console reply:
@@ -133,7 +157,7 @@ computable from outside without starting anything.
 
 ### The reading, and the same reading by hand
 
-At 11:13:54Z the app answered
+At 11:25:48Z the app answered
 
 ```
 updater settings: enabled=True declared=True path='/opt/tortoise/sql/database_updates/'
@@ -174,11 +198,11 @@ the same running world**, and one file was the only difference:
 
 | when | the updater | the press on the Modules tab |
 |---|---|---|
-| 11:15:37Z | `world 0`, `armed=False` | **permitted** — `install perf-report:` |
-| 11:15:38Z | one `*.sql` written into `/opt/tortoise/sql/database_updates/world/` inside the running container | `world 1`, `armed=True` |
-| 11:15:39Z | armed | **REFUSED** (`4-refused-while-armed.png`) |
-| 11:15:39Z | probe file deleted | `world 0`, `armed=False` |
-| 11:15:41Z | disarmed | **permitted again** (`5-permitted-again.png`) |
+| 11:29:07Z | `world 0`, `armed=False` | **permitted** — `install perf-report:` |
+| 11:29:08Z | one `*.sql` written into `/opt/tortoise/sql/database_updates/world/` inside the running container | `world 1`, `armed=True` |
+| 11:29:09Z | armed | **REFUSED** (`4-refused-while-armed.png`) |
+| 11:29:10Z | probe file deleted | `world 0`, `armed=False` |
+| 11:29:11Z | disarmed | **permitted again** (`5-permitted-again.png`) |
 
 What the tab showed, verbatim:
 
@@ -229,7 +253,7 @@ the shipped value back and asks for exactly the same restart.
 And it is on the object **the tab actually holds**:
 `1-modules-listed.png` is `ControllerServices.for_entry(...)`'s own view, and
 the transcript records `applier = yulon.controller_wow_tortoise.autoupdate.GuardedApplier`
-at 11:13:54Z. A guard built correctly in `modules.py` and a plain `Applier`
+at 11:25:48Z. A guard built correctly in `modules.py` and a plain `Applier`
 passed from `controller_view` would have passed every unit test and guarded
 nothing anybody presses.
 
@@ -308,8 +332,8 @@ Also not proved here:
 ## What was left on m910q
 
 The **Tortoise** stack **up** (`tortoise-db` healthy, `tortoise-realmd`,
-`tortoise-mangosd` — ready line at 11:16:54Z), on the pre-rebuild image.
-`etc/mangosd.conf` sha256 `cf679be7…`, **the same value it had at 11:07:23Z**,
+`tortoise-mangosd` — ready line at 11:30:24Z), on the pre-rebuild image.
+`etc/mangosd.conf` sha256 `cf679be7…`, **the same value it had at 11:25:48Z**,
 with the gate's own copy kept beside it as `etc/mangosd.conf.before-87d`. The
 probe file is gone. TBC and Vanilla stay stopped — one server at a time. Nothing
 was rebuilt and `src/tortoise-wow` is untouched at `3a8472e`.
