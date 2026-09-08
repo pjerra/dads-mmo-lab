@@ -1265,7 +1265,8 @@
         "notes": [
           "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
         ]
-      }
+      },
+      "has_manifests": true
     }
   ]
 }

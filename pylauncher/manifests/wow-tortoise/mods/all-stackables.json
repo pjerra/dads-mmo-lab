@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "all-stackables",
+  "name": "Bigger Stacks",
+  "type": "mod",
+  "game": "wow-tortoise",
+  "description": "Raise the stack size of every stackable item in the world database.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "sql": [
+    {
+      "db": "world",
+      "statement": "CREATE TABLE IF NOT EXISTS yulon_stackable_backup (entry INT UNSIGNED NOT NULL PRIMARY KEY, stackable SMALLINT UNSIGNED NOT NULL) ENGINE=InnoDB;",
+      "note": "the undo, taken before anything is changed"
+    },
+    {
+      "db": "world",
+      "statement": "INSERT IGNORE INTO yulon_stackable_backup (entry, stackable) SELECT entry, stackable FROM item_template WHERE stackable > 1;",
+      "note": "INSERT IGNORE so a second install never overwrites the ORIGINAL values with this mod's own"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template SET stackable = {stack_size} WHERE stackable > 1;"
+    },
+    {
+      "db": "world",
+      "statement": "UPDATE item_template t JOIN yulon_stackable_backup b ON b.entry = t.entry SET t.stackable = b.stackable;",
+      "when": "remove"
+    },
+    {
+      "db": "world",
+      "statement": "DROP TABLE IF EXISTS yulon_stackable_backup;",
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "stack_size",
+      "question": "Max stack size for stackable items",
+      "kind": "int",
+      "default": "200"
+    }
+  ],
+  "notes": [
+    "`db: world` is tw_world on this fork -- not acore_world and not mangos. The column is",
+    "`item_template`.`stackable`, smallint(5) unsigned NOT NULL DEFAULT 1 (SHOW COLUMNS on",
+    "the live tw_world, m910q 2026-09-08), so a size above 65535 would be silently clamped.",
+    "`applied_by` is left at its default `direct` and MUST STAY THERE. On AzerothCore",
+    "`db-import` hands files to ac-db-import, a separate one-shot container. On this fork the",
+    "importer IS the worldserver: World.cpp:1988-1994 calls sAutoUpdater.ProcessUpdates() at",
+    "startup and exit(1)s the whole world on one failure. controller_wow_tortoise.autoupdate",
+    "refuses any manifest that spells it the other way (checklist 2504).",
+    "It carries its own undo. item_template is loaded from tw_world, so the values it",
+    "overwrites are not recoverable from anywhere else once changed -- the backup table is the",
+    "only thing that makes Remove mean anything. Do not drop it by hand.",
+    "`WHERE stackable > 1` leaves non-stackable items alone; an item whose stack is already",
+    "larger than the chosen size is lowered to it, which is why the backup is taken first.",
+    "Verify with: SELECT COUNT(*) FROM item_template WHERE stackable = <size>;"
+  ]
+}

@@ -624,6 +624,34 @@ def _running(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None
     return Running(tuple(ours), tuple(strangers), tuple(unreadable))
 
 
+def exec_output(
+    container: str,
+    argv: list[str],
+    *,
+    timeout: float | None = 60.0,
+    wsl_distro: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run `docker exec <container> <argv...>` and return the result UNTOUCHED.
+
+    The read-only sibling of `exec_stdin()`, for asking a running container a
+    question whose answer is small: what files are in a directory the image owns
+    and nothing outside it can see.
+
+    Not raised on a non-zero exit, deliberately and for the same reason
+    `exec_stdin()` is not: `docker exec` returns the CHILD's status, so exit 1
+    can mean "the container said no", "there is no such container" or "the
+    daemon never answered", and only the caller knows which of those it is
+    allowed to treat as an answer. `_run()` would flatten all three into one
+    exception. A host with no docker CLI comes back as `_docker()`'s recognisable
+    sentinel rather than an exception, for the same reason again.
+
+    The timeout is bounded by default because every caller so far is on a path a
+    user is waiting on, and a wedged daemon must not turn a directory listing
+    into an indefinite wait.
+    """
+    return _docker(["exec", container, *argv], timeout=timeout, wsl_distro=wsl_distro)
+
+
 def container_exists(container: str, *, wsl_distro: str | None = None) -> bool:
     """True if a container by that name exists at all, running or exited."""
     proc = _run(["ps", "-a", "--format", "{{.Names}}"], wsl_distro=wsl_distro)
