@@ -3847,3 +3847,25 @@ good news in the entry.
   the status label two lines up still says unknown. Same family as `:552` (the label is only
   written by the poll handler), seen here on a tab that was opened and pressed within its first
   poll interval. The refusal is right; the label beside it is not. Audit, 2026-09-08.
+- [x] **The Rebuild button waited for the address a FRESH install advertises, so no rebuild could
+  ever report ready.** `native._ready_spec()` filled `ready.auth`'s `{{REALM_HOST}}` from
+  `INSTALL_REALM_HOST` (`127.0.0.1`), and `StagedInstaller._advertise_realm()` — the install's LAST
+  act, itself the fix for §35 — rewrites that row to the machine's reachable address. So on every
+  install the button can be pressed on, the marker said `127\.0\.0\.1:8085` while the auth server
+  said `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` Found on the control's first live press,
+  `yulon-ubuntu2` 2026-09-09: the compile finished, the containers were replaced, the new
+  worldserver came up with `mod-ale` compiled in and answered `dml_bridge_ping` over its own
+  channel — and the press sat in "Waiting for the world server". `wait_for_ready()` grants another
+  window every time the server prints, and this one prints bot statistics every thirty seconds for
+  ever, so unattended it spends `READY_CEILING_SECONDS` (six hours) and then `_restore_rollback`
+  puts the OLD build back: *"nothing changes when I log back in"* with six hours added to it.
+  **Fixed** by making the address half of the marker a wildcard (`native.REALM_ADDRESS_PATTERN`)
+  and leaving the port half exact — readiness needs the auth server to have advertised THIS
+  install's realm on THIS install's world port, and WHICH address it advertises is
+  `_advertise_realm()`'s question, asked there against the row. No promise the confirmation makes
+  had to be weakened: the rebuild still reads no database at all. Pinned by three tests in
+  `test_rebuild.py` (matches any address · still refuses another port · install and rebuild use the
+  same marker) and by `test_spine.py`'s rewritten A3/A5 test, which still requires the WORLD marker
+  to be a literal. The seam that hid it took the `ReadySpec` and threw it away; `Recorder` keeps
+  every spec now. Re-pressed on the fix: `REBUILD RETURNED CLEANLY in 63.4s`. Evidence:
+  `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`.
