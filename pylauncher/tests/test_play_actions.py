@@ -61,7 +61,7 @@ def _install(tmp_path, sql=None, channel=None) -> play.InstallPlay:
     return play.InstallPlay(
         WOTLK,
         tmp_path,
-        sql=sql if sql is not None else _Reader(**{"SELECT name FROM": "Guglu\n"}),
+        sql=sql if sql is not None else _Reader(**{"SELECT name, online FROM": "Guglu\t1\n"}),
         channel_for_saved=lambda: channel if channel is not None else _Channel(),
     )
 
@@ -146,7 +146,7 @@ def test_a_gear_set_larger_than_one_mail_is_sent_as_the_mails_it_needs(tmp_path)
     does the sending.
     """
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     channel = _Channel()
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -160,7 +160,7 @@ def test_a_gear_set_larger_than_one_mail_is_sent_as_the_mails_it_needs(tmp_path)
 
 def test_the_number_of_mails_a_set_needs_can_be_asked_before_pressing(tmp_path) -> None:
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     install = _install(tmp_path, sql=sql)
 
     assert install.gear_set_size("guglu") == (19, 2)
@@ -169,7 +169,7 @@ def test_the_number_of_mails_a_set_needs_can_be_asked_before_pressing(tmp_path) 
 def test_a_gear_set_from_a_character_wearing_nothing_is_refused(tmp_path) -> None:
     """Rather than sending an empty mail, which the server would refuse anyway
     with a sentence about item ids that says nothing about gear."""
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n"})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n"})
     channel = _Channel()
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -185,7 +185,7 @@ def test_a_set_that_fails_half_way_says_which_mails_went(tmp_path) -> None:
     person send the whole set again and the recipient get the first twelve
     twice."""
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     channel = _Channel("yes", "no")
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -297,7 +297,7 @@ def test_a_half_sent_set_says_what_arrived_and_does_not_advise_the_impossible(
     delivered will arrive a second time if they do.
     """
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     install = _install(tmp_path, sql=sql, channel=_Channel("yes", "no"))
 
     outcome = install.send_gear_set("guglu", to="guglu", subject="s", body="b")
@@ -329,7 +329,7 @@ def _tortoise(tmp_path, channel):
     return play.InstallPlay(
         TORTOISE,
         tmp_path,
-        sql=_Reader(**{"SELECT name FROM": "Guglu\n"}),
+        sql=_Reader(**{"SELECT name, online FROM": "Guglu\t1\n"}),
         channel_for_saved=lambda: channel,
     )
 
@@ -470,3 +470,144 @@ def test_the_offline_rename_this_fork_would_destroy_a_name_with_is_refused(tmp_p
     assert "logged in" in said, said
     assert "guid" in said, "the sentence names what the server would do instead"
     assert WOTLK.play is not None and WOTLK.play.rename_offline_refusal is None
+
+
+# -- 8.4d review, finding 2: the destructive action gets the seam guard -------
+
+
+def _one_row(tmp_path, entry, row: str, channel):
+    """An install whose character lookup answers `row`, verbatim, and its reader.
+
+    Keyed on `UPPER(name)` rather than on the `SELECT name FROM` prefix the rest
+    of this file uses, because the read this guard needs comes back with the
+    online column BESIDE the name -- a fixture keyed on the old prefix would
+    stop matching the moment that select grows, and a test asserting "nothing
+    was sent" would then pass because the name resolved to nothing rather than
+    because the guard fired.
+    """
+    reader = _Reader(**{"UPPER(name)": row})
+    install = play.InstallPlay(entry, tmp_path, sql=reader, channel_for_saved=lambda: channel)
+    return install, reader
+
+
+def test_a_rename_is_not_sent_to_a_character_the_database_says_is_offline(tmp_path) -> None:
+    """The seam refuses it, not only the button.
+
+    The button was the whole protection until now, and it is driven by the
+    `online` flag of a character-list SNAPSHOT: the list is read once, and a bot
+    or a player that logs out a second later leaves a row that still says 1.
+    `RandomPlayerbotMgr` cycles its bots on a timer, so on the tree this matters
+    on, the snapshot goes stale on its own with nobody touching anything.
+
+    What is behind the button there is not an ineffective command, it is a
+    DIFFERENT one: `rename <char>` on an offline character runs
+    `UPDATE characters SET name = guid, at_login = at_login | '1'`
+    (`src/game/Commands/Commands.cpp:12624-12635`, re-read on m910q 2026-09-08),
+    which throws the name away. `set_level`, whose worst outcome is a harmless
+    `There is no such subcommand`, already had the belt-and-braces guard; this
+    is the action that needed it.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, TORTOISE, "Ganaar\t0\n", channel)
+
+    outcome = install.rename("ganaar")
+
+    assert outcome.done is False
+    assert channel.sent == [], channel.sent
+    assert outcome.problem.startswith("Ganaar "), outcome.problem
+    assert "logged in" in outcome.problem, outcome.problem
+    assert "guid" in outcome.problem, outcome.problem
+
+
+def test_the_rename_guard_reads_the_row_at_the_press_rather_than_the_list(tmp_path) -> None:
+    """The reading the refusal is made from is taken WHEN THE BUTTON IS PRESSED.
+
+    Two assertions, because either alone is satisfied by a guard that is not
+    really asking: the statement the seam sent NAMES the online column, and the
+    same install answers differently for the same character when the row behind
+    it says 1 rather than 0. A guard reading a snapshot taken at construction
+    would answer the same both times, and one that hard-coded "offline" would
+    never send at all.
+    """
+    refused_channel, sent_channel = _Channel(), _Channel()
+    offline, reader = _one_row(tmp_path, TORTOISE, "Guglu\t0\n", refused_channel)
+    online, _ = _one_row(tmp_path, TORTOISE, "Guglu\t1\n", sent_channel)
+
+    refused = offline.rename("guglu")
+    allowed = online.rename("guglu")
+
+    assert "online" in reader.asked[0], reader.asked[0]
+    assert refused.done is False
+    assert refused_channel.sent == [], refused_channel.sent
+    assert allowed.done is True, allowed.problem
+    assert sent_channel.sent == ["rename Guglu"], sent_channel.sent
+
+
+def test_a_tree_that_measured_no_such_hazard_still_flags_an_offline_rename(tmp_path) -> None:
+    """The guard is the ENTRY's fact and not a blanket rule.
+
+    WotLK's own box watched `character rename` on an offline character do
+    exactly what its name says -- set the at-login flag and nothing else -- so
+    its entry carries no refusal and this must keep sending. A guard that
+    refused every offline rename everywhere would pass the test above and take a
+    working action away from three trees.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, WOTLK, "Guglu\t0\n", channel)
+
+    outcome = install.rename("guglu")
+
+    assert outcome.done is True, outcome.problem
+    assert channel.sent == ["character rename Guglu"], channel.sent
+
+
+def test_the_actions_that_are_safe_offline_are_not_caught_by_the_rename_guard(
+    tmp_path,
+) -> None:
+    """Every other action on this fork works on a character who is out.
+
+    The teleport's own help says so in as many words, and 8.4c watched the
+    offline revive remove a corpse. A guard written into the shared `_one`
+    rather than into `rename` alone would have taken all of them out on this
+    tree, and nothing else in this file presses them against an offline row.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, TORTOISE, "Ganaar\t0\n", channel)
+
+    assert install.teleport("ganaar", "Stormwind").done is True
+    assert install.revive("ganaar").done is True
+    assert channel.sent == ["tele name Ganaar Stormwind", "revive Ganaar"], channel.sent
+
+
+def test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_own_entry(tmp_path) -> None:
+    """The line 8.4d was missing, and every test above it passed without.
+
+    The catalog block, the commands and the tab were all written for this tree
+    and `_for_tortoise` never bound the seam, so `ControllerServices.play` was
+    None and the Characters tab drew *"WoW Tortoise has not had its character
+    actions measured yet"* -- the entry saying the measurement exists and the
+    window saying it does not. `test_every_game_offers_the_whole_controller_
+    surface_wotlk_does` is the guard that caught it, and it asserts presence.
+
+    This asserts WHICH, which is the half that file's own docstring warns
+    presence is not: a seam handed a sibling's entry would send
+    `character rename` on the one fork where that is not a command, and would
+    promise twelve items per mail on the one that carries one. The entry is the
+    object every one of those facts is read from, so naming it names them all.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    server_dir = tmp_path / TORTOISE.id
+    server_dir.mkdir()
+    password_file = TORTOISE.install.password.file
+    if password_file:
+        (server_dir / password_file).write_text("hunter2", encoding="utf-8")
+
+    seam = ControllerServices.for_entry(TORTOISE, server_dir).play
+
+    assert isinstance(seam, play.InstallPlay)
+    assert seam.entry.id == "wow-tortoise", seam.entry.id
+    assert seam.entry.play is not None
+    assert seam.entry.play.rename_command == "rename"
+    assert seam.entry.play.set_level_command is None
+    assert seam.mail_item_cap == 1

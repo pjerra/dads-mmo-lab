@@ -470,19 +470,45 @@ def test_a_gear_read_that_fails_some_other_way_still_does_not_claim_it_is_naked(
 # -- 8.4d: a group that is absent AND says why -------------------------------
 
 
-def _drawn(widget: object) -> bool:
-    """Whether this control is really on the tab: in the layout, and not hidden.
+def _in_the_layout(widget: object) -> bool:
+    """Whether the form added a row for this control."""
+    parent = widget.parentWidget()
+    return parent.layout().indexOf(widget) >= 0
 
-    Both halves, because either alone is satisfied by a control that is there.
-    `isVisibleTo(view)` -- the probe the rest of this file reaches for -- cannot
-    answer it at all: a QTabWidget hides every page but the current one, so it
-    is False for every widget on this tab whether or not the tab drew it. And a
-    widget left OUT of the form still has the group box as its parent and would
-    paint itself in the corner of it, so "no row was added" is not by itself
-    "no control was drawn".
+
+def _shown(widget: object) -> bool:
+    """Whether this control would paint itself inside the group box that owns it.
+
+    A widget left OUT of the form still has that group box as its PARENT, and a
+    parented widget nobody laid out paints at the corner of it -- so "no row was
+    added" is not by itself "no control is on screen", and hiding it is a second
+    thing the tab has to do.
+
+    Measured against the parent rather than the view, because `isVisibleTo(view)`
+    cannot answer it at all: a QTabWidget hides every page but the current one,
+    so that probe is False for every widget on this tab whether the tab drew it
+    or not.
+
+    **This is a separate function, and its callers assert it separately, because
+    the two halves ANDed together proved nothing.** 8.4d's review deleted the
+    two `setVisible(False)` lines in `_build_characters_tab`, purged the
+    bytecode on both sides, and all 21 tests in this file still passed: where
+    the control is absent `indexOf` is already -1, so an `and` short-circuits
+    before the visibility half is ever reached, and the half that guards the
+    corner-painting bug was dead. Re-run against the same mutation on
+    2026-09-08, with the assertions split, it fails.
     """
     parent = widget.parentWidget()
-    return parent.layout().indexOf(widget) >= 0 and widget.isVisibleTo(parent)
+    return widget.isVisibleTo(parent)
+
+
+def _drawn(widget: object) -> bool:
+    """Both halves at once, for the places that want the whole answer.
+
+    Never the ONLY assertion about a control the tab is supposed to withhold --
+    see `_shown`.
+    """
+    return _in_the_layout(widget) and _shown(widget)
 
 
 def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
@@ -513,10 +539,18 @@ def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
         has_command = entry.play.set_level_command is not None
         (with_control if has_command else without_control).append(entry.id)
 
-        assert _drawn(view.set_level_button) is has_command, entry.id
-        assert _drawn(view.new_level) is has_command, entry.id
+        assert _in_the_layout(view.set_level_button) is has_command, entry.id
+        assert _in_the_layout(view.new_level) is has_command, entry.id
+        # Separately, and not folded into the line above with an `and`: where
+        # the control is absent `_in_the_layout` is already False, so an ANDed
+        # probe can never reach this one and a tab that added no row but hid
+        # nothing would pass. That mutant survived the first version of this
+        # file (see `_shown`).
+        assert _shown(view.set_level_button) is has_command, entry.id
+        assert _shown(view.new_level) is has_command, entry.id
         assert (view.set_level_button in view.character_buttons()) is has_command, entry.id
-        assert _drawn(view.set_level_absent) is not has_command, entry.id
+        assert _in_the_layout(view.set_level_absent) is not has_command, entry.id
+        assert _shown(view.set_level_absent) is not has_command, entry.id
         if has_command:
             assert view.set_level_absent.text() == "", entry.id
         else:
@@ -535,22 +569,35 @@ def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
     "the group is replaced by a sentence naming what does exist rather than one
     implying nothing does". A generic walk can only assert that some sentence is
     drawn -- "Not supported" would satisfy it. This asserts the words, once, on
-    the tree they were measured from: `.reset level` (`Chat.cpp:653`,
-    AllowConsole=true) and the character has to be logged in
-    (`ExtractPlayerTarget` with only a `Player**`, `Chat.cpp:3482-3527`).
+    the tree they were measured from, every one of them re-read on m910q on
+    2026-09-08 against `~/tortoise-server/src/tortoise-wow` and that install's
+    own `etc/mangosd.conf`:
 
-    Two things this test used to assert and must not. It asserted the words
-    "level 1", read from `StartPlayerLevel` in one install's
-    `etc/mangosd.conf:714` -- a key the person running the server may edit,
-    which the catalog never re-reads, so the sentence would rot into a lie the
-    day somebody changed it ("present tense rots"). And the sentence itself
-    used to say this console has NO command that puts a character at a level
-    you pick, which an adversarial review refuted: `.rndbot` is AllowConsole
-    true (`Chat.cpp:1012`) and its dispatch reaches `PlayerbotMgr::CreateBot`,
-    which parses `level=<n>` and calls `SetLevel`. The button is still rightly
-    absent -- nothing console-legal moves an EXISTING character to a chosen
-    level -- so the sentence now draws that distinction instead of denying the
-    command exists.
+    * `reset level` is `{ "level", SEC_ADMINISTRATOR, true, ... }` -- console
+      allowed -- at `src/game/Chat/Chat.cpp:653`, and its handler
+      (`Commands.cpp:3814`) takes only a `Player**` through `ExtractPlayerTarget`
+      at `:3817`, so the character has to be logged in.
+    * the level it writes is `CONFIG_UINT32_START_PLAYER_LEVEL`
+      (`Commands.cpp:3824-3826`), and the NUMBER that key currently holds is
+      `StartPlayerLevel = 1` at `etc/mangosd.conf:714` -- a line the owner of
+      any install can edit. So the sentence must NOT say one: finding 5 of the
+      review, and "present tense rots" -- shipped data that names a live
+      config value is wrong the day somebody changes it, silently.
+
+    The sentence itself used to say this console has NO command that puts a
+    character at a level you pick, and an adversarial review refuted that:
+    `.rndbot` is AllowConsole true (`Chat.cpp:1012`) and its dispatch reaches
+    `PlayerbotMgr::CreateBot`, which parses `level=<n>` and calls `SetLevel`.
+    The button is still rightly absent -- nothing console-legal moves an
+    EXISTING character to a chosen level -- so the sentence draws that
+    distinction rather than denying the command exists, and the two
+    assertions below hold it to both halves.
+
+    Two of these assertions are the same words `test_the_sentence_in_place_of_
+    the_level_control_names_what_this_fork_has` makes about the catalog string.
+    That is on purpose and it is not the same claim: that one says the
+    measurement is written down, this one says the tab DRAWS it -- a view that
+    fell back to a phrase of its own would pass that test and fail this.
     """
     view = _view(tmp_path, TORTOISE, play=_Play(characters=_people(), cap=1))
 
@@ -559,11 +606,19 @@ def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
     assert "reset level" in said, said
     assert "logged in" in said, said
     assert "configured starting level" in said, said
-    assert "level 1" not in said, f"a conf value the user can edit was baked in: {said}"
-    assert "rndbot create" in said, said
+    assert "level 1" not in said, said
+    # The route the review found, and the reason the sentence is narrower than
+    # it was: `rndbot` IS console-allowed (`Chat.cpp:1012`) and
+    # `rndbot create level=<n>` reaches `CreateBot`, which parses `level=` and
+    # calls `SetLevel` (`PlayerbotMgr.cpp:2389`, `:2497-2510`). What it cannot
+    # do is move a character that already exists, and that is the true clause.
+    assert "rndbot create level=" in said, said
+    assert "existing character" in said, said
     assert "NEW character" in said, said
-    assert _drawn(view.set_level_absent) is True
-    assert _drawn(view.set_level_button) is False
+    assert _in_the_layout(view.set_level_absent) is True
+    assert _shown(view.set_level_absent) is True
+    assert _in_the_layout(view.set_level_button) is False
+    assert _shown(view.set_level_button) is False
 
 
 def test_the_at_login_rename_is_withheld_offline_where_it_would_destroy_the_name(
@@ -584,18 +639,38 @@ def test_the_at_login_rename_is_withheld_offline_where_it_would_destroy_the_name
 
     view.character_list.setCurrentRow(0)
     assert view.rename_button.isEnabled() is True, "an online character can be flagged"
+    assert view.rename_button.toolTip() == "", "nothing to explain about a character who is in"
 
     view.character_list.setCurrentRow(1)
     assert view.rename_button.isEnabled() is False
     said = view.rename_button.text()
     assert said.startswith("Ganaar "), said
     assert "logged in" in said, said
-    assert "guid" in said, "the sentence says what the server would have done instead"
+    # In two lengths, like the Ambiguous refusal twenty lines below it in the
+    # view, and for the same reason: 8.4c put a 180-character sentence on one of
+    # these labels and it ran off the end of the window
+    # (`pyplan/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`). This
+    # refusal is ~200 characters. The bound is the one that box's own test
+    # already uses, so a label that overflows fails here rather than in a
+    # screenshot somebody takes later.
+    assert len(said) < 60, f"{len(said)} characters on a button: {said}"
+    hover = view.rename_button.toolTip()
+    assert "guid" in hover, "the whole sentence says what the server would have done instead"
+    assert hover == TORTOISE.play.rename_offline_refusal, hover
+
+    # And the label goes back when a character who IS logged in is chosen again:
+    # a stale refusal on a button that now works is the same defect the other
+    # way round.
+    view.character_list.setCurrentRow(0)
+    assert view.rename_button.isEnabled() is True
+    assert view.rename_button.text() == "Rename at next login Guglu"
+    assert view.rename_button.toolTip() == ""
 
     wotlk = _view(tmp_path, WOTLK, play=_Play(characters=_people()))
     wotlk.refresh_characters()
     wotlk.character_list.setCurrentRow(1)
     assert wotlk.rename_button.isEnabled() is True, wotlk.rename_button.text()
+    assert wotlk.rename_button.toolTip() == ""
 
 
 def test_the_control_follows_the_measurement_rather_than_the_game_it_belongs_to(
@@ -633,6 +708,8 @@ def test_the_control_follows_the_measurement_rather_than_the_game_it_belongs_to(
     lost = _view(tmp_path, wotlk_without_one, play=_Play(characters=_people()))
 
     assert _drawn(gained.set_level_button) is True, "the id is Tortoise and the fact is not"
-    assert _drawn(gained.set_level_absent) is False
-    assert _drawn(lost.set_level_button) is False, "the id is WotLK and the fact is not"
+    assert _in_the_layout(gained.set_level_absent) is False
+    assert _shown(gained.set_level_absent) is False
+    assert _in_the_layout(lost.set_level_button) is False, "the id is WotLK and the fact is not"
+    assert _shown(lost.set_level_button) is False, "the id is WotLK and the fact is not"
     assert lost.set_level_absent.text() == "a sentence measured on some other server"

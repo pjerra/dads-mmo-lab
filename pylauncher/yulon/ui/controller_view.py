@@ -223,6 +223,20 @@ makes a seventh button added to one and not the other raise on the first
 selection rather than silently mislabel.
 """
 
+_RENAME_OFFLINE_LABEL = "has to be logged in to be renamed"
+"""What the button says when the tree's entry refuses an offline rename.
+
+The short half of a two-length refusal, and short is the whole point: the
+measured sentence behind it is ~200 characters and a QPushButton is not where
+200 characters go -- 8.4c photographed a 180-character label running off the
+end of the window. The long half stays the entry's and becomes the tooltip.
+
+Here rather than in the catalog because it says nothing about any particular
+server: it is the field's own definition read back ("what to say instead of
+offering the at-login rename to a character who is NOT logged in"), and it is
+the same shape the revive refusal beside it takes.
+"""
+
 
 def _highest_level(entry: CatalogEntry) -> int:
     """The highest GM level this tree's own command accepts.
@@ -1051,6 +1065,16 @@ def _for_tortoise(
     # top-level command here (`Chat.cpp:850`) where the other three spell it
     # `character rename`, and there is no console route to an arbitrary level at
     # all, so the tab draws a sentence where that group would be.
+    #
+    # The `play=` keyword below was missing for a while, and two independent
+    # runs found it: the catalog block, the commands and the tab were all
+    # written, and without that one keyword the tab on this game drew "WoW
+    # Tortoise has not had its character actions measured yet" -- the entry
+    # saying the measurement existed and the window saying it did not.
+    # `test_every_game_offers_the_whole_controller_surface_wotlk_does` is what
+    # caught it, from the entry rather than from a list of which games are
+    # behind, and `test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_
+    # own_entry` asserts WHICH entry rather than only that one arrived.
     characters_admin = play_module.InstallPlay(
         entry,
         server_dir,
@@ -2822,6 +2846,10 @@ class ControllerView(QWidget):
         for button, label in self._character_actions():
             button.setText(f"{label} {name}")
             button.setEnabled(True)
+            # Cleared on every selection, not only set on the branches below: a
+            # tooltip left behind from the previous row explains a refusal that
+            # is no longer being made.
+            button.setToolTip("")
         offline_rename = self._rename_offline_refusal()
         if not online and offline_rename:
             # 8.4d, and it is a sharper case than the revive one below: the
@@ -2832,8 +2860,21 @@ class ControllerView(QWidget):
             # `UPDATE characters SET name = guid` (`:12624-12635`) and the name
             # is gone. So the refusal is the entry's, per tree, and it names
             # what the server would have done rather than only saying no.
+            #
+            # In two lengths, exactly as the `Ambiguous` refusal below is, and
+            # for the same measured reason: the reader is a BUTTON. The entry's
+            # sentence is ~200 characters, and 8.4c photographed a 180-character
+            # one running off the end of the window
+            # (`pyplan/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`).
+            # The short half is this view's because it is the same clause on
+            # every tree that has such a refusal -- the field's own definition
+            # is "what to say to a character who is NOT logged in" -- and it is
+            # the shape the revive refusal beside it already takes. The measured
+            # half, what THIS server would have done instead, stays the entry's
+            # and is what a person gets when they ask.
             self.rename_button.setEnabled(False)
-            self.rename_button.setText(f"{name} {offline_rename}")
+            self.rename_button.setText(f"{name} {_RENAME_OFFLINE_LABEL}")
+            self.rename_button.setToolTip(offline_rename)
         if not online and not self._revive_works_offline():
             # Whether an offline revive does anything is a PER-TREE fact and the
             # entry carries it. It was a constant here, on the strength of a

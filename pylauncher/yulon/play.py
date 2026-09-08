@@ -138,21 +138,45 @@ def like_literal(text: str) -> str:
     return literal(f"%{escaped}%")
 
 
-def canonical_character(sql: SqlReader, entry: CatalogEntry, typed: str) -> str | None:
-    """The stored spelling of a character's name, or `None` if there is none.
+@dataclass(frozen=True)
+class Stored:
+    """What the database says about a typed name, at the moment it was asked.
+
+    Two fields rather than one, and read in one statement, because 8.4d's review
+    found the destructive action deciding from the character LIST -- a snapshot
+    that is already stale by the time anybody presses anything, on a tree whose
+    bot manager logs its bots in and out on a timer. `online` here is a reading
+    taken by the press itself.
+    """
+
+    name: str
+    online: bool
+
+
+def canonical_character(sql: SqlReader, entry: CatalogEntry, typed: str) -> Stored | None:
+    """The stored spelling of a character's name and whether it is logged in,
+    or `None` if there is no such character.
 
     This tree's name column is case-sensitive and so is the server's own lookup,
     so `guglu` is not `Guglu` to either of them -- the prior art answered "not
     online" for an online character on exactly that. Every command this app
     builds uses the answer from here rather than what somebody typed.
+
+    The `online` column comes back with it because the caller that needs it
+    needs it FRESH, and asking twice would be two answers about two moments.
+    A row that answers no second field is read as not logged in: the direction
+    that refuses a destructive command is the direction to be wrong in.
     """
     characters = entry.schema_map()["characters"]
     found = sql.query(
         "characters",
-        f"SELECT name FROM {characters}.characters "
+        f"SELECT name, online FROM {characters}.characters "
         f"WHERE UPPER(name) = UPPER({literal(typed)}) LIMIT 1;",
     ).strip()
-    return found.splitlines()[0].strip() if found else None
+    if not found:
+        return None
+    fields = found.splitlines()[0].split("\t")
+    return Stored(fields[0].strip(), len(fields) > 1 and fields[1].strip() == "1")
 
 
 def characters(sql: SqlReader, entry: CatalogEntry) -> tuple[Character, ...]:
@@ -408,8 +432,26 @@ class InstallPlay:
         )
 
     def rename(self, character: str) -> Outcome:
-        verb = self.entry.play.rename_command if self.entry.play is not None else ""
-        return self._one(character, lambda name: commands.rename_at_login(name, verb=verb))
+        """Not sent at all where this tree measured the offline arm destroying
+        the name.
+
+        The belt-and-braces argument `set_level`'s docstring makes belongs
+        here far more than it belongs there: `set_level`'s worst outcome on
+        the fork that has no such command is `There is no such subcommand`,
+        while `rename`'s is
+        `UPDATE characters SET name = guid, at_login = at_login | '1'`
+        (this fork's `src/game/Commands/Commands.cpp:12624-12635`) -- the name
+        replaced by the numeric guid, behind a button that says "Rename at next
+        login". The view greys the button, but it greys it from a character
+        list read minutes ago; this reads the row the press is about.
+        """
+        block = self.entry.play
+        verb = block.rename_command if block is not None else ""
+        return self._one(
+            character,
+            lambda name: commands.rename_at_login(name, verb=verb),
+            refuse_offline=block.rename_offline_refusal if block is not None else None,
+        )
 
     def revive(self, character: str) -> Outcome:
         return self._one(character, commands.revive)
@@ -500,21 +542,39 @@ class InstallPlay:
 
     # -- the shape every write shares ----------------------------------------
 
-    def _one(self, character: str, build: Callable[[str], str]) -> Outcome:
-        name = self._stored_name(character)
-        if name is None:
+    def _one(
+        self, character: str, build: Callable[[str], str], *, refuse_offline: str | None = None
+    ) -> Outcome:
+        """One write, with the name the server stores.
+
+        `refuse_offline` is the sentence to answer with instead of sending, on
+        a tree that has measured this command doing something WORSE than
+        nothing to a character who is not logged in. It is checked here, off
+        the row this press just read, rather than in the view off the character
+        list -- 8.4d's review: the list is a snapshot and the bot manager
+        invalidates it on a timer. Passed per action rather than applied to all
+        of them, because every other action on that same fork works offline.
+        """
+        stored = self._stored(character)
+        if stored is None:
             return Outcome(False, problem=_no_such(character))
+        if refuse_offline and not stored.online:
+            return Outcome(False, problem=f"{stored.name} {refuse_offline}")
         channel = self._channel_for_saved()
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
         try:
-            line = build(name)
+            line = build(stored.name)
         except commands.CommandError as exc:
             return Outcome(False, problem=str(exc))
         return send(channel, line)
 
-    def _stored_name(self, character: str) -> str | None:
+    def _stored(self, character: str) -> Stored | None:
         return canonical_character(self._sql, self.entry, character)
+
+    def _stored_name(self, character: str) -> str | None:
+        stored = self._stored(character)
+        return None if stored is None else stored.name
 
 
 def _mails_needed(pieces: int, cap: int) -> int:

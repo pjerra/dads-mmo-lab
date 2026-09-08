@@ -42,10 +42,39 @@ def test_a_name_typed_in_the_wrong_case_still_finds_the_character() -> None:
     every command is built with — the server is just as case-sensitive as its
     column.
     """
-    sql = _Reader("Guglu\n")
+    sql = _Reader("Guglu\t1\n")
 
-    assert play.canonical_character(sql, WOTLK, "guglu") == "Guglu"
+    assert play.canonical_character(sql, WOTLK, "guglu") == play.Stored("Guglu", True)
     assert "UPPER" in sql.asked[0][1], sql.asked[0][1]
+
+
+def test_the_name_lookup_brings_back_whether_that_character_is_logged_in() -> None:
+    """8.4d's review, finding 2: the destructive action needs a FRESH reading.
+
+    The `online` flag the view had was the character list's, read once and
+    stale from then on -- and on the tree it matters on, the bot manager logs
+    bots in and out on a timer with nobody touching anything. It comes back
+    with the name because the two belong to the same moment; asking twice would
+    be two answers about two different ones.
+
+    Both directions, and a third for the answer that has no such column at all:
+    a row that does not say is read as NOT logged in, which is the direction
+    that refuses a command rather than sends it.
+    """
+    assert play.canonical_character(_Reader("Guglu\t1\n"), WOTLK, "guglu").online is True
+    assert play.canonical_character(_Reader("Guglu\t0\n"), WOTLK, "guglu").online is False
+    assert play.canonical_character(_Reader("Guglu\n"), WOTLK, "guglu").online is False
+
+
+def test_the_name_lookup_asks_for_the_online_column_rather_than_deducing_it() -> None:
+    """The value has to arrive from the server for the guard above it to mean
+    anything -- a `Stored` built with `online=False` by default would satisfy
+    every refusal test in the suite and send nothing, ever."""
+    sql = _Reader("Guglu\t1\n")
+
+    play.canonical_character(sql, WOTLK, "guglu")
+
+    assert "online" in sql.asked[0][1], sql.asked[0][1]
 
 
 def test_a_name_that_is_not_there_answers_nothing_rather_than_itself() -> None:
