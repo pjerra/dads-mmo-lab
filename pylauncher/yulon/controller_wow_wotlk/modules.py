@@ -11,9 +11,10 @@ particular module does; that is all in `manifests/wow-wotlk/` (§3).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import date
 from pathlib import Path
 
-from yulon import docker, resources
+from yulon import docker, module_source, platform, resources
 from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, ModuleUpdate, SqlRunner
 from yulon.apply import module_updates as apply_updates
 from yulon.controller_wow_wotlk import docker_ctl
@@ -32,6 +33,11 @@ from yulon.manifest_store import (
     load_manifest,
     urllib_get,
 )
+
+# Explicit re-export: copying a folder is not game-bound in any way, so the
+# WotLK binding is the same function under this package's name rather than a
+# wrapper that could come to disagree with it (style-guide §4).
+from yulon.module_source import copy_folder as copy_folder
 
 logger = get_logger(__name__)
 
@@ -56,9 +62,84 @@ def load_module(manifest_path: Path) -> Manifest:
     return load_manifest(manifest_path)
 
 
-def store(root: Path = BUNDLED_MANIFESTS_DIR) -> ManifestStore:
-    """The WotLK manifest store over `root` (bundled by default, or a refreshed cache)."""
-    return ManifestStore(root, GAME)
+def user_manifests_dir(config_dir: Path | None = None) -> Path:
+    """Where manifests this app DERIVED are kept: `<config_dir()>/manifests/user/`.
+
+    `platform.config_dir()`'s own docstring already reserves that directory for
+    "cached manifests", and `credentials/`, `logs/`, `downloads/` and `state.json`
+    live beside it. Resolved in a function rather than frozen into a module
+    constant at import time, which is what every sibling that writes under the
+    config directory does (`state.py`, `dbsecret.py`, `channel_setup.py`) — the
+    parameter is how a test gets a `tmp_path` there.
+    """
+    root = config_dir if config_dir is not None else platform.config_dir()
+    return root / "manifests" / "user"
+
+
+def shipped_ids(kind: ManifestType = "module") -> tuple[str, ...]:
+    """The ids this app SHIPS for that family — the bundled index alone, never the user layer.
+
+    What the shadow rule is answered against. Asked of the bundled store directly
+    rather than of `store()`, because `store()` is the merged view and a custom
+    module already in it would then be reported as shipped and refuse its own
+    re-derivation.
+    """
+    return ManifestStore(BUNDLED_MANIFESTS_DIR, GAME).load_index(kind).items
+
+
+def store(root: Path = BUNDLED_MANIFESTS_DIR, user_root: Path | None = None) -> ManifestStore:
+    """The WotLK manifest store over `root`, with the user layer over it.
+
+    `root` is the bundled tree by default (or a refreshed cache); the second layer
+    is `user_manifests_dir()` unless a caller names one. Every existing call site
+    gets the merged view with no change, which is the point: the Modules tab reads
+    `store().load_all("module")` and a custom module appears in that list on the
+    next start without the view learning anything new. A caller that wants the
+    bundled tree ALONE builds `ManifestStore(root, GAME)` itself — `shipped_ids()`
+    is the one that does.
+    """
+    return ManifestStore(root, GAME, user_root if user_root is not None else user_manifests_dir())
+
+
+def derive_link(text: str) -> Manifest:
+    """A WotLK module manifest for the link `text`, or `module_source.DeriveError`.
+
+    Minimal: what a link can be known to say before it is cloned. `complete()`
+    below is the other half, run once the clone is on disk.
+    """
+    return module_source.derive_link(text, GAME, today=date.today(), shipped_ids=shipped_ids())
+
+
+def derive_folder(path: Path) -> Manifest:
+    """A WotLK module manifest for the folder `path`, or `module_source.DeriveError`."""
+    return module_source.derive_folder(path, GAME, today=date.today(), shipped_ids=shipped_ids())
+
+
+def complete(manifest: Manifest, clone: Path) -> Manifest:
+    """Fill `manifest` in from what `clone` holds, PERSIST it, and return it.
+
+    Handed to the applier as its completion hook, so the manifest that is
+    persisted is the same one the rest of the install pass acts on and the same
+    one the report describes — there is no window in which the file on disk says
+    something the run did not do.
+
+    The persist is here rather than in `module_source.complete()` because
+    completing is a pure read and persisting is a write, and the applier's hook
+    contract is about the manifest, not about the config directory.
+    """
+    completed = module_source.complete(manifest, clone)
+    module_source.persist(user_manifests_dir(), completed, shipped_ids=shipped_ids())
+    return completed
+
+
+def forget(manifest: Manifest) -> bool:
+    """Drop `manifest` from the user layer; `True` if there was one to drop.
+
+    Called AFTER a remove returned, never before. `False` for every shipped
+    module, which is how the caller learns a shipped one has nothing to forget
+    without reading `manifest.origin` itself.
+    """
+    return module_source.forget(user_manifests_dir(), manifest)
 
 
 def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:

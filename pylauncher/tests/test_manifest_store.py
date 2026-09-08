@@ -187,3 +187,88 @@ def test_a_truncated_download_never_replaces_a_good_cached_file(tmp_path: Path) 
     with pytest.raises(ManifestError, match="not a manifest"):
         fetcher.refresh("wow-wotlk", "module")
     assert ManifestStore(tmp_path, "wow-wotlk").load_index("module").items == ("mod-x",)
+
+
+# -- the user layer --------------------------------------------------------
+
+
+def _write_layer(root: Path, items: list[str]) -> None:
+    """A manifest tree at `root/wow-wotlk/`: the modules index plus one file each."""
+    game_dir = root / "wow-wotlk"
+    (game_dir / "modules").mkdir(parents=True, exist_ok=True)
+    (game_dir / "modules.json").write_bytes(_index(items))
+    for item_id in items:
+        (game_dir / "modules" / f"{item_id}.json").write_bytes(_item(item_id, item_id.upper()))
+
+
+def test_user_items_follow_bundled_items_and_a_user_file_never_shadows_a_shipped_id(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two layers, one order, and the bundled one always wins the name.
+
+    The user layer holds modules this app DERIVED from a link or a folder the
+    user chose; the bundled layer is what the project ships. A user file that
+    claims a shipped id would replace a reviewed manifest — its repo, its conf
+    keys, its SQL — with one this app wrote from a basename, and the file can
+    arrive by hand as easily as by a press. So it is skipped, and the skip is
+    logged with the path, because a silently ignored file is a bug report nobody
+    can answer.
+    """
+    bundled, user = tmp_path / "bundled", tmp_path / "user"
+    _write_layer(bundled, ["mod-shipped", "mod-other"])
+    _write_layer(user, ["mod-shipped", "mod-custom"])
+
+    store = ManifestStore(bundled, "wow-wotlk", user_root=user)
+
+    with caplog.at_level("WARNING"):
+        assert [m.id for m in store.load_all("module")] == [
+            "mod-shipped",
+            "mod-other",
+            "mod-custom",
+        ]
+    assert str(user / "wow-wotlk" / "modules" / "mod-shipped.json") in caplog.text
+
+    # `load()` prefers the bundled file for a shadowed id and reaches the user
+    # layer for one the bundled index does not list.
+    assert store.load("module", "mod-shipped").name == "MOD-SHIPPED"
+    assert (bundled / "wow-wotlk" / "modules" / "mod-shipped.json").read_bytes() == _item(
+        "mod-shipped", "MOD-SHIPPED"
+    )
+    assert store.load("module", "mod-custom").name == "MOD-CUSTOM"
+
+    # Without a user root the store is exactly what it was: one layer.
+    assert [m.id for m in ManifestStore(bundled, "wow-wotlk").load_all("module")] == [
+        "mod-shipped",
+        "mod-other",
+    ]
+
+
+def test_a_missing_user_index_is_an_empty_layer_and_a_broken_one_is_an_error(
+    tmp_path: Path,
+) -> None:
+    """Nothing persisted yet is the ordinary first start, not a failure.
+
+    The distinction matters because the tab draws a `ManifestError` as
+    `!! could not load modules: …` with no list at all. On a machine that has
+    never used the feature there is no user index, and that must not take the
+    shipped modules down with it. A user index that IS there and does not parse
+    is a real error: something wrote a file this app reads back, and pretending
+    it is absent would hide a custom module the user believes is installed.
+    """
+    bundled, user = tmp_path / "bundled", tmp_path / "user"
+    _write_layer(bundled, ["mod-other"])
+
+    store = ManifestStore(bundled, "wow-wotlk", user_root=user)
+    assert [m.id for m in store.load_all("module")] == ["mod-other"]
+    assert store.load_all("ale") is not None  # a family with no layer at all
+
+    (user / "wow-wotlk").mkdir(parents=True)
+    (user / "wow-wotlk" / "modules.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ManifestError, match="valid JSON"):
+        list(store.load_all("module"))
+
+    (user / "wow-wotlk" / "modules.json").write_bytes(
+        json.dumps({"schema_version": 1, "game": "wow-wotlk", "type": "ale", "items": []}).encode()
+    )
+    with pytest.raises(ManifestError, match="expected wow-wotlk/module"):
+        list(store.load_all("module"))

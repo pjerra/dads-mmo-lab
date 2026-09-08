@@ -250,6 +250,45 @@
       "title": "Npc",
       "type": "object"
     },
+    "Origin": {
+      "additionalProperties": false,
+      "description": "How a CUSTOM manifest came to exist: derived by this app, not shipped by the project.\n\nPresent only on a manifest `yulon.module_source` derived from a link the user\npasted or a folder the user chose. Every file under `manifests/` has\n`origin=None`, and `test_origin_is_optional_and_every_shipped_manifest_has_none`\nasserts that over the tree rather than trusting it.\n\nIt exists because a local folder is **not** a `Source`. `Source` means \"where\ncontent is cloned from\" and its `url` property feeds `git.CloneSpec`; a path\nis not a clone URL, `same_repo()`/`remote_url()` have no meaning for a copy,\nand `README.md` \u00a73a treats `repo` as the piracy fence, which the user's own\ndisk should neither need to pass nor be allowed to weaken. So a folder-derived\nmanifest carries no source at all and records where it came from here.\n\n`path` is the folder the module was copied from, for a human reading the file\nand for choosing the same folder again; it is `None` for a link, whose source\nalready says where it came from. Nothing in the applier reads this model \u2014\nownership is decided by the clone claim, as it is for a shipped module.",
+      "properties": {
+        "added": {
+          "description": "ISO date the derivation happened.",
+          "minLength": 1,
+          "title": "Added",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "link",
+            "folder"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The folder it was copied from (kind='folder'); null for a link.",
+          "title": "Path"
+        }
+      },
+      "required": [
+        "kind",
+        "added"
+      ],
+      "title": "Origin",
+      "type": "object"
+    },
     "Patch": {
       "additionalProperties": false,
       "description": "A find/replace applied to a file after deploy/clone (the script's `sed -i`s).\n\n`file` is relative to the server dir for deployed files, or to the clone when\n`in_clone` is true (e.g. a source patch before a rebuild). `replace` may use\n`{prompt_key}` templates. Regex patches use Python `re` syntax.",
@@ -622,6 +661,18 @@
       },
       "title": "Npcs",
       "type": "array"
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Origin"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set only on a manifest this app derived; see `Origin`."
     },
     "patches": {
       "default": [],
