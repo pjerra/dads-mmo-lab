@@ -272,6 +272,37 @@ seconds and leaves `acore_world` permanently unimportable (yulon-ubuntu,
 true; without it the honest copy would be the opposite.
 """
 
+REALM_HOST_TOKEN = "{{REALM_HOST}}"
+"""The catalog token `ready.auth` names the realm's advertised address with."""
+
+REALM_ADDRESS_PATTERN = r"\S+"
+"""What `{{REALM_HOST}}` becomes in a ready marker: any address, not a literal one.
+
+**Measured on `yulon-ubuntu2`, 2026-09-09, on the first live press of the
+Rebuild control.** `ready.auth` is `{{REALM_HOST}}:{{WORLD_PORT}}`, and filling
+the token with `INSTALL_REALM_HOST` made the marker `127\\.0\\.0\\.1:8085` while
+the auth server's own line said
+`Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` — because
+`_advertise_realm()` is the install's LAST act and had replaced that row hours
+earlier. The compile finished, the containers were replaced, the new
+worldserver came up with the module compiled in and answered a command over its
+own channel, and the press sat in "Waiting for the world server" with nothing
+left that could ever match. Unattended it spends `READY_CEILING_SECONDS` and
+then puts a GOOD build back — the report this button exists to answer, with six
+hours added to it.
+
+**What is asserted, and what is not.** Readiness needs the auth server to have
+loaded a realm and to be advertising it on THIS install's world port: the port
+half stays exact, which is what
+`test_the_ready_wait_still_refuses_a_realm_line_on_another_port` holds. WHICH
+address it advertises is a different question with an owner —
+`_advertise_realm()`, which reads the row itself, decides whether it is
+reachable and says so — so pinning it here bought nothing and cost the above.
+
+`\\S+` and not `.+`: the address is one whitespace-free field in that line, and
+a greedy `.+` would let a marker match across a line that names no realm at all.
+"""
+
 INSTALL_REALM_HOST = "127.0.0.1"
 """The realm address every fresh install advertises, and what the `ready` stage expects.
 
@@ -3346,8 +3377,15 @@ class StagedInstaller:
         tokens = {"REALM_HOST": INSTALL_REALM_HOST, "WORLD_PORT": str(self.entry.ports.world)}
 
         def marker(text: str) -> str:
-            filled = composegen.fill(text, tokens)
-            pattern = filled if markers.regex else re.escape(filled)
+            if markers.regex:
+                pattern = composegen.fill(text, tokens)
+            else:
+                # `{{REALM_HOST}}` becomes a wildcard rather than a literal, and
+                # the port beside it stays exact. See `REALM_ADDRESS_PATTERN`.
+                halves = text.split(REALM_HOST_TOKEN)
+                pattern = REALM_ADDRESS_PATTERN.join(
+                    re.escape(composegen.fill(half, tokens)) for half in halves
+                )
             try:
                 re.compile(pattern)
             except re.error as exc:
