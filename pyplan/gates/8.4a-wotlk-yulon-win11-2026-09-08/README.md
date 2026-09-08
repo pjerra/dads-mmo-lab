@@ -40,7 +40,7 @@ Every one of these was sent from the VM while the host's client had the characte
 |---|---|
 | `teleport name Amvezuan Stormwind` | `pinfo`: **Durotar, Razor Hill → Stormwind City**; the client in the **Trade District** (`5-`, `7-`) |
 | `character level Amvezuan 55` | `pinfo`: **60 → 55**; the client's chat *"Congratulations, you have reached level 55!"* and *"server console command level down you to (55)"* (`7-`) |
-| `send money Amvezuan "A gift" … 50000` | mail rows **6 → 7**, `pinfo` **Mails: 0 Read/7 Total**, and the row carries `money = 50000` copper — the app's 5 gold, converted once |
+| `send money Amvezuan "A gift" … 50000` | mail rows **6 → 7**; the ground was read as both, `pinfo` saying **Mails: 0 Read/6 Total** before the press. The mail table afterwards carries four `A gift` rows at `money = 50000` copper each — the app's 5 gold, converted once (`logs/the-mail-rows.txt`) |
 | `revive Amvezuan` | `pinfo`: **Alive ?: No → Yes**. The ground is real: the character was **dead** first (`6-`) |
 | `character rename Amvezuan` | *"Forced rename for player Amvezuan will be requested at next login."*, and at the next Enter World **"Your name has been flagged for rename — Please enter a new name"** over a panel reading *Amvezuan, Level 55 Death Knight, Stormwind City* (`9-`). Answering it renamed the character: the portrait then read **Amvezgate** (`10-`) |
 
@@ -57,7 +57,14 @@ the server at all** — at `logout_time`. `the-row-and-the-world.py` and `watch_
 probes, `logs/log-row-and-world.txt` and `logs/log-watch-row.txt` their output. So the online arm's
 live reading is `pinfo` — the server answering about its own world — and the row is read after the
 logout that writes it (`stage_logout`, which **refuses to run while the character is still online**;
-it did refuse once, `logs/log-gate84a_win-logout.txt` carries both attempts' outcome).
+it did refuse once).
+
+That refusal really happened, and **the log does not carry it**. The first attempt ran at 15:59:55Z,
+four seconds after the client was killed, and stopped with `AssertionError: the character is still
+logged in; the row is not written yet`; the second run, two minutes later, wrote over the same log
+file, so `logs/log-gate84a_win-logout.txt` holds only the pass. It is recorded here in the session's
+own words rather than pointed at in a file that has not got it — the runner takes a `-Label` for
+exactly this and it was not used on that pair.
 
 The row after the logout: **level 55, map 0, at_login 1, `logout_time 2026-09-08 15:59:57`.** Every
 online action, in the row, written at the logout.
@@ -67,7 +74,9 @@ console answered *"Command 'die Amvezuan' does not exist"* — a SOAP session se
 one command that kills cannot be reached from the console. The kill is therefore the client's: F1 to
 target self, then `.die` from the character's own chat line, on an account the **app's own 8.3a
 button** put at GM level 3 (`Account(id=102, username='GATE84W', gm_level=0)` → `set_gm_level: True
-You change security level of account GATE84W to 3.` → `gm_level=3`). One run sent `.die` with
+You change security level of account GATE84W to 3.` → `gm_level=3`; that press was a one-liner
+rather than a gate stage, so its exchange is in `logs/gm-level-for-the-die.txt` and named as a
+console capture). One run sent `.die` with
 nothing selected and the server answered *"You should select a character or a creature."* — which
 photographs exactly like a character that refused to die, and is why the F1 is in the script.
 
@@ -97,7 +106,11 @@ that re-read is in the other folder.
   four of them `A gift` at 50000 copper, `deliver_time` in the past) and the world's own `pinfo`
   counts them, but no minimap envelope appears in any frame of the runs that were taken. The
   reading for this clause on this box is the mail rows and the server's own count, not a picture.
-  8.4a's Linux half has the envelope; this one does not, and says so.
+  8.4a's Linux half has the envelope; this one does not, and says so. The delivery timer was ruled
+  out (`logs/the-mail-rows.txt`); what is left unexplained is the client's, not the app's.
+* **Three empty mail rows** landed on the character during the session, one within a second of each
+  teleport, and nothing this app sends creates one. `logs/the-mail-rows.txt` records them without
+  attributing them to anything.
 * The **item search** and **item mail** controls were not pressed separately — the gear set exercises
   the same `mail_items` path with the cap, and that is what was gated.
 
