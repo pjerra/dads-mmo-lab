@@ -511,7 +511,16 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
     named = tuple(s for s in completed if isinstance(s, str)) if isinstance(completed, list) else ()
     stages = tuple(s for s in named if s in valid)
     unknown = tuple(s for s in named if s not in valid)
-    if unknown:
+    # `valid` empty means the CALLER IS NOT ASKING ABOUT STAGES, and the two
+    # callers that pass `()` both say so in as many words: `apply.
+    # server_dir_claim()` wants the identity and `purge._default_reason()` wants
+    # the version. Measuring `completed` against an empty tuple made every
+    # recorded stage "unknown", so every purge plan of every ordinary install
+    # logged advice about a version mismatch that was not happening — read on
+    # m910q during 8.9b's live gate, 2026-09-08, on an install this build had
+    # written itself. `stages` is still filtered and `unknown` is still carried,
+    # so nothing about what the file yields changes; only the sentence goes.
+    if unknown and valid:
         # Loud, because the silent version cost a downgrade its progress. This is
         # the ordinary shape of running an older build against a newer install;
         # it is not an error, and the names are kept and written back.

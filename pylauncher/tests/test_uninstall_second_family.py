@@ -525,3 +525,59 @@ def test_a_ticked_vanilla_purge_keeps_the_password_the_reinstall_will_need(
     assert kept is not None, "the key to the kept volume died with the folder"
     assert kept.password == "s3cret-generated"
     assert kept.volume == volume
+
+
+def test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found by 8.9b's live gate: every purge plan logged a warning that is not true.
+
+    `purge._default_reason()` and `apply.server_dir_claim()` both call
+    `native.read_claim(server_dir, valid=())`, and both say in as many words that
+    the stage names are not their business — they want the identity and the
+    version. `_parse_state` measures `completed` against `valid` anyway, so with
+    an empty tuple EVERY recorded stage is "unknown" and the log says:
+
+        .yulon-install.json records stages this build does not know:
+        clone-sources, write-dockerfile, build, extract, mmaps, conf, import.
+        … this is usually an older Yu'lon opening an install a newer one created.
+
+    Read on m910q 2026-09-08 against a perfectly ordinary CMaNGOS install this
+    build had just written. The sentence is advice about a version mismatch that
+    is not happening, printed on the one action that cannot be undone, and it is
+    the last thing a user should be reading while deciding whether to press
+    Uninstall. It is a family-neutral defect: `valid=()` makes every name unknown
+    whoever installed it, so 8.9a's WotLK gate saw it too and nobody read the log.
+    """
+    import logging
+
+    from yulon.catalog import native
+
+    server_dir = tmp_path / "vanilla"
+    server_dir.mkdir()
+    stages = ("clone-sources", "write-dockerfile", "build", "extract", "conf", "import")
+    native.write_state(
+        server_dir,
+        native.InstallState(
+            game_id=VANILLA,
+            install_id=composegen.install_id(server_dir),
+            family="cmangos",
+            completed=stages,
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        claim = native.read_claim(server_dir, valid=())
+    assert claim.state is not None and claim.state.install_id
+    assert [r.message for r in caplog.records] == [], (
+        "asking for the identity alone must not accuse the install of coming from a "
+        "newer build; only a caller that supplied a stage list is asking about stages"
+    )
+
+    # And the warning must still fire for the caller that IS asking about stages.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
+        native.read_claim(server_dir, valid=("clone-sources",))
+    assert any(
+        "records stages this build does not know" in r.message for r in caplog.records
+    ), "a caller that named the stages it knows must still be told about the ones it does not"
