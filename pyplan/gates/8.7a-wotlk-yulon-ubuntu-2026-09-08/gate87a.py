@@ -340,6 +340,26 @@ def step_start(view: ControllerView) -> None:
     shot(view, "6-started.png", tab="Server")
 
 
+def step_serverstatus(view: ControllerView) -> None:
+    """Re-capture the Server tab with its status line SETTLED.
+
+    `refresh_status()` is asynchronous like every other press here, so the first
+    capture after a start photographs `status: unknown` -- the label before the
+    read comes back -- on a server that is up. Same class of artifact as the
+    eight Server-tab pictures the first run produced: a file that reads as a
+    fact and is a placeholder.
+    """
+    say("=== the Server tab, with the status read settled ===")
+    view.refresh_status()
+    for _ in range(120):
+        QApplication.processEvents()
+        if "unknown" not in view.status_label.text():
+            break
+        time.sleep(0.5)
+    say(f"status label: {view.status_label.text()!r}")
+    shot(view, "6-started.png", tab="Server")
+
+
 def step_running(view: ControllerView) -> None:
     say("=== CLAUSE 5: the running server shows it, not the file ===")
     say(f"ac-worldserver alive: {alive()}")
@@ -488,6 +508,7 @@ def step_remove(view: ControllerView) -> None:
 
 STEPS = {
     "remove": step_remove,
+    "serverstatus": step_serverstatus,
     "ground": step_ground,
     "config": step_config,
     "behind": step_behind,

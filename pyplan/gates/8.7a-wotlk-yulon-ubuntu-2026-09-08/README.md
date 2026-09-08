@@ -166,6 +166,16 @@ and in the first cycle, four files in one run (`04-apply.log`):
 world 2974 → 2977, characters 31 → 32, auth 23 → 23
 ```
 
+**Three artifact traps are recorded here rather than quietly fixed**, because each produced a file
+that read as evidence and was not. (1) The first eight captures were byte-identical pictures of the
+**Server** tab: `ControllerView` opens there and nothing in the gate ever moved, so a "refusal"
+screenshot showed a Server tab with a greyed Start button. (2) The first press captures
+photographed the *placeholder* — `Asking each installed module's upstream…`, `Running the importer
+over the modules installed here.` — because every press here is asynchronous and the capture came
+before the answer. (3) `6-started.png` first showed `status: unknown` on a server that was up, for
+the same reason. All three now wait on the thing they are photographing; `gate87a.py` carries the
+reason at each wait.
+
 The ledger before the stop is read **while the database is still up**, and that is not tidiness:
 the app's Stop takes `ac-database` down with the servers, so a count taken after it answers `-1`
 for every schema. The first cycle recorded exactly that and then printed a difference against it,
@@ -179,7 +189,8 @@ nothing (measured on this box 2026-09-07).
 
 ## 5 — the running server, and the one clause this box cannot meet
 
-`6-started.png` (the Server tab after the restart) → `7-running-server-states-it.png` →
+`6-started.png` (the Server tab after the restart, `status: db up, auth up, world up` —
+`15-serverstatus.log`) → `7-running-server-states-it.png` →
 `8-config-and-the-running-server.png`, `13-cycle2-running.log`.
 
 **What the running server does show.** Asked through the app's own console seam, the restarted
