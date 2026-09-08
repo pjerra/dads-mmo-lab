@@ -399,11 +399,14 @@ def test_the_tortoise_block_carries_this_forks_own_numbers_and_not_a_siblings() 
     assert block.teleport_command == "tele name", "Chat.cpp:716/:869 -- `teleport` is no command"
     assert block.equipped.instance_table is None, "character_inventory carries item_template"
     assert block.equipped.template_column == "item_template"
-    assert block.revive_offline is None, (
-        "Commands.cpp:3040 has a ConvertCorpseForPlayer branch, so 8.4d's gate is EXPECTED "
-        "to measure True -- but this field is null until a box has pressed it. 8.4a learned "
-        "that the source can say yes while the server does nothing, which is why "
-        "revive_offline is measured and never read (audit, 2026-09-08)"
+    assert block.revive_offline is True, (
+        "MEASURED, not read off Commands.cpp:3040: 8.4d on m910q, 2026-09-08 -- Bramerm's "
+        "corpse row held for 12 s of watching and went to 0 on the press (transcript.txt:196-204, "
+        "07:37Z), and Ramoni's again in round 2 (transcript-round2.txt:48, 08:25Z). This field "
+        "IS read: controller_view offers the Revive button only on True, and for a few hours on "
+        "2026-09-08 it was null here -- set from a belief that no box had pressed it, while the "
+        "press sat unmerged in a stopped workflow's worktree -- which took the button off a tab "
+        "where it had already worked"
     )
     assert block.rename_command == "rename", "Chat.cpp:850 -- top level, not under `character`"
     assert block.set_level_command is None, "Chat.cpp:923 -- .levelup is AllowConsole=false"

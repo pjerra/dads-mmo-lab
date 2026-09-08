@@ -1230,6 +1230,7 @@
         "equipped": { "template_column": "item_template" },
         "teleport_command": "tele name",
         "mail_item_cap": 1,
+        "revive_offline": true,
         "rename_command": "rename",
         "rename_offline_refusal": "has to be logged in before a rename can be flagged on this server -- the same command run on an offline character here replaces the name with the character's guid instead, so it is not sent",
         "set_level_command": null,
