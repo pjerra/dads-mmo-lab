@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Literal
 
 from yulon import docker
-from yulon.apply import Applier, ApplyError, ApplyReport, SqlRunner
+from yulon.apply import Applier, ApplyError, ApplyReport, Completer, FolderSource, SqlRunner
 from yulon.dbreads import SqlReader
 from yulon.git import Git
 from yulon.log import get_logger
@@ -470,9 +470,23 @@ class GuardedApplier(Applier):
             world_running=self.world_running(),
         )
 
-    def install(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        folder: FolderSource | None = None,
+        complete: Completer | None = None,
+    ) -> ApplyReport:
+        # `folder` and `complete` are the base class's second way to fill
+        # `modules/<id>` (a module from a link or a folder). Passed THROUGH,
+        # not dropped: custom modules are wow-wotlk-only, so nothing reaches
+        # this class with either set today, and a subclass that silently
+        # ignored a keyword its base accepts would report an install it copied
+        # nothing for. The guard still runs first, whichever route fills the
+        # folder -- the restart a C++ module asks for is the same restart.
         note = self._guard(manifest, "install")
-        return _with_note(super().install(manifest, values), note)
+        return _with_note(super().install(manifest, values, folder=folder, complete=complete), note)
 
     def configure(self, manifest: Manifest, values: Mapping[str, str] | None = None) -> ApplyReport:
         note = self._guard(manifest, "configure")

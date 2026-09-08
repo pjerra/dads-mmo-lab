@@ -554,3 +554,68 @@ def test_the_guard_is_on_the_object_the_tortoise_tab_is_actually_handed(tmp_path
     services = ControllerServices.for_entry(ENTRY, tmp_path)
     assert services.store is not None and services.store.game == GAME
     assert isinstance(services.applier, autoupdate.GuardedApplier)
+
+
+def test_a_folder_and_a_completer_handed_to_the_guarded_applier_reach_the_engine_behind_the_guard(
+    tmp_path: Path,
+) -> None:
+    """`Applier.install` grew `folder=` and `complete=` (module-from-link, lane B); the override
+    must carry both THROUGH its guard, not drop them and not route around it.
+
+    Custom modules are wow-wotlk-only, so no folder reaches this class in practice --
+    which is why dropping the keywords would be cheap and wrong at once: a
+    subclass whose `install()` silently ignores a keyword its base accepts is a
+    seam that copies nothing and reports an install. Ground first: with the world
+    DOWN the same applier takes both keywords and the guard's note is in the
+    report beside the copy; then, armed and UP, the same call is refused before
+    the copier is ever asked.
+    """
+    from yulon.apply import FolderSource
+
+    server_dir = _server_dir_with_conf(tmp_path)
+    source = tmp_path / "mod-hand-made"
+    (source / "src").mkdir(parents=True)
+    copied: list[tuple[Path, Path]] = []
+    completed: list[Path] = []
+
+    def copier(src: Path, dest: Path) -> None:
+        copied.append((src, dest))
+        dest.mkdir(parents=True)
+        (dest / "src").mkdir()
+
+    def complete(manifest: Manifest, clone: Path) -> Manifest:
+        completed.append(clone)
+        return manifest
+
+    manifest = parse_manifest(
+        {
+            "schema_version": 1,
+            "id": "mod-hand-made",
+            "name": "mod-hand-made",
+            "type": "module",
+            "game": GAME,
+            "origin": {"kind": "folder", "path": str(source), "added": "2026-09-08"},
+            "build": {"rebuild": True, "restart": True},
+        }
+    )
+    armed = autoupdate.Arming(
+        enabled=True, outstanding={"auth": (), "characters": (), "world": ("2026_a.sql",)}
+    )
+    world_up = [False]
+    applier = tortoise_modules.applier(
+        server_dir, sql=_RecordingSql(), arming=lambda: armed, world_running=lambda: world_up[0]
+    )
+
+    report = applier.install(manifest, folder=FolderSource(source, copier), complete=complete)
+
+    clone = server_dir / "modules" / "mod-hand-made"
+    assert copied == [(source, clone)]
+    assert completed == [clone]
+    assert any("auto-update" in line.lower() for line in report.done), report.done
+    assert any(line.startswith("copy ") for line in report.done), report.done
+
+    applier.remove(manifest)
+    world_up[0] = True
+    with pytest.raises(autoupdate.AutoUpdateRefused):
+        applier.install(manifest, folder=FolderSource(source, copier), complete=complete)
+    assert copied == [(source, clone)], "the refusal must come before the seam is asked"
