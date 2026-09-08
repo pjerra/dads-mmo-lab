@@ -45,6 +45,8 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.manifest import Build, Manifest, ManifestType, Source
+from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -1030,6 +1032,350 @@ def test_the_modules_tab_shows_how_far_behind_each_installed_module_is(
     text = view.module_report.toPlainText()
     assert "mod-aoe-loot: 3 commits behind" in text
     assert "mod-playerbots: 0 commits behind" in text
+
+
+# --------------------------------------------- a module from a link or a folder
+#
+# Lane C of `pyplan/phase8-designs/module-from-link-or-folder.md`: the two
+# buttons, the two dialog seams, and what the tab does with what they answer.
+# Every service below is a fake, which is the whole point of the seam -- the
+# real ones are lane A's (`module_source.py`, absent from this branch) and the
+# install route behind them is lane B's.
+#
+# Prior art, `origin/rust-main`: the same control is
+# `launcher/src/lib/pages/ModuleManager.svelte:1473-1491` -- an "Install from
+# URL" card with a `mod-* repos only` hint and a button dead while the field is
+# empty -- and its handler at `:447-455` clears the field on success, after the
+# `await refresh()` at `:439` that re-reads the list.
+
+
+def _custom_manifest(item_id: str, description: str) -> Manifest:
+    """A manifest of the shape lane A's `derive_link`/`derive_folder` return."""
+    return Manifest(
+        id=item_id,
+        name=item_id,
+        type="module",
+        game="wow-wotlk",
+        description=description,
+        source=Source(repo=f"https://github.com/you/{item_id}"),
+        build=Build(rebuild=True),
+    )
+
+
+CUSTOM_LINK_DESC = "Custom module (cloned from a URL you provided)."
+"""Verbatim `origin/rust-main:crates/dml-wow/src/modules.rs:38`."""
+
+CUSTOM_FOLDER_DESC = "Custom module (copied from a folder you provided)."
+"""No prior art: `origin/rust-main` had no folder route at all."""
+
+
+class _LayeredStore(ManifestStore):
+    """The bundled store with a user layer over it, which is lane A's §2.3 shape.
+
+    The row a custom install adds to the list does NOT come from the view
+    remembering it: it comes from the store, because lane A persists the
+    derived manifest under `config_dir()/manifests/user/<game>/` and reads that
+    layer back after the bundled index. Modelled here rather than asserted
+    against a view-held dict, so a view that quietly kept its own copy would
+    still fail these tests -- its row would survive a `reload_modules()` that
+    the real store answers without it.
+
+    User items follow bundled items, and a user id that is shipped never
+    shadows the shipped one, both of which are lane A's rules.
+    """
+
+    def __init__(self, root: Path, game: str) -> None:
+        super().__init__(root, game)
+        self.user: dict[str, Manifest] = {}
+
+    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
+        shipped = list(super().load_all(kind))
+        yield from shipped
+        ids = {m.id for m in shipped}
+        for manifest in self.user.values():
+            if manifest.type == kind and manifest.id not in ids:
+                yield manifest
+
+
+class _FakeCustomRoute:
+    """Lane A's bindings and lane B's install, as one recording fake."""
+
+    def __init__(self, store: _LayeredStore, refusal: str | None = None) -> None:
+        self.store = store
+        self.refusal = refusal
+        self.derived_from: list[object] = []
+        self.installed: list[tuple[str, Path | None]] = []
+        self.forgotten: list[str] = []
+        self.custom_ids: set[str] = set()
+
+    def derive_link(self, text: str) -> Manifest:
+        if self.refusal is not None:
+            raise ValueError(self.refusal)
+        self.derived_from.append(text)
+        item_id = text.rstrip("/").rsplit("/", 1)[-1]
+        self.custom_ids.add(item_id)
+        return _custom_manifest(item_id, CUSTOM_LINK_DESC)
+
+    def derive_folder(self, path: Path) -> Manifest:
+        if self.refusal is not None:
+            raise ValueError(self.refusal)
+        self.derived_from.append(path)
+        self.custom_ids.add(path.name)
+        return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
+
+    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+        self.installed.append((manifest.id, folder))
+        # Lane A's `complete()` persists inside the install pass, so the row is
+        # in the store by the time the report comes back.
+        self.store.user[manifest.id] = manifest
+        return ApplyReport("install", manifest.id, done=("clone",), rebuild_required=True)
+
+    def forget(self, manifest: Manifest) -> bool:
+        self.forgotten.append(manifest.id)
+        return self.store.user.pop(manifest.id, None) is not None
+
+
+def _with_custom_route(
+    services: ControllerServices, refusal: str | None = None
+) -> _FakeCustomRoute:
+    """Put a layered store and the five custom-module seams on `services`."""
+    store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
+    route = _FakeCustomRoute(store, refusal=refusal)
+    services.store = store
+    services.module_from_link = route.derive_link
+    services.module_from_folder = route.derive_folder
+    services.module_install_custom = route.install
+    services.module_forget = route.forget
+    return route
+
+
+def _listed(view: ControllerView) -> list[str]:
+    return [view.module_list.item(i).text() for i in range(view.module_list.count())]
+
+
+def _rows_for(view: ControllerView, item_id: str) -> list[int]:
+    """Every row whose manifest id is `item_id` -- the id, not the visible text.
+
+    A shipped manifest's row reads `[module] AoE Loot — ...`: the id is the
+    row's `Qt.UserRole` data and appears nowhere in the line, so a search over
+    the text finds a custom module (whose name IS its id) and silently misses
+    every shipped one.
+    """
+    return [
+        i for i in range(view.module_list.count()) if view.module_list.item(i).data(256) == item_id
+    ]
+
+
+def _row_for(view: ControllerView, item_id: str) -> int:
+    rows = _rows_for(view, item_id)
+    assert rows, f"{item_id!r} is in no row of the modules list"
+    return rows[0]
+
+
+def test_the_link_button_derives_installs_and_relists_as_a_custom_module(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole link clause: derive, install through the seam, then re-list.
+
+    The re-list is the half that is easy to drop and hard to notice from the
+    report alone: without it the module is on disk, the report says so, and the
+    list the user selects Remove from does not carry it until the next start.
+
+    The ground is read first and asserted absent, because a list that already
+    held the row would make the assertion below true before the press.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    assert not any("mod-my-thing" in line for line in _listed(view))
+
+    view.install_module_from_link()
+
+    assert route.derived_from == ["https://github.com/you/mod-my-thing"]
+    assert route.installed == [("mod-my-thing", None)]
+    assert "install mod-my-thing:" in view.module_report.toPlainText()
+    assert f"[module] mod-my-thing — {CUSTOM_LINK_DESC}" in _listed(view)
+    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    chosen = view.selected_manifest()
+    assert chosen is not None and chosen.id == "mod-my-thing"
+
+
+def test_a_refused_link_says_the_sentence_and_installs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A refusal is lane A's sentence, shown verbatim, with no job queued."""
+    refusal = (
+        "The repository is named 'tools', and a custom module must be named "
+        "mod-<something> in lowercase letters, digits and hyphens. "
+        "Nothing on this machine was changed."
+    )
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services, refusal=refusal)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/tools",
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.install_module_from_link()
+
+    assert view.module_report.toPlainText() == refusal
+    assert failures == [refusal]
+    assert route.installed == []
+
+
+def test_cancelling_the_link_dialog_changes_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Cancel is not empty text: nothing is derived and nothing is installed."""
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, link_asker=lambda parent, title: None)
+
+    view.install_module_from_link()
+
+    assert route.derived_from == [] and route.installed == []
+    assert view.module_report.toPlainText() == (
+        "install from link: cancelled — nothing on this machine was changed."
+    )
+
+
+def test_the_folder_button_hands_the_install_route_the_folder_it_was_given(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The folder is derived from and then carried into the install call.
+
+    The design has the view build lane B's `FolderSource` and hand it the
+    copier; lanes A and B are not on this branch, so the view hands the route
+    the path alone and the route (lane A's binding) owns the copier. Recorded
+    as deviation D1 in the gate README.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    source = tmp_path / "mod-hand-made"
+    source.mkdir()
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        folder_asker=lambda parent, title: source,
+    )
+    assert not any("mod-hand-made" in line for line in _listed(view))
+
+    view.install_module_from_folder()
+
+    assert route.derived_from == [source]
+    assert route.installed == [("mod-hand-made", source)]
+    assert f"[module] mod-hand-made — {CUSTOM_FOLDER_DESC}" in _listed(view)
+
+
+def test_a_game_with_no_custom_module_route_gets_dead_buttons_that_do_nothing_when_pressed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games, and this branch's WotLK: no route, dead controls.
+
+    Same rule as `module_sql` and the update check -- a control that is visibly
+    unavailable beats one that is pressed and then explains itself. Both
+    presses must still be harmless, because the slot is reachable by more than
+    the button, and neither may open a dialog it cannot act on.
+    """
+    services = _services(ps, tmp_path, [])
+    services.module_from_link = None
+    services.module_from_folder = None
+    services.module_install_custom = None
+    asked: list[str] = []
+
+    def refuse_link(parent: object, title: str) -> str | None:
+        asked.append(title)
+        return None
+
+    def refuse_folder(parent: object, title: str) -> Path | None:
+        asked.append(title)
+        return None
+
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=refuse_link,
+        folder_asker=refuse_folder,
+    )
+
+    assert not view.module_link_button.isEnabled()
+    assert not view.module_folder_button.isEnabled()
+    view.install_module_from_link()  # must not raise
+    view.install_module_from_folder()  # must not raise
+    assert asked == []  # not even the dialog opens
+
+
+def test_removing_a_custom_module_forgets_it_and_removing_a_shipped_one_keeps_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The record follows the folder, and only for the record this app wrote.
+
+    The view never reads a manifest field to tell the two apart: it asks the
+    forget seam after the remove returned, and the seam's answer is what
+    decides whether the list is re-read. The ordering matters -- a forget
+    before the remove would drop the record of a remove that then failed,
+    leaving a folder on disk and nothing in the list to try again with.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    view.install_module_from_link()
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+
+    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    view._module_action("remove")
+
+    assert route.forgotten == ["mod-my-thing"]
+    assert applier.removed == ["mod-my-thing"]
+    assert _rows_for(view, "mod-my-thing") == []
+
+    view.module_list.setCurrentRow(_row_for(view, "mod-aoe-loot"))
+    view._module_action("remove")
+
+    assert route.forgotten == ["mod-my-thing", "mod-aoe-loot"]
+    assert _rows_for(view, "mod-aoe-loot") != []
+
+
+def test_the_custom_install_report_is_the_one_install_selected_prints(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """One formatter, so the rebuild sentence and the pending-SQL lines are the same.
+
+    A second report builder for this route is the mutation this catches: the
+    sentence a C++ module gets is the longest piece of copy on the tab and the
+    one an operator acts on.
+    """
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    expected = controller_view_module._format_report(
+        ApplyReport("install", "mod-my-thing", done=("clone",), rebuild_required=True)
+    )
+    assert view.module_report.toPlainText() == expected
+    assert "worldserver REBUILD required" in expected
 
 
 def test_a_game_with_no_module_checkouts_gets_no_update_button(
