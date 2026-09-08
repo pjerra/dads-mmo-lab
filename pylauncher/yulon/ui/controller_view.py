@@ -2566,11 +2566,16 @@ class ControllerView(QWidget):
             f"  images: {len(plan.images)} built for this install",
         ]
         if keep and plan.character_volume:
-            others = [v for v in plan.volumes if v != plan.character_volume]
+            kept = [plan.character_volume]
+            if plan.client_volume:
+                kept.append(plan.client_volume)
+            others = [v for v in plan.volumes if v not in kept]
             lines.append(f"  volumes removed: {', '.join(others) or 'none'}")
             lines.append(
-                f"  volumes KEPT: {plan.character_volume} \u2014 your characters. A reinstall "
-                f"to THIS SAME FOLDER finds them again; a reinstall anywhere else does not."
+                f"  volumes KEPT: {', '.join(kept)} \u2014 your characters"
+                + (" and the extracted client data" if plan.client_volume else "")
+                + ". A reinstall to THIS SAME FOLDER finds them again; a reinstall anywhere "
+                "else does not."
             )
         else:
             lines.append(f"  volumes removed: {', '.join(plan.volumes) or 'none'}")

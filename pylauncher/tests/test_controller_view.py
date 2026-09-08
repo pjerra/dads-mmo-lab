@@ -4131,8 +4131,12 @@ class _FakeUninstall:
             server_dir=self.server_dir,
             project="yulon-wow-wotlk-deadbeef",
             containers=("ac-worldserver", "ac-database"),
-            volumes=("yulon-wow-wotlk-deadbeef_db-data",),
+            volumes=(
+                "yulon-wow-wotlk-deadbeef_db-data",
+                "yulon-wow-wotlk-deadbeef_client-data",
+            ),
             character_volume="yulon-wow-wotlk-deadbeef_db-data",
+            client_volume="yulon-wow-wotlk-deadbeef_client-data",
             images=("yulon.local/ac-wotlk-worldserver:native-deadbeef",),
             folder_bytes=2_300_000_000,
         )
@@ -4344,6 +4348,27 @@ def test_a_second_press_cannot_delete_what_the_first_promised_to_keep(
     assert seen == [False, False], f"the uninstall controls stayed live: {seen}"
     assert len(fake.runs) == 1, f"the purge ran {len(fake.runs)} times, not once"
     assert fake.runs[0] is True, "the one run that happened did not keep the characters"
+
+
+def test_a_ticked_plan_says_the_client_data_volume_is_kept_not_removed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Owner answer 3, 2026-09-08, read off the dialog before the press.
+
+    A ticked purge keeps the 3.2 GB client-data volume as well as the database
+    volume, and the sentence a person reads must say so -- the plan is what
+    stands between them and a 3.2 GB re-download they did not expect.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+
+    said = view.uninstall_label.text()
+    kept = [line for line in said.splitlines() if "KEPT" in line]
+    removed = [line for line in said.splitlines() if "volumes removed" in line]
+    assert kept and "_client-data" in kept[0], said
+    assert removed and "_client-data" not in removed[0], said
 
 
 def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(

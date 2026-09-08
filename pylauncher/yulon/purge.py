@@ -106,6 +106,19 @@ this module builds and hands to `docker volume rm`. A computed name that misses
 leaks the volume; a computed name that hits the wrong one deletes a database.
 """
 
+CLIENT_VOLUME_SUFFIX = "_client-data"
+"""The extracted client data (maps, vmaps, mmaps, dbc): `<compose project>_client-data`.
+
+Declared next to `db-data:` in the base template, so compose names it the same
+way. Measured at 3.2 GB on yulon-ubuntu 2026-09-08. Whether a ticked purge keeps
+it was never decided by the design; the owner decided it on 2026-09-08 (answer
+3, `pyplan/phase8-owner-answers-2026-09-08.md`): a TICKED purge keeps it, so
+the reinstall that keeps the characters does not re-download 3.2 GB of maps;
+an UNTICKED purge removes it, because "remove everything" that leaves 3.2 GB
+behind is the surprise nobody wants. Until then the ticked press removed it
+(8.9a's gate log, `stage1.log:102`).
+"""
+
 
 LEFT_BEHIND = (
     "your backups — an uninstall that deleted them would make "
@@ -161,6 +174,7 @@ class PurgePlan:
     containers: tuple[str, ...] = ()
     volumes: tuple[str, ...] = ()
     character_volume: str | None = None
+    client_volume: str | None = None
     images: tuple[str, ...] = ()
     folder_bytes: int = 0
     left_behind: tuple[str, ...] = LEFT_BEHIND
@@ -353,6 +367,7 @@ class Uninstaller:
             containers=targets.containers,
             volumes=targets.volumes,
             character_volume=targets.character_volume,
+            client_volume=targets.client_volume,
             images=self.image_refs,
             folder_bytes=self._folder_size(self.server_dir),
             problems=targets.problems,
@@ -416,12 +431,14 @@ class Uninstaller:
                 f"removed."
             )
         character = next((v for v in volumes if v.endswith(DB_VOLUME_SUFFIX)), None)
+        client = next((v for v in volumes if v.endswith(CLIENT_VOLUME_SUFFIX)), None)
         return (
             _Targets(
                 project=project,
                 containers=tuple(containers),
                 volumes=tuple(volumes),
                 character_volume=character,
+                client_volume=client,
                 problems=() if containers else ("this install has no containers left",),
             ),
             "",
@@ -457,7 +474,7 @@ class Uninstaller:
         kept: list[str] = []
         removed_volumes: list[str] = []
         for name in targets.volumes:
-            if keep_characters and name == targets.character_volume:
+            if keep_characters and name in (targets.character_volume, targets.client_volume):
                 kept.append(name)
                 continue
             self._remove_volume(name)
@@ -553,6 +570,7 @@ class _Targets:
     containers: tuple[str, ...]
     volumes: tuple[str, ...]
     character_volume: str | None
+    client_volume: str | None
     problems: tuple[str, ...] = ()
 
 

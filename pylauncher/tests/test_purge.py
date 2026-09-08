@@ -443,14 +443,38 @@ def test_the_purge_never_prunes_anything(tmp_path: Path) -> None:
 # -- 5. keep my characters -------------------------------------------------
 
 
-def test_ticked_keeps_exactly_the_database_volume_and_removes_the_other(
+def test_ticked_keeps_the_database_volume_and_the_client_data_volume(
     tmp_path: Path,
 ) -> None:
-    """One object survives: `<project>_db-data`, which IS the three acore schemas."""
+    """Two objects survive a ticked purge, and the second is the owner's call.
+
+    Until 2026-09-08 this test pinned the opposite: ticked kept `_db-data` alone
+    and removed `_client-data`, and 8.9a's own gate log shows it doing exactly
+    that (`stage1.log:102`, `client-data volume gone: True`, on the TICKED
+    press). The design of record never decided the 3.2 GB client-data volume
+    either way; the owner did, the same morning (owner answer 3,
+    `pyplan/phase8-owner-answers-2026-09-08.md`): an UNTICKED purge removes it,
+    because "remove everything" that leaves 3.2 GB behind is the surprise
+    nobody wants, and a TICKED purge keeps it, because a reinstall that keeps
+    the characters should not re-download 3.2 GB of maps. Re-pointed, with the
+    old expectation named here so the change is visible rather than silent.
+    """
     rec = _recorder(tmp_path)
     report = rec.uninstaller().run(keep_characters=True)
-    assert report.kept_volumes == ("yulon-wow-wotlk-deadbeef_db-data",)
-    assert rec.removed_volumes == ["yulon-wow-wotlk-deadbeef_client-data"]
+    assert set(report.kept_volumes) == {
+        "yulon-wow-wotlk-deadbeef_db-data",
+        "yulon-wow-wotlk-deadbeef_client-data",
+    }
+    assert rec.removed_volumes == [], "a ticked purge removed a volume"
+
+
+def test_the_plan_names_the_client_data_volume_so_the_dialog_can_say_it_is_kept(
+    tmp_path: Path,
+) -> None:
+    """The dialog must name what a ticked press keeps BEFORE the press, from the plan."""
+    plan = _recorder(tmp_path).uninstaller().plan()
+    assert plan.client_volume == "yulon-wow-wotlk-deadbeef_client-data"
+    assert plan.character_volume == "yulon-wow-wotlk-deadbeef_db-data"
 
 
 def test_ticked_still_removes_the_folder_and_the_record(tmp_path: Path) -> None:
@@ -484,7 +508,10 @@ def test_the_kept_volume_is_the_name_a_reinstall_to_this_folder_recomputes(
     rec = Recorder(server_dir, project=project)
     report = rec.uninstaller().run(keep_characters=True)
     reinstalled = composegen.project_name(GAME, server_dir)
-    assert report.kept_volumes == (f"{reinstalled}_db-data",)
+    assert f"{reinstalled}_db-data" in report.kept_volumes
+    assert (
+        f"{reinstalled}_client-data" in report.kept_volumes
+    ), "the reinstall would re-download 3.2 GB of maps (owner answer 3, 2026-09-08)"
 
 
 def test_unticked_leaves_no_container_volume_image_folder_or_record(
