@@ -115,6 +115,127 @@ def test_a_write_inside_a_nested_function_is_attributed_to_that_function() -> No
     assert _sites_in(source) == {"inner::write_text"}
 
 
+# -- three shapes the walk could not see, widened 2026-09-08 ---------------
+#
+# A retrospective audit found the ledger claiming completeness over a walk that
+# was blind to three call shapes. Each of the three is written here as a snippet
+# FIRST, so the walker's answer is the assertion and not a reading of it; each
+# corresponds to a live call in the package, named in its docstring, so none of
+# them is a hypothetical. The ground before the widening, recorded because a
+# guard that was already true proves nothing: `pytest tests/test_write_ledger.py`
+# was **18 passed** at `c0513d6d` with all three of these shapes invisible.
+
+
+def test_writing_to_a_file_descriptor_is_a_write_even_though_it_names_no_path() -> None:
+    """`os.write(master, ...)` is how a console command reaches a running world.
+
+    Live in two places at `c0513d6d`: `controller_wow_wotlk/console.py:318` sends
+    the command into the worldserver's pty, and `runner.py:647` is the same shape
+    for every subprocess this app drives on a pty. It is the FURTHEST-reaching
+    write in the package -- what goes down that descriptor is a GM command, and
+    `.account set gmlevel`, `.character rename` and `.reset level` all change the
+    database on the other side of it -- and the walk could not see it, because a
+    file descriptor is an integer and the walker was looking for paths.
+    """
+    source = "import os\ndef f(fd, payload):\n    os.write(fd, payload)\n"
+    assert _sites_in(source) == {"f::os.write"}
+
+
+def test_an_open_whose_mode_is_computed_is_a_write_because_it_might_be() -> None:
+    """`part.open("ab" if resumed else "wb")` -- `platform.py:2220`, the resumable download.
+
+    `_mode_of()` returns `""` for any mode that is not an `ast.Constant`, and the
+    caller then asked whether `""` intersects the writing modes. It does not, so
+    a computed mode read as "not a write" -- the one direction of that question a
+    walker must never guess, since the whole point of an unknown is that it could
+    be either. A 74 MB AppImage lands through this call.
+
+    The answer is `open(?)`, deliberately not `open(ab)`: the walker does not know
+    which branch runs and the ledger must not print a mode nobody measured.
+    """
+    source = (
+        "def f(p, resumed):\n"
+        "    with p.open('ab' if resumed else 'wb') as fh:\n"
+        "        fh.write(b'x')\n"
+    )
+    assert _sites_in(source) == {"f::open(?)"}
+
+
+def test_a_module_that_opens_a_path_carries_its_mode_second_and_the_walk_knows_which() -> None:
+    """`gzip.open(path, "rb")` — `catalog/families/sqlplan.py`, reading a dump.
+
+    Caught by the widening itself, on its first run: teaching `_mode_of()` to
+    answer "unknown" turned this READ into a write, because the walker decided
+    where the mode sits by asking whether the call is an attribute — true of
+    `part.open("wb")`, where the path is the receiver, and equally true of
+    `gzip.open(path, "rb")`, where it is the first argument. Position 0 is then
+    `run.path`, which is not a constant, which under the new rule is "unknown".
+
+    So the receiver decides, not the syntax: a NAME THAT IS A MODULE takes its
+    mode second. Recorded here rather than in a comment because a false positive
+    in a ledger is not harmless — a row about a read is a row that teaches the
+    next reader the table is approximate.
+    """
+    source = "import gzip\ndef f(p):\n    return gzip.open(p, 'rb')\n"
+    assert _sites_in(source) == set()
+
+
+def test_a_module_opening_a_path_for_writing_is_still_a_write() -> None:
+    """The other direction of the rule above: the exemption is about POSITION, not about gzip."""
+    source = "import gzip\ndef f(p):\n    return gzip.open(p, 'wb')\n"
+    assert _sites_in(source) == {"f::open(wb)"}
+
+
+def test_deleting_a_docker_volume_is_a_write_and_the_ledger_is_the_place_it_is_named() -> None:
+    """`docker volume rm` -- `docker.py:972`, the most destructive thing Phase 8 added.
+
+    It deletes a database volume: every character on that install, in one command,
+    with no undo and nothing on the filesystem to recover from. The walk saw
+    nothing at all, because the destruction is not a Python call -- it is an argv
+    handed to a subprocess, and the ledger's whole vocabulary was `shutil` and
+    `Path`.
+
+    Matched on the ARGV and not on the function that runs it, which is the rule
+    this project has already paid for once (`audit-by-argv-not-by-string`): a
+    guard keyed to `_docker(` is a guard a rename walks past.
+    """
+    source = "def f(name):\n    return _docker(['volume', 'rm', name])\n"
+    assert _sites_in(source) == {"f::docker volume rm"}
+
+
+def test_the_docker_verbs_that_only_make_things_are_not_writes_here() -> None:
+    """Named rather than omitted, the way `mkdir` is.
+
+    `run`, `build`, `pull`, `up` and `image tag` all change the machine, and none
+    of them can lose anything the user had: the ledger's own vocabulary is what
+    can be LOST (`test_deleting_is_a_write_because_the_ledger_is_about_what_can_be_lost`
+    above says so in its name). Including them would add a dozen rows about
+    `inspect`-adjacent creation and bury the four that matter.
+    """
+    source = (
+        "def f(ref, src, dst):\n"
+        "    _docker(['run', '--rm', ref])\n"
+        "    _docker(['image', 'tag', src, dst])\n"
+        "    _docker(['compose', 'up', '-d'])\n"
+    )
+    assert _sites_in(source) == set()
+
+
+def test_a_docker_read_is_not_a_write_even_when_it_shares_a_noun_with_one() -> None:
+    """`volume ls`, `volume inspect` and `image inspect` all lead with a destructive noun.
+
+    The verb is the second word, so a match on `volume` alone would put four read
+    sites in a table about destruction.
+    """
+    source = (
+        "def f(name):\n"
+        "    _docker(['volume', 'ls', '--filter', name])\n"
+        "    _docker(['volume', 'inspect', name])\n"
+        "    _docker(['image', 'inspect', name])\n"
+    )
+    assert _sites_in(source) == set()
+
+
 # -- the ledger, both directions -------------------------------------------
 
 

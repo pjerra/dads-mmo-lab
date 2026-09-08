@@ -10,6 +10,27 @@ to a call fails it too, so a deleted write cannot leave a line behind claiming
 it still happens. One direction alone rots: the first lets the code outgrow the
 table, the second lets the table outlive the code.
 
+**Three shapes this walk could not see until 2026-09-08.** A retrospective audit
+found the page above claiming completeness over a walk with three holes in it,
+and eight write sites behind them — the table said "every place", the test agreed,
+and neither could see the most destructive command the app runs. They were:
+
+* **`os.write`.** A file descriptor is an integer, and the walk was looking for
+  paths. Two sites, and one of them is the furthest-reaching write in the
+  package: `console.py` puts a GM command into a running worldserver, and
+  `.account set gmlevel`, `.character rename` and `.reset level` all change the
+  database on the other side of it.
+* **An `open()` whose mode is computed.** `_mode_of()` answered `""` for any mode
+  that was not a literal and the caller read `""` as "not writing" — so
+  `part.open("ab" if resumed else "wb")`, which is how every download lands, was
+  a read. An unknown mode is the one thing a walk must not guess about, and it
+  now answers `?`.
+* **`docker volume rm`.** The destruction is not a Python call: it is an argv
+  handed to a subprocess. A volume holds every character on an install and one
+  command deletes it with no undo, and the walk's entire vocabulary was `shutil`
+  and `Path`. Matched on the argv rather than on the function that runs it, so a
+  rename cannot walk past it.
+
 **Why the table is keyed by function and not by line.** A ledger keyed to line
 numbers is rewritten by every edit above it, and a table that churns is a table
 people stop reading. Two writes of the same kind in one function are one row.
@@ -81,6 +102,14 @@ descriptions are written by hand.
 | `catalog/native.py::write_state::os.replace` | that record renamed into place | install time |
 | `catalog/native.py::write_state::unlink` | the temp record after a failure | install time |
 | `catalog/native.py::write_state::write_text` | the install's own stage record, to a temp name | install time |
+| `controller_wow_wotlk/console.py::send_command::os.write` | **found 2026-09-08** one GM command line, into the pty the worldserver's console is attached to. **The furthest-reaching write in this table, and it names no file at all**: what goes down this descriptor is whatever the caller built, and 8.3–8.5's commands (`.account set gmlevel`, `.character rename`, `.reset level`, `.send items`) each change the `auth` or `characters` database from inside the server. The row exists here because the ledger is about what can change outside this process, and a descriptor is as much outside it as a path is | **yes, and necessarily** — there is no console to write to unless the world is up, which is the opposite of every other row's argument. The safety is not a refusal but the server's own: the world thread applies the command under its own locks, which is exactly why owner answer 7 sends changes through the console instead of through SQL |
+| `runner.py::_write::os.write` | **found 2026-09-08** bytes into the stdin of whatever child this runner is driving, when that child is on a pseudo-terminal. The generic half of the row above — this is the transport, and `send_command()` is one caller of the shape. What it can change is therefore whatever the child does with the bytes | **yes** — the subprocesses this drives include an attached console on a running server |
+| `docker.py::remove_volume::docker volume rm` | **new (8.9a), and invisible to this ledger until 2026-09-08** — the single most destructive thing in the package. It deletes a named volume: **every character on that install**, in one command, with no undo, and with nothing left on the filesystem to recover from. Deliberately not a flag on `remove_staged()` and deliberately not `compose down -v`, both argued at the function; the name must come from `project_volumes()`, and the removal is confirmed by re-asking rather than by an exit code | **no — the purge refuses while any container of the project is running**, asked of `docker.running_census().ours` before any command is issued. It is also reached only from an uninstall the user has confirmed, and only for the volume the "keep my characters" answer did not spare |
+| `docker.py::remove_image::docker image rm` | **new (8.9a)** one built image by its exact reference, one call per ref, never a compose flag. `--rmi all` would take `mysql:8.4`/`mariadb:11` with it and those are shared with a neighbouring install, which is why the refs are enumerated from `composegen.built_image_refs()` instead. A refusal is a warning and not an error here | **no** — same press, after the same refusal. Nothing a player made is in an image |
+| `docker.py::remove_staged::docker compose down` | this install's containers, removed. **No `-v`, ever** — the volumes are untouched and the button's copy says so — and `-t STOP_GRACE_SECONDS`, because at Docker's 10 s default a populated worldserver is SIGKILLed mid-drain and the save queue is what is lost | **yes, and that is the point**: it is offered on a RUNNING server under copy promising the characters survive. The grace is what makes that copy true |
+| `docker.py::remove_staged::docker rm` | the by-name fallback for containers `compose down` left behind, and only names the project-label census already proved are ours. Each is stopped with the full grace FIRST: `rm -f` on its own is a SIGKILL with no drain at all, which would leave a hard-kill path reachable from the button whose copy promises the characters survive | **yes** — as above |
+| `docker.py::copy_from_image::docker rm` | the throwaway container this function created a moment earlier to copy a file out of an image, removed in a `finally`. It writes nothing of the user's and it is the only row here about a container this app made itself; its own failure is logged rather than raised, because the copy's error is the one that explains anything | n/a — the container is this function's own, and no install's server is inside it |
+| `platform.py::_download_urllib::open(?)` | **invisible until 2026-09-08** — the downloaded body, into the `.part` file, appended when the server honoured a `Range` request and truncated when it did not. The mode is a conditional rather than a literal, which is exactly why the walk could not see it. Every client and emulator archive this app fetches in-process lands through this call | n/a — a download into the app's own cache, before anything is installed |
 | `controller_wow_wotlk/accounts.py::_account_row::run_statement` | an account row in the auth database (create, and its counters) | yes |
 | `controller_wow_wotlk/accounts.py::_run::run_statement` | the auth database, for the account statements this module builds | yes |
 | `controller_wow_wotlk/maintenance.py::_dump_one::open(wb)` | one database dump, to a `.partial` | yes — a hot backup |

@@ -53,7 +53,12 @@ the stored verifier.
     MATCH: s=little h1=as-is x=little v=big
 
 Exactly one combination matched; the wrong password matched none. That pair is
-the test vector in `tests/test_srp6.py`, and the gate's own log line for the
+the test vector in `tests/test_passwordcheck.py`
+(`test_the_recipe_reproduces_a_verifier_taken_off_the_live_server`, whose `SALT`
+and `VERIFIER` are these two strings). Until 2026-09-08 this line instead read
+`tests/test_srp6.py` — a file never written, under that name or any other — and
+the citation guard could not see it, because the guard was hard-wired to
+`phase7-plans/` and this box's evidence is a gate folder. The gate's own log line for the
 password change now reads *"GATE83C's stored verifier is the one this password
 makes"*.
 

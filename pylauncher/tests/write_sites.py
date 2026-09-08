@@ -44,6 +44,7 @@ _PATH_METHODS = {
 _SQL_WRITE_METHODS = {"run_statement", "run_file"}
 _QUALIFIED = {
     ("os", "open"),
+    ("os", "write"),
     ("os", "replace"),
     ("os", "rename"),
     ("os", "remove"),
@@ -60,6 +61,64 @@ _QUALIFIED = {
     ("shutil", "unpack_archive"),
 }
 _WRITING_MODE = set("wax+")
+
+_OPENING_MODULES = {"gzip", "bz2", "lzma", "io", "codecs", "tarfile", "zipfile", "tokenize"}
+"""Modules whose `open()` takes the PATH first and the mode second.
+
+`part.open("wb")` and `gzip.open(part, "wb")` are both attribute calls, so being
+one says nothing about where the mode sits — and reading `gzip.open`'s first
+argument as a mode reported `sqlplan.py`'s dump READ as a write the moment
+`_mode_of()` learned to answer "unknown". The receiver is what separates them.
+"""
+
+_UNKNOWN_MODE = "?"
+"""What `_mode_of()` answers for a mode it could not read off the syntax tree.
+
+`part.open("ab" if resumed else "wb")` is a real call (`platform.py`, the
+resumable download). The mode is a conditional rather than a constant, so there
+is nothing to inspect — and an unknown mode has to count as a write, because the
+one answer a walker may never guess is the one that removes a row. Spelt `?`
+rather than resolved to a branch: the walker does not know which arm runs, and a
+ledger that prints a mode nobody measured is a ledger making things up.
+"""
+
+_DESTRUCTIVE_DOCKER_ARGV: tuple[tuple[str, ...], ...] = (
+    ("volume", "rm"),
+    ("volume", "prune"),
+    ("image", "rm"),
+    ("image", "prune"),
+    ("rmi",),
+    ("rm",),
+    ("compose", "down"),
+    ("compose", "rm"),
+    ("container", "prune"),
+    ("system", "prune"),
+    ("builder", "prune"),
+)
+"""Docker argv prefixes that DELETE durable state, longest match first below.
+
+A volume holds every character on an install. `docker volume rm` destroys one in
+a single command with no undo and nothing on the filesystem to recover from, and
+it is the most destructive thing Phase 8 added — yet it was invisible to this
+walk until 2026-09-08, because the destruction is not a Python call at all: it
+is an argv handed to a subprocess, and this module's whole vocabulary was
+`shutil` and `Path`.
+
+Matched on the ARGV and not on the function that runs it. A rule keyed to
+`_docker(` is a rule a rename walks past, and this project has already paid for
+that once (`audit-by-argv-not-by-string`): the same action spelt as a Python
+list is invisible to a guard that knows one shell spelling of it.
+
+**What is deliberately NOT here, named rather than omitted, the way `mkdir` is:**
+the verbs that only MAKE things — `run`, `build`, `pull`, `up`, `create`,
+`image tag`. Each changes the machine and none can lose anything the user had,
+and the ledger's own vocabulary is what can be lost. Including them would add a
+dozen rows about creation and bury the four that matter.
+
+**And what this still cannot see:** an argv assembled rather than written out —
+`argv = ["volume"]` then `argv.append("rm")`. Nothing in the package does that
+today; a walk that tried to follow it would be an interpreter.
+"""
 
 
 @dataclass(frozen=True)
@@ -89,21 +148,85 @@ class LedgerRow:
     running: str
 
 
+def _opens_for_writing(mode: str) -> bool:
+    """Whether an `open()` mode can put bytes anywhere. An unreadable mode counts."""
+    return mode == _UNKNOWN_MODE or bool(set(mode) & _WRITING_MODE)
+
+
+def _argv_prefix(node: ast.expr) -> list[str]:
+    """The leading string constants of an argv expression, stopping at the first that is not.
+
+    `["volume", "rm", name]` gives `["volume", "rm"]`, which is the whole verb.
+    A concatenation is followed into its left operand, because that is where a
+    verb lives when the tail is computed: `["run", "--rm", *flags] + [image]`.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _argv_prefix(node.left)
+    if not isinstance(node, ast.List | ast.Tuple):
+        return []
+    lead: list[str] = []
+    for element in node.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str):
+            lead.append(element.value)
+        else:
+            break
+    return lead
+
+
+def _destructive_docker(node: ast.Call) -> str | None:
+    """`docker <verb>` when one of this call's arguments is a destroying argv.
+
+    Longest match first, so `volume rm` is not reported as the bare container
+    `rm`. Read off the argv wherever it appears in the call, rather than off the
+    name of the function being called: see `_DESTRUCTIVE_DOCKER_ARGV`.
+    """
+    for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+        lead = _argv_prefix(argument)
+        if not lead:
+            continue
+        for verb in sorted(_DESTRUCTIVE_DOCKER_ARGV, key=len, reverse=True):
+            if tuple(lead[: len(verb)]) == verb:
+                return "docker " + " ".join(verb)
+    return None
+
+
 def _mode_of(node: ast.Call) -> str:
-    """The mode string an `open()` call was given, empty if it was not a constant."""
+    """The mode an `open()` call was given: the string, `""` for none, `"?"` for unreadable.
+
+    Three answers and not two. `""` means the call named no mode at all, which is
+    a read (`open(path)` and `path.open(encoding=...)` both default to `"r"`);
+    `_UNKNOWN_MODE` means a mode was named and this walk cannot read it, which
+    must count as a write. Collapsing those two is how `platform.py`'s resumable
+    download was invisible until 2026-09-08.
+    """
     for keyword in node.keywords:
-        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
-            return str(keyword.value.value)
-    # `open(path, "w")` carries the mode second; `path.open("w")` carries it
-    # first, because the path is the receiver rather than an argument.
-    position = 0 if isinstance(node.func, ast.Attribute) else 1
-    if len(node.args) > position and isinstance(node.args[position], ast.Constant):
-        return str(node.args[position].value)
+        if keyword.arg == "mode":
+            if isinstance(keyword.value, ast.Constant):
+                return str(keyword.value.value)
+            return _UNKNOWN_MODE
+    # `path.open("w")` carries the mode FIRST, because the path is the receiver;
+    # `open(path, "w")` and `gzip.open(path, "w")` carry it second, because it is
+    # not. Being an attribute call does not settle that — `gzip.open` is one and
+    # takes its path as an argument — so the receiver decides: a bare name that
+    # is one of the modules below is a module, and anything else is a path.
+    receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    on_a_path = receiver is not None and not (
+        isinstance(receiver, ast.Name) and receiver.id in _OPENING_MODULES
+    )
+    position = 0 if on_a_path else 1
+    if len(node.args) > position:
+        given = node.args[position]
+        return str(given.value) if isinstance(given, ast.Constant) else _UNKNOWN_MODE
     return ""
 
 
 def _callee(node: ast.Call) -> str | None:
     """What this call writes with, or `None` if it writes nothing."""
+    # The argv check comes first and is deliberately independent of the callee:
+    # what destroys a volume is the argument, not the function it is handed to.
+    destructive = _destructive_docker(node)
+    if destructive is not None:
+        return destructive
     func = node.func
     if isinstance(func, ast.Attribute):
         owner = func.value.id if isinstance(func.value, ast.Name) else None
@@ -113,7 +236,7 @@ def _callee(node: ast.Call) -> str | None:
             return func.attr
         if func.attr == "open":
             mode = _mode_of(node)
-            return f"open({mode})" if set(mode) & _WRITING_MODE else None
+            return f"open({mode})" if _opens_for_writing(mode) else None
         if func.attr == "replace" and len(node.args) == 1 and not node.keywords:
             # `tmp.replace(target)` is `Path.replace` — an atomic rename over
             # whatever was there, and how `state.py` and `manifest_store.py`
@@ -127,7 +250,7 @@ def _callee(node: ast.Call) -> str | None:
         return None
     if isinstance(func, ast.Name) and func.id == "open":
         mode = _mode_of(node)
-        return f"open({mode})" if set(mode) & _WRITING_MODE else None
+        return f"open({mode})" if _opens_for_writing(mode) else None
     return None
 
 
