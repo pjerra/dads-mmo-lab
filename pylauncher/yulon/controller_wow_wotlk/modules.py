@@ -15,7 +15,15 @@ from datetime import date
 from pathlib import Path
 
 from yulon import docker, module_source, platform, resources
-from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, ModuleUpdate, SqlRunner
+from yulon.apply import (
+    Applier,
+    ApplyReport,
+    DbcCopier,
+    DockerSql,
+    FolderSource,
+    ModuleUpdate,
+    SqlRunner,
+)
 from yulon.apply import module_updates as apply_updates
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import BehindReader, Git, RunnerGit
@@ -140,6 +148,30 @@ def forget(manifest: Manifest) -> bool:
     without reading `manifest.origin` itself.
     """
     return module_source.forget(user_manifests_dir(), manifest)
+
+
+def install_custom(applier: Applier) -> Callable[[Manifest, Path | None], ApplyReport]:
+    """The Modules tab's one custom-install seam, over the applier the tab already holds.
+
+    Lane C's deviation D1 from the design (§3.3/§3.5): the view hands over the
+    manifest it derived and the folder the user chose (`None` for a link), and
+    everything the design listed as `module_copy_folder` and `module_complete`
+    is bound HERE — the applier's `folder=` is `FolderSource(path, copy_folder)`
+    and its `complete=` is this module's `complete()`, which persists what it
+    finished. A view that built `apply.FolderSource` itself would know one thing
+    more about the engine than `ui/*_view.py` is allowed to (style-guide §3).
+
+    Over the SAME `Applier` object the tab installs shipped modules with, rather
+    than a second one built here from `server_dir`: one applier, one SQL runner,
+    one client dir, so a custom module cannot be installed against a database
+    or a client the shipped route is not (style-guide §4).
+    """
+
+    def install(manifest: Manifest, folder: Path | None) -> ApplyReport:
+        source = FolderSource(folder, copy_folder) if folder is not None else None
+        return applier.install(manifest, None, folder=source, complete=complete)
+
+    return install
 
 
 def fetcher(cache_root: Path, http: HttpGet = urllib_get) -> ManifestFetcher:

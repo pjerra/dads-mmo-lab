@@ -419,7 +419,19 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # Read off the store the services were handed, so the day a CMaNGOS game
         # ships its first module manifest this fails until its wiring lands.
         counted = services.store is not None and any(services.store.load_all("module"))
-        uncounted = set() if counted else {"module_updates"}
+        # The four seams behind "Install from link…" and "Install from
+        # folder…" (module-from-link, 2026-09-08) ride on the same fact: a
+        # custom module is a C++ checkout or a copy under `modules/`, so it
+        # belongs to a game whose manifest set already puts one there. On the
+        # three CMaNGOS games a module is a conf key or a SQL mod (8.7b, 8.7c)
+        # and there is no `modules/` folder for a clone or a copy to land in.
+        custom = {
+            "module_from_link",
+            "module_from_folder",
+            "module_install_custom",
+            "module_forget",
+        }
+        uncounted = set() if counted else {"module_updates"} | custom
         allowed = (
             unstocked
             | unmeasured

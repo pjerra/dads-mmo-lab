@@ -1378,6 +1378,69 @@ def test_the_custom_install_report_is_the_one_install_selected_prints(
     assert "worldserver REBUILD required" in expected
 
 
+def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_a_folder(
+    tmp_path: Path,
+) -> None:
+    """The real bindings behind the two buttons, driven end to end on a scratch install.
+
+    Everything above this test is fake-driven, which proves what the VIEW does
+    with the seams and nothing about what `for_entry()` hands it. This one
+    takes the services `_for_wotlk()` really builds and walks the folder route
+    with no fake in it: lane A's `derive_folder`, lane B's `install(folder=,
+    complete=)` over lane A's `copy_folder` and `complete`, the persist under
+    `config_dir()/manifests/user/`, the merged store listing it, and `forget`.
+    The link seam is asserted to derive only -- installing it would clone.
+
+    The ground is read first: no user layer exists, and the store lists no
+    such module, so nothing below is true before the press.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    source = tmp_path / "mod-hand-made"
+    (source / "src").mkdir(parents=True)
+    (source / "conf").mkdir()
+    (source / "conf" / "mod_hand_made.conf.dist").write_text(
+        "[worldserver]\nHandMade.Enable = 1\n", encoding="utf-8"
+    )
+    (source / ".git").mkdir()
+    (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.module_from_link is not None
+    assert services.module_from_folder is not None
+    assert services.module_install_custom is not None
+    assert services.module_forget is not None
+    assert services.store is not None
+    user_dir = modules.user_manifests_dir()
+    assert not user_dir.exists(), "the ground: no user layer before the first persist"
+    assert "mod-hand-made" not in {m.id for m in services.store.load_all("module")}
+    assert services.module_from_link("https://github.com/you/mod-linked").id == "mod-linked"
+
+    manifest = services.module_from_folder(source)
+    report = services.module_install_custom(manifest, source)
+
+    clone = server_dir / "modules" / "mod-hand-made"
+    assert (clone / "src").is_dir()
+    assert not (clone / ".git").exists(), "a copy carries no .git"
+    assert (server_dir / "env" / "dist" / "etc" / "modules" / "mod_hand_made.conf").is_file()
+    assert report.rebuild_required is True
+    assert any(line.startswith("copy ") for line in report.done), report.done
+    persisted = user_dir / "wow-wotlk" / "modules" / "mod-hand-made.json"
+    assert persisted.is_file()
+    listed = {m.id: m for m in services.store.load_all("module")}
+    assert listed["mod-hand-made"].conf[0].template == "conf/mod_hand_made.conf.dist"
+    assert listed["mod-hand-made"].origin is not None
+    assert listed["mod-hand-made"].origin.kind == "folder"
+
+    assert services.module_forget(manifest) is True
+    assert not persisted.exists()
+    assert "mod-hand-made" not in {m.id for m in services.store.load_all("module")}
+    assert services.module_forget(services.store.load("module", "mod-aoe-loot")) is False
+
+
 def test_a_game_with_no_module_checkouts_gets_no_update_button(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

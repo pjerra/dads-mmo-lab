@@ -727,6 +727,10 @@ def _assemble(
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
     module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
+    module_from_link: Callable[[str], Manifest] | None = None,
+    module_from_folder: Callable[[Path], Manifest] | None = None,
+    module_install_custom: CustomModuleInstall | None = None,
+    module_forget: Callable[[Manifest], bool] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -770,6 +774,13 @@ def _assemble(
         # Defaulted for the same reason and passed by the same factory: a game
         # with no `modules/` folder of checkouts has nothing to count.
         module_updates=module_updates,
+        # Defaulted for the same reason again: the four seams behind "Install
+        # from link…" and "Install from folder…" belong to the one game whose
+        # modules are checkouts under `modules/`, and that factory passes them.
+        module_from_link=module_from_link,
+        module_from_folder=module_from_folder,
+        module_install_custom=module_install_custom,
+        module_forget=module_forget,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
         # `catalog.json` by `installer_for()`, and every family's stage tuple
@@ -859,6 +870,13 @@ def _for_wotlk(
         sql=sql,
         channel_for_saved=channel.live_channel,
     )
+    # One applier for the Modules tab, named here so the custom-module seam
+    # below is built over the SAME object the shipped route installs with.
+    module_applier = (
+        wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+        if entry.has_manifests
+        else None
+    )
     return _assemble(
         entry,
         server_dir,
@@ -917,11 +935,7 @@ def _for_wotlk(
             sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
         ),
         store=wotlk_modules.store() if entry.has_manifests else None,
-        applier=(
-            wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
-            if entry.has_manifests
-            else None
-        ),
+        applier=module_applier,
         # The other half of installing a module, and until now the half with no
         # button: `applier` clones the module and activates its conf, leaving
         # `data/sql/db-world/*.sql` "to ac-db-import on next start" — and no
@@ -952,23 +966,22 @@ def _for_wotlk(
         module_updates=(
             (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
-        # NOT WIRED, and this is the honest state rather than an omission.
-        # `module_from_link`, `module_from_folder`, `module_install_custom` and
-        # `module_forget` are the design's lane C seams, and the objects that
-        # fill them are lanes A and B: `yulon/module_source.py` (derive,
-        # persist, forget, copy) and `apply.Applier.install`'s folder/complete
-        # keywords. Neither is on this branch -- grepped across every remote
-        # ref on 2026-09-08 -- so there is nothing to name here, and the two
-        # buttons are greyed for WotLK exactly as they are for the three
-        # CMaNGOS games. When the lanes land this becomes four lines:
-        #     module_from_link=wotlk_modules.derive_link,
-        #     module_from_folder=wotlk_modules.derive_folder,
-        #     module_install_custom=wotlk_modules.install_custom(server_dir, sql=sql),
-        #     module_forget=wotlk_modules.forget,
-        # each gated on `entry.has_manifests` the way `module_updates` above is.
-        # `store=` gains lane A's `user_root=` in the same edit, which is what
-        # puts a derived manifest into the list on the next start.
-        #
+        # A module from a link or a folder (design page, lane C's four seams),
+        # wired once lanes A and B were on the branch (2026-09-08). Lane C
+        # left this as a comment naming the four lines because the objects
+        # that fill them did not exist on its tree; they do now. Gated on the
+        # same object as `applier=` rather than on `entry.has_manifests`
+        # directly, because `install_custom` runs over THAT applier — the one
+        # the shipped route uses — and a custom module must not be installed
+        # against a second one. `store()` already carries lane A's user layer
+        # by default, which is what puts a derived manifest into the list on
+        # the next start.
+        module_from_link=wotlk_modules.derive_link if module_applier is not None else None,
+        module_from_folder=wotlk_modules.derive_folder if module_applier is not None else None,
+        module_install_custom=(
+            wotlk_modules.install_custom(module_applier) if module_applier is not None else None
+        ),
+        module_forget=wotlk_modules.forget if module_applier is not None else None,
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
         # containers with `docker ps` — a second question, to the same daemon,
