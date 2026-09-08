@@ -41,6 +41,7 @@ ILLUSTRATIONS = {
     "0a1b2c3d4e5f6a7b": "a counting pattern used in bug-checklist prose",
     "1a2b3c4d5e6f7a8b": "the same pattern, in controller-view and sqlplan fixtures",
     "deadbeefcafe1234": "`deadbeef` and `cafe` — words, in a cmangos docstring example",
+    "0000000000000000": "sixteen zeros — the dummy the 8.9b tests write into a .db_password",
 }
 
 
