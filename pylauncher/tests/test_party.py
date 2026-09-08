@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from yulon import party, resources
+from yulon import dbreads, party, resources
+from yulon.catalog.catalog import load_catalog
 from yulon.channel import Answer
 
 # -- where the scripts live ------------------------------------------------
@@ -391,3 +392,392 @@ def test_the_script_path_the_manifest_writes_is_the_absolute_container_path() ->
     path = next(k for k in manifest["conf"][0]["keys"] if k["key"] == "ALE.ScriptPath")
     assert party.ALE_SCRIPT_PATH in path["default"]
     assert path["default"].startswith('"/')
+
+
+# -- adding a bot, dismissing it (8.6 part 2) ------------------------------
+#
+# Every command string below is the shape `rust-main` fires, cited at its line,
+# and every SQL shape is that tree's too. What is NOT inherited is the class
+# list: `dk` is a class THIS tree's `addclass` accepts (`PlayerbotMgr.cpp:1089`,
+# read on `yulon-ubuntu` 2026-09-08), and the bash launcher's `_valid_bot_class`
+# excluded it. A sibling's list would have refused a class this server supports.
+
+WOTLK = load_catalog().get("wow-wotlk")
+RNDBOT = dbreads.Marker(prefix="rndbot", source="default")
+
+
+def test_the_add_command_is_the_bridge_command_and_not_the_playerbot_one() -> None:
+    """`.playerbots bot addclass` is what the SERVER runs; the app can only ask
+    the bridge (`rust-main:crates/dml-wow/src/party.rs:163`). Sending the
+    playerbot spelling over the channel is the 2026-08-20 mistake by hand."""
+    assert party.add_command("Pakka", "mage") == "dml_addclass Pakka mage"
+    assert party.add_command("Pakka", "mage", gender="female") == "dml_addclass Pakka mage female"
+
+
+def test_deathknight_is_a_class_this_tree_accepts() -> None:
+    assert party.add_command("Pakka", "dk") == "dml_addclass Pakka dk"
+
+
+@pytest.mark.parametrize("bad", ["sorcerer", "", "mage; .server shutdown 1", "MAGE!"])
+def test_a_class_this_tree_does_not_have_is_refused_before_anything_is_sent(bad: str) -> None:
+    with pytest.raises(party.BadRequest):
+        party.add_command("Pakka", bad)
+
+
+@pytest.mark.parametrize("bad", ["", "Pak ka", "Pakka;", "a" * 13])
+def test_a_name_that_is_not_a_character_name_never_reaches_the_channel(bad: str) -> None:
+    with pytest.raises(party.BadRequest):
+        party.add_command(bad, "mage")
+
+
+def test_the_dismiss_commands_are_the_uninvite_and_the_logout_whisper() -> None:
+    """Two commands, and the second is best-effort — `rust-main`'s kick fires
+    `dml_uninvite` then `dml_whisper <master> <bot> logout`
+    (`crates/dml-wow/src/party.rs:184,192`)."""
+    assert party.uninvite_command("Bottom") == "dml_uninvite Bottom"
+    assert party.logout_command("Pakka", "Bottom") == "dml_whisper Pakka Bottom logout"
+
+
+def test_the_finishing_whispers_are_gear_and_talents() -> None:
+    """ "geared and specced" is not what `addclass` alone does: the bash and Rust
+    launchers both whisper the bot afterwards
+    (`rust-main:crates/dml-wow/src/party.rs:246,249`)."""
+    assert party.autogear_command("Pakka", "Bottom") == "dml_whisper Pakka Bottom autogear"
+    assert party.talents_command("Pakka", "Bottom") == "dml_whisper Pakka Bottom talents autopick"
+
+
+def test_the_group_read_is_anchored_on_the_masters_own_group() -> None:
+    """`WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=<master>)`
+    — the master's GROUP id, not his guid (`group_member.guid` is the group on
+    this tree; `describe group_member`, `yulon-ubuntu2` 2026-09-08). Without the
+    sub-select this reads every group on the server."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001)
+    assert "group_member" in sql
+    assert "memberGuid=1001" in sql.replace(" ", "")
+    assert "RNDBOT%" in sql.upper()
+    assert "ORDER BY" in sql.upper()
+
+
+def test_the_group_read_only_returns_rows_the_bot_marker_recognises() -> None:
+    """The box's words: "one row appears in the group table on an account the
+    bot marker recognises". The master is in his own `group_member` row too, and
+    a read that returned him would report a party of one before any bot joined."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001)
+    assert dbreads.bot_clause(WOTLK, RNDBOT) in sql
+
+
+class _Chan:
+    """A channel that records what it was asked and answers from a script."""
+
+    def __init__(self, answers: dict[str, Answer] | None = None) -> None:
+        self.sent: list[str] = []
+        self.answers = answers or {}
+
+    def send(self, command: str) -> Answer:
+        self.sent.append(command)
+        return self.answers.get(command.split()[0], Answer("yes", "ok"))
+
+
+def test_a_party_that_is_not_ready_sends_nothing_and_says_which_step_failed() -> None:
+    """The box's words: "with the bridge absent the group says which precondition
+    failed and never reads as ready". Never-ready is the whole point: the
+    2026-08-20 failure was a control that pressed happily into a dead bridge."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(bridge_answered=False),
+        player="Pakka",
+        klass="mage",
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert result.added is False
+    assert result.blocker == party.blocker(_facts(bridge_answered=False))
+    assert "does not answer" in result.sentence
+
+
+def test_the_ground_is_read_before_the_press_and_the_new_row_is_the_difference() -> None:
+    """A poll that asserts "there is a bot in the party" proves nothing on a
+    server that already had one. The new member is the guid that was not there
+    before (`rust-main:crates/dml-wow/src/party.rs:315`)."""
+    already = party.Member(name="Oldbot", guid=500, klass=8, level=10)
+    fresh = party.Member(name="Newbot", guid=777, klass=8, level=1)
+    reads = iter([(already,), (already,), (already, fresh)])
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        send=chan.send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert result.bot == "Newbot"
+    assert result.joined is True
+    assert chan.sent[0] == "dml_addclass Pakka mage"
+    assert "dml_whisper Pakka Newbot autogear" in chan.sent
+    assert "dml_whisper Pakka Newbot talents autopick" in chan.sent
+    assert result.geared is True
+    assert result.specced is True
+
+
+def test_a_bot_that_never_joins_is_reported_as_added_but_not_joined() -> None:
+    """Not as a success and not as a failure: the command was accepted and the
+    row never appeared, which is a third thing and the one a person can act on."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        send=chan.send,
+        members=lambda: (),
+        tries=3,
+        sleep=lambda _s: None,
+    )
+    assert result.added is True
+    assert result.joined is False
+    assert result.bot is None
+    assert chan.sent == ["dml_addclass Pakka mage"]
+    assert "no bot joined" in result.sentence
+
+
+def test_a_refused_add_never_polls_and_quotes_the_server() -> None:
+    chan = _Chan({"dml_addclass": Answer("no", "Command 'dml_addclass' does not exist")})
+    polls = 0
+
+    def members() -> tuple[party.Member, ...]:
+        nonlocal polls
+        polls += 1
+        return ()
+
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        send=chan.send,
+        members=members,
+        sleep=lambda _s: None,
+    )
+    assert result.added is False
+    assert "does not exist" in result.sentence
+    assert polls <= 1
+
+
+def test_dismissing_uninvites_then_whispers_logout_and_confirms_the_row_is_gone() -> None:
+    reads = iter([(party.Member("Newbot", 777, 8, 1),), ()])
+    chan = _Chan()
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert chan.sent[0] == "dml_uninvite Newbot"
+    assert "dml_whisper Pakka Newbot logout" in chan.sent
+    assert result.removed is True
+
+
+def test_a_logout_whisper_that_fails_does_not_fail_the_dismiss() -> None:
+    """Best-effort at every call site in the prior art, whose own comment says
+    the failure "never aborts the caller" (`party.rs:189-192`)."""
+    chan = _Chan({"dml_whisper": Answer("no", "player not found")})
+    reads = iter([(party.Member("Newbot", 777, 8, 1),), ()])
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert result.removed is True
+
+
+class _Sql:
+    """The reader seam, answering each statement from a script in order."""
+
+    def __init__(self, *answers: str) -> None:
+        self.answers = list(answers)
+        self.asked: list[str] = []
+
+    def query(self, db: str, statement: str) -> str:
+        self.asked.append(statement)
+        return self.answers.pop(0) if self.answers else ""
+
+
+def _ready_install(tmp_path: Path) -> Path:
+    """A server folder with every disk-side precondition already met."""
+    server = tmp_path / "wowserver"
+    (server / "modules" / "mod-ale").mkdir(parents=True)
+    (server / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
+    (server / party.ALE_CONF).write_text(
+        f'ALE.Enabled = 1\nALE.ScriptPath = "{party.ALE_SCRIPT_PATH}"\n'
+    )
+    dest = party.dest_dir(server)
+    dest.mkdir(parents=True)
+    for name in party.BRIDGE_SCRIPTS:
+        (dest / name).write_text("-- x\n")
+    return server
+
+
+def _install(
+    server: Path, sql: _Sql, chan: object | None, running: bool = True
+) -> party.InstallParty:
+    return party.InstallParty(
+        WOTLK,
+        server,
+        sql=sql,
+        channel_for_saved=lambda: chan,
+        container="ac-worldserver",
+        world_running=lambda: running,
+        engine=lambda: party.BinaryRead(True, "in"),
+    )
+
+
+def test_the_seam_refuses_a_master_who_is_not_logged_in(tmp_path: Path) -> None:
+    """The bridge resolves its master with `GetPlayerByName` and prints
+    "player not found/offline" when there is none (`dml_addclass.lua`), and
+    `.playerbots bot addclass` needs a live session in the first place. A press
+    that goes out anyway gets a silent no-op and a bot that never arrives."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("")  # the online lookup finds nobody
+    result = _install(_ready_install(tmp_path), sql, chan).add("Pakka", "mage")
+    assert result.added is False
+    assert "logged in" in result.sentence
+    assert chan.sent == ["dml_bridge_ping"]
+
+
+def test_the_seam_never_asks_the_server_while_the_world_is_down(tmp_path: Path) -> None:
+    """`world_running` is passed in rather than guessed at, and a stopped world
+    is the second precondition — so no channel is opened and no SQL is run."""
+    sql = _Sql()
+    chan = _Chan()
+    state = _install(_ready_install(tmp_path), sql, chan, running=False).state("Pakka")
+    assert state.ready is False
+    assert "not running" in state.blocker
+    assert sql.asked == []
+    assert chan.sent == []
+
+
+def test_the_seam_reads_the_ground_and_shows_the_party(tmp_path: Path) -> None:
+    """The group read is anchored on the master's ONLINE guid, and both reads
+    happen: the lookup, then the group."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Bottom\t777\t8\t1\n")
+    state = _install(_ready_install(tmp_path), sql, chan).state("Pakka")
+    assert state.ready is True
+    assert state.blocker == ""
+    assert state.members == (party.Member("Bottom", 777, 8, 1),)
+    assert "online = 1" in sql.asked[0]
+    assert "memberGuid=1001" in sql.asked[1].replace(" ", "")
+
+
+def test_a_bridge_that_does_not_answer_leaves_the_group_unready(tmp_path: Path) -> None:
+    """The live half of "never reads as ready": the disk says everything is in
+    place and the SERVER says it has never heard of the bridge."""
+    chan = _Chan({"dml_bridge_ping": Answer("no", "Command 'dml_bridge_ping' does not exist")})
+    sql = _Sql()
+    state = _install(_ready_install(tmp_path), sql, chan).state("Pakka")
+    assert state.ready is False
+    assert "does not answer" in state.blocker
+    assert sql.asked == []
+
+
+def test_the_group_rows_come_back_as_members_and_a_bad_row_is_said_so() -> None:
+    """Four fields per row, and a row that is not four fields is reported
+    rather than skipped: a party silently one bot short is the same lie as a
+    party that never filled."""
+    assert party.read_members("Bottom\t777\t8\t1\n") == (party.Member("Bottom", 777, 8, 1),)
+    assert isinstance(party.read_members("Bottom\t777\n"), str)
+
+
+def test_a_script_the_module_brought_is_not_a_missing_bridge_script(tmp_path: Path) -> None:
+    """MEASURED on `yulon-ubuntu2` 2026-09-09, by the rebuild lane: `mod-ale`
+    installs its own example `LootPet.lua` into the very directory the bridge
+    is deployed to. The deployed precondition asked for set EQUALITY, so on the
+    only install where the engine has ever worked My Party would have reported
+    "some of the bridge scripts are missing" and named none of them — while all
+    five were there. What is required is that ours are all present."""
+    facts = _facts(deployed=(*party.BRIDGE_SCRIPTS, "LootPet.lua"))
+    assert party.ready(facts) is True
+    assert party.blocker(facts) is None
+
+
+def test_the_conf_is_read_for_both_keys_or_for_neither(tmp_path: Path) -> None:
+    """`ALE.Enabled` and `ALE.ScriptPath` are read from column 0 only, the same
+    rule `conf.patch()` writes by: the shipped `mod_ale.conf.dist` is full of
+    commented prose, and a looser pattern reads its own comment saying `true`
+    as the setting — which is the exact lie the compiled default `false` makes
+    expensive (`ALEConfig.cpp:20`)."""
+    conf = tmp_path / "mod_ale.conf"
+    conf.write_text(
+        "# ALE.Enabled = 1\n"
+        '#   ALE.ScriptPath = "/somewhere/else"\n'
+        "ALE.Enabled = 1\n"
+        'ALE.ScriptPath = "/azerothcore/env/dist/etc/modules/lua_scripts"\n'
+    )
+    read = party.read_conf(conf)
+    assert read.present is True
+    assert read.enabled is True
+    assert read.script_path == party.ALE_SCRIPT_PATH
+
+
+def test_a_conf_that_is_not_there_reads_as_absent_and_not_as_off(tmp_path: Path) -> None:
+    """`enabled=None` and not `False`: a file nobody wrote has said nothing
+    about the engine, and "switched off" sends a person to edit a key that is
+    not there. The precondition above it is what names the real fix."""
+    read = party.read_conf(tmp_path / "nothing.conf")
+    assert read.present is False
+    assert read.enabled is None
+    assert read.script_path is None
+
+
+def test_the_facts_are_gathered_from_the_disk_the_binary_and_the_wire(tmp_path: Path) -> None:
+    """`read_facts` is what the tab's seam calls. It asks each source once and
+    it asks the SERVER whether the bridge is there — the deploy's own success is
+    not evidence, which is the whole finding of 2026-08-20."""
+    server = tmp_path / "wowserver"
+    (server / "modules" / "mod-ale").mkdir(parents=True)
+    (server / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
+    (server / "env" / "dist" / "etc" / "modules" / "mod_ale.conf").write_text(
+        f'ALE.Enabled = 1\nALE.ScriptPath = "{party.ALE_SCRIPT_PATH}"\n'
+    )
+    dest = party.dest_dir(server)
+    dest.mkdir(parents=True)
+    for name in party.BRIDGE_SCRIPTS:
+        (dest / name).write_text("-- x\n")
+    facts = party.read_facts(
+        server,
+        world_running=True,
+        engine=party.BinaryRead(True, "in"),
+        probe=party.Probe(True, "answered", "DML-BRIDGE-READY"),
+    )
+    assert party.ready(facts) is True
+    assert facts.deployed == tuple(sorted(party.BRIDGE_SCRIPTS))
+    assert facts.engine_cloned is True
+
+
+def test_the_facts_carry_a_server_that_was_never_installed(tmp_path: Path) -> None:
+    facts = party.read_facts(
+        tmp_path / "nowhere",
+        world_running=False,
+        engine=party.BinaryRead(None, "unread"),
+        probe=party.Probe(None, "unasked", ""),
+    )
+    assert facts.server_installed is False
+    assert party.blocker(facts) is not None
+    assert "not installed" in party.blocker(facts)  # type: ignore[operator]
+
+
+def test_a_row_that_is_still_there_is_not_reported_as_dismissed() -> None:
+    chan = _Chan()
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: (party.Member("Newbot", 777, 8, 1),),
+        tries=2,
+        sleep=lambda _s: None,
+    )
+    assert result.removed is False
+    assert "still" in result.sentence

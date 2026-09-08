@@ -190,9 +190,9 @@ def test_an_unknown_stage_name_survives_a_read_and_a_write(tmp_path: Path) -> No
 
     native.write_state(tmp_path, state)
     on_disk = json.loads((tmp_path / native.STATE_FILE).read_text(encoding="utf-8"))["completed"]
-    assert (
-        "a-stage-from-the-future" in on_disk
-    ), "the older build wrote the newer build's progress out of existence"
+    assert "a-stage-from-the-future" in on_disk, (
+        "the older build wrote the newer build's progress out of existence"
+    )
 
 
 def test_recording_a_stage_does_not_drop_the_names_this_build_cannot_read(
@@ -248,9 +248,9 @@ def test_a_stage_this_build_cannot_read_is_reported_rather_than_dropped_in_silen
     with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
         native.read_state(tmp_path, valid=ORDER)
     said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        "a-stage-from-the-future" in m for m in said
-    ), f"the dropped name was never reported: {said}"
+    assert any("a-stage-from-the-future" in m for m in said), (
+        f"the dropped name was never reported: {said}"
+    )
 
 
 def test_the_same_file_reads_differently_for_two_entries_stage_tuples(
@@ -719,9 +719,9 @@ def test_a_finished_install_says_so_last_and_says_where(tmp_path: Path) -> None:
         "the closing line does not say which folder, so two installs of the same "
         f"game are indistinguishable in a log: {ending[0]!r}"
     )
-    assert (
-        lines[-1] == ending[0]
-    ), f"something is said after the install claims to be finished: {lines[-1]!r}"
+    assert lines[-1] == ending[0], (
+        f"something is said after the install claims to be finished: {lines[-1]!r}"
+    )
 
 
 def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
@@ -747,9 +747,9 @@ def test_a_failed_install_never_says_it_finished(tmp_path: Path) -> None:
         for line in engine.run(InstallOptions(server_dir=tmp_path / "wow")):
             said.append(line)
 
-    assert not [
-        line for line in said if "is installed and running" in line
-    ], f"a failed install announced success: {said}"
+    assert not [line for line in said if "is installed and running" in line], (
+        f"a failed install announced success: {said}"
+    )
 
 
 def test_the_cancel_note_is_said_by_the_spine_right_after_the_stage_heading(
@@ -2371,6 +2371,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "the Rust launcher reported a success envelope when this listing found nothing, and "
         "My Party then silently did not work (`rust-main:bridge.rs:56-70`)"
     ),
+    ("party.py", "read_facts"): (
+        "lists the bridge directory under the server dir to say WHICH of the five scripts are "
+        "there, and decides no write at all - My Party never writes into that folder, `deploy()` "
+        "does. An unreadable folder answers an empty tuple, which draws the `deployed` "
+        "precondition's own sentence; reporting a scripts-are-there when the folder could not "
+        "be read is the one thing that would be worse, and this cannot"
+    ),
     ("apply.py", "_undeploy"): (
         "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
         "removes exactly those names; reads a folder this app filled, decides no write into it"
@@ -2419,8 +2426,7 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "retention failing must not fail the stop it runs in front of"
     ),
     ("ui/controller_view.py", "refresh_backups"): (
-        "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
-        "nothing"
+        "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes nothing"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
@@ -2632,9 +2638,9 @@ def test_a_reset_that_fails_reaches_the_cli_as_a_sentence_and_is_recorded(
     assert refusal == expected + str(error)
     assert "nothing was found to clear" not in refusal, "that is the empty-tuple refusal below it"
     neighbours = ("already hold data", "could not be asked")
-    assert not any(
-        words in refusal for words in neighbours
-    ), "those are the `populated` and `unreadable` branches, which this run never took"
+    assert not any(words in refusal for words in neighbours), (
+        "those are the `populated` and `unreadable` branches, which this run never took"
+    )
     assert "one-shot:ac-db-import" not in rec.calls, (
         "the import ran over databases that were never cleared, which is the 28-second "
         "success that leaves `acore_world` permanently unimportable"
@@ -2690,7 +2696,7 @@ def test_a_finished_install_drops_the_previous_runs_failure(tmp_path: Path) -> N
     after = native.read_state(server_dir, valid=("always", "never"))
     assert after is not None
     assert after.last_error == "", (
-        "a finished install left the previous failure in the state file: " f"{after.last_error!r}"
+        f"a finished install left the previous failure in the state file: {after.last_error!r}"
     )
     assert after.completed == ("always",), "clearing the error must not disturb what was done"
 
@@ -2750,9 +2756,9 @@ def test_a_state_file_deleted_mid_install_is_not_written_back_at_the_end(
     # install finishes successfully.
     list(_build(rec, family).run(InstallOptions(server_dir=server_dir)))
 
-    assert not (
-        server_dir / native.STATE_FILE
-    ).exists(), "a finished install wrote back a state file the run itself had deleted"
+    assert not (server_dir / native.STATE_FILE).exists(), (
+        "a finished install wrote back a state file the run itself had deleted"
+    )
 
 
 # -- the address the realm advertises when the install ends -----------------
@@ -2889,16 +2895,16 @@ def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(
 
     public = Recorder(realm_row="203.0.113.9\t192.168.1.25\n")
     spoke = _advertising(public, tmp_path / "internet", lan_ip=lambda: "192.168.1.25")
-    assert (
-        _statements(public) == []
-    ), "a public address somebody set for internet play was overwritten with a LAN one"
+    assert _statements(public) == [], (
+        "a public address somebody set for internet play was overwritten with a LAN one"
+    )
     assert [line for line in spoke if "203.0.113.9" in line], spoke
 
     half = Recorder(realm_row=f"10.1.2.3\t{native.INSTALL_REALM_HOST}\n")
     _advertising(half, tmp_path / "second", lan_ip=lambda: "10.1.2.3")
-    assert _statements(half) == [
-        networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")
-    ], "a localAddress still on the loopback was read as nothing to change"
+    assert _statements(half) == [networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")], (
+        "a localAddress still on the loopback was read as nothing to change"
+    )
 
 
 def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
@@ -3292,9 +3298,9 @@ def test_a_worker_abandoned_during_interpreter_finalisation_is_not_waited_for(
         native.stop_abandoned_worker(deaf, cancel, what="the install output")
         elapsed = time.monotonic() - started
 
-        assert (
-            elapsed < native.ABANDONED_WORKER_SECONDS / 5
-        ), f"waited {elapsed:.2f}s for a worker finalisation will not release"
+        assert elapsed < native.ABANDONED_WORKER_SECONDS / 5, (
+            f"waited {elapsed:.2f}s for a worker finalisation will not release"
+        )
         assert deaf.is_alive(), "the deaf worker is alive by construction"
         assert not cancel.is_set()
     finally:
@@ -3397,9 +3403,9 @@ def test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so(
             started = time.monotonic()
             generator.close()
             elapsed = time.monotonic() - started
-        assert (
-            elapsed < native.ABANDONED_WORKER_SECONDS / 5
-        ), f"close() spent {elapsed:.2f}s on a worker nothing could stop"
+        assert elapsed < native.ABANDONED_WORKER_SECONDS / 5, (
+            f"close() spent {elapsed:.2f}s on a worker nothing could stop"
+        )
         assert PUMP_THREAD in _live_pump_workers(), "with no event, the worker is left running"
         assert any(
             "abandoned with no cancel event" in record.getMessage() for record in caplog.records

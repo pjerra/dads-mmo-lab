@@ -58,6 +58,7 @@ from yulon import (
     install_wiring,
     logsnap,
     networking,
+    party,
     platform,
     purge,
     resources,
@@ -125,6 +126,22 @@ class BotBrowser(Protocol):
     """What the Bots tab needs (8.5a). One question, asked with a page and a filter."""
 
     def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> object: ...
+
+
+class MyPartySeam(Protocol):
+    """What the My Party control needs (8.6). One read and two presses.
+
+    `state()` carries the group AND the reason there is none, in one object,
+    because they are one question: the empty list a broken bridge produces is
+    the same empty list a working party with no bots in it produces, and the
+    2026-08-20 failure is exactly that pair being told apart wrongly.
+    """
+
+    def state(self, master: str) -> party.PartyState: ...
+
+    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition: ...
+
+    def remove(self, master: str, bot: str) -> party.Dismissal: ...
 
 
 class Uninstall(Protocol):
@@ -354,6 +371,15 @@ class ControllerServices:
     rather than the emulator's.
     """
     accounts: AccountAdmin | None = None
+    my_party: MyPartySeam | None = None
+    """8.6's My Party, on the one tree whose route to it has ever answered.
+
+    `None` everywhere else, and that is not a stub: the route is an
+    AzerothCore Lua module, so a CMaNGOS tab gets no My Party control rather
+    than a control that sends AzerothCore's commands at a server that has never
+    heard of them. Even on WotLK the object refuses every press until the
+    SERVER has answered `dml_bridge_ping` in the bridge's own word.
+    """
     play: object | None = None
     """8.4a's Characters tab, where this tree has measured what it needs."""
     """This install's user accounts, for a game whose stores are measured (8.3a).
@@ -619,6 +645,7 @@ def _assemble(
     log_snapshot: logsnap.Recorder | None = None,
     channel_setup: ChannelSetup | None = None,
     accounts: AccountAdmin | None = None,
+    my_party: MyPartySeam | None = None,
     play: object | None = None,
     bots: BotBrowser | None = None,
     console_probe: Callable[[str], object] | None = None,
@@ -656,6 +683,7 @@ def _assemble(
         uninstall=uninstall,
         channel_setup=channel_setup,
         accounts=accounts,
+        my_party=my_party,
         play=play,
         bots=bots,
         console_probe=console_probe,
@@ -766,6 +794,23 @@ def _for_wotlk(
         channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
+        # 8.6. The one tree whose bridge has ever answered, and the object
+        # refuses every press until it answers again: the facts are re-read per
+        # press, not cached, because the world can be restarted and
+        # `mod_ale.conf` edited while the tab is open. `world_running` is asked
+        # of the same `docker.container_state` the Server tab draws from, so
+        # the group and the status line cannot disagree about a stopped world.
+        my_party=party.InstallParty(
+            entry,
+            server_dir,
+            sql=sql,
+            channel_for_saved=channel.live_channel,
+            container=spec.world,
+            wsl_distro=wsl_distro,
+            world_running=lambda: docker.container_state(
+                spec.world, wsl_distro=wsl_distro
+            ).settled,
+        ),
         # 8.9a. WotLK first, and Vanilla in 8.9b; the four seams this needs are
         # the ones every install has. `forget` is the default that reads and
         # rewrites `state.json` -- `main.py` replaces it on the tab it builds,

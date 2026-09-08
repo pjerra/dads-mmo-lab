@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon import party
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -52,9 +53,9 @@ def test_every_cmangos_package_offers_the_same_account_functions(name: str) -> N
     this is the assertion that says so out loud.
     """
     missing = [game for game, mod in CMANGOS_ACCOUNTS.items() if not hasattr(mod, name)]
-    assert (
-        not missing
-    ), f"{name}() is missing from {missing} but present in the other CMaNGOS packages"
+    assert not missing, (
+        f"{name}() is missing from {missing} but present in the other CMaNGOS packages"
+    )
 
 
 def test_the_password_parameter_is_spelled_the_same_in_every_package() -> None:
@@ -178,9 +179,9 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
     }
     catalog = load_catalog()
-    assert set(packages) == {
-        game.id for game in catalog.games
-    }, "a game was added to the catalog with no controller package listed here"
+    assert set(packages) == {game.id for game in catalog.games}, (
+        "a game was added to the catalog with no controller package listed here"
+    )
 
     checked = 0
     for game, mods in packages.items():
@@ -420,6 +421,17 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # ships its first module manifest this fails until its wiring lands.
         counted = services.store is not None and any(services.store.load_all("module"))
         uncounted = set() if counted else {"module_updates"}
+        # 8.6's My Party, and the one seam whose absence is decided by the
+        # ENGINE rather than by a measurement. The route is `mod-ale`, an
+        # AzerothCore Lua module hooking AzerothCore's command table, and the
+        # bot it adds is `mod-playerbots`' `addclass`. A CMaNGOS tree has
+        # neither, so there is nothing to wire and nothing a later box could
+        # measure that would change it -- wiring it there would be a control
+        # that sends AzerothCore's commands at a server that has never heard of
+        # them. `InstallParty.for_entry_is_possible` is the same rule spelled
+        # once in the module, and this reads it rather than repeating it, so a
+        # tree that ever gains the route fails this until its wiring lands.
+        unpartied = set() if party.InstallParty.for_entry_is_possible(entry) else {"my_party"}
         allowed = (
             unstocked
             | unmeasured
@@ -430,11 +442,12 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unplayed
             | unremovable
             | uncounted
+            | unpartied
         )
         if game == "wow-wotlk":
-            assert (
-                set(absent) == unprobed
-            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
+            assert set(absent) == unprobed, (
+                f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
+            )
         else:
             assert set(absent) <= allowed, (
                 f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "
