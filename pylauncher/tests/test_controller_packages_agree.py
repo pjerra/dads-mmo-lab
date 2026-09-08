@@ -53,9 +53,9 @@ def test_every_cmangos_package_offers_the_same_account_functions(name: str) -> N
     this is the assertion that says so out loud.
     """
     missing = [game for game, mod in CMANGOS_ACCOUNTS.items() if not hasattr(mod, name)]
-    assert not missing, (
-        f"{name}() is missing from {missing} but present in the other CMaNGOS packages"
-    )
+    assert (
+        not missing
+    ), f"{name}() is missing from {missing} but present in the other CMaNGOS packages"
 
 
 def test_the_password_parameter_is_spelled_the_same_in_every_package() -> None:
@@ -179,9 +179,9 @@ def test_every_seam_builder_in_every_package_binds_the_declared_client(tmp_path:
         "wow-wotlk": (wotlk_accounts, wotlk_maintenance),
     }
     catalog = load_catalog()
-    assert set(packages) == {game.id for game in catalog.games}, (
-        "a game was added to the catalog with no controller package listed here"
-    )
+    assert set(packages) == {
+        game.id for game in catalog.games
+    }, "a game was added to the catalog with no controller package listed here"
 
     checked = 0
     for game, mods in packages.items():
@@ -441,13 +441,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unprobed
             | unplayed
             | unremovable
-            | uncounted
             | unpartied
+            | uncounted
         )
         if game == "wow-wotlk":
-            assert set(absent) == unprobed, (
-                f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
-            )
+            assert (
+                set(absent) == unprobed
+            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
         else:
             assert set(absent) <= allowed, (
                 f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "

@@ -61,7 +61,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from yulon import dbreads, platform, resources, runner
 from yulon.catalog.catalog import CatalogEntry
@@ -934,10 +933,15 @@ def dismiss(
 # -- the tab's seam --------------------------------------------------------
 
 
-class SqlReader(Protocol):
-    """The database read seam, the same one the Bots tab is given."""
+SqlReader = dbreads.SqlReader
+"""The database read seam, and it is `dbreads`' own rather than a second one.
 
-    def query(self, db: str, statement: str) -> str: ...
+A Protocol re-declared here with `db: str` looks identical and is not: the real
+reader's `db` is a `Literal` of the five schema aliases, and a Protocol widening
+it to `str` is not satisfied by the object every caller actually has -- mypy
+said so on all three platforms, and the wrong fix was to widen the real one.
+The read half is all that is wanted (`run_statement` is not reachable through
+it), which is exactly what `dbreads.SqlReader` already is."""
 
 
 @dataclass(frozen=True)

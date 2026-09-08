@@ -807,9 +807,7 @@ def _for_wotlk(
             channel_for_saved=channel.live_channel,
             container=spec.world,
             wsl_distro=wsl_distro,
-            world_running=lambda: docker.container_state(
-                spec.world, wsl_distro=wsl_distro
-            ).settled,
+            world_running=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro).settled,
         ),
         # 8.9a. WotLK first, and Vanilla in 8.9b; the four seams this needs are
         # the ones every install has. `forget` is the default that reads and
