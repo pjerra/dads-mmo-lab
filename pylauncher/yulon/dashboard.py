@@ -36,6 +36,28 @@ logger = get_logger(__name__)
 
 State = Literal["up", "stopped", "restart_loop", "unknown"]
 
+LOOP_RESTART_STRIKES = 3
+"""How many restarts NEW SINCE THIS WATCHER FIRST LOOKED make a loop rather than a hiccup.
+
+Docker's restart policy increments `RestartCount` only when it revives a
+container that DIED; a healthy boot, however slow, never increments it. So one
+new restart is already abnormal -- and this used to call a loop on exactly
+one, which is the false alarm photographed in 8.2b's own evidence: a healthy
+server, the command-channel button greyed, "restart loop -- 1 restarts".
+
+Three, because a single OOM-kill or a transient the next boot survives is a
+hiccup, and calling that a loop trains users to ignore the warning; three
+consecutive failures to get through boot is a pattern no healthy start
+produces. The Rust launcher measured the same signal and wrote that reason down
+(`origin/rust-main:crates/dml-wow/src/lifecycle.rs`, BOOT_LOOP_RESTART_STRIKES);
+this port re-derived one strike without reading it, and the retrospective audit
+of 2026-09-08 priced that. Owner's decision, the same day.
+
+A DELTA against the count at the first tick, never the absolute count, so a
+long-lived server carrying hundreds of historical restarts cannot trip it by
+being looked at. It resets with the run (`_restarted`) and with the settle.
+"""
+
 SETTLED_AFTER = timedelta(minutes=10)
 """How long a run must have lasted before a restarted server is called steady again.
 
@@ -209,6 +231,7 @@ class Dashboard:
         )
         self._now = now or (lambda: datetime.now(UTC))
         self._last_restarts: int | None = None
+        self._strikes = 0
         self._looping = False
         self._loop_is_current = False
 
@@ -223,13 +246,21 @@ class Dashboard:
             return Verdict("unknown", state.restart_count, state.started_at, uptime)
         if self._restarted(state):
             self._loop_is_current = False
-        grew = self._last_restarts is not None and state.restart_count > self._last_restarts
+            self._strikes = 0
+        new_restarts = (
+            state.restart_count - self._last_restarts
+            if self._last_restarts is not None and state.restart_count > self._last_restarts
+            else 0
+        )
         self._last_restarts = state.restart_count
-        if grew:
-            self._looping = True
-            self._loop_is_current = True
+        if new_restarts:
+            self._strikes += new_restarts
+            if self._strikes >= LOOP_RESTART_STRIKES:
+                self._looping = True
+                self._loop_is_current = True
         elif self._looping and uptime is not None and uptime >= SETTLED_AFTER:
             self._looping = False
+            self._strikes = 0
 
         if state.status == "restarting" or (
             self._looping and self._loop_is_current and state.status == "running"
