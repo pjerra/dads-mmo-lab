@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon import apply as apply_module
 from yulon import (
     botlist,
     channel_setup,
@@ -373,6 +374,22 @@ class ControllerServices:
     which refusals — belongs below this seam, in `docker.apply_module_sql()`,
     which is where 8.7a's "not while the world is running" guard lives.
     """
+    module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None
+    """How far behind each installed module is, or None for a game with no modules.
+
+    Defaulted for `module_sql`'s reason and wired by the same test: only
+    AzerothCore has a `modules/` folder of git checkouts at all, so the three
+    CMaNGOS games get a dead button rather than a press that explains itself.
+
+    Takes nothing and returns rows that already carry their own sentence
+    (`apply.ModuleUpdate.line`). The view does not format the figure, because
+    8.7a's definition of done is that the number on screen equals the same range
+    run by hand — a view that pluralised or defaulted it could drift from the
+    seam that was tested.
+
+    It costs one `git fetch` per installed checkout, which is why it is a button
+    and not part of the status poll.
+    """
     rebuild: install_wiring.RebuildSource | None = None
     """Recompile this install and restart it on the result; None when nothing can.
 
@@ -604,6 +621,7 @@ def _assemble(
     console_probe: Callable[[str], object] | None = None,
     uninstall: Uninstall | None = None,
     module_sql: ModuleSqlRoute | None = None,
+    module_updates: Callable[[], tuple[apply_module.ModuleUpdate, ...]] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -644,6 +662,9 @@ def _assemble(
         # the WotLK factory passes instead is spelled there, next to the
         # `import_service` it is conditional on.
         module_sql=module_sql,
+        # Defaulted for the same reason and passed by the same factory: a game
+        # with no `modules/` folder of checkouts has nothing to count.
+        module_updates=module_updates,
         # HERE, in the shared half, and not in the four per-game factories. A
         # rebuild takes no per-game decision at all — the engine is chosen from
         # `catalog.json` by `installer_for()`, and every family's stage tuple
@@ -816,6 +837,15 @@ def _for_wotlk(
             )
             if spec.import_service
             else None
+        ),
+        # 8.7a's other half, and a different condition from the one above on
+        # purpose: `import_service` is about whether a one-shot can APPLY, while
+        # this is about whether there are git checkouts to COUNT. They happen to
+        # agree for all four games today — only AzerothCore has both — and tying
+        # this to `import_service` would make that coincidence load-bearing for
+        # a future core that compiles modules and imports differently.
+        module_updates=(
+            (lambda: wotlk_modules.module_updates(server_dir)) if entry.has_manifests else None
         ),
         # `wsl_distro=` as well as the distro-aware `mysql`: the dump goes
         # through `docker exec`, but before it runs, maintenance censuses the
@@ -1480,6 +1510,29 @@ It names the refusal the user is most likely to meet — `docker.apply_module_sq
 will not write module SQL underneath a running worldserver (checklist 8.7a) —
 before the click rather than after it. It is a courtesy, not the guard.
 """
+
+MODULE_UPDATES_BUTTON_LABEL = "Check for updates"
+"""The Modules tab's read-only button (checklist 8.7a's first clause)."""
+
+MODULE_UPDATES_TIP = (
+    "Asks each installed module's upstream how many commits it is behind. Fetches, and changes "
+    "nothing on the server."
+)
+"""Named before the press, because the word "check" hides a network round trip
+per installed module and a user who is offline should know which half failed."""
+
+MODULE_UPDATES_NO_MODULES = (
+    "This game has no modules folder, so there is nothing installed here to compare."
+)
+"""Why the button is dead on the three CMaNGOS games — `MODULE_SQL_NO_IMPORTER`'s reason."""
+
+MODULE_UPDATES_RUNNING = "Asking each installed module's upstream how far behind it is…"
+
+MODULE_UPDATES_NONE = (
+    "No modules are installed in this server's modules folder, so there is nothing to compare."
+)
+"""An empty answer said out loud. A blank box reads identically to a failed
+read, which is how the app once reported a step nobody ran as done."""
 
 MODULE_SQL_NO_IMPORTER = (
     "This game has no one-shot import service, so there is nothing to run its modules' SQL with."
@@ -2150,8 +2203,13 @@ class ControllerView(QWidget):
             # the SAME one-shot service against the same databases, so one
             # while the other is live is two importers writing at once.
             self.module_sql_button.setEnabled(False)
+            # And the update check, which writes nothing but does a network
+            # round trip per installed module: two of those in flight at once
+            # would fetch the same clones twice and print one over the other.
+            self.module_updates_button.setEnabled(False)
         else:
             self.refresh_button.setEnabled(True)
+            self.module_updates_button.setEnabled(self.services.module_updates is not None)
             # Back to what this install can do, not unconditionally: a game
             # with no import service has no route, and re-enabling it here
             # would hand the three CMaNGOS games a live button the moment any
@@ -3842,9 +3900,15 @@ class ControllerView(QWidget):
         # here, because that is the granularity the importer has — it is handed
         # the module folder list and ledgers what it applies in `updates`.
         self.module_sql_button = QPushButton(MODULE_SQL_BUTTON_LABEL, tab)
+        # The fourth, and the only read-only one: it fetches and counts and
+        # writes nothing outside each clone's `.git`. It is a button rather than
+        # part of the status poll because it costs one network round trip per
+        # installed module, and a poll would pay that every few seconds.
+        self.module_updates_button = QPushButton(MODULE_UPDATES_BUTTON_LABEL, tab)
         self.install_module_button.clicked.connect(lambda: self._module_action("install"))
         self.remove_module_button.clicked.connect(lambda: self._module_action("remove"))
         self.module_sql_button.clicked.connect(self.apply_module_sql)
+        self.module_updates_button.clicked.connect(self.check_module_updates)
         # The action `_format_report` has always named. It sits on THIS tab
         # because this is the tab that prints "worldserver REBUILD required
         # before this takes effect" — for 20 of the 41 shipped manifests, every
@@ -3882,6 +3946,7 @@ class ControllerView(QWidget):
         row.addWidget(self.install_module_button)
         row.addWidget(self.remove_module_button)
         row.addWidget(self.module_sql_button)
+        row.addWidget(self.module_updates_button)
         row.addStretch(1)
         row.addWidget(self.rebuild_button)
         box.addWidget(self.module_list, 2)
@@ -3903,6 +3968,12 @@ class ControllerView(QWidget):
         self.module_sql_button.setEnabled(self.services.module_sql is not None)
         self.module_sql_button.setToolTip(
             MODULE_SQL_TIP if self.services.module_sql is not None else MODULE_SQL_NO_IMPORTER
+        )
+        self.module_updates_button.setEnabled(self.services.module_updates is not None)
+        self.module_updates_button.setToolTip(
+            MODULE_UPDATES_TIP
+            if self.services.module_updates is not None
+            else MODULE_UPDATES_NO_MODULES
         )
         # A separate gate from the two above, and it must stay separate: the
         # three CMaNGOS games have no manifest store at all, and their
@@ -3994,6 +4065,46 @@ class ControllerView(QWidget):
     def _module_failed(self, exc: object) -> None:
         what, self._module_pending = self._module_pending or "module action", None
         self.module_report.setPlainText(f"{what} FAILED: {exc}")
+        self.action_failed.emit(str(exc))
+
+    @Slot()
+    def check_module_updates(self) -> None:
+        """Ask each installed module how far behind its upstream it is (checklist 8.7a).
+
+        Read-only, so it takes no arming and no confirmation: it fetches into
+        each clone's `.git` and counts. It still goes through `_run()` and the
+        busy lock, because a fetch per installed module is a network round trip
+        per installed module and the GUI thread must not hold them.
+
+        What comes back is already a list of sentences — `apply.ModuleUpdate`
+        formats its own row. The definition of done for this clause is that the
+        figure equals `git rev-list --count HEAD..FETCH_HEAD` run by hand, and
+        a number the view re-formatted would be a second place for it to change.
+        """
+        route = self.services.module_updates
+        if route is None:
+            return
+        self._set_busy(True)
+        self._module_pending = "check for module updates"
+        self.module_report.setPlainText(MODULE_UPDATES_RUNNING)
+        self._run(route, self._module_updates_done, self._module_updates_failed)
+
+    @Slot(object)
+    def _module_updates_done(self, result: object) -> None:
+        self._set_busy(False)
+        self._module_pending = None
+        self.module_updates_button.setEnabled(self.services.module_updates is not None)
+        if not isinstance(result, tuple):
+            return
+        rows = [row.line for row in result]
+        self.module_report.setPlainText("\n".join(rows) if rows else MODULE_UPDATES_NONE)
+
+    @Slot(object)
+    def _module_updates_failed(self, exc: object) -> None:
+        self._set_busy(False)
+        self._module_pending = None
+        self.module_updates_button.setEnabled(self.services.module_updates is not None)
+        self.module_report.setPlainText(f"check for module updates FAILED: {exc}")
         self.action_failed.emit(str(exc))
 
     @Slot()

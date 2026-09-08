@@ -2333,6 +2333,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`native._listing()` from here because that raises `InstallerError` while every "
         "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
     ),
+    ("apply.py", "module_updates"): (
+        "lists `modules/` to say how far behind each installed module is (checklist 8.7a); it "
+        "decides no write at all - every clone it names is then FETCHED into and nothing else - "
+        "and an unreadable or absent folder is the ordinary answer for the three CMaNGOS games, "
+        "which have no `modules/` at all, so the OSError is logged and answers an empty tuple "
+        "rather than a refusal"
+    ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
         "skipped and the total is short rather than absent, because a folder whose size "

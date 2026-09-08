@@ -3615,3 +3615,50 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       refusal (the folder was built before the doodad patch), so it never reached `ready` and no
       `The server is up.` belongs to this gate; it did not compile.
       `pyplan/gates/bug43-keepawake-win11-2026-09-05/README.md`.
+
+### 44. Four defects in the module manifest layer, found while gating 8.7a — 2026-09-08, OPEN
+
+Found on `yulon-ubuntu` by pressing the Modules tab against the live AzerothCore install; the
+readings are in `pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`. All four are about what a
+manifest DECLARES versus what the install does, which is the same shape as the defect 8.7a's own
+text was opened for.
+
+- [ ] **a. A conf key declared with no value is never written.**
+      `manifests/wow-wotlk/modules/mod-npc-beastmaster.json` names `Creatures.CustomIDs` on
+      `env/dist/etc/worldserver.conf` with a note and no `default`. Installing the module reports
+      `activate … mod_npc_beastmaster.conf` and says nothing about `worldserver.conf`; the file is
+      byte-identical before and after, still without `601026`. So the only *core-side*
+      configuration change this module needs — the only one a running server could show without a
+      rebuild — is documented in the catalog and not made. Currently harmless only by luck: the
+      module's own creature row carries `flags_extra = 2` (`CREATURE_FLAG_EXTRA_MODULE`), which
+      suppresses the warning the key exists to silence (`ObjectMgr.cpp:1219-1229`, read on the
+      box), and the boot logged no gossip complaint at all.
+
+- [ ] **b. Two shipped manifests declare a SQL step for a module that ships no SQL.**
+      `mod-junk-to-gold` and `mod-learn-spells` both declare `data/sql/db-world/*.sql` with
+      `applied_by: db-import`; neither clone contains a single `.sql` file. The report is honest —
+      `files=[]`, not a guess — but the tab still shows a pending SQL step for a module that owes
+      none.
+
+- [ ] **c. `mod-1v1-arena`'s manifest names the wrong database and the wrong depth.**
+      It declares `db=characters path=data/sql/db-characters/*.sql`. The repository ships
+      `data/sql/db-world/base/1v1_Battlemaster.sql` and `data/sql/delete/1v1_delete.sql`. So
+      `pending_sql` came back empty while the importer — which walks the module's `data/sql` tree
+      itself rather than the manifest's glob — applied `1v1_Battlemaster.sql` to the **world**
+      database, moving `acore_world.updates` 2977 → 2978. The apply was right; the report of what
+      was owed was not, and a flat `*.sql` glob cannot see a file one directory deeper.
+
+- [ ] **d. Removing a module leaves its activated conf behind.**
+      `remove mod-learn-spells` reported one step, `rm -r modules/mod-learn-spells`, and
+      `env/dist/etc/modules/mod_learnspells.conf` is still on disk. Harmless on this tree, because
+      AzerothCore does not open a conf for a module it was not compiled with (see below) — but it
+      is a file this app wrote and does not take back.
+
+**And one fact that is not a defect but decides a definition-of-done clause.** 8.7a asks that "a
+configuration change the module needs is shown by the running server". On AzerothCore it cannot
+be, until the worldserver is rebuilt with the module: `Loading Modules Configuration...` looks
+conf files up by the names of the modules **compiled into the binary**
+(`Acore::Module::GetEnableModulesList()`, the same list `.server debug` prints). Measured with two
+activated module conf files sitting in `env/dist/etc/modules/`: the server asked for
+`playerbots.conf` by name, failed to open it, and answered `> Not found modules config files`
+without looking at either. The rebuild is the owner's to run.
