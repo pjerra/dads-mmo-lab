@@ -980,8 +980,11 @@ class Accounts(_Strict):
     in `account.rank` — measured against a live server on 2026-08-26, where the
     core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
     exactly. CMaNGOS proper (TBC, Vanilla) keeps SRP6 in `v`/`s` with the level
-    in `gmlevel`, which is a THIRD shape and has not been measured, so it is
-    declared unsupported rather than assumed to be tortoise's.
+    in `gmlevel`, a THIRD shape -- measured on 2026-09-07 against both trees with
+    real clients (8.3b, 8.3c): `x = SHA1(reverse(s) + SHA1(UPPER(user:pass)))`
+    little-endian, `v = 7^x mod N`, recomputed by hand and matching the row.
+    This paragraph said "has not been measured, so it is declared unsupported"
+    for a day after it was (audit, 2026-09-08).
 
     Getting this wrong does not fail loudly — it inserts a row that looks
     correct and can never log in.

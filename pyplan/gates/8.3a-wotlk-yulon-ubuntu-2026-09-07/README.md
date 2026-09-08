@@ -4,7 +4,7 @@
 install at `~/wowserver`, code at `ab059592`. The client half was driven on the Hyper-V host
 (`DESKTOP-FP27AUV`) with `C:\clients\WoW-WotLK-3.3.5a-min`, in the interactive session.
 
-**This box is NOT ticked.** Its own line says so: *"Windows follows on the gate box once 8.2b has
+**This box IS ticked** -- its Windows half was pressed on the gate box the same day (`pyplan/gates/8.3a-wotlk-yulon-win11-gate-2026-09-07/`), which is what its own line required. This README opened with "NOT ticked" for a day after that, and a reader trusting the folder over the checklist would have been misled (audit, 2026-09-08). Its own line says: *"Windows follows on the gate box once 8.2b has
 run there, as its own press, and this box does not tick on Linux alone if the Windows half is
 claimed — it is claimed, so both are gated."* 8.2b has not run. Everything below is the Linux half,
 finished.
