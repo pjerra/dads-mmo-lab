@@ -1785,6 +1785,51 @@ def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved(
             assert str(PurePosixPath(argument).parent) in dockerfile, argument
 
 
+def test_the_tortoise_image_makes_their_self_colliding_migration_idempotent() -> None:
+    """One file, named, with the reason -- not the 173 the owner refused to patch.
+
+    Measured on m910q 2026-09-08 on a byte copy of the live volume
+    (`pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`): with
+    `tw_world` imported from their `sql/base` at head, their updater applied 157
+    world migrations and cancelled the server on `20260903063722_world` --
+    `Duplicate entry '44070' for key 'PRIMARY'` in `spell_proc_event`, a row
+    their base does not hold. The file collides with itself or a sibling, so a
+    FRESH install at their head cannot start either; the incident of the night
+    before had looked like an existing install being too far behind, and it was
+    not only that.
+
+    The image copies `sql/` out of the clone; this rewrites that one file's
+    `INSERT INTO` to `INSERT IGNORE INTO` in the copy the updater reads, and
+    nothing else. The updater is hash-keyed (SHA1 of the file, `AutoUpdater.cpp`),
+    so the rewritten file is a new migration to it, applied once and recorded
+    under its own hash; an install that already recorded the original is not
+    touched by this, because its rows are already there and IGNORE skips them.
+    The owner rejected patching all 173 (answer 1, 2026-09-08); this is the one
+    that is measured broken, named here so the day upstream fixes it the line
+    can go.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    dockerfile = dockerfile_text(entry)
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    # A `RUN` may continue over lines; read it as the shell will.
+    joined = dockerfile.replace("\\\n", " ")
+    line = next(
+        (
+            ln
+            for ln in joined.splitlines()
+            if "20260903063722_world.sql" in ln and "INSERT IGNORE" in ln
+        ),
+        None,
+    )
+    assert line is not None, "the self-colliding migration is not made idempotent in the image"
+    assert f"{core_dir}/sql/database_updates/world/20260903063722_world.sql" in line
+    assert dockerfile.count("INSERT IGNORE") == 1, "exactly one file, not a blanket rewrite"
+    # And the reason travels with the line: a reader of the rendered Dockerfile
+    # must find the incident named, not a bare sed.
+    idx = joined.index(line)
+    assert "44070" in joined[max(0, idx - 1200) : idx], "the comment above it names the duplicate"
+
+
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
 def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
     entry: CatalogEntry,

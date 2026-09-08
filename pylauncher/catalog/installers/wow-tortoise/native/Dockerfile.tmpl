@@ -157,6 +157,24 @@ RUN mkdir -p {{CORE_DIR}}/sql {{CORE_DIR}}/src/tools && \
     cp -r /src/sql/. {{CORE_DIR}}/sql/ && \
     cp -r /src/tools/mmap {{CORE_DIR}}/src/tools/mmap
 
+# ONE of their migrations cannot apply to their own base, and it is this one.
+# Measured on m910q 2026-09-08 on a copy of a live install
+# (pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/): with tw_world
+# imported from sql/base at head 3a8472e, the updater applied 157 world
+# migrations and cancelled the server on 20260903063722_world with
+#   [1062] Duplicate entry '44070' for key 'PRIMARY'   (spell_proc_event)
+# -- a row their base does not hold, so the file collides with itself or a
+# sibling, and a FRESH install at their head cannot start. Their updater is
+# hash-keyed (SHA1 of the file, src/shared/Database/AutoUpdater.cpp), so the
+# copy rewritten here is a new migration to it: applied once, recorded under
+# its own hash, every statement of it run with duplicates skipped rather than
+# the server cancelled. An install that already recorded the original is left
+# alone by this -- its rows are there and IGNORE skips them. The owner refused
+# a blanket rewrite of all 173 (answer 1, 2026-09-08); this is the one that is
+# measured broken, and the line goes the day upstream fixes the file.
+RUN sed -i 's/^\(\s*\)INSERT INTO/\1INSERT IGNORE INTO/' \
+    {{CORE_DIR}}/sql/database_updates/world/20260903063722_world.sql
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
