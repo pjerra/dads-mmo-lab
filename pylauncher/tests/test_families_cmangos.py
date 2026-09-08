@@ -2928,8 +2928,52 @@ def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab
         for path in app_modules()
         for kind, spelling in volume_deleting_spellings(path.read_text(encoding="utf-8"))
         if not (kind == "text" and path.resolve() == own_file)
+        if path.name not in THE_UNINSTALL
     ]
     assert offenders == [], offenders
+
+
+THE_UNINSTALL = frozenset({"docker.py", "purge.py"})
+"""The two files 8.9a's uninstall is allowed to live in, and nowhere else.
+
+This scan's docstring said it "goes red the day any part of the app grows such
+an action, the Server tab included, at which point this refusal should point at
+it rather than at a terminal". 2026-09-08 is that day: 8.9a built
+`docker.remove_volume()` and `purge.py` around it.
+
+The refusal above is NOT re-pointed yet, and that is deliberate rather than
+forgotten. It belongs to the CMaNGOS family, and 8.9a wires uninstall for
+AzerothCore only - 8.9b is the box that brings Vanilla, and it is the box that
+owes this refusal a sentence naming the tab instead of a terminal command. Until
+then, sending a CMaNGOS user to a button their tab does not have would be the
+same round trip this test exists to prevent, one step later.
+
+Two files and not a blanket exemption, and the test below keeps them honest: the
+only ARGV spelling anywhere is the one inside `docker.remove_volume()`.
+"""
+
+
+def test_the_only_volume_deleting_command_in_the_app_is_the_uninstalls_own(
+    tmp_path: Path,
+) -> None:
+    """The exemption above is a place, not a licence.
+
+    `THE_UNINSTALL` lets two files carry the action; this says WHERE in them.
+    Exactly one function may issue the argv, and it is the one whose contract is
+    that the volume is gone afterwards. A second `volume rm` anywhere - a
+    convenience wrapper, a fallback in `remove_staged()` - fails here.
+    """
+    import yulon.docker as docker_module
+
+    source = Path(inspect.getsourcefile(docker_module) or "").read_text(encoding="utf-8")
+    issuing = [
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and volume_deleting_spellings(ast.unparse(node))
+        and any(kind == "argv" for kind, _ in volume_deleting_spellings(ast.unparse(node)))
+    ]
+    assert issuing == ["remove_volume"], issuing
 
 
 A_NEW_SERVER_TAB_ACTION = '''

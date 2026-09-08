@@ -1959,3 +1959,75 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     deadline, and is named so this audit can tell it from one.
     """
     assert spelled_bounds(__file__) == {"JOB_PACE"}
+
+
+# ------------------------------------------------------- 8.9a: the tile back
+#
+# `_remember_installed()` is the way IN and there was no way OUT:
+# `_show_installed()` early-returns for a game not in `_installed_dirs`, so
+# nothing could un-grey a tile. An uninstall needs the inverse, and it is not
+# "clear the key" - `installed_dirs()` is one folder per GAME, so a machine with
+# two WotLK installs still has one after the first is purged.
+
+
+def _installed_view(tmp_path: Path, installed: dict[str, Path]) -> CatalogView:
+    return CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda *_: None,
+        installed_games=installed,
+    )
+
+
+def test_a_purged_install_puts_its_tile_back_to_install(qapp: object, tmp_path: Path) -> None:
+    """The visible effect the box asks for: the tile reads Install again."""
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    view.forget_installed("wow-wotlk", {})
+    button = view.button_for("wow-wotlk")
+    assert button.text() == "Install"
+    assert button.isEnabled() is True
+    assert "Already installed" not in button.toolTip()
+
+
+def test_purging_one_of_two_installs_of_a_game_leaves_the_tile_installed(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Recomputed from the surviving installs, never cleared.
+
+    `installed_dirs()` is "one folder per game, last remembered wins", so a
+    machine with two WotLK installs still has one after the first is purged -
+    and its tab is still open. A tile flipped back to Install there would offer
+    a second install of a game that already has two.
+    """
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "first"})
+    view.forget_installed("wow-wotlk", {"wow-wotlk": tmp_path / "second"})
+    button = view.button_for("wow-wotlk")
+    assert button.text() == "Installed"
+    assert button.isEnabled() is False
+    assert str(tmp_path / "second") in button.toolTip()
+
+
+def test_forgetting_an_install_does_not_re_enable_a_platform_gated_tile(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tile the platform gate disabled is a standing fact about the TILE.
+
+    `_set_buttons_enabled()` already carries this rule for the job lock, and the
+    un-install path is a third way to reach the same button.
+    """
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    view._gated.add("wow-wotlk")
+    view.forget_installed("wow-wotlk", {})
+    assert view.button_for("wow-wotlk").isEnabled() is False
+
+
+def test_forgetting_a_game_that_was_never_installed_changes_nothing(
+    qapp: object, tmp_path: Path
+) -> None:
+    """A signal can arrive for a tab opened before the tile knew about it."""
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    view.forget_installed("wow-tbc", {"wow-wotlk": tmp_path / "wotlk"})
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-tbc").text() == "Install"

@@ -2333,6 +2333,20 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`native._listing()` from here because that raises `InstallerError` while every "
         "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
     ),
+    ("purge.py", "folder_bytes"): (
+        "measures the server folder for the uninstall dialog; every OSError per entry is "
+        "skipped and the total is short rather than absent, because a folder whose size "
+        "cannot be read still has to be offerable for removal - it decides no write, only a "
+        "number in a sentence"
+    ),
+    ("purge.py", "_clear_read_only"): (
+        "walks the tree the uninstall is about to delete, to add the write bit back to "
+        "everything in it. It IS reached on the way to a write, and it is the one place that "
+        "is right: the delete has ALREADY failed once when this runs, so the folder is one "
+        "the user asked to remove and `remove_tree()` re-raises against the tree if the "
+        "retry still cannot finish. A failure on any single entry is skipped here on purpose "
+        "- the report belongs to the rmtree that follows, not to one chmod"
+    ),
     ("apply.py", "_undeploy"): (
         "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
         "removes exactly those names; reads a folder this app filled, decides no write into it"
@@ -2343,6 +2357,24 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("apply.py", "_run_sql"): (
         "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
+    ),
+    ("apply.py", "_pending_sql"): (
+        "resolves a `db-import` step's glob so the file count on `PendingSql` is one this run "
+        "actually took -- reads the clone this app just made, decides no write anywhere, and "
+        "runs nothing. Its emptiness verdict is deliberate and is NOT a refusal: upstream's "
+        "own updater joins `<module>/data/sql` and skips what is not there "
+        "(`UpdateFetcher.cpp:159-186`), so a module that brought no SQL is normal. The verdict "
+        "it must not give is a confident zero for a path it could not resolve, which is why a "
+        "`{key}` in the path answers `files=None` instead of globbing the literal braces"
+    ),
+    ("docker.py", "allowed_modules"): (
+        "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
+        "decides no write to that folder and never touches it. Its `except OSError` logs and "
+        "answers `all`, which is upstream's own default (the modules COMPILED into the image), "
+        "so an unreadable folder leaves the install doing exactly what it did before. The one "
+        'answer it must never give is `""`: measured on the real ac-db-import image '
+        "2026-09-07, an empty value means `Loading modules: none` and switches module updates "
+        "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string"
     ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "

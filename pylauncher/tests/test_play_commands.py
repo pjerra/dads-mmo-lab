@@ -53,7 +53,10 @@ def test_a_teleport_refuses_a_name_the_server_would_not_accept() -> None:
 
 
 def test_a_level_change_names_the_character_and_the_level() -> None:
-    assert commands.set_character_level("Guglu", 80) == "character level Guglu 80"
+    assert (
+        commands.set_character_level("Guglu", 80, verb="character level")
+        == "character level Guglu 80"
+    )
 
 
 def test_a_level_outside_what_the_server_takes_is_refused_here() -> None:
@@ -61,7 +64,29 @@ def test_a_level_outside_what_the_server_takes_is_refused_here() -> None:
     its own business and it says so itself. What this refuses is the shape."""
     for bad in (0, -1, 256, 1000):
         with pytest.raises(commands.CommandError):
-            commands.set_character_level("Guglu", bad)
+            commands.set_character_level("Guglu", bad, verb="character level")
+
+
+def test_a_level_cannot_be_built_without_naming_the_verb_this_tree_has() -> None:
+    """8.4d, and the same argument `cap=` won in 8.4c.
+
+    Three of these trees spell it `character level`; the tortoise fork has no
+    console route to an arbitrary level AT ALL -- `.levelup` is the only command
+    that writes one and its own table row sets `AllowConsole` false
+    (`Chat.cpp:923`, read from this fork's source 2026-09-07). Its catalog block
+    therefore carries `set_level_command: null`, and a default here would let
+    that null turn back into a sibling's string on the way to the wire.
+    """
+    with pytest.raises(TypeError):
+        commands.set_character_level("Guglu", 80)
+
+
+def test_a_level_verb_nobody_measured_is_refused_rather_than_sent() -> None:
+    """An empty verb means the tree has not got one, and sending
+    `" Guglu 80"` would be a command whose first word is a character name."""
+    for bad in ("", "   ", "character level; account delete x", "character"):
+        with pytest.raises(commands.CommandError):
+            commands.set_character_level("Guglu", 80, verb=bad)
 
 
 # -- rename -----------------------------------------------------------------
@@ -72,7 +97,34 @@ def test_a_rename_marks_the_character_for_the_next_login() -> None:
     arguments are deliberately not sent: one reserves the old name server-wide
     and the other renames without asking, and neither is what a button called
     "Rename at next login" promises."""
-    assert commands.rename_at_login("Guglu") == "character rename Guglu"
+    assert commands.rename_at_login("Guglu", verb="character rename") == "character rename Guglu"
+
+
+def test_the_rename_verb_comes_from_the_tree_rather_than_this_file() -> None:
+    """8.4d. The tortoise fork's rename is TOP-LEVEL and there is no
+    `character rename` on it at all.
+
+    Read from this fork's own source, 2026-09-07:
+    `{ "rename", SEC_MODERATOR, true, &ChatHandler::HandleCharacterRenameCommand, ... }`
+    at `src/game/Chat/Chat.cpp:850`, while its `characterCommandTable`
+    (deleted/erase/getname/diffitems/reputation/hasitem/fillflys/clean/itemlog/
+    mail/inactivity) has no rename row. So the string this app has always sent
+    would arrive there as an unknown SUBcommand and answer with a list of the
+    subcommands it does have -- a refusal that reads like the app being broken.
+    """
+    assert commands.rename_at_login("Guglu", verb="character rename") == "character rename Guglu"
+    assert commands.rename_at_login("Ddsasd", verb="rename") == "rename Ddsasd"
+
+
+def test_a_rename_cannot_be_built_without_naming_the_verb_this_tree_has() -> None:
+    with pytest.raises(TypeError):
+        commands.rename_at_login("Guglu")
+
+
+def test_a_rename_verb_nobody_measured_is_refused_rather_than_sent() -> None:
+    for bad in ("", "   ", "rename; account delete x", "character"):
+        with pytest.raises(commands.CommandError):
+            commands.rename_at_login("Guglu", verb=bad)
 
 
 # -- mail -------------------------------------------------------------------
@@ -194,8 +246,8 @@ def test_a_revive_names_the_character_even_though_the_help_does_not() -> None:
     "builder",
     [
         lambda name: commands.teleport_to(name, "Stormwind", verb="teleport name"),
-        lambda name: commands.set_character_level(name, 10),
-        commands.rename_at_login,
+        lambda name: commands.set_character_level(name, 10, verb="character level"),
+        lambda name: commands.rename_at_login(name, verb="character rename"),
         lambda name: commands.mail_items(name, subject="s", body="b", items=((1, 1),), cap=1),
         lambda name: commands.mail_money(name, subject="s", body="b", copper=1),
         commands.revive,

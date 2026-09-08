@@ -9,9 +9,12 @@ a small seam (`Git`, `SqlRunner`, `DbcCopier`) so the engine is unit-testable
 without git, Docker or a network, and so the real implementations live next
 to the other subprocess code.
 
-Nothing is ever skipped silently: every step a run could not perform (no SQL
-runner, no client dir, no DBC copier) is named in `ApplyReport.skipped`, and
-`rebuild_required` says whether the worldserver must be rebuilt before the
+Nothing is ever skipped silently, and nothing is ever CLAIMED silently either:
+every step a run could not perform (no SQL runner, no client dir, no DBC copier)
+is named in `ApplyReport.skipped`; SQL left to AzerothCore's own importer is
+named in `ApplyReport.pending_sql` rather than in `done`, with the glob resolved
+so the file count is one this run took (`PendingSql` records what that cost);
+and `rebuild_required` says whether the worldserver must be rebuilt before the
 change is live. The engine does not restart, rebuild, or touch Docker itself —
 that is the controller's call (call down / signal up, §5).
 """
@@ -28,10 +31,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from string import Formatter
 from typing import IO, Literal, Protocol
 
 from yulon import platform, runner
 from yulon.catalog import composegen
+from yulon.dbreads import SqlReader
 from yulon.git import (
     CloneSpec,
     Git,
@@ -43,7 +48,7 @@ from yulon.git import (
     same_repo,
 )
 from yulon.log import get_logger
-from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, SqlStep, When
+from yulon.manifest import Db, Deploy, Manifest, ManifestType, Patch, Prompt, SqlStep, When
 from yulon.ownership import Ownership
 
 logger = get_logger(__name__)
@@ -662,8 +667,68 @@ def _check_sql(proc: subprocess.CompletedProcess[str], what: str) -> None:
 
 
 @dataclass(frozen=True)
+class PendingSql:
+    """SQL this run put on disk for AzerothCore's importer and did NOT apply.
+
+    `applied_by="db-import"` hands a module's `data/sql/**` to upstream's own
+    `UpdateFetcher`, which is right — applying those files by hand leaves the
+    `updates` ledger without their hashes and a later real import re-runs them.
+    But "right to defer" was written down as `done`: until 2026-09-07 `_sql()`
+    appended `sql <glob> → <db>: left to ac-db-import on next start` to the done
+    list having run nothing and checked nothing, not even that the glob matched
+    a file, and `controller_view._format_report()` ticks every done entry. The
+    live applier on yulon-ubuntu therefore reported
+
+        DONE: sql data/sql/db-world/*.sql -> world: left to ac-db-import on next start
+
+    over an install where nothing whatever had been applied and nothing was
+    going to be: `docker.start_staged()` names the three long-running services
+    so a Start never reaches the importer, and `docker.repair_import()` refuses
+    a database that is already complete.
+
+    So the deferral is a value now, and it is a value rather than a sentence
+    because the caller that has to tell "applied" from "not applied yet" must
+    not do it by grepping English — that would be this same defect one layer up.
+
+    `files` is the glob RESOLVED against the clone, so the count a reader is
+    shown is one this run actually took:
+
+    * a tuple of clone-relative paths — what is on disk waiting,
+    * `()` — the glob matched nothing, which is not an error and is NOT "this
+      module has no SQL". Measured on the real clones, yulon-ubuntu 2026-09-07:
+      `mod-aoe-loot` keeps its one file in `data/sql/db-world/base/`, one
+      directory below the `data/sql/db-world/*.sql` its manifest names, while
+      `mod-solocraft` (1 file) and `mod-transmog` (3, plus an `updates/` folder)
+      put theirs exactly there. The layout is per-repository and this pattern is
+      Yu'lon's own bookkeeping — `UpdateFetcher.cpp:159-186` joins the module's
+      `data/sql` path and walks it itself, so upstream applies what this misses.
+      An empty answer therefore means "this app cannot count", and the caller
+      must not draw it as "nothing to do",
+    * `None` — the path carries a `{key}` and this run could not resolve it.
+      A third answer for the same reason `docker.importer_sees_modules()` keeps
+      one: globbing the raw `{key}` would match nothing and report a confident
+      "no files". No shipped manifest has such a path today (all 20 db-import
+      steps across 15 manifests are literal `data/sql/db-*/*.sql`), and
+      `_action_templates()` deliberately leaves db-import paths out of
+      `required_prompts()`, so there is no value to render one with.
+    """
+
+    db: Db
+    path: str
+    files: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
 class ApplyReport:
-    """What one install/configure/remove run did, did not do, and still needs."""
+    """What one install/configure/remove run did, did not do, and still needs.
+
+    Four lists, because a run has four outcomes and only the first two were ever
+    written down: `done` is what happened, `skipped` is what could not happen,
+    `pending_sql` is what was deliberately left to another program to do (see
+    `PendingSql`), and `rebuild_required` is what no program in this app can do
+    at all. A caller can answer "is this module's SQL in the database?" from
+    `pending_sql` alone, without reading a word of the report.
+    """
 
     action: When
     item_id: str
@@ -671,12 +736,14 @@ class ApplyReport:
     skipped: tuple[str, ...] = ()
     rebuild_required: bool = False
     restart_recommended: bool = False
+    pending_sql: tuple[PendingSql, ...] = ()
 
 
 @dataclass
 class _Log:
     done: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    pending_sql: list[PendingSql] = field(default_factory=list)
 
 
 class _NoAdoption(Enum):
@@ -763,6 +830,98 @@ def _no_adoption_message(refusal: _NoAdoption, rel: str, retry: str) -> str:
         ),
     }
     return messages[refusal]
+
+
+# --------------------------------------------------- the answers to prompts
+
+_INT = re.compile(r"[+-]?\d+")
+
+_BOOL_WORDS = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
+
+_SAFE_IN_QUERY = re.compile(r"^[A-Za-z0-9_.-]+$")
+"""What an answer may contain before it is pasted into an `ExistsCheck.query`.
+
+Not an escape: a refusal, exactly as `dbreads._SAFE_PREFIX` is one and for the
+same reason. Every answer that reaches a check today is a character GUID, and
+the set of characters a GUID needs does not include a quote, a semicolon or a
+backslash — so the answer to anything else is "I will not use this", rather than
+an escaping rule that has to be right on four cores and two SQL modes.
+"""
+
+
+def _fields(template: str) -> set[str]:
+    """The `{key}` names a `_render()` of this template would look up."""
+    return {
+        name.split(".")[0].split("[")[0] for _, name, _, _ in Formatter().parse(template) if name
+    }
+
+
+def _action_templates(manifest: Manifest, action: When) -> list[str]:
+    """Every string this action would put through `_render()`, in the engine's own order.
+
+    Read off the `Applier` methods below rather than guessed: `_patches` and
+    `_sql` filter on `when`, `_sql` returns before rendering for a `db-import`
+    step (which is why `mod-ah-bot`'s SQL glob is absent here), and `_conf` runs
+    for install and configure only and skips a glob or a non-`.conf` file. A
+    template this misses is a value the user is never asked for; a template it
+    invents is a question nobody needs to answer — so the two must be kept in
+    step, and `test_required_prompts_are_only_the_ones_the_action_actually_renders`
+    is what says they are.
+    """
+    out = [patch.replace for patch in manifest.patches if patch.when == action]
+    for step in manifest.sql:
+        if step.when != action or step.applied_by != "direct":
+            continue
+        out.append(step.statement if step.statement is not None else step.path or "")
+    if action in ("install", "configure"):
+        for conf in manifest.conf:
+            if _is_glob(conf.file) or not conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES):
+                continue
+            out += [key.default for key in conf.keys if key.default is not None]
+    return out
+
+
+def required_prompts(manifest: Manifest, action: When) -> tuple[Prompt, ...]:
+    """The manifest's prompts whose value this action would actually render.
+
+    The question the Modules tab has to answer before it can ask a human
+    anything, and the reason it is per-ACTION rather than per-manifest: removing
+    `mod-ah-bot` renders nothing at all, and a dialog asking for the AH bot's
+    GUID before deleting it would be a question about nothing.
+
+    Order is the manifest's own, so a check that reads an earlier answer (
+    `mod-ah-bot`'s `bot_account`, whose `ExistsCheck` also names `{bot_guid}`)
+    is run after the answer it depends on has been validated.
+    """
+    wanted: set[str] = set()
+    for template in _action_templates(manifest, action):
+        wanted |= _fields(template)
+    return tuple(prompt for prompt in manifest.prompts if prompt.key in wanted)
+
+
+def check_answer(prompt: Prompt, value: str) -> str:
+    """Why this answer cannot be used, or `""` if it can. Never raises.
+
+    A returned sentence, not an exception, because both callers want to say it
+    rather than to unwind: the dialog puts it under the box the user is still
+    typing in, and the applier wraps it in a refusal that names the module.
+    """
+    text = value.strip()
+    if not text:
+        return "this cannot be left empty"
+    if prompt.kind == "int":
+        return "" if _INT.fullmatch(text) else "this must be a whole number"
+    if prompt.kind == "float":
+        try:
+            float(text)
+        except ValueError:
+            return "this must be a number"
+        return ""
+    if prompt.kind == "bool":
+        return "" if text.lower() in _BOOL_WORDS else "this must be yes or no"
+    if prompt.kind == "choice":
+        return "" if text in prompt.choices else "choose one of: " + ", ".join(prompt.choices)
+    return ""
 
 
 # ------------------------------------------------------------------- engine
@@ -859,6 +1018,7 @@ class Applier:
         """Clone, deploy, patch, run install-time SQL, activate conf, copy client/DBC files."""
         vals = self._values(manifest, values)
         log = _Log()
+        self._check_values(manifest, "install", vals, log)
         clone = self.clone_dir(manifest)
         if manifest.source is None:
             # A manifest with no source never clones, so the guard used to sit
@@ -924,6 +1084,7 @@ class Applier:
         """
         vals = self._values(manifest, values)
         log = _Log()
+        self._check_values(manifest, "configure", vals, log)
         clone = self.clone_dir(manifest)
         if clone.exists() and any(p.in_clone and p.when == "configure" for p in manifest.patches):
             # The third writer through `clone_dir()`, and the smallest: an
@@ -943,6 +1104,7 @@ class Applier:
         """Run remove-time patches/SQL, delete deployed files and the clone. DB rows are kept."""
         vals = self._values(manifest, values)
         log = _Log()
+        self._check_values(manifest, "remove", vals, log)
         clone = self.clone_dir(manifest)
         if clone.exists():
             # Before the SQL, not next to the `rmtree` below: a refusal must
@@ -959,6 +1121,93 @@ class Applier:
             shutil.rmtree(clone)
             log.done.append(f"rm -r {_rel(self.server_dir, clone)}")
         return self._report("remove", manifest, log)
+
+    # -- the answers -------------------------------------------------------
+
+    def _check_values(
+        self, manifest: Manifest, action: When, vals: Mapping[str, str], log: _Log
+    ) -> None:
+        """Refuse an answer this action cannot use, BEFORE anything is written.
+
+        This used to happen at the end. `install()` cloned the repository, wrote
+        `include.sh`, ran the deploy and the patches, and only reached the
+        missing value inside `_conf()` — so a `mod-ah-bot-plus` install with no
+        GUID left a full checkout at `modules/mod-ah-bot-plus` on disk and
+        reported `conf AuctionHouseBot.GUIDs: no value for {bot_guid}`. Half an
+        install is worse than none of one: the next attempt then meets the
+        ownership guard over a folder this app itself abandoned.
+
+        Nothing here writes, and the two things it reads are the answers it was
+        handed and (through `_check_exists`) the server's own database.
+        """
+        for prompt in required_prompts(manifest, action):
+            value = vals.get(prompt.key)
+            if value is None:
+                raise ApplyError(
+                    f"{manifest.id}: {prompt.question} — no value for {{{prompt.key}}}. "
+                    f"Nothing was changed."
+                )
+            problem = check_answer(prompt, value)
+            if problem:
+                raise ApplyError(
+                    f"{manifest.id}: {prompt.question} — {problem}, and {value!r} is not. "
+                    f"Nothing was changed."
+                )
+            self._check_exists(manifest, prompt, vals, log)
+
+    def _check_exists(
+        self, manifest: Manifest, prompt: Prompt, vals: Mapping[str, str], log: _Log
+    ) -> None:
+        """Ask the database whether the thing this answer names is really there.
+
+        Three outcomes, and the difference between the last two is the whole
+        point of writing it this way:
+
+        * a row came back — nothing is said, the install goes on;
+        * **no row came back** — the answer is refused by name, because a GUID
+          that matches no character is not an error inside the AH bot module,
+          it is a module that silently posts nothing;
+        * **the question could not be put** — no reader on this seam, or the
+          query itself failed — which is reported in `skipped` and does NOT
+          refuse. A database is legitimately stopped while a module is being
+          installed, and an install that a stopped server can veto would be a
+          worse defect than the one this check is here for.
+        """
+        check = prompt.exists
+        if check is None:
+            return
+        unsafe = sorted(
+            key
+            for key in _fields(check.query) | _fields(check.missing)
+            if not _SAFE_IN_QUERY.fullmatch(vals.get(key, ""))
+        )
+        if unsafe:
+            raise ApplyError(
+                f"{manifest.id}: {', '.join(unsafe)} cannot be used in a database question "
+                f"(letters, digits, dot, dash and underscore only). Nothing was changed."
+            )
+        if not isinstance(self.sql, SqlReader):
+            log.skipped.append(
+                f"{prompt.key}={vals[prompt.key]}: NOT checked against the database "
+                f"(this install has no database reader), so a wrong answer here will look "
+                f"like a module that does nothing"
+            )
+            return
+        statement = _render(check.query, vals, f"prompt {prompt.key}")
+        try:
+            rows = self.sql.query(check.db, statement)
+        except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
+            logger.warning(f"could not check {prompt.key} against {check.db}: {exc}")
+            log.skipped.append(
+                f"{prompt.key}={vals[prompt.key]}: NOT checked against the database "
+                f"({exc}), so a wrong answer here will look like a module that does nothing"
+            )
+            return
+        if not rows.strip():
+            raise ApplyError(
+                f"{manifest.id}: {_render(check.missing, vals, f'prompt {prompt.key}')}. "
+                f"Nothing was changed."
+            )
 
     # -- the guard ---------------------------------------------------------
 
@@ -1363,12 +1612,39 @@ class Applier:
             if step.when != when:
                 continue
             if step.applied_by == "db-import":
-                log.done.append(f"sql {step.path} → {step.db}: left to ac-db-import on next start")
+                log.pending_sql.append(self._pending_sql(step, clone))
                 continue
             if self.sql is None:
                 log.skipped.append(f"sql → {step.db}: no SQL runner configured")
                 continue
             self._run_sql(step, clone, vals, log)
+
+    def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:
+        """Resolve a deferred step's glob so the count reported is a real one.
+
+        The path is globbed UNRENDERED on purpose. `_action_templates()` leaves
+        db-import paths out of `required_prompts()`, so a `{key}` in one was
+        never put to the user and `_render()` here would raise on a step this
+        run is not performing — turning a report into a failure. A `{key}` gets
+        `files=None` instead of a glob that would match nothing and call it
+        zero; see `PendingSql`.
+
+        A step with no `path` cannot happen — `SqlStep._exactly_one_body`
+        requires exactly one of `path`/`statement`, and an inline `statement`
+        is never `applied_by="db-import"` (there is no file for the importer to
+        find) — but the assert says so rather than the type checker alone.
+        """
+        assert step.path is not None
+        if _fields(step.path):
+            return PendingSql(db=step.db, path=step.path, files=None)
+        matches = sorted(clone.glob(step.path)) if _is_glob(step.path) else [clone / step.path]
+        # `as_posix()`, not `_rel()`: these names are compared against the
+        # manifest's own `path` (forward slashes, always) and read by a person
+        # who may be on Windows, and `_rel()` would answer
+        # `data\sql\db-world\a.sql` there and `data/sql/db-world/a.sql` on the
+        # Linux box the same install was measured on. One spelling, both.
+        found = tuple(p.relative_to(clone).as_posix() for p in matches if p.is_file())
+        return PendingSql(db=step.db, path=step.path, files=found)
 
     def _run_sql(self, step: SqlStep, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
         assert self.sql is not None
@@ -1457,10 +1733,12 @@ class Applier:
                 or any(s.applied_by == "direct" for s in manifest.sql)
                 or manifest.server_dbc
             ),
+            pending_sql=tuple(log.pending_sql),
         )
         logger.info(
             f"{action} {manifest.id}: {len(report.done)} step(s), "
-            f"{len(report.skipped)} skipped, rebuild={report.rebuild_required}"
+            f"{len(report.skipped)} skipped, {len(report.pending_sql)} left unapplied, "
+            f"rebuild={report.rebuild_required}"
         )
         return report
 

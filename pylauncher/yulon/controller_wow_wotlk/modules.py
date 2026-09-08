@@ -10,10 +10,10 @@ particular module does; that is all in `manifests/wow-wotlk/` (§3).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from yulon import resources
+from yulon import docker, resources
 from yulon.apply import Applier, ApplyReport, DbcCopier, DockerSql, SqlRunner
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.git import Git
@@ -102,3 +102,33 @@ def apply_module(
     lifecycle itself).
     """
     return applier(server_dir, client_dir=client_dir).install(manifest, values)
+
+
+def apply_module_sql(
+    server_dir: Path, *, output: Callable[[str], None] | None = None
+) -> docker.AttachedRun:
+    """Run the AzerothCore importer over `server_dir` for the modules that are ON DISK.
+
+    The route that was missing, and the reason it had to exist. `apply_module()`
+    installs a C++ module by cloning it and activating its conf; its
+    `data/sql/db-world/*.sql` is left "to `ac-db-import` on next start", which
+    is a promise nothing in this app kept — `docker.start_staged()` names the
+    three long-running services so a Start can never reach the importer, and
+    `docker.repair_import()` refuses any install whose databases are already
+    complete. Measured on yulon-ubuntu 2026-09-07: even when the importer IS
+    run, it logs `Loading modules: all` and applies nothing, because `"all"` is
+    the list compiled into the image and not the folder on disk
+    (`docker.allowed_modules()` has the numbers).
+
+    Per-game and nothing else: which compose service imports is
+    `docker_ctl.SPEC.import_service`, asked rather than respelled here
+    (style-guide §3). Every refusal — ownership, strangers, and 8.7a's "not
+    while the world is running" — belongs to `docker.apply_module_sql()`, so
+    this route and the repair cannot come to disagree about whose install it is
+    or when it is safe to write.
+
+    `output` receives the importer's lines as they arrive; the `>> Applying
+    update <file>.sql` lines among them are the only evidence that a module's
+    SQL was applied, so a caller reporting to a user should pass one.
+    """
+    return docker.apply_module_sql(docker_ctl.SPEC, server_dir, output=output)

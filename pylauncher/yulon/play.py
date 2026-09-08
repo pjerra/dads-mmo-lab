@@ -35,6 +35,35 @@ from yulon.log import get_logger
 logger = get_logger(__name__)
 
 
+class Ambiguous(LookupError):
+    """More than one character on this server answers to that name.
+
+    Measured on the live Vanilla install, 2026-09-07 (8.4c): `characters.name`
+    is `idx_name`, a NON-unique index, and this server holds two characters
+    called Joleta and two called Dalnaal -- the bot generator collided and
+    nothing stopped it. The read that found it did not answer the wrong set; it
+    died with *"Subquery returns more than 1 row"*, and the tab turned that into
+    "Joleta is wearing nothing" with the button greyed out, for a character
+    wearing a full set.
+
+    It is a named refusal rather than a pick, because there is nothing here to
+    pick BY: every command this feature sends addresses a character by name, so
+    a set read off one of the two would be mailed to whichever the server's own
+    lookup chose. The two are not distinguishable at this layer and saying so is
+    the only honest answer.
+
+    It carries the sentence in two lengths because its reader is a BUTTON:
+    `summary` is what fits on one, and the whole of it is what a person gets
+    when they ask why. The first version put all of it on the label and the
+    label ran off the end of the window (`4-two-of-one-name.png` in 8.4c's gate
+    folder is the photograph of that).
+    """
+
+    def __init__(self, summary: str, detail: str) -> None:
+        super().__init__(f"{summary} {detail}")
+        self.summary = summary
+
+
 class NotMeasured(LookupError):
     """This tree has no Play block, so there is nothing here to read it with.
 
@@ -207,6 +236,16 @@ def equipped(sql: SqlReader, entry: CatalogEntry, character: str) -> tuple[int, 
     `src/game/Entities/Player.cpp:3832`. That the two shapes agree ROW FOR ROW
     on a loaded database is a source reading, not a live one -- 8.4c's gate
     counts the difference on the running server.)
+
+    **The name is matched by a JOIN and the owner comes back with the row**,
+    which is 8.4c's other correction. It used to be
+    `ci.guid = (SELECT guid FROM characters WHERE name = ...)`, a scalar
+    subquery on a column no core makes unique -- so on a server with two
+    characters of one name the read did not answer the wrong set, it died with
+    *"Subquery returns more than 1 row"*, and the tab drew "is wearing nothing"
+    over the wreck. Selecting the owner beside the item means the ambiguity is
+    visible in the answer rather than in the database engine's error, and it
+    costs no extra round trip. See `Ambiguous`.
     """
     schemas = entry.schema_map()
     if entry.play is None:
@@ -216,24 +255,39 @@ def equipped(sql: SqlReader, entry: CatalogEntry, character: str) -> tuple[int, 
         )
     block = entry.play.equipped
     inventory = f"{schemas['characters']}.character_inventory"
-    where = (
-        f"WHERE ci.guid = (SELECT guid FROM {schemas['characters']}.characters "
-        f"WHERE name = {literal(character)}) "
+    owner = (
+        f"JOIN {schemas['characters']}.characters ch ON ch.guid = ci.guid "
+        f"WHERE ch.name = {literal(character)} "
         f"AND ci.bag = 0 AND ci.slot < {EQUIPPED_SLOTS}"
     )
     if block.instance_table is None:
         statement = (
-            f"SELECT ci.{block.template_column} FROM {inventory} ci {where} ORDER BY ci.slot;"
+            f"SELECT ci.{block.template_column}, ch.guid FROM {inventory} ci "
+            f"{owner} ORDER BY ch.guid, ci.slot;"
         )
     else:
         instances = f"{schemas['characters']}.{block.instance_table}"
         statement = (
-            f"SELECT ii.{block.template_column} FROM {inventory} ci "
+            f"SELECT ii.{block.template_column}, ch.guid FROM {inventory} ci "
             f"JOIN {instances} ii ON ii.guid = ci.{block.inventory_column} "
-            f"{where} ORDER BY ci.slot;"
+            f"{owner} ORDER BY ch.guid, ci.slot;"
         )
     rows = sql.query("characters", statement)
-    return tuple(int(line.split("\t")[0]) for line in rows.splitlines() if line.strip())
+    worn: dict[str, list[int]] = {}
+    for line in rows.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        worn.setdefault(fields[1] if len(fields) > 1 else "", []).append(int(fields[0]))
+    if len(worn) > 1:
+        owners = ", ".join(sorted(worn))
+        raise Ambiguous(
+            f"{len(worn)} characters here are called {character}",
+            f"(guids {owners}), and every command this app sends names a character rather "
+            "than a guid -- so it cannot tell you which one's gear this is, nor send it to "
+            "the right one.",
+        )
+    return tuple(next(iter(worn.values()))) if worn else ()
 
 
 # -- what the tab is handed --------------------------------------------------
@@ -335,10 +389,27 @@ class InstallPlay:
         return self._one(character, lambda name: commands.teleport_to(name, location, verb=verb))
 
     def set_level(self, character: str, level: int) -> Outcome:
-        return self._one(character, lambda name: commands.set_character_level(name, level))
+        """Refused outright on a tree whose console has no route to a level.
+
+        The tab does not draw the control there (8.4d), so this is the second
+        of the two places -- and it is the one that matters, because the first
+        is a decision about drawing and this is the decision about SENDING. A
+        press that arrived anyway must not fall through to a sibling's
+        `character level`: on the tortoise fork that is an unknown subcommand
+        today, and on a fork that later grows one it would be a real command
+        nobody has run.
+        """
+        block = self.entry.play
+        if block is None or block.set_level_command is None:
+            return Outcome(False, problem=_no_set_level(self.entry))
+        verb = block.set_level_command
+        return self._one(
+            character, lambda name: commands.set_character_level(name, level, verb=verb)
+        )
 
     def rename(self, character: str) -> Outcome:
-        return self._one(character, commands.rename_at_login)
+        verb = self.entry.play.rename_command if self.entry.play is not None else ""
+        return self._one(character, lambda name: commands.rename_at_login(name, verb=verb))
 
     def revive(self, character: str) -> Outcome:
         return self._one(character, commands.revive)
@@ -387,7 +458,12 @@ class InstallPlay:
         channel = self._channel_for_saved()
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
-        pieces = equipped(self._sql, self.entry, wearer)
+        try:
+            pieces = equipped(self._sql, self.entry, wearer)
+        except Ambiguous as exc:
+            # A refusal and not a raise: the press came from a button, and a
+            # button that throws is a crash report where a sentence belongs.
+            return Outcome(False, problem=str(exc))
         if not pieces:
             return Outcome(
                 False, problem=f"{wearer} is wearing nothing, so there are no items to send"
@@ -443,6 +519,21 @@ class InstallPlay:
 
 def _mails_needed(pieces: int, cap: int) -> int:
     return (pieces + cap - 1) // cap if pieces else 0
+
+
+def _no_set_level(entry: CatalogEntry) -> str:
+    """Why the press did nothing, in the tree's own measured words.
+
+    The entry's sentence and not a phrase from here, so the refusal a person
+    reads at the seam is the same one the tab draws where the control would be
+    -- one measurement with one voice, rather than two English sentences that
+    can drift apart.
+    """
+    reason = entry.play.set_level_absent_reason if entry.play is not None else None
+    return reason or (
+        f"{entry.name} has not measured whether its console can set a character's level, "
+        "so this app does not send one"
+    )
 
 
 def _no_such(typed: str) -> str:

@@ -19,7 +19,7 @@
       "db": "world",
       "path": "data/sql/db-world/*.sql",
       "applied_by": "db-import",
-      "note": "updates.name values: auctionhousebot_professionItems.sql, mod_auctionhousebot.sql (professionItems lacks CREATE TABLE IF NOT EXISTS — classic 'Table already exists' if applied twice by hand)"
+      "note": "updates.name values: auctionhousebot_professionItems.sql, mod_auctionhousebot.sql (professionItems lacks CREATE TABLE IF NOT EXISTS \u2014 classic 'Table already exists' if applied twice by hand)"
     }
   ],
   "conf": [
@@ -52,12 +52,22 @@
     {
       "key": "bot_guid",
       "question": "GUID of the AH bot character (create the AHBOT account + ONE character first, log it out)",
-      "kind": "int"
+      "kind": "int",
+      "exists": {
+        "db": "characters",
+        "query": "SELECT name FROM characters WHERE guid = {bot_guid}",
+        "missing": "no character in this server's own database has GUID {bot_guid} \u2014 create the AHBOT account and ONE character, log that character out, then try again"
+      }
     },
     {
       "key": "bot_account",
-      "question": "Account id of the AH bot character (looked up from acore_characters.characters by GUID)",
-      "kind": "int"
+      "question": "Account id of the AH bot character (the AHBOT account you created it on; Yu'lon checks the two name the same character)",
+      "kind": "int",
+      "exists": {
+        "db": "characters",
+        "query": "SELECT name FROM characters WHERE guid = {bot_guid} AND account = {bot_account}",
+        "missing": "character GUID {bot_guid} does not belong to account {bot_account} in this server's own database \u2014 the two keys must name the same character"
+      }
     }
   ],
   "notes": [

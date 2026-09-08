@@ -131,6 +131,31 @@ services:
       # import that never heard of acore_playerbots leaves a worldserver that
       # cannot start its bots.
       AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-password};acore_playerbots"
+      # WHICH modules' SQL this import may apply, and it is not the ones in the
+      # folder next to this file. Upstream's default is "all", and "all" means
+      # AC_MODULES_LIST - a macro modules/CMakeLists.txt:371 bakes from a glob
+      # at CMake time - so a module cloned after the image was compiled is
+      # invisible to the importer for ever. Proven twice on yulon-ubuntu
+      # 2026-09-07 against the same files and the same database: the unchanged
+      # one-shot logged "Loading modules: all" and applied nothing
+      # (acore_world.updates stayed at 2967); the same container with
+      # AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot logged ">> Applying update
+      # aoe_loot_module_string.sql" and left it at 2968.
+      #
+      # Interpolated, not baked: what is on disk changes every time a module is
+      # installed, and this file is written once at install time.
+      # `docker.allowed_modules()` computes the list; a value in this project's
+      # .env reaches an `up` (compose reads .env from the project directory),
+      # and `docker.apply_module_sql()` passes it in argv for the installs
+      # whose compose file this engine did not write.
+      #
+      # The default is "all" and MUST NOT be empty. src/tools/dbimport/Main.cpp
+      # :114-118 branches three ways and an empty value is the third: it builds
+      # a DatabaseLoader with no module list at all. Measured on the real image
+      # 2026-09-07 - `-e AC_UPDATES_ALLOWED_MODULES=` logs "Loading modules:
+      # none". So an unset variable renders exactly upstream's own behaviour,
+      # and no install changes what it does by acquiring this line.
+      AC_UPDATES_ALLOWED_MODULES: "${AC_UPDATES_ALLOWED_MODULES:-all}"
     # user: left to the image (acore) - see composegen.container_user()
     volumes:
       - ./env/dist/etc:/azerothcore/env/dist/etc

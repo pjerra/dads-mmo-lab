@@ -27,7 +27,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import IO, BinaryIO, Literal
 
 from yulon import platform, runner, wsl
@@ -811,6 +811,126 @@ def project_containers(project: str, *, wsl_distro: str | None = None) -> list[s
     return _project_containers(project, wsl_distro=wsl_distro)
 
 
+def running_census(spec: ContainerSpec, project: str, *, wsl_distro: str | None = None) -> Running:
+    """Who owns the containers wearing this install's names. The public `_running()`.
+
+    Made public for the same reason `project_containers()` was: one caller
+    outside this module needs the answer this module already computes, and a
+    second copy of it would be a second thing to keep in step. `purge.py` asks
+    it twice — once to refuse an uninstall of a RUNNING server (`ours` non-empty,
+    before any command is issued), and once for the ownership refusal the
+    teardown path shares (`strangers`, `unreadable`).
+
+    Raises the same way `_running()` does, and a caller must fail closed on
+    both: `unreadable` is not proof of anything, and `strangers` means these
+    containers are somebody else's.
+    """
+    return _running(spec, project, wsl_distro=wsl_distro)
+
+
+def project_volumes(project: str, *, wsl_distro: str | None = None) -> list[str] | None:
+    """Every named volume compose stamped with `project`. `None` if Docker would not say.
+
+    Discovered, never computed. A volume name built out of a folder basename is
+    the bug `guides/uninstall.sh:136` shipped — it hardcodes
+    `wow-server-playerbots_ac-database`, so on a folder named anything else it
+    removes nothing, and on the wrong machine it could remove somebody's
+    database. Compose labels the volumes it creates exactly as it labels the
+    containers, so the same filter answers both questions.
+
+    `None` and not `[]` when the daemon could not be asked, on the same rule as
+    `_project_containers()`: a caller must not read "Docker did not answer" as
+    "there is nothing there", because the caller here goes on to delete a folder
+    and forget the record.
+    """
+    proc = _docker(
+        [
+            "volume",
+            "ls",
+            "--filter",
+            f"label={PROJECT_LABEL}={project}",
+            "--format",
+            "{{.Name}}",
+        ],
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not list volumes for project {project}: {proc.stderr.strip()}")
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def remove_volume(name: str, *, wsl_distro: str | None = None) -> None:
+    """Delete one named volume, and confirm it is gone. The uninstall's own entry point.
+
+    Deliberately NOT a flag on `remove_staged()`. That function's contract is
+    that it never touches a volume and a test asserts its argv never grows a
+    `-v`; it is offered on a RUNNING server under copy promising the characters
+    are unaffected, so putting the data-destroying option one argv away from it
+    would leave the safest action in the Controller and the most destructive one
+    indistinguishable at a glance (`phase8-decisions.md`:135-143).
+
+    `compose down -v` is the other shape this must not be. It removes BOTH
+    volumes of an AzerothCore project — the 3.2 GB of client data and the
+    characters — which makes "Keep my characters" unimplementable. The bash
+    prior art does exactly that on all four of its WoW arms.
+
+    The name must come from `project_volumes()`. This function does not check
+    that, because it cannot: a volume name carries no reference to the folder it
+    belongs to. What it does check is the ONE thing it can — that the volume is
+    actually gone afterwards, rather than trusting an exit code, the same way
+    `remove_staged()` re-censuses.
+
+    Raises:
+        DockerCommandError: The volume is still in use, or the removal could not
+            be confirmed. "In use" is a failure and not a warning: an exited
+            container still counts as a reference (the live `client-data` volume
+            shows LINKS 2), so warning past it is how six gigabytes leak.
+    """
+    proc = _docker(["volume", "rm", name], wsl_distro=wsl_distro)
+    if proc.returncode != 0:
+        if _cli_missing(proc):
+            raise DockerCliMissingError(platform.DOCKER_CLI_MISSING_HELP)
+        said = proc.stderr.strip()
+        if "no such volume" in said.lower():
+            logger.info(f"volume {name} was already gone")
+            return
+        raise DockerCommandError(f"{name} could not be removed: {said}")
+    if volume_exists(name, wsl_distro=wsl_distro):
+        raise DockerCommandError(f"{name} is still there after being removed")
+    logger.info(f"removed volume {name}")
+
+
+def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
+    """Delete one image by its exact reference. Returns why it could not be, or `""`.
+
+    One ref at a time, and never a compose flag. Measured on yulon-ubuntu
+    2026-09-08: an AzerothCore project's images are the four
+    `yulon.local/ac-wotlk-*:native-<install id>` builds plus `mysql:8.4`, which
+    a second WotLK install also uses and TBC and Vanilla share `mariadb:11` the
+    same way. `--rmi all` takes the shared one with it. `--rmi local` removes
+    only images with no custom tag, and every one of ours is custom-tagged, so
+    it removes none of them. That closes open item 1 of `phase8-decisions.md`,
+    and the answer is neither of its two guesses: enumerate
+    `composegen.built_image_refs()` and remove those.
+
+    A refusal is a WARNING and not an error, which is the one place this module
+    is deliberately soft: "in use by another container" means a second install
+    or a running title is holding a layer, and that is not this uninstall's
+    business. The Rust prior art reached the same conclusion from the other end
+    (`destructive.rs:574-602`).
+    """
+    proc = _docker(["image", "rm", ref], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"removed image {ref}")
+        return ""
+    said = proc.stderr.strip()
+    if "no such image" in said.lower():
+        return ""
+    logger.warning(f"could not remove image {ref}: {said}")
+    return said
+
+
 LOG_TAIL_LINES = 2000
 """How many log ENTRIES of a container's log a snapshot keeps.
 
@@ -1430,10 +1550,153 @@ def start_database(
         )
 
 
+ALLOWED_MODULES_VAR = "AC_UPDATES_ALLOWED_MODULES"
+"""The environment variable AzerothCore reads `Updates.AllowedModules` from.
+
+Its config layer takes `AC_` + the option name upper-cased with dots as
+underscores, and it says so on the way past: running the real `ac-db-import`
+image with this set printed `Configuration field Updates.AllowedModules was
+overridden with environment variable` (yulon-ubuntu, 2026-09-07)."""
+
+ALL_MODULES = "all"
+"""Upstream's own default for `Updates.AllowedModules`, and NOT "the modules on disk".
+
+`src/tools/dbimport/Main.cpp:114-118` reads three different meanings out of
+this one option and only the middle one is obvious:
+
+* `""` — build a `DatabaseLoader` with **no module list at all**. Measured on
+  the real image 2026-09-07 (bogus database hosts, so it printed its decision
+  and then failed to connect): `Loading modules: none`. An empty value is a
+  third meaning, not an absence, which is why `allowed_modules()` never returns
+  one.
+* `"all"` — pass `AC_MODULES_LIST`, the macro `modules/CMakeLists.txt:371`
+  bakes from a glob **at CMake time**. On the yulon-ubuntu stack that macro
+  holds exactly `mod-playerbots`, whatever is in `modules/` today.
+* anything else — pass that comma-separated list through to `UpdateFetcher`,
+  which joins each name onto `<source>/modules/<name>/data/sql/` and skips the
+  ones that are not directories (`UpdateFetcher.cpp:159-186`). A name that is
+  not on disk therefore costs nothing."""
+
+
+MODULES_DIR_NAME = "modules"
+"""The folder under an install that holds its modules, one per directory.
+
+Named once because two things here have to agree about it: `allowed_modules()`
+reads it off the host, and `importer_sees_modules()` asks whether the container
+that applies SQL has it mounted. A check that looked for a different folder than
+the one that was listed would answer confidently about nothing."""
+
+
+def importer_sees_modules(
+    service: str, server_dir: Path, *, wsl_distro: str | None = None
+) -> bool | None:
+    """Is the install's `modules/` folder mounted into the service that imports SQL?
+
+    `None` means the question could not be asked (no compose config, no such
+    service) — not `False`, because "cannot tell" and "proven absent" lead
+    somewhere different and only one of them is worth refusing on.
+
+    **This is the FACT 6 question, and on the install the real user has the
+    answer is no.** `tests/data/wotlk-compose-config-script.json` is `docker
+    compose config` read off a server the DML bash installer built (Fedora,
+    2026-08-31, project `wow-server-playerbots`): its `ac-db-import` mounts
+    `./env/dist/etc` and `./env/dist/logs` and nothing else, while `./modules`
+    is bound into `ac-worldserver` alone. The importer on that install therefore
+    resolves every allowed module name against the modules baked into the
+    IMAGE — `UpdateFetcher.cpp:159-186` joins `<source>/modules/<name>/data/sql`
+    and skips what is not a directory — so a module cloned onto the host
+    afterwards is invisible to it no matter what `AC_UPDATES_ALLOWED_MODULES`
+    says. The compose file this app generates does mount it (see
+    `catalog/installers/wow-wotlk/native/base.yml.tmpl`), and nothing in this
+    app rewrites a compose file it did not write: `composegen.write_plan()`
+    refuses an unmarked file, and `catalog_view.attach_existing()` only
+    remembers the folder. So this cannot be fixed from here — it can only be
+    said, which is what the caller does with the answer.
+
+    Asked of `compose config` rather than of the file, so an override that adds
+    the mount counts and a file this app cannot parse does not have to be.
+    """
+    proc = _docker(
+        ["compose", "config", "--format", "json"],
+        cwd=server_dir,
+        timeout=_COMPOSE_CONFIG_TIMEOUT_SECONDS,
+        wsl_distro=wsl_distro,
+    )
+    if proc.returncode != 0:
+        logger.debug(f"compose config failed in {server_dir}: {proc.stderr.strip()}")
+        return None
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        logger.debug("compose config did not return JSON")
+        return None
+    services = parsed.get("services") if isinstance(parsed, dict) else None
+    entry = services.get(service) if isinstance(services, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    mounts = entry.get("volumes")
+    if not isinstance(mounts, list):
+        return None
+    for mount in mounts:
+        source = mount.get("source") if isinstance(mount, dict) else None
+        # By name, not by target: the container-side path is a per-game fact
+        # this module must not know (style-guide §3), while the host-side folder
+        # is the one `allowed_modules()` just listed.
+        if isinstance(source, str) and PurePosixPath(source.replace("\\", "/")).name == (
+            MODULES_DIR_NAME
+        ):
+            return True
+    return False
+
+
+def allowed_modules(server_dir: Path) -> str:
+    """Which modules this install's importer should be allowed to update, from DISK.
+
+    The root cause this exists for, measured twice on yulon-ubuntu 2026-09-07
+    against the same files and the same database: `compose up --no-deps
+    ac-db-import` logged `Loading modules: all`, applied nothing and left
+    `acore_world.updates` at 2967; the same container plus
+    `-e AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot` logged `>> Applying update
+    aoe_loot_module_string.sql`, `>> Applied 1 query`, and moved it to 2968.
+    The difference is not the files, which were identical — it is that `"all"`
+    means the COMPILED list, so every module installed after the image was
+    built is invisible to the importer and its SQL is never applied. Nothing in
+    Yu'lon set this option anywhere before 8.x.
+
+    Directories only, sorted, comma-joined. The live install's `modules/` also
+    holds `CMakeLists.txt`, `create_module.sh`, `how_to_make_a_module.md`,
+    `ModulesLoader.cpp.in.cmake`, `ModulesPCH.h` and `ModulesScriptLoader.h`
+    beside `mod-playerbots` (read off yulon-ubuntu, 2026-09-07), and a
+    dot-directory is `.git`, never a module.
+
+    **A folder with nothing in it answers `"all"`, never `""`** — see
+    `ALL_MODULES` for what those two mean to upstream, which is not the same
+    thing. `"all"` is what the install would have done with no variable set at
+    all, so a modules folder that is empty, missing or unreadable leaves the
+    behaviour exactly as it was found; `""` would switch module updates off for
+    an install that was getting them. The two are equivalent in effect for a
+    genuinely empty folder — the compiled names have no directory, so
+    `UpdateFetcher` skips them — and only one of them is safe when the folder
+    could not be read.
+    """
+    modules = server_dir / MODULES_DIR_NAME
+    try:
+        names = sorted(
+            entry.name
+            for entry in modules.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        )
+    except OSError as exc:
+        logger.warning(f"could not list {modules}, so the importer keeps upstream's default: {exc}")
+        return ALL_MODULES
+    return ",".join(names) if names else ALL_MODULES
+
+
 def run_one_shot(
     service: str,
     server_dir: Path,
     *,
+    allowed_modules: str | None = None,
     wsl_distro: str | None = None,
     sink: OutputSink | None = None,
     cancel: threading.Event | None = None,
@@ -1447,13 +1710,48 @@ def run_one_shot(
     engine's `import`/`client-data` stages (roadmap 6.2) so the two can never
     drift into running different commands for the same job.
 
+    `allowed_modules`, when given, switches the argv from `compose up` to
+    `compose run --rm --no-deps -e AC_UPDATES_ALLOWED_MODULES=<list>`, and the
+    reason it is a different command is that **`compose up` takes no `-e`**. The
+    generated compose file interpolates the variable
+    (`${AC_UPDATES_ALLOWED_MODULES:-all}`), so for an install this engine wrote
+    a value in `.env` would be enough — but an install adopted from the DML bash
+    launcher has a compose file we never wrote and no such key to interpolate,
+    and that is the install the real user is running. Putting the value in argv
+    is the only route that reaches both.
+
+    Measured against the real `ac-db-import` image on yulon-ubuntu 2026-09-07,
+    with bogus database hosts so nothing was written: the container logged
+    `Configuration field Updates.AllowedModules was overridden with environment
+    variable` and `Loading modules: mod-lane-c-probe,mod-second`, the pinned
+    `container_name` did not stop `run` from starting it, and `--rm` left
+    nothing behind (`docker ps -a` named no `*-run-*` container afterwards).
+
+    What that mode costs, stated because a caller has to say it to a user:
+    `--rm` deletes the container, so `docker compose logs <service>` afterwards
+    shows nothing. The run's output is what there is — it arrives at `sink` and
+    a bounded tail comes back on the result.
+
     The exit status is returned rather than raised for the reason
     `repair_import()` records: a one-shot that failed part-way and one that
     failed having done nothing exit alike, and only a probe of the result can
     tell them apart.
     """
+    argv = (
+        ["compose", "up", "--no-deps", service]
+        if allowed_modules is None
+        else [
+            "compose",
+            "run",
+            "--rm",
+            "--no-deps",
+            "-e",
+            f"{ALLOWED_MODULES_VAR}={allowed_modules}",
+            service,
+        ]
+    )
     run = run_attached(
-        ["compose", "up", "--no-deps", service],
+        argv,
         server_dir,
         wsl_distro=wsl_distro,
         sink=sink,
@@ -1532,6 +1830,140 @@ def verify_import(
         )
     logger.info(f"{service} finished; the databases now read as {after.state}")
     return after
+
+
+def apply_module_sql(
+    spec: ContainerSpec,
+    server_dir: Path,
+    *,
+    output: OutputSink | None = None,
+    db_timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
+    wsl_distro: str | None = None,
+) -> AttachedRun:
+    """Run the one-shot importer for the modules on disk. The route nothing else takes.
+
+    A module installed by `apply.py` clones its files and activates its conf,
+    and its `data/sql/db-world/*.sql` is then left "to `ac-db-import` on next
+    start". There is no next start that runs it. `start_staged()` names the
+    three long-running services precisely so an ordinary Start can never reach
+    the importer, and `repair_import()` refuses every install whose databases
+    are `imported` or `populated` — which is every working server. So a module's
+    SQL was never applied by any button in this app, and the applier reported it
+    as done regardless.
+
+    This is that missing route, and it is deliberately not the repair. The
+    repair exists for a BROKEN install and is about the base data; this one runs
+    the same one-shot over a database that is expected to be complete, so that
+    upstream's own updater applies the pending module files and ledgers them in
+    `updates`. Running the importer over a finished install is what upstream's
+    own `docker compose up` does on every start, so it is not a new risk — the
+    measured danger (`ImportState.repairable`) is re-running it over a schema
+    that was left HALF-written, which this cannot reach without going past the
+    same refusals.
+
+    The refusals are the same three `repair_import()` opens with, and they are
+    the same on purpose: ownership must be provable, containers wearing our
+    names must be ours, and **this install's authserver or worldserver must not
+    be running**. That last one is checklist 8.7a's rule — a live worldserver
+    holds state in memory and writes it back over whatever the import leaves —
+    and it is the reason the honest affordance here is "Stop, then apply", not
+    a button that works while people are playing.
+
+    What is deliberately NOT here is a post-check. `verify_import()` asks
+    whether the base import finished, which for this call is already true before
+    it starts and stays true whether or not a single module file was applied.
+    What actually happened is in the importer's own output — `>> Applying update
+    <file>.sql` per file, `>> Applied N quer(y|ies)` — so the run comes back to
+    the caller rather than a bool, and a caller that wants to tell the user what
+    was applied reads the lines through `output` (the tail on the result is
+    bounded; see `KEEP_OUTPUT_LINES`).
+
+    Raises:
+        DockerCommandError: any of the refusals above, the database never became
+            healthy, or the importer exited non-zero.
+    """
+    logger.debug(f"apply_module_sql() called: server_dir={server_dir}")
+    service = spec.import_service
+    if not service:
+        raise DockerCommandError(
+            "this game does not say which compose service imports its databases, so there is "
+            "nothing to run its modules' SQL with. Nothing was changed."
+        )
+
+    project = install_project(spec, server_dir, wsl_distro=wsl_distro)
+    if project is None:
+        _refuse_without_an_identity(
+            spec, server_dir, "No module SQL was applied.", wsl_distro=wsl_distro
+        )
+        raise DockerCommandError(
+            f"the install in {server_dir} cannot say which compose project it is — its compose "
+            f"files are unreadable and no {PROJECT_NAME_VAR} is pinned — so no module SQL was "
+            "applied. Running the importer against the wrong project would write to the wrong "
+            "database."
+        )
+
+    running = _running(spec, project, wsl_distro=wsl_distro)
+    if running.unreadable:
+        raise DockerCommandError(
+            f"Docker would not say which project owns {', '.join(running.unreadable)}, so this "
+            f"install in {server_dir} cannot prove those containers are its own. No module SQL "
+            "was applied."
+        )
+    if running.strangers:
+        raise DockerCommandError(_stranger_message(running.strangers, project, server_dir))
+    servers = [name for name in (spec.world, spec.auth) if name in running.ours]
+    if servers:
+        verb = "is" if len(servers) == 1 else "are"
+        raise DockerCommandError(
+            f"{', '.join(servers)} {verb} running. The importer writes to the databases "
+            "underneath them, and a running worldserver holds characters in memory and saves "
+            "them back over whatever it finds. Press Stop first, then try again."
+        )
+
+    # Asked BEFORE the database is started, because it is the one refusal here
+    # that is about the install's shape rather than its state: nothing this
+    # function could do first would change the answer, and starting a container
+    # to reach a refusal is a cost for nothing.
+    sees = importer_sees_modules(service, server_dir, wsl_distro=wsl_distro)
+    if sees is False:
+        raise DockerCommandError(
+            f"{service} in {server_dir} has no {MODULES_DIR_NAME} folder mounted into it, so it "
+            "cannot see the modules that are installed here and nothing it applied would be "
+            "theirs. This is what a server built by the DML bash installer looks like — its "
+            f"compose file binds {MODULES_DIR_NAME} into the worldserver only. Nothing was run. "
+            "Add the mount to this install's compose file (Yu'lon does not rewrite a compose "
+            "file it did not write), then try again."
+        )
+    if sees is None:
+        # Not a refusal. "Could not read the compose config" is the state a
+        # pinned project name exists for, and the cost of being wrong here is a
+        # run that applies nothing — loud in its own output — rather than a
+        # write to anything.
+        logger.warning(
+            f"could not tell whether {service} can see this install's {MODULES_DIR_NAME} folder; "
+            "running it anyway, and its output is the evidence"
+        )
+
+    start_database(
+        spec,
+        server_dir,
+        timeout=db_timeout,
+        because="no module SQL was applied",
+        wsl_distro=wsl_distro,
+    )
+
+    modules = allowed_modules(server_dir)
+    logger.warning(f"apply_module_sql(): running {service} for modules: {modules}")
+    run = run_one_shot(
+        service, server_dir, allowed_modules=modules, wsl_distro=wsl_distro, sink=output
+    )
+    if run.returncode != 0:
+        raise DockerCommandError(
+            f"{service} exited {run.returncode}, so its modules' SQL may be part-applied. Its "
+            f"last words were: {last_words(run.tail)}. The container was removed when it exited "
+            "(`--rm`), so those lines are all there is — `docker compose logs` has nothing to add."
+        )
+    return run
 
 
 def _run_docker_stop(container: str, *, wsl_distro: str | None = None) -> None:

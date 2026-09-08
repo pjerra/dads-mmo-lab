@@ -213,6 +213,45 @@ def build_window() -> object:
         # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
         view.deleteLater()
 
+    def _forget_live_record(game: str, server_dir: Path) -> Any:
+        """`state.forget()` over the window's own state object, persisted. No Qt."""
+        from yulon.state import save_state
+
+        def forget() -> None:
+            state.forget(game, server_dir)
+            save_state(state)
+
+        return forget
+
+    def on_uninstalled(game: str, server_dir: object) -> None:
+        """An install is gone (8.9a): drop its tab, and recompute its Catalog tile.
+
+        `state.forget()` again, and deliberately: it is a filter, so calling it
+        twice costs nothing, and it is what makes this handler correct on its
+        own rather than only when it follows a purge that already did it. The
+        SAVE is not repeated - the purge's own last step did that, and reported
+        it if it could not.
+
+        `drop_controller()` and not a second teardown: a QThread destroyed while
+        running aborts the process, and that function already does the whole
+        dangerous part in the right order. It runs here rather than in the view
+        because the view is what it destroys.
+
+        The tile is recomputed from the SURVIVING installs, never cleared:
+        `installed_dirs()` is one folder per game, so purging one of two WotLK
+        installs must leave the tile saying "Installed" and naming the other.
+        """
+        folder = Path(str(server_dir))
+        state.forget(game, folder)
+        key = (game, folder)
+        if key in controllers:
+            drop_controller(key)
+            # What tells two tabs apart is the shortest tail they do NOT share,
+            # which is a fact about the SET - so removing one can make another's
+            # title longer than it needs to be.
+            retitle_controller_tabs(tabs, controllers.values())
+        catalog_view.forget_installed(game, state.installed_dirs())
+
     def add_controller(
         game: str,
         server_dir: Path,
@@ -268,7 +307,22 @@ def build_window() -> object:
             drop_controller(key)
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
+        if services.uninstall is not None:
+            # 8.9a. The record is the LAST thing an uninstall forgets, and in a
+            # running window "the record" is this closure's live `AppState` -
+            # every tab writes into it. The factory's default seam re-reads
+            # `state.json`, which is right for a tab built outside a window and
+            # wrong here: it would forget this install and silently undo
+            # whatever else the session had remembered.
+            #
+            # No Qt in the seam. It runs on the purge's worker thread, and
+            # `_warn_unless_remembered()` opens a QMessageBox - which off the
+            # GUI thread is the abort every other note in this file is about.
+            # `save_state()`'s `OSError` is caught by `purge.run()` and reported
+            # as a warning on a finished uninstall.
+            services.uninstall.forget = _forget_live_record(game, server_dir)
         view = ControllerView(entry, services)
+        view.uninstalled.connect(on_uninstalled)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).

@@ -1804,3 +1804,40 @@ def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
     assert dockerfile.count("FROM ubuntu:22.04") == 2, "a builder stage and a slim runtime"
     for tool in native.cmangos.extract.tools:
         assert tool.argv[0].startswith(f"{core_dir}/bin/"), tool.argv[0]
+
+
+# -- which modules the generated importer is allowed to apply -------------------
+
+
+def test_the_importer_reads_its_module_list_from_the_environment(tmp_path: Path) -> None:
+    """`"all"` is upstream's default and it does NOT mean the modules on disk.
+
+    `Updates.AllowedModules = "all"` passes `AC_MODULES_LIST` — a macro
+    `modules/CMakeLists.txt:371` bakes from a glob at CMake time — so a module
+    cloned into `modules/` after the image was built is invisible to the
+    importer for ever. Measured twice on yulon-ubuntu 2026-09-07 against the
+    same files and database: the unchanged one-shot logged `Loading modules:
+    all` and applied nothing (`acore_world.updates` stayed at 2967); the same
+    container with `AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot` logged `>> Applying
+    update aoe_loot_module_string.sql` and left it at 2968.
+
+    So the service carries the variable rather than nothing, interpolated from
+    the project's `.env` and defaulting to `all` — which renders exactly what
+    upstream would have done when nothing sets it, so no existing install
+    changes behaviour by acquiring this line.
+    """
+    plan = render(tmp_path)
+    assert 'AC_UPDATES_ALLOWED_MODULES: "${AC_UPDATES_ALLOWED_MODULES:-all}"' in plan.base
+    # The KEY once, counted as a key rather than as a substring: the comment
+    # above it names the variable three times, and a count of the string would
+    # pass on a file that set the option twice with different values.
+    keys = [
+        line.strip()
+        for line in plan.base.splitlines()
+        if line.strip().startswith("AC_UPDATES_ALLOWED_MODULES:")
+    ]
+    assert len(keys) == 1, keys
+    # Never an empty default. `src/tools/dbimport/Main.cpp:114-118` reads an
+    # empty value as a third meaning — allow NO modules — measured on the real
+    # image 2026-09-07 as `Loading modules: none`.
+    assert "${AC_UPDATES_ALLOWED_MODULES:-}" not in plan.base

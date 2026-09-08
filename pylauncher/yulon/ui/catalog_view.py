@@ -443,6 +443,37 @@ class CatalogView(QWidget):
         self._installed_dirs[game_id] = server_dir
         self._show_installed(game_id)
 
+    def forget_installed(self, game_id: str, surviving: Mapping[str, Path]) -> None:
+        """An install of `game_id` is gone (8.9a). Recompute this tile from what is left.
+
+        The inverse of `_remember_installed()`, and the way OUT this view did
+        not have: `_show_installed()` early-returns for a game that is not in
+        `_installed_dirs`, so nothing could ever un-grey a tile.
+
+        `surviving` is the whole `AppState.installed_dirs()` after the record was
+        forgotten, and NOT a game id to delete a key for. That is the difference
+        between right and nearly right here: `installed_dirs()` is one folder per
+        GAME, last remembered wins, so a machine with two WotLK installs still
+        has one after the first is purged - and its tab is still open. Flipping
+        the tile back to "Install" there offers a third install of a game that
+        already has two.
+
+        The re-enable is the enable rule from `_set_buttons_enabled()` and not a
+        bare `setEnabled(True)`: a tile the platform gate disabled (roadmap 6.1)
+        must not become pressable because an install elsewhere was removed.
+        """
+        button = self._buttons.get(game_id)
+        if button is None:
+            return
+        if game_id in surviving:
+            self._installed_dirs[game_id] = surviving[game_id]
+            self._show_installed(game_id)
+            return
+        self._installed_dirs.pop(game_id, None)
+        button.setText("Install")
+        button.setToolTip("")
+        button.setEnabled(game_id not in self._gated)
+
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
         return self._buttons[game_id]

@@ -202,16 +202,24 @@ def test_a_tree_with_no_measured_play_block_offers_nothing(tmp_path) -> None:
     """The tab draws what the tree has, and a button drawn on a tree nobody has
     asked would send a command nobody has checked.
 
-    The unmeasured tree here was Vanilla until 8.4c measured it; the guard moved
-    to Tortoise rather than going, because it is the guard the whole
-    `NotMeasured` class exists for and there is still exactly one tree holding
-    it. When 8.4d measures Tortoise there will be no tree left to stand here,
-    and the honest thing then is a synthesised entry rather than a deletion.
+    The unmeasured tree here was Vanilla until 8.4c measured it and Tortoise
+    until 8.4d did. Every shipped entry now carries a block, so the tree that
+    stands here is SYNTHESISED -- which is what this guard's own note said to do
+    when the last real one went, rather than delete the assertion the whole
+    `NotMeasured` class exists for. The second half is what keeps it honest: it
+    asserts against the shipped catalog that there is no longer a real tree to
+    stand here, so the day a fifth game lands without its 8.4 box this test says
+    so rather than passing on a stand-in.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = _unmeasured()
 
-    assert play.InstallPlay.for_entry_is_possible(tortoise) is False
+    assert play.InstallPlay.for_entry_is_possible(unmeasured) is False
     assert play.InstallPlay.for_entry_is_possible(WOTLK) is True
+    assert [
+        entry.id
+        for entry in load_catalog().games
+        if not play.InstallPlay.for_entry_is_possible(entry)
+    ] == []
 
 
 def test_the_mail_cap_offered_is_the_one_this_tree_carries(tmp_path) -> None:
@@ -232,15 +240,15 @@ def test_an_unmeasured_tree_has_no_cap_to_offer_rather_than_a_plausible_one(
     nothing behind the promise. It raises instead, in the same voice
     `play.equipped` already refuses in.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = _unmeasured()
     install = play.InstallPlay(
-        tortoise, tmp_path, sql=_Reader(), channel_for_saved=lambda: _Channel()
+        unmeasured, tmp_path, sql=_Reader(), channel_for_saved=lambda: _Channel()
     )
 
     with pytest.raises(play.NotMeasured) as refused:
         install.mail_item_cap  # noqa: B018
 
-    assert "WoW Tortoise" in str(refused.value)
+    assert unmeasured.name in str(refused.value)
 
 
 def test_the_cap_is_this_trees_own_and_not_its_siblings() -> None:
@@ -299,3 +307,166 @@ def test_a_half_sent_set_says_what_arrived_and_does_not_advise_the_impossible(
     assert "1 of 2" in said or "1 of the 2" in said, outcome.problem
     assert "again" in said, "it does not say what pressing again would do"
     assert "missing" not in said, "it still advises an operation that does not exist"
+
+
+def _unmeasured():
+    """A shipped entry with its Play block taken away.
+
+    Written once and used by both guards. `model_copy` keeps the id, so this is
+    still an entry this build has a factory for -- a tree whose 8.4 box has not
+    been done, not a game this build cannot manage.
+    """
+    return WOTLK.model_copy(update={"play": None})
+
+
+# -- 8.4d: the tortoise fork's own verbs -------------------------------------
+
+
+TORTOISE = load_catalog().get("wow-tortoise")
+
+
+def _tortoise(tmp_path, channel):
+    return play.InstallPlay(
+        TORTOISE,
+        tmp_path,
+        sql=_Reader(**{"SELECT name FROM": "Guglu\n"}),
+        channel_for_saved=lambda: channel,
+    )
+
+
+def test_the_rename_this_tree_sends_is_its_own_top_level_command(tmp_path) -> None:
+    """Read from this fork's source, 2026-09-07: `rename` is registered at the
+    TOP level (`src/game/Chat/Chat.cpp:850`) and its `characterCommandTable` has
+    no rename row at all.
+
+    Both trees are asserted against one call each, because the failure this
+    guards is a string in `yulon.commands` that is right for three trees and
+    silently wrong for the fourth -- and "silently" is the word: the tortoise
+    console answers `There is no such subcommand` and prints the list of the
+    subcommands it does have, which reads like the app being broken.
+    """
+    tortoise_channel, wotlk_channel = _Channel(), _Channel()
+
+    _tortoise(tmp_path, tortoise_channel).rename("guglu")
+    _install(tmp_path, channel=wotlk_channel).rename("guglu")
+
+    assert tortoise_channel.sent == ["rename Guglu"]
+    assert wotlk_channel.sent == ["character rename Guglu"]
+
+
+def test_a_tree_with_no_level_command_refuses_the_press_and_sends_nothing(tmp_path) -> None:
+    """The headline of 8.4d, at the seam under the button.
+
+    The whole command implementation of this fork writes a level in three places
+    (`Commands.cpp:3516`, `:3569`, `:3826`), and the only one that reaches an
+    arbitrary level is `HandleCharacterLevel`, whose single caller is
+    `HandleLevelUpCommand` -- registered with `AllowConsole` FALSE
+    (`Chat.cpp:923`). `CliHandler::isAvailable` refuses on that field before it
+    looks at security at all (`Chat.cpp:3723-3731`), and the `command` DB table
+    can override a row's SecurityLevel and Help but not its AllowConsole
+    (`Chat.cpp:1730-1770`) -- so this is not a permission this install could be
+    configured into.
+
+    The tab does not draw the control, but the seam refuses on its own: a press
+    that arrived anyway must not fall through to a sibling's `character level`,
+    which on this fork is an unknown subcommand today and, on a fork that later
+    gains one, would be a real command nobody has measured.
+    """
+    channel = _Channel()
+
+    outcome = _tortoise(tmp_path, channel).set_level("guglu", 60)
+
+    assert outcome.done is False
+    assert channel.sent == [], channel.sent
+    assert "reset level" in outcome.problem, outcome.problem
+
+
+def test_the_tortoise_block_carries_this_forks_own_numbers_and_not_a_siblings() -> None:
+    """Every field, against the source line it was read from, in one breath.
+
+    The hazard 8.4c named is the same one here: Vanilla's block matches this one
+    on all four of ITS fields, so pasting it over would have produced a block
+    that passes every other test in this file. What would not have come with it
+    are the rename verb and the absent level command, which are the two facts
+    this fork disagrees with all three siblings about.
+    """
+    block = TORTOISE.play
+
+    assert block is not None
+    assert block.mail_item_cap == 1, "src/game/Mail/Mail.h:51 -- #define MAX_MAIL_ITEMS 1"
+    assert block.teleport_command == "tele name", "Chat.cpp:716/:869 -- `teleport` is no command"
+    assert block.equipped.instance_table is None, "character_inventory carries item_template"
+    assert block.equipped.template_column == "item_template"
+    assert block.revive_offline is True, "Commands.cpp:3040 -- ConvertCorpseForPlayer"
+    assert block.rename_command == "rename", "Chat.cpp:850 -- top level, not under `character`"
+    assert block.set_level_command is None, "Chat.cpp:923 -- .levelup is AllowConsole=false"
+
+
+def test_the_sentence_in_place_of_the_level_control_names_what_this_fork_has() -> None:
+    """ "a sentence naming what does exist rather than one implying nothing does".
+
+    Re-measured on this fork's own source, 2026-09-08, after the first version
+    of this sentence said "its console has no command that puts a character at a
+    level you pick" and that was FALSE. The first measurement read
+    `src/game/Chat/Chat.cpp` and `Commands.cpp` and stopped there; `.rndbot` is
+    registered `AllowConsole=true` at `Chat.cpp:1012`, and a console `.rndbot
+    create level=<n>` reaches `PlayerbotHolder::HandleCreate`
+    (`modules/mod-playerbots/src/playerbot/PlayerbotMgr.cpp:2593`, no security
+    check and no master required, unlike `HandleGroup` below it) and then
+    `CreateBot` (`:2350`), which parses `level=` at `:2389` and runs
+    `SetLevel(level)` at `:2498`.
+
+    So the clause that survives is narrower, and every word of it was read here:
+
+    * nothing moves an EXISTING character to a chosen level. `.levelup` is
+      `AllowConsole=false` (`Chat.cpp:923`), and the playerbot table's own
+      `level`/`levelup` verb (`PlayerbotMgr.cpp:336`) is
+      `HandleBotLevelUp` (`:3159`), whose whole body is
+      `PlayerbotFactory factory(bot, bot->GetLevel()); factory.Randomize(...)` --
+      it never reads the parameter it was handed. `init` (`:3094`) does the same
+      thing: with no master, which is every console call, the level it builds
+      with is `bot->GetLevel()`.
+    * `.reset level` IS console-legal (`Chat.cpp:653`, `AllowConsole=true`), its
+      handler takes only a `Player**` through `ExtractPlayerTarget` so the
+      character has to be logged in, and the level it writes is
+      `CONFIG_UINT32_START_PLAYER_LEVEL` (`Commands.cpp:3824-3826`).
+    * `.rndbot create level=<n>` makes a NEW character at the level named.
+
+    The number that value happens to hold is NOT in the sentence: it is
+    `StartPlayerLevel` in the operator's own `etc/mangosd.conf`, editable on any
+    install, and this catalog is shipped data that never re-reads it.
+    """
+    said = TORTOISE.play.set_level_absent_reason
+
+    assert said
+    assert "reset level" in said, said
+    assert "logged in" in said, said
+    assert "configured starting level" in said, said
+    # Finding 5: a conf key's current value is not a fact this file may ship.
+    assert "level 1" not in said, said
+    # Finding 1: the console route that DOES take a level is named, and named as
+    # what it is -- a new character rather than a change to an existing one.
+    assert "rndbot create level=" in said, said
+    assert "NEW" in said, said
+    assert "existing character" in said, said
+    assert "no command that puts a character at a level you pick" not in said, said
+
+
+def test_the_offline_rename_this_fork_would_destroy_a_name_with_is_refused(tmp_path) -> None:
+    """`rename <char>` with no new name is the at-login flag only for a character
+    who is ONLINE.
+
+    For an offline one the same spelling runs
+    `UPDATE characters SET name = guid, at_login = at_login|1`
+    (`src/game/Commands/Commands.cpp:12624-12635`) -- it does not flag the
+    rename, it throws the current name away and puts the numeric guid there.
+    That is data loss behind a button labelled "Rename at next login", so the
+    entry carries the refusal and this asserts the tree that has one and a tree
+    that has not, in one breath.
+    """
+    said = TORTOISE.play.rename_offline_refusal
+
+    assert said
+    assert "logged in" in said, said
+    assert "guid" in said, "the sentence names what the server would do instead"
+    assert WOTLK.play is not None and WOTLK.play.rename_offline_refusal is None

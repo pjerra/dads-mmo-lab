@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import gzip
 import io
+import json
 import re
 import subprocess
 import threading
@@ -2248,6 +2249,7 @@ def _repair_doubles(
     import_exit: int = 0,
     import_output: Callable[[], Iterable[str]] = tuple,
     cwds: list[Path | None] | None = None,
+    import_mounts: list[str] | None = None,
 ) -> None:
     """Fake BOTH `runner.run` and `runner.stream` for the repair path.
 
@@ -2269,7 +2271,23 @@ def _repair_doubles(
     def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
         calls.append(cmd)
         if cmd[:4] == ["docker", "compose", "config", "--format"]:
-            return _completed(stdout='{"name": "' + PROJECT + '"}')
+            # The service block is here because `apply_module_sql()` asks the
+            # same capture whether the importer can see this install's
+            # `modules/` folder — the FACT 6 question — and a fixture that
+            # answered only `name` would make every test of it "cannot tell".
+            sources = ["./modules"] if import_mounts is None else import_mounts
+            config = {
+                "name": PROJECT,
+                "services": {
+                    "ac-db-import": {
+                        "volumes": [
+                            {"type": "bind", "source": s, "target": "/x/" + s.lstrip("./")}
+                            for s in sources
+                        ]
+                    }
+                },
+            }
+            return _completed(stdout=json.dumps(config))
         if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
             live.update(cmd[5:])
             return _completed()
@@ -5468,3 +5486,342 @@ def test_volume_exists_forwards_its_distro_per_the_completeness_rule() -> None:
     """The module rule, spelled out for the function that answers it."""
     assert "volume_exists" not in _DAEMON_AGNOSTIC
     assert "wsl_distro" in _seam_reachers()["volume_exists"]
+
+
+# ------------------------------------------- which modules the importer may apply
+
+
+def test_allowed_modules_names_every_module_directory_on_disk(tmp_path: Path) -> None:
+    """The whole defect in one assertion: the importer must be told the DISK, not the binary.
+
+    AzerothCore's db-import defaults `Updates.AllowedModules` to `"all"`, and
+    `"all"` does not mean "everything in `modules/`" — it means `AC_MODULES_LIST`,
+    a macro baked at CMake time from a glob of the modules that were present
+    when the image was compiled. Measured twice on yulon-ubuntu 2026-09-07
+    against the same files and the same database: the unchanged one-shot logged
+    `Loading modules: all` and applied nothing, and the same container with
+    `AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot` logged
+    `>> Applying update aoe_loot_module_string.sql` and moved
+    `acore_world.updates` from 2967 to 2968.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-solocraft", "mod-aoe-loot", "mod-playerbots"):
+        (modules / name).mkdir(parents=True)
+    assert docker.allowed_modules(tmp_path) == "mod-aoe-loot,mod-playerbots,mod-solocraft"
+
+
+def test_allowed_modules_never_answers_the_empty_string(tmp_path: Path) -> None:
+    """An empty value is not "nothing to allow", it is a THIRD meaning: allow nothing.
+
+    `src/tools/dbimport/Main.cpp:114-118` branches three ways — empty builds a
+    `DatabaseLoader` with no module list at all, `"all"` passes `AC_MODULES_LIST`,
+    anything else passes the string. Measured on yulon-ubuntu 2026-09-07 by
+    running the real `ac-db-import` image with bogus database hosts, so it
+    printed its decision and then failed to connect: `-e
+    AC_UPDATES_ALLOWED_MODULES=` logged `Loading modules: none`, and
+    `-e AC_UPDATES_ALLOWED_MODULES=mod-lane-c-probe,mod-second` logged
+    `Loading modules: mod-lane-c-probe,mod-second`.
+
+    So a modules folder that is empty or unreadable must answer `"all"` —
+    upstream's own default, which leaves the install exactly as it was — and
+    never `""`, which would silently switch module updates off for a stack that
+    was getting them.
+    """
+    (tmp_path / "modules").mkdir()
+    assert docker.allowed_modules(tmp_path) == "all"
+    assert docker.allowed_modules(tmp_path / "nowhere") == "all"
+
+
+def test_allowed_modules_lists_only_directories(tmp_path: Path) -> None:
+    """`modules/` holds CMakeLists.txt and friends beside the modules themselves.
+
+    Read off the live install on yulon-ubuntu 2026-09-07: `CMakeLists.txt`,
+    `create_module.sh`, `how_to_make_a_module.md`, `ModulesLoader.cpp.in.cmake`,
+    `ModulesPCH.h`, `ModulesScriptLoader.h` — and one directory, `mod-playerbots`.
+    """
+    modules = tmp_path / "modules"
+    (modules / "mod-playerbots").mkdir(parents=True)
+    (modules / ".git").mkdir()
+    (modules / "CMakeLists.txt").write_text("", encoding="utf-8")
+    assert docker.allowed_modules(tmp_path) == "mod-playerbots"
+
+
+def test_run_one_shot_carries_the_module_list_in_its_own_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The value has to ride in argv, because the compose FILE is not always ours.
+
+    `compose up` takes no `-e`, so the generated file's
+    `${AC_UPDATES_ALLOWED_MODULES:-all}` is the only way in for an `up` — and an
+    adopted, DML-built install has no such key to interpolate. `compose run
+    --rm --no-deps -e …` reaches both, and was measured against the real
+    `ac-db-import` image on yulon-ubuntu 2026-09-07: the container logged
+    `Configuration field Updates.AllowedModules was overridden with environment
+    variable` and `Loading modules: mod-lane-c-probe,mod-second`, left no
+    container behind, and the service's pinned `container_name` did not stop it.
+    """
+    seen, _ = _stream_double(monkeypatch, ["importing"])
+    docker.run_one_shot("ac-db-import", Path("/tmp/wow"), allowed_modules="mod-a,mod-b")
+    assert seen == [
+        [
+            "docker",
+            "compose",
+            "run",
+            "--rm",
+            "--no-deps",
+            "-e",
+            "AC_UPDATES_ALLOWED_MODULES=mod-a,mod-b",
+            "ac-db-import",
+        ]
+    ]
+
+
+def test_apply_module_sql_refuses_while_this_installs_servers_are_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """8.7a's rule, and the reason it exists: the import writes underneath a live world."""
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db, SPEC.world})
+    with pytest.raises(docker.DockerCommandError, match="running"):
+        docker.apply_module_sql(SPEC, Path("/tmp/wow"))
+    assert not any(c[:3] == ["docker", "compose", "run"] for c in calls), calls
+
+
+def test_apply_module_sql_runs_the_importer_with_the_modules_on_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The route FACT 5 leaves missing: Start never runs the import, so something must."""
+    (tmp_path / "modules" / "mod-aoe-loot").mkdir(parents=True)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db})
+    run = docker.apply_module_sql(SPEC, tmp_path)
+    assert run.returncode == 0
+    assert [
+        "docker",
+        "compose",
+        "run",
+        "--rm",
+        "--no-deps",
+        "-e",
+        "AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot",
+        "ac-db-import",
+    ] in calls, calls
+
+
+def test_apply_module_sql_refuses_an_importer_that_cannot_see_the_modules_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The install the real user is on, and the reason the env variable is not enough.
+
+    `tests/data/wotlk-compose-config-script.json` is `docker compose config`
+    from a server the DML bash installer built (Fedora, 2026-08-31, project
+    `wow-server-playerbots`). Its `ac-db-import` mounts `./env/dist/etc` and
+    `./env/dist/logs` and NOTHING else: `./modules` is bound into
+    `ac-worldserver` alone. So on that install the importer has no host modules
+    tree at all, `UpdateFetcher` resolves every allowed name against the
+    modules baked into the IMAGE, and a module cloned onto the host afterwards
+    is invisible to it whatever `AC_UPDATES_ALLOWED_MODULES` says.
+
+    Nothing in this app rewrites a compose file it did not write
+    (`composegen.write_plan()` refuses an unmarked file; `attach_existing()`
+    only remembers the folder), so this is not a state a fix can quietly
+    correct. It is a state that has to be SAID — a run that exits 0 having
+    applied nothing is exactly the lie this whole lane exists to remove.
+    """
+    (tmp_path / "modules" / "mod-aoe-loot").mkdir(parents=True)
+    calls: list[list[str]] = []
+    _repair_doubles(monkeypatch, calls, running={SPEC.db}, import_mounts=[])
+    with pytest.raises(docker.DockerCommandError, match="modules"):
+        docker.apply_module_sql(SPEC, tmp_path)
+    assert not any(c[:3] == ["docker", "compose", "run"] for c in calls), calls
+
+
+# ------------------------------------------------- the uninstall primitives
+#
+# Three functions 8.9a owes, and each of them is the one shape of its kind the
+# package had never had: nothing in `yulon/` removed a volume or an image before
+# this. They are pinned here rather than only through `purge.py`, because what
+# makes them safe is the ARGV, and the `purge.py` tests substitute them out.
+
+
+def _volume_runner(
+    calls: list[list[str]],
+    *,
+    listed: list[str] | None = None,
+    list_fails: bool = False,
+    rm_stderr: str = "",
+    still_there: bool = False,
+):
+    """A `runner.run` double for `project_volumes()` / `remove_volume()`."""
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "volume", "ls"]:
+            if list_fails:
+                return _completed(1, stderr="Cannot connect to the Docker daemon")
+            return _completed(stdout="\n".join(listed or []) + "\n")
+        if cmd[:3] == ["docker", "volume", "rm"]:
+            return _completed(1, stderr=rm_stderr) if rm_stderr else _completed()
+        if cmd[:3] == ["docker", "volume", "inspect"]:
+            if still_there:
+                return _completed(stdout=cmd[-1])
+            return _completed(
+                1, stderr=f"Error response from daemon: get {cmd[-1]}: no such volume"
+            )
+        raise AssertionError(f"unexpected command {cmd}")
+
+    return fake_run
+
+
+def test_project_volumes_asks_by_the_compose_project_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovered, never computed from a folder basename (`guides/uninstall.sh:136`)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _volume_runner(calls, listed=[f"{PROJECT}_db-data", f"{PROJECT}_client-data"]),
+    )
+    assert docker.project_volumes(PROJECT) == [f"{PROJECT}_db-data", f"{PROJECT}_client-data"]
+    assert calls == [
+        [
+            "docker",
+            "volume",
+            "ls",
+            "--filter",
+            f"label=com.docker.compose.project={PROJECT}",
+            "--format",
+            "{{.Name}}",
+        ]
+    ]
+
+
+def test_project_volumes_says_none_when_docker_would_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` is not `[]`: the caller goes on to delete a folder and forget a record."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _volume_runner(calls, list_fails=True))
+    assert docker.project_volumes(PROJECT) is None
+
+
+def test_remove_volume_removes_that_one_name_and_confirms_it_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit code is not the proof; `volume_exists()` afterwards is."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _volume_runner(calls))
+    docker.remove_volume(f"{PROJECT}_client-data")
+    assert calls[0] == ["docker", "volume", "rm", f"{PROJECT}_client-data"]
+    assert calls[1][:3] == ["docker", "volume", "inspect"]
+
+
+def test_remove_volume_never_reaches_for_compose_down_with_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose down -v` takes BOTH volumes, which makes the checkbox unimplementable.
+
+    The bash prior art does exactly that on all four of its WoW arms
+    (`guides/uninstall.sh:69, :152, :201, :240`).
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _volume_runner(calls))
+    docker.remove_volume(f"{PROJECT}_db-data")
+    for cmd in calls:
+        assert "compose" not in cmd, cmd
+        assert "-v" not in cmd, cmd
+        assert "--volumes" not in cmd, cmd
+
+
+def test_remove_volume_raises_when_the_volume_is_still_in_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An EXITED container still counts as a reference; warning past it leaks the data."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _volume_runner(calls, rm_stderr="volume is in use - [abc123]"),
+    )
+    with pytest.raises(docker.DockerCommandError, match="in use"):
+        docker.remove_volume(f"{PROJECT}_db-data")
+
+
+def test_remove_volume_raises_when_it_is_still_there_afterwards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker.runner, "run", _volume_runner(calls, still_there=True))
+    with pytest.raises(docker.DockerCommandError, match="still there"):
+        docker.remove_volume(f"{PROJECT}_db-data")
+
+
+def test_remove_volume_treats_an_absent_volume_as_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ticked purge run twice must not fail on the volume it already removed."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner,
+        "run",
+        _volume_runner(calls, rm_stderr="Error response from daemon: no such volume: x"),
+    )
+    docker.remove_volume(f"{PROJECT}_db-data")
+
+
+def test_remove_image_removes_one_ref_and_never_a_compose_rmi_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--rmi all` takes `mysql:8.4` with it; `--rmi local` takes none of ours."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    ref = "yulon.local/ac-wotlk-worldserver:native-243c46e3"
+    assert docker.remove_image(ref) == ""
+    assert calls == [["docker", "image", "rm", ref]]
+    for cmd in calls:
+        assert "--rmi" not in cmd, cmd
+        assert "prune" not in cmd, cmd
+
+
+def test_remove_image_reports_an_image_in_use_as_a_warning_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A layer another title holds is not this uninstall's problem to fail on."""
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        return _completed(1, stderr="conflict: unable to delete (must be forced) - image is in use")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    assert "in use" in docker.remove_image("yulon.local/ac-wotlk-authserver:native-1")
+
+
+def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
+    """`image prune`, `builder prune` and `system prune` reach every project on the box.
+
+    `alpine/git` shows on a real install as `<none>`-tagged - it LOOKS dangling
+    - and it is the sha256-pinned image every install's clone stage depends on.
+    """
+    source = (Path(__file__).resolve().parents[1] / "yulon" / "docker.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"prune"' not in source
+    assert '"--rmi"' not in source
+
+
+def test_running_census_is_the_same_answer_the_teardown_path_refuses_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Made public for `purge.py`, and it must not become a second implementation."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.runner, "run", _remove_runner(calls, running={SPEC.world}, owner=PROJECT)
+    )
+    census = docker.running_census(SPEC, PROJECT)
+    assert census.ours == (SPEC.world,)
+    assert census.strangers == () and census.unreadable == ()

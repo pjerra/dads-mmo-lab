@@ -208,6 +208,36 @@ class Npc(_Strict):
     note: str | None = None
 
 
+class ExistsCheck(_Strict):
+    """A read run against the server's own database before an answer is accepted.
+
+    Declared here rather than coded in the applier because it is per-item
+    knowledge (style-guide §4), and it exists because of what the AH bot modules
+    do with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an
+    error inside the module, it is a module that quietly posts nothing — which
+    from the outside is indistinguishable from "this module does not work"
+    (measured on the owner's own install, 2026-09-07).
+
+    `query` and `missing` are templates over the manifest's prompt keys.
+    `query` must be a single SELECT: the applier hands it to the READ half of
+    the SQL seam, and a manifest is content rather than code, so the one thing
+    it must not be able to do through this field is write.
+    """
+
+    db: Db
+    query: str = Field(min_length=1)
+    missing: str = Field(min_length=1, description="What to tell the user when no row came back.")
+
+    @field_validator("query")
+    @classmethod
+    def _one_select(cls, value: str) -> str:
+        if not value.strip().upper().startswith("SELECT "):
+            raise ValueError(f"ExistsCheck.query must be a SELECT: {value!r}")
+        if ";" in value.strip().rstrip(";"):
+            raise ValueError(f"ExistsCheck.query must be ONE statement: {value!r}")
+        return value
+
+
 class Prompt(_Strict):
     """A value asked of the user at configure time, referenced as `{key}` elsewhere."""
 
@@ -216,6 +246,10 @@ class Prompt(_Strict):
     kind: PromptKind = "string"
     default: str | None = None
     choices: tuple[str, ...] = ()
+    exists: ExistsCheck | None = Field(
+        default=None,
+        description="A row that must be found before this answer is used; see `ExistsCheck`.",
+    )
 
     @model_validator(mode="after")
     def _choice_needs_choices(self) -> Prompt:

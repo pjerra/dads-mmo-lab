@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon import apply as apply_module
 from yulon import (
     botlist,
     channel,
@@ -19,6 +20,7 @@ from yulon import (
     docker,
     logsnap,
     networking,
+    purge,
     runner,
     useraccounts,
 )
@@ -103,11 +105,24 @@ class _FakeApplier(Applier):
     def __init__(self) -> None:
         super().__init__(Path("/srv"), git=None)  # type: ignore[arg-type]
         self.installed: list[str] = []
+        # What the tab handed down as the `values` argument, per call. Recorded
+        # because for two of the 41 shipped manifests that argument WAS the
+        # defect: the tab called the applier without one at all, and the two
+        # modules whose prompts have no default could only fail (2026-09-07).
+        self.values: list[object] = []
+        self.removed: list[str] = []
 
     def install(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.installed.append(item_id)
+        self.values.append(values)
         return ApplyReport("install", item_id, done=("clone",), rebuild_required=True)
+
+    def remove(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
+        item_id = str(manifest.id)  # type: ignore[attr-defined]
+        self.removed.append(item_id)
+        self.values.append(values)
+        return ApplyReport("remove", item_id, done=("rm -r",))
 
 
 class _FakeMaintenance:
@@ -508,7 +523,16 @@ def test_backing_up_says_where_it_went(qapp: object, ps: _Ps, tmp_path: Path) ->
 def test_modules_tab_lists_manifests_and_installs_selected(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    # The asker is injected because `mod-ah-bot` is one of the two manifests
+    # that now HAS a question: with the real one this test would sit on a modal
+    # dialog forever, which is exactly what it did when the seam was added and
+    # this line was not (2026-09-07).
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
     assert view.module_list.count() >= 40
     for i in range(view.module_list.count()):
         if view.module_list.item(i).data(256) == "mod-ah-bot":
@@ -518,7 +542,209 @@ def test_modules_tab_lists_manifests_and_installs_selected(
     view._module_action("install")
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-ah-bot"]
-    assert "REBUILD required" in view.module_report.toPlainText()
+    # It used to say "worldserver REBUILD required before this takes effect",
+    # which sent the reader hunting for a button no tab has (FACT 4, 2026-09-07).
+    assert "C++ module" in view.module_report.toPlainText()
+
+
+def test_the_report_never_names_a_rebuild_control_because_the_app_has_none() -> None:
+    """FACT 4, 2026-09-07: every `QPushButton` in `yulon/ui/` was listed; none rebuilds.
+
+    `native.stage_build()` skips the compile whenever `built_images()` is true
+    and the image tag comes off the folder name, so installing a module cannot
+    even change the tag. The old line — "⚠ worldserver REBUILD required before
+    this takes effect" — reads as an instruction to press something, and there
+    is nothing to press. What is asserted here is the absence, because a
+    rewrite that reintroduced the imperative would still pass a test that only
+    checked for new words.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport("install", "mod-solocraft", done=("clone",), rebuild_required=True)
+    )
+    assert "REBUILD required" not in text
+    assert "nothing in this app rebuilds" in text
+
+
+def test_the_report_says_which_kind_of_module_this_is() -> None:
+    """21 of the 41 shipped manifests need no recompile; 20 do. Different sentences.
+
+    Counted 2026-09-07 through `parse_manifest`: `build.rebuild` is true for 20
+    manifests, all of type `module`, and false for the other 21 (7 ale, 2 keg,
+    11 mod, and `mod-arac`). "No module works until someone rebuilds" would be
+    false for half of them, which is why the kind is on the report rather than
+    in the sentence.
+    """
+    cpp = controller_view_module._format_report(
+        ApplyReport("install", "mod-solocraft", rebuild_required=True)
+    )
+    data_only = controller_view_module._format_report(
+        ApplyReport("install", "sitmeanrest", restart_recommended=True)
+    )
+    assert "C++ module" in cpp and "C++ module" not in data_only
+    assert "Stop" in data_only and "Server tab" in data_only
+
+
+def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
+    """The same flag, the opposite situation: the binary may still HAVE it.
+
+    "may": the live run on yulon-ubuntu 2026-09-07 removed two modules that had
+    been installed minutes earlier and never built, and a draft that said "its
+    code was compiled into the worldserver" asserted of both something that was
+    false of both. The app cannot know what went into the last build — that is
+    the same ignorance `NO_REBUILD_CONTROL` records — so it says which case
+    would be bad rather than claiming to know which case this is.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport("remove", "mod-solocraft", done=("rm -r",), rebuild_required=True)
+    )
+    assert "If mod-solocraft was in the last build it is still in there" in text
+    assert "is on disk and inert" not in text
+
+
+def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
+    """The line the user reads in place of the tick that was a lie.
+
+    The real report from the live applier, yulon-ubuntu 2026-09-07, read
+    `DONE: sql data/sql/db-world/*.sql -> world: left to ac-db-import on next
+    start` — with nothing run and nothing checked.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport(
+            "install",
+            "mod-aoe-loot",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql(
+                    db="world",
+                    path="data/sql/db-world/*.sql",
+                    files=("data/sql/db-world/aoe_loot_module_string.sql",),
+                ),
+            ),
+        )
+    )
+    assert "NOT applied" in text
+    assert "1 file" in text
+    assert "left to ac-db-import" not in text
+    assert "No button here applies that SQL" in text
+
+
+def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
+    """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
+
+    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
+    clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
+    FACT 1 had watched the importer apply an hour earlier. The draft said
+    "nothing to apply". Two sibling modules cloned the same minute keep theirs
+    directly in `db-world/` (mod-solocraft 1 file, mod-transmog 3), so the
+    layout is per-repository and a zero match is this app failing to count.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport(
+            "install",
+            "mod-aoe-loot",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql(db="world", path="data/sql/db-world/*.sql", files=()),
+            ),
+        )
+    )
+    assert "nothing to apply" not in text
+    assert "NOT applied" in text
+    assert "No button here applies that SQL" in text
+
+
+def _select_module(view: ControllerView, item_id: str) -> None:
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) == item_id:
+            view.module_list.setCurrentRow(i)
+            return
+    raise AssertionError(f"{item_id} is not in the Modules list")
+
+
+def test_installing_a_module_whose_prompt_has_no_default_asks_first(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """FACT 3, 2026-09-07: the tab called the applier with no `values` at all.
+
+    `mod-ah-bot` and `mod-ah-bot-plus` are the only two shipped manifests with a
+    prompt carrying no default, so pressing Install on either of them could only
+    ever produce `conf AuctionHouseBot.GUIDs: no value for {bot_guid}` — and
+    they are exactly the two the owner could test.
+    """
+    asked: list[tuple[str, tuple[str, ...]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+        asked.append(
+            (str(manifest.id), tuple(p.key for p in prompts))  # type: ignore[attr-defined]
+        )
+        return {"bot_guid": "42", "bot_account": "7"}
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "mod-ah-bot")
+    view._module_action("install")
+
+    assert asked == [("mod-ah-bot", ("bot_guid", "bot_account"))]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["mod-ah-bot"]
+    assert applier.values == [{"bot_guid": "42", "bot_account": "7"}]
+
+
+def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: None,
+    )
+    _select_module(view, "mod-ah-bot-plus")
+    view._module_action("install")
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == [] and applier.values == []
+    assert "cancelled" in view.module_report.toPlainText().lower()
+
+
+def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    asked: list[str] = []
+
+    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+        asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) not in view._manifests:
+            continue
+        view.module_list.setCurrentRow(i)
+        view._module_action("install")
+
+    assert sorted(asked) == ["mod-ah-bot", "mod-ah-bot-plus"], asked
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert len(applier.installed) == view.module_list.count()
+    unasked = [v for m, v in zip(applier.installed, applier.values, strict=True) if m not in asked]
+    assert all(v is None for v in unasked), "a manifest with no question was given values"
+
+
+def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Remove renders no template on either manifest, so it must not interrogate."""
+    asked: list[str] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "mod-ah-bot")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-ah-bot"]
 
 
 def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -3501,3 +3727,237 @@ def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lack
             f"{entry.id}: registry {'declared' if registry else 'absent'}, "
             f"table {'named' if named else 'not named'} in {counting}"
         )
+
+
+# ------------------------------------------------------- 8.9a: the uninstall
+#
+# The view's half of the box: the plan has to be on screen before the button
+# will act, the checkbox is what reaches `run()`, and the removal is signalled
+# UP so the window can drop the tab and the Catalog tile can go back to
+# "Install". Driven through the same run seam as everything else on this tab.
+
+
+class _FakeUninstall:
+    """A `purge.Uninstaller` double: records what it was asked, answers what it was told."""
+
+    def __init__(
+        self,
+        server_dir: Path,
+        *,
+        refusal: str = "",
+        failure: str = "",
+        report: object | None = None,
+        while_running: object | None = None,
+    ) -> None:
+        self.server_dir = server_dir
+        self.refusal = refusal
+        self.failure = failure
+        self.plans = 0
+        self.runs: list[bool] = []
+        self.busy_seen: list[object] = []
+        self._report = report
+        self._while_running = while_running
+
+    def plan(self) -> purge.PurgePlan:
+        self.plans += 1
+        if self.refusal:
+            return purge.PurgePlan(
+                game="wow-wotlk", server_dir=self.server_dir, refusal=self.refusal
+            )
+        return purge.PurgePlan(
+            game="wow-wotlk",
+            server_dir=self.server_dir,
+            project="yulon-wow-wotlk-deadbeef",
+            containers=("ac-worldserver", "ac-database"),
+            volumes=("yulon-wow-wotlk-deadbeef_db-data",),
+            character_volume="yulon-wow-wotlk-deadbeef_db-data",
+            images=("yulon.local/ac-wotlk-worldserver:native-deadbeef",),
+            folder_bytes=2_300_000_000,
+        )
+
+    def run(self, *, keep_characters: bool) -> purge.PurgeReport:
+        self.runs.append(keep_characters)
+        if self._while_running is not None:
+            self.busy_seen.append(self._while_running())
+        if self.failure:
+            raise purge.PurgeError(self.failure)
+        return self._report or purge.PurgeReport(
+            removed_containers=True,
+            removed_volumes=("yulon-wow-wotlk-deadbeef_client-data",),
+            kept_volumes=("yulon-wow-wotlk-deadbeef_db-data",) if keep_characters else (),
+            folder_removed=True,
+            record_forgotten=True,
+        )
+
+
+def _uninstall_view(ps: _Ps, tmp_path: Path, fake: _FakeUninstall) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    services.uninstall = fake
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The restore action's gate, not the typed-name box the decisions doc assumed.
+
+    `phase8-decisions.md`:172 says the typed confirmation "is the same pattern
+    the restore action already uses" — and it is not: restore's gate is that the
+    PLAN must be on screen first (`run_restore()` refuses with "Show the restore
+    plan first."). Uninstall has a `plan()` too, so it inherits the gate this
+    tab actually has rather than inventing a second confirmation idiom.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.run_uninstall()
+    assert fake.runs == [], "it removed a server nobody had been shown a plan for"
+    assert "Show the uninstall plan first" in view.uninstall_label.text()
+
+
+def test_a_plan_that_refuses_shows_the_refusal_and_offers_no_uninstall(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A refusal is the whole answer, and there must be nothing left to press."""
+    fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    assert "Stop the server first" in view.uninstall_label.text()
+    assert view.uninstall_confirm_button.isHidden()
+    view.run_uninstall()
+    assert fake.runs == []
+
+
+def test_the_plan_names_the_folder_and_its_size_before_anything_is_pressed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    text = view.uninstall_label.text()
+    assert str(tmp_path) in text
+    assert "2.1 GB" in text or "2.3 GB" in text, text
+    assert not view.uninstall_confirm_button.isHidden()
+
+
+def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Owner answer 2: one button with a checkbox, unticked. Not two buttons."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.keep_characters_check.isChecked() is False
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.runs == [False]
+
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.runs == [False, True]
+
+
+def test_the_removal_is_signalled_up_with_the_game_and_the_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The window needs both to find the tab, which is keyed by (game, server dir)."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    seen: list[tuple[str, object]] = []
+    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert seen == [("wow-wotlk", tmp_path)]
+
+
+def test_an_uninstall_that_failed_says_so_and_signals_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A tab dropped after a failed removal would take the only surface with it."""
+    fake = _FakeUninstall(tmp_path, failure="the folder could not be deleted")
+    view = _uninstall_view(ps, tmp_path, fake)
+    seen: list[object] = []
+    failures: list[str] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    view.action_failed.connect(failures.append)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert seen == []
+    assert "could not be deleted" in view.uninstall_label.text()
+    assert failures and "could not be deleted" in failures[0]
+
+
+def test_a_failed_uninstall_makes_the_user_ask_for_a_fresh_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The machine changed under the plan, so the photograph is no longer evidence."""
+    fake = _FakeUninstall(tmp_path, failure="the folder could not be deleted")
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    view.run_uninstall()
+    assert fake.runs == [False], "a second press acted on a plan that had already failed"
+
+
+def test_the_tab_reports_itself_busy_while_the_uninstall_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`busy_reason()` is what stops the window destroying a running QThread.
+
+    A purge is a long blocking job in a `_JobWorker`, and a tab torn down under
+    one is the 0xC0000409 abort `drop_controller()` and this function exist to
+    prevent.
+    """
+    view: ControllerView | None = None
+    fake = _FakeUninstall(tmp_path, while_running=lambda: view.busy_reason())
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.busy_reason() is None
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.busy_seen and fake.busy_seen[0] is not None, fake.busy_seen
+    assert "uninstall" in str(fake.busy_seen[0]).lower()
+    assert view.busy_reason() is None, "the tab stayed busy after the job finished"
+
+
+def test_a_second_press_cannot_delete_what_the_first_promised_to_keep(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The uninstall controls lock while the purge runs, and the slot refuses too.
+
+    Found by review, 2026-09-08, and it is the same defect `_set_busy` was
+    written for in the first place -- the uninstall controls were simply added
+    outside it. The state that loses data: tick "Keep my characters", press
+    Uninstall, and while the 60-to-90-second teardown runs, untick the box and
+    press again. `keep` is read at press time, so the second run resolves the
+    plan afresh and removes `<project>_db-data` -- the volume the first press
+    promised to keep.
+
+    Asserted at both seams on purpose. The disabled widget is a statement about
+    the button; the `_uninstall_running` guard is a statement about the action,
+    and reaches the case where something else re-enables the widget or a
+    queued click arrives anyway.
+    """
+    seen: list[bool] = []
+
+    def while_running() -> None:
+        seen.append(view.uninstall_confirm_button.isEnabled())
+        seen.append(view.keep_characters_check.isEnabled())
+        view.run_uninstall()  # the second press, mid-teardown
+
+    view: ControllerView | None = None
+    fake = _FakeUninstall(tmp_path, while_running=while_running)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.keep_characters_check.setChecked(True)
+    view.run_uninstall()
+
+    assert seen == [False, False], f"the uninstall controls stayed live: {seen}"
+    assert len(fake.runs) == 1, f"the purge ran {len(fake.runs)} times, not once"
+    assert fake.runs[0] is True, "the one run that happened did not keep the characters"
+
+
+def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.uninstall_button is None

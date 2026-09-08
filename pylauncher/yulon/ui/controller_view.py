@@ -21,14 +21,15 @@ reached servers that have none of them.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -55,13 +56,14 @@ from yulon import (
     logsnap,
     networking,
     platform,
+    purge,
     resources,
     useraccounts,
 )
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
-from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -82,11 +84,12 @@ from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 from yulon.controller_wow_wotlk import modules as wotlk_modules
 from yulon.log import get_logger
-from yulon.manifest import Manifest
+from yulon.manifest import Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
+from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 
 logger = get_logger(__name__)
 
@@ -114,6 +117,30 @@ class BotBrowser(Protocol):
     """What the Bots tab needs (8.5a). One question, asked with a page and a filter."""
 
     def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> object: ...
+
+
+class Uninstall(Protocol):
+    """What the Uninstall control needs (8.9a): a plan, and a run that takes the checkbox.
+
+    A Protocol rather than the concrete `purge.Uninstaller` for the reason every
+    other seam on this tab is one: the view is tested offscreen with a fake, and
+    the fake for THIS one must be a fake -- a test that reached the real thing
+    would be a test that deletes a directory.
+    """
+
+    forget: Callable[[], None]
+    """How this install's record is forgotten -- the LAST thing `run()` does.
+
+    Part of the protocol because `main.py` REPLACES it: the factory's default
+    re-reads `state.json`, and the running window holds one live `AppState` that
+    every tab writes into. An attribute rather than a constructor argument
+    because the object is built by the factory and the live state exists only in
+    the window's closure.
+    """
+
+    def plan(self) -> purge.PurgePlan: ...
+
+    def run(self, *, keep_characters: bool) -> purge.PurgeReport: ...
 
 
 class AccountAdmin(Protocol):
@@ -209,6 +236,15 @@ def _highest_level(entry: CatalogEntry) -> int:
     return level.max_level if level is not None else 3
 
 
+PromptAsker = Callable[[QWidget, Manifest, Sequence[Prompt]], "Mapping[str, str] | None"]
+"""Puts a manifest's own questions to the user, or returns `None` for "cancel".
+
+A constructor seam for the reason `catalog_view`'s pickers are seams: a modal
+dialog cannot run headless, and the part worth testing is what the tab does with
+the answer — install with it, or change nothing at all.
+"""
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -273,6 +309,15 @@ class ControllerServices:
     `None` everywhere else. A tree with a set-up button has a verified line
     saying a real round trip answered and when, which is the same evidence by a
     better route; two ways to say it would be one more than is true.
+    """
+    uninstall: Uninstall | None = None
+    """This install's Uninstall action, for a family whose removal is gated (8.9a).
+
+    `None` leaves the tab with no uninstall controls at all, which is what a
+    game outside 8.9a/8.9b gets. Uninstall is deliberately gated on two FAMILIES
+    rather than on one box per game (owner answer 3's usual rule): the mechanism
+    is the compose project and the folder, and both of those are the engine's
+    rather than the emulator's.
     """
     accounts: AccountAdmin | None = None
     play: object | None = None
@@ -342,6 +387,32 @@ class ControllerServices:
 # the maintenance binding and the manifest store — is spelled out per game,
 # because that is exactly the list of things a per-game package exists to
 # answer differently.
+
+
+def forget_record(game: str, server_dir: Path) -> Callable[[], None]:
+    """`state.forget()` made to persist, for a caller that holds no live `AppState`.
+
+    `AppState.forget()` is a method on an in-memory object and does not save, so
+    persisting is load -> forget -> save. That is right for the CLI harness and
+    for a tab built outside the window; it is WRONG inside the running app,
+    where `main.py`'s `build_window()` closure holds one live state object that
+    every tab writes into. Re-loading there would forget this install and
+    silently undo whatever else the session had remembered -- so `main.py`
+    hands the Uninstaller its own seam over that object instead.
+
+    `OSError` is deliberately not caught: `purge.run()` catches it, and this is
+    the last step of the action, so an unwritable config dir becomes a warning
+    on a finished uninstall rather than a failure of one.
+    """
+
+    def forget() -> None:
+        from yulon.state import load_state, save_state
+
+        app_state = load_state()
+        app_state.forget(game, server_dir)
+        save_state(app_state)
+
+    return forget
 
 
 def _db_password(entry: CatalogEntry, server_dir: Path) -> str:
@@ -474,6 +545,7 @@ def _assemble(
     play: object | None = None,
     bots: BotBrowser | None = None,
     console_probe: Callable[[str], object] | None = None,
+    uninstall: Uninstall | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -502,6 +574,7 @@ def _assemble(
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
+        uninstall=uninstall,
         channel_setup=channel_setup,
         accounts=accounts,
         play=play,
@@ -596,6 +669,20 @@ def _for_wotlk(
         channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
+        # 8.9a. WotLK first, and Vanilla in 8.9b; the four seams this needs are
+        # the ones every install has. `forget` is the default that reads and
+        # rewrites `state.json` -- `main.py` replaces it on the tab it builds,
+        # because THAT process holds one live `AppState` and re-loading from
+        # disk mid-session would clobber whatever else the session changed.
+        uninstall=purge.Uninstaller(
+            game=entry.id,
+            server_dir=server_dir,
+            spec=spec,
+            image_refs=composegen.built_image_refs(entry, server_dir),
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+            forget=forget_record(entry.id, server_dir),
+        ),
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
         # and a list built on a stale marker is a list of the wrong characters.
@@ -950,6 +1037,26 @@ def _for_tortoise(
         channel_for_saved=lambda: console,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
+    # 8.4d. The same seam as 8.4a, 8.4b and 8.4c, over the ATTACH channel rather
+    # than SOAP -- the same `console` object the Server tab's probe and the
+    # Accounts tab's writes already press, because it is one console with one
+    # lock and two channels over one `docker attach` would interleave two
+    # replies in one window. There is no SOAP alternative here to choose
+    # between: this build's `src/mangosd` has no SOAP source and its
+    # `etc/mangosd.conf` no `SOAP.*` key (the fork added one on 2026-09-07,
+    # after this tree's HEAD), which is what `operations.channel: attach` says.
+    #
+    # The facts under it were read from this fork's own source on 2026-09-07,
+    # and two of them are ITS OWN rather than a sibling's: `rename` is a
+    # top-level command here (`Chat.cpp:850`) where the other three spell it
+    # `character rename`, and there is no console route to an arbitrary level at
+    # all, so the tab draws a sentence where that group would be.
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=lambda: console,
+    )
     return _assemble(
         entry,
         server_dir,
@@ -958,6 +1065,7 @@ def _for_tortoise(
         log_snapshot=recorder,
         console_probe=console.send,
         accounts=accounts_admin,
+        play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -1159,6 +1267,35 @@ The armed wording is where they differ: the teardown's says what is *kept*,
 this one says what is *overwritten*.
 """
 
+UNINSTALL_RUNNING = (
+    "This server is being uninstalled. Closing now would destroy the job part-way through, "
+    "leaving containers, volumes or a half-deleted folder behind. The window will close "
+    "normally once it finishes."
+)
+"""Why a tab mid-uninstall must not be torn down (8.9a).
+
+The same reason the import has one: the work runs synchronously inside a
+`_JobWorker`, so `thread.quit()` cannot preempt it, and a QThread destroyed
+while running aborts the process (0xC0000409). The difference is what the crash
+would land on top of - an install that is half removed, whose record may already
+be gone.
+"""
+
+UNINSTALL_NO_PLAN = (
+    "Show the uninstall plan first. It names the folder, its size and every Docker object "
+    "that would go, and nothing is removed until you have seen it."
+)
+"""The gate on the Uninstall button, borrowed from the restore action.
+
+`phase8-decisions.md`:172 asks for a typed server name and says it "is the same
+pattern the restore action already uses". It is not: restore's gate is that the
+PLAN must be on screen (`run_restore()` refuses with "Show the restore plan
+first."). Uninstall has a `plan()` for the same reason restore does, so it gets
+the gate this tab really has rather than a second confirmation idiom nobody
+here has learned.
+"""
+
+
 IMPORT_RUNNING = (
     "Running the database import. A full one takes 10-30 minutes and cannot be stopped once "
     "it has started. What the import is printing:"
@@ -1187,11 +1324,35 @@ everything under it.
 """
 
 
+def _size_text(size: int) -> str:
+    """Bytes as the dialog says them: decimal units, one decimal place.
+
+    Decimal rather than binary because that is what a user's file manager and
+    their disk's label both say, and a dialog asking permission to delete
+    2.3 GB should not be the one place the number reads 2.1.
+    """
+    for unit, step in (("TB", 10**12), ("GB", 10**9), ("MB", 10**6), ("kB", 10**3)):
+        if size >= step:
+            return f"{size / step:.1f} {unit}"
+    return f"{size} bytes"
+
+
 class ControllerView(QWidget):
     """Per-install tabs; see module docstring."""
 
     status_changed = Signal(object)  # InstallStatus
     action_failed = Signal(str)  # user-readable message
+    uninstalled = Signal(str, object)  # game id, server_dir (Path) -- 8.9a
+    """This install is gone. The window drops the tab and the Catalog tile resets.
+
+    A third signal because neither existing one can mean it: `action_failed`
+    carries a message and `status_changed` carries an `InstallStatus`, and
+    "there is no longer anything here to have a status" is neither. Both
+    payloads are needed because tabs are keyed by (game, server dir).
+
+    Emitted only after `purge.run()` returned. A tab dropped after a FAILED
+    removal would take away the only surface that could try again.
+    """
 
     def __init__(
         self,
@@ -1200,11 +1361,15 @@ class ControllerView(QWidget):
         *,
         status_poll_ms: int = 5000,
         job_runner: JobRunner | None = None,
+        prompt_asker: PromptAsker | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.services = services
+        # How the Modules tab asks a manifest's own questions. A seam, so a test
+        # can answer them without a modal dialog; the real one is the dialog.
+        self._prompt_asker: PromptAsker = prompt_asker or ask_manifest_prompts
         # Every service call goes through this: on a worker thread in the app,
         # inline in tests (review finding, 2026-08-21 — the window used to
         # freeze for the length of a `docker compose up`).
@@ -1221,6 +1386,13 @@ class ControllerView(QWidget):
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
         self._remove_armed = False
         self._import_running = False
+        self._uninstall_running = False
+        self._uninstall_plan: purge.PurgePlan | None = None
+        """The plan currently on screen, and the only thing that authorises a run.
+
+        Cleared by a failure, because the machine has changed under the
+        photograph: a second press then has to ask for a fresh one.
+        """
         self._repair_armed = False
         # The last answer the database gave about its own import, and whether it
         # has been asked since the database came up. Remembered because the
@@ -1342,6 +1514,30 @@ class ControllerView(QWidget):
         self.repair_label.setWordWrap(True)
         self.repair_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.repair_label.setVisible(False)
+        # 8.9a. Built only where the seam is wired, so a game outside 8.9a/8.9b
+        # has no uninstall controls rather than ones that cannot work. The three
+        # are a set: a button that shows the PLAN, the checkbox owner answer 2
+        # asked for, and a second button that only appears once a plan is on
+        # screen.
+        self.uninstall_button: QPushButton | None = None
+        self.keep_characters_check = QCheckBox(
+            "Keep my characters (the database volume is left alone)", tab
+        )
+        self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
+        self.keep_characters_check.setVisible(False)
+        self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
+        self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_label = QLabel("", tab)
+        self.uninstall_label.setWordWrap(True)
+        self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.uninstall_label.setVisible(False)
+        if self.services.uninstall is not None:
+            self.uninstall_button = QPushButton("Uninstall\u2026", tab)
+            self.uninstall_button.clicked.connect(self.show_uninstall_plan)
+            self.uninstall_confirm_button.clicked.connect(self.run_uninstall)
+            self.keep_characters_check.toggled.connect(self._redraw_uninstall_plan)
+            self.keep_characters_check.setVisible(True)
+            self.uninstall_label.setVisible(True)
         self.start_button.clicked.connect(self.start_server)
         self.stop_button.clicked.connect(self.stop_server)
         self.refresh_button.clicked.connect(self.recheck)
@@ -1369,6 +1565,11 @@ class ControllerView(QWidget):
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
         box.addWidget(self.repair_label)
+        if self.uninstall_button is not None:
+            box.addWidget(self.uninstall_button)
+            box.addWidget(self.keep_characters_check)
+            box.addWidget(self.uninstall_label)
+            box.addWidget(self.uninstall_confirm_button)
         box.addStretch(1)
         self._tabs.addTab(tab, "Server")
 
@@ -1386,6 +1587,8 @@ class ControllerView(QWidget):
         outcome: the import cannot be stopped, so the only choice available was
         ever between waiting and a crash (review, 2026-08-23).
         """
+        if self._uninstall_running:
+            return UNINSTALL_RUNNING
         if not self._import_running:
             return None
         return (
@@ -1709,6 +1912,14 @@ class ControllerView(QWidget):
         teardown started a second one on top of the first — and whichever
         finished first called `_set_busy(False)` and unlocked Start while the
         other was still writing schemas (review, 2026-08-23).
+
+        **And the uninstall controls, which is the same defect on the one
+        action that cannot be undone** (review, 2026-09-08). The uninstall
+        controls were added outside this function, so a purge run with "Keep my
+        characters" TICKED could be pressed a second time — 60 to 90 seconds is
+        a long time to look at a frozen window — with the box unticked, and the
+        second run removed the database volume the first run had promised to
+        keep. `keep` is read at press time, so the two presses need not agree.
         """
         self._busy = busy
         if busy:
@@ -1716,6 +1927,10 @@ class ControllerView(QWidget):
             self.stop_button.setEnabled(False)
             self.remove_button.setEnabled(False)
             self.repair_button.setEnabled(False)
+            if self.uninstall_button is not None:
+                self.uninstall_button.setEnabled(False)
+            self.uninstall_confirm_button.setEnabled(False)
+            self.keep_characters_check.setEnabled(False)
             # Refresh too, and this one is not symmetry. `recheck()` blanks
             # `problem_label` — which during an import is the live output the
             # user is watching — and then fires `Controller.import_state()`,
@@ -1730,6 +1945,10 @@ class ControllerView(QWidget):
             # visible at all, and an invisible button being enabled is harmless.
             self.remove_button.setEnabled(True)
             self.repair_button.setEnabled(True)
+            if self.uninstall_button is not None:
+                self.uninstall_button.setEnabled(True)
+            self.uninstall_confirm_button.setEnabled(True)
+            self.keep_characters_check.setEnabled(True)
 
     @Slot()
     def start_server(self) -> None:
@@ -1942,6 +2161,141 @@ class ControllerView(QWidget):
         self.problem_label.setText(msg)
         self.action_failed.emit(msg)
         self.refresh_status()
+
+    # ------------------------------------------------------------- 8.9a
+    #
+    # Two presses with a plan between them. The first reads (`purge.plan()`
+    # touches nothing); the second acts. What is on screen between them is the
+    # whole blast radius, because a destructive action that cannot state what
+    # it reaches is one a user has to guess about.
+
+    @Slot()
+    def show_uninstall_plan(self) -> None:
+        """Ask what an uninstall would remove, and show it. Removes nothing."""
+        if self.services.uninstall is None:
+            return
+        self._uninstall_plan = None
+        self.uninstall_confirm_button.setVisible(False)
+        self.uninstall_label.setText("Working out what would be removed\u2026")
+        self._run(self.services.uninstall.plan, self._uninstall_plan_ready, self._uninstall_failed)
+
+    @Slot(object)
+    def _uninstall_plan_ready(self, result: object) -> None:
+        if not isinstance(result, purge.PurgePlan):  # pragma: no cover - defensive
+            return
+        if result.refusal:
+            # A refusal is the whole answer and there must be nothing left to
+            # press: `plan.refusal` non-empty means nothing was resolved, so a
+            # visible Uninstall button would be an offer the app cannot keep.
+            self._uninstall_plan = None
+            self.uninstall_confirm_button.setVisible(False)
+            self.uninstall_label.setText(result.refusal)
+            return
+        self._uninstall_plan = result
+        self.uninstall_confirm_button.setVisible(True)
+        self._redraw_uninstall_plan()
+
+    @Slot()
+    def _redraw_uninstall_plan(self) -> None:
+        """Re-render the plan for the checkbox's current state.
+
+        The checkbox does not change what `plan()` found, only which of those
+        objects survives - so toggling it re-renders rather than re-planning,
+        and the user is not made to wait for Docker again to read a different
+        sentence.
+        """
+        plan = self._uninstall_plan
+        if plan is None:
+            return
+        keep = self.keep_characters_check.isChecked()
+        lines = [
+            f"This removes {plan.server_dir} ({_size_text(plan.folder_bytes)}) and this "
+            f"server's Docker project {plan.project}:",
+            f"  containers: {', '.join(plan.containers) or 'none left'}",
+            f"  images: {len(plan.images)} built for this install",
+        ]
+        if keep and plan.character_volume:
+            others = [v for v in plan.volumes if v != plan.character_volume]
+            lines.append(f"  volumes removed: {', '.join(others) or 'none'}")
+            lines.append(
+                f"  volumes KEPT: {plan.character_volume} \u2014 your characters. A reinstall "
+                f"to THIS SAME FOLDER finds them again; a reinstall anywhere else does not."
+            )
+        else:
+            lines.append(f"  volumes removed: {', '.join(plan.volumes) or 'none'}")
+            lines.append("  your characters go with the database volume.")
+        lines.append("It does not touch " + "; ".join(plan.left_behind) + ".")
+        if plan.problems:
+            lines.append("Could not determine: " + "; ".join(plan.problems))
+        self.uninstall_label.setText("\n".join(lines))
+
+    @Slot()
+    def run_uninstall(self) -> None:
+        """Remove this install. Refuses until its plan has been shown.
+
+        The `_uninstall_running` guard is belt to `_set_busy`'s braces, and it
+        is here because disabling a button is a statement about the widget
+        while this is a statement about the action: a queued click, a keyboard
+        Space on a button re-enabled by some other path, or a second caller of
+        this slot all reach the seam without ever touching the mouse.
+        """
+        if self.services.uninstall is None:
+            return
+        if self._uninstall_running:
+            return
+        if self._uninstall_plan is None:
+            self.uninstall_label.setText(UNINSTALL_NO_PLAN)
+            self.action_failed.emit(UNINSTALL_NO_PLAN)
+            return
+        keep = self.keep_characters_check.isChecked()
+        uninstall = self.services.uninstall
+        self._uninstall_running = True
+        self._set_busy(True)
+        self.uninstall_label.setText("Uninstalling\u2026")
+        self._run(
+            lambda: uninstall.run(keep_characters=keep),
+            self._uninstall_done,
+            self._uninstall_failed,
+        )
+
+    @Slot(object)
+    def _uninstall_done(self, result: object) -> None:
+        self._uninstall_running = False
+        self._set_busy(False)
+        self._uninstall_plan = None
+        self.uninstall_confirm_button.setVisible(False)
+        report = result if isinstance(result, purge.PurgeReport) else purge.PurgeReport()
+        said = [f"{self.services.controller.server_dir} was removed."]
+        if report.kept_volumes:
+            said.append(
+                f"Kept {', '.join(report.kept_volumes)} \u2014 reinstall to the same folder to "
+                f"find those characters again."
+            )
+        if report.snapshot.path is not None:
+            said.append(f"The server's last log was saved to {report.snapshot.path}.")
+        elif report.snapshot.problem:
+            said.append(f"No log could be saved: {report.snapshot.problem}")
+        said.extend(report.warnings)
+        self.uninstall_label.setText(" ".join(said))
+        # Last, and only on success: the window drops this tab on this signal,
+        # which destroys the view. Nothing may touch `self` after it.
+        self.uninstalled.emit(self.entry.id, self.services.controller.server_dir)
+
+    @Slot(object)
+    def _uninstall_failed(self, exc: object) -> None:
+        """Say why, and make the next press ask for a fresh plan.
+
+        No `uninstalled` signal: the tab is the only surface that can try again,
+        and dropping it here would leave a half-removed install with nothing
+        pointing at it.
+        """
+        self._uninstall_running = False
+        self._set_busy(False)
+        self._uninstall_plan = None
+        self.uninstall_confirm_button.setVisible(False)
+        message = str(exc)
+        self.uninstall_label.setText(message)
+        self.action_failed.emit(message)
 
     @Slot()
     def remove_containers(self) -> None:
@@ -2352,10 +2706,34 @@ class ControllerView(QWidget):
         self.mail_gold_button.clicked.connect(self.mail_gold)
         self.send_gear_button = QPushButton("Send everything worn", actions)
         self.send_gear_button.clicked.connect(self.send_gear_set)
+        # 8.4d. The set-level group is drawn only where the tree HAS such a
+        # command, and where it has not, the space it would have taken carries a
+        # sentence about what the server can do instead. Not a disabled button
+        # (a promise this tab cannot keep), not an empty space (which reads as a
+        # tab that forgot), and not "not supported" (which says nothing a person
+        # can act on): the entry's own `set_level_absent_reason`, measured with
+        # the absence and stored beside it, so this view holds no English about
+        # anybody's server.
+        self.set_level_absent = QLabel("", actions)
+        self.set_level_absent.setWordWrap(True)
+        self.set_level_absent.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow("Teleport to", self.teleport_where)
         form.addRow(self.teleport_button)
-        form.addRow("Level", self.new_level)
-        form.addRow(self.set_level_button)
+        if self._set_level_command() is not None:
+            form.addRow("Level", self.new_level)
+            form.addRow(self.set_level_button)
+            self.set_level_absent.setVisible(False)
+        else:
+            # Hidden as well as un-added: a widget with a parent and no layout
+            # cell still draws itself at the corner of its parent, so leaving
+            # the row out is not by itself leaving the control out.
+            self.new_level.setVisible(False)
+            self.set_level_button.setVisible(False)
+            reason = self.entry.play.set_level_absent_reason if self.entry.play else None
+            self.set_level_absent.setText(reason or "")
+            self.set_level_absent.setVisible(bool(reason))
+            if reason:
+                form.addRow(self.set_level_absent)
         form.addRow(self.rename_button)
         form.addRow(self.revive_button)
         form.addRow("Gold", self.gold_amount)
@@ -2390,14 +2768,24 @@ class ControllerView(QWidget):
         box.addStretch(1)
         self._tabs.addTab(tab, "Characters")
 
-    def character_buttons(self) -> tuple[QPushButton, ...]:
-        """Every control that acts on the chosen character.
+    def _set_level_command(self) -> str | None:
+        """This tree's set-level verb, or None where its console has no route.
 
-        One tuple, so the enabling, the naming and the tests all walk the same
-        list -- a seventh button added to the form and forgotten here would be
-        the one that stays enabled with nothing selected.
+        Read from the entry rather than decided by id, which is 8.4d's own
+        clause: a tab that knows Tortoise by name is a tab that is wrong about
+        the fifth game.
         """
-        return (
+        return self.entry.play.set_level_command if self.entry.play is not None else None
+
+    def _character_actions(self) -> tuple[tuple[QPushButton, str], ...]:
+        """The controls this TREE has, each with the verb that labels it.
+
+        Pairs rather than two lists, because the two have to stay in step and a
+        `zip(..., strict=True)` over a list that is now conditional would fail
+        on the first selection instead of on the drawing. A button withheld
+        here is withheld from the naming, the enabling and the tests at once.
+        """
+        every = (
             self.teleport_button,
             self.set_level_button,
             self.rename_button,
@@ -2405,30 +2793,71 @@ class ControllerView(QWidget):
             self.mail_gold_button,
             self.send_gear_button,
         )
+        drawn = self._set_level_command() is not None
+        return tuple(
+            (button, label)
+            for button, label in zip(every, _CHARACTER_ACTIONS, strict=True)
+            if drawn or button is not self.set_level_button
+        )
+
+    def character_buttons(self) -> tuple[QPushButton, ...]:
+        """Every control that acts on the chosen character, ON THIS TREE.
+
+        One tuple, so the enabling, the naming and the tests all walk the same
+        list -- a seventh button added to the form and forgotten here would be
+        the one that stays enabled with nothing selected.
+        """
+        return tuple(button for button, _ in self._character_actions())
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
-            for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+            for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
         online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
-        for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+        for button, label in self._character_actions():
             button.setText(f"{label} {name}")
             button.setEnabled(True)
-        if not online:
-            # Measured on the live server, 2026-09-07: `revive` on an offline
-            # character answers SUCCESS and does nothing -- the row read health 0
-            # before and health 0 twenty seconds after. It acts on a live player
-            # object and an offline character has none. Every other action here
-            # works offline; the teleport's own help says so in as many words.
+        offline_rename = self._rename_offline_refusal()
+        if not online and offline_rename:
+            # 8.4d, and it is a sharper case than the revive one below: the
+            # command is not merely ineffective offline on that fork, it does
+            # something ELSE. `rename <char>` with no new name flags the rename
+            # for a character who is logged in (`Commands.cpp:12612-12623`); for
+            # one who is not, the same spelling runs
+            # `UPDATE characters SET name = guid` (`:12624-12635`) and the name
+            # is gone. So the refusal is the entry's, per tree, and it names
+            # what the server would have done rather than only saying no.
+            self.rename_button.setEnabled(False)
+            self.rename_button.setText(f"{name} {offline_rename}")
+        if not online and not self._revive_works_offline():
+            # Whether an offline revive does anything is a PER-TREE fact and the
+            # entry carries it. It was a constant here, on the strength of a
+            # reading taken on two other trees: `characters.health` before and
+            # after, 0 and 0, "so the command does nothing". 8.4c looked at the
+            # CORPSE on the Vanilla server instead and watched it go, on a
+            # character that never logged in -- the offline branch is
+            # `ConvertCorpseForPlayer`, which resurrects at the next login and
+            # touches no health. Every other action here works offline; the
+            # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails = self._gear_set_size(name)
-        if pieces:
+        pieces, mails, refusal = self._gear_set_size(name)
+        self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        if refusal is not None:
+            # The read did not answer, and WHY is the only useful thing to draw.
+            # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
+            # characters there are called Joleta, the read raised, and this
+            # branch used to fall through to "wearing nothing" -- a sentence
+            # about the character that was false, in place of a sentence about
+            # the server that was true.
+            self.send_gear_button.setText(refusal[0])
+            self.send_gear_button.setEnabled(False)
+        elif pieces:
             plural = "mail" if mails == 1 else "mails"
             self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
         else:
@@ -2437,16 +2866,41 @@ class ControllerView(QWidget):
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
 
-    def _gear_set_size(self, name: str) -> tuple[int, int]:
+    def _revive_works_offline(self) -> bool:
+        """Only where this tree's own box measured that it does.
+
+        A missing block and an unmeasured field both mean "do not offer it",
+        which is the same answer for the same reason: nobody has run the command
+        against that server and watched what it did.
+        """
+        return bool(self.entry.play is not None and self.entry.play.revive_offline)
+
+    def _rename_offline_refusal(self) -> str:
+        """What to say instead of flagging a rename on a character who is out.
+
+        Empty on every tree whose entry carries no such refusal, which is the
+        honest default here and not the one `revive_offline` takes: a rename
+        flag is offered until a tree has been measured to do something worse,
+        and this app has watched three trees do the harmless thing.
+        """
+        play = self.entry.play
+        return (play.rename_offline_refusal or "") if play is not None else ""
+
+    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+        """The set's size, or why there is not one -- short enough for the
+        button, and in full for the tooltip behind it."""
         play = self.services.play
         if play is None:
-            return (0, 0)
+            return (0, 0, None)
         try:
             pieces, mails = play.gear_set_size(name)  # type: ignore[attr-defined]
-            return (int(pieces), int(mails))
+            return (int(pieces), int(mails), None)
+        except play_module.Ambiguous as exc:
+            logger.info(f"could not size {name}'s gear: {exc}")
+            return (0, 0, (exc.summary, str(exc)))
         except Exception as exc:  # noqa: BLE001 - a read that failed is not a press
             logger.info(f"could not size {name}'s gear: {exc}")
-            return (0, 0)
+            return (0, 0, (f"Could not read what {name} is wearing", str(exc)))
 
     def _chosen_character(self) -> str:
         item = self.character_list.currentItem()
@@ -3187,10 +3641,44 @@ class ControllerView(QWidget):
         applier = self.services.applier
         if manifest is None or applier is None:
             return
+        go_ahead, values = self._module_values(manifest, action)
+        if not go_ahead:
+            self._module_pending = None
+            self.module_report.setPlainText(
+                f"{action} {manifest.id}: cancelled — nothing on this machine was changed."
+            )
+            return
         run = applier.install if action == "install" else applier.remove
         self._module_pending = f"{action} {manifest.id}"
         self.module_report.setPlainText(f"{self._module_pending}…")
-        self._run(lambda: run(manifest), self._module_done, self._module_failed)
+        self._run(lambda: run(manifest, values), self._module_done, self._module_failed)
+
+    def _module_values(
+        self, manifest: Manifest, action: str
+    ) -> tuple[bool, Mapping[str, str] | None]:
+        """Whether to go ahead, and the answers to hand the applier.
+
+        Two values rather than a sentinel because there are three outcomes and
+        only one of them is a mapping: go ahead with answers, go ahead with
+        `None` (the manifest asked nothing, which is byte-for-byte the old
+        call), and do not go ahead at all.
+
+        The tab asked nothing and passed nothing until 2026-09-07, which made
+        `mod-ah-bot` and `mod-ah-bot-plus` — the only two shipped manifests with
+        a prompt carrying no default — unreachable from the GUI: the applier
+        filled in every prompt that HAD a default and then raised on the one
+        that did not, after the clone. See `widgets/manifest_prompt.py`.
+
+        The gate is deliberately narrow. A dialog opens only when this action
+        would really render a value the manifest has no default for, so 39 of
+        the 41 manifests get no new window and the applier gets `None` rather
+        than `{}` — the call it has always been given.
+        """
+        needed = required_prompts(manifest, cast(When, action))
+        if not any(prompt.default is None for prompt in needed):
+            return True, None
+        answers = self._prompt_asker(self, manifest, needed)
+        return (False, None) if answers is None else (True, answers)
 
     @Slot(object)
     def _module_done(self, result: object) -> None:
@@ -3297,14 +3785,139 @@ class ControllerView(QWidget):
 # ------------------------------------------------------------- formatting
 
 
+NO_REBUILD_CONTROL = (
+    "nothing in this app rebuilds a worldserver — there is no such button, on any tab"
+)
+"""FACT 4, established 2026-09-07: every `QPushButton` in `yulon/ui/` was listed.
+
+None of them rebuilds. `catalog/native.py`'s `stage_build()` skips the compile
+whenever `built_images()` answers true, and the image tag is derived from the
+install folder's name — so adding a module to `modules/` cannot even change the
+tag that would make the build stage notice. The report used to end with
+
+    ⚠ worldserver REBUILD required before this takes effect
+
+which reads as an instruction, and sent its reader looking for a control that
+has never existed. This sentence is here so that the app says what is true of
+itself rather than what would be convenient."""
+
+NO_IMPORT_CONTROL = (
+    "a Start deliberately skips AzerothCore's importer — it brings up only the three "
+    "long-running services — and Repair refuses a database that is already complete. "
+    "Applying it means stopping the server and running the importer by hand; Yu'lon "
+    "cannot finish this one for you yet"
+)
+"""FACT 5, and the reason the honest word here is "yet".
+
+`docker.apply_module_sql()` exists and was measured working on yulon-ubuntu
+2026-09-07 — the same one-shot with `AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot`
+applied `aoe_loot_module_string.sql` and moved `acore_world.updates` 2967 → 2968
+— but no widget in this file calls it, so naming it here would be the same fault
+as naming a rebuild button. What is claimed is only what this app can be seen
+not to do."""
+
+
+def _pending_sql_lines(pending: Sequence[PendingSql]) -> list[str]:
+    """One line per deferred SQL step, saying what is on disk and unapplied.
+
+    Three shapes because `PendingSql.files` has three answers — but all three
+    say NOT applied, and the empty one earned that the hard way. The first live
+    run of this code (yulon-ubuntu, 2026-09-07, the real applier against
+    `/home/pk/wowserver`) installed `mod-aoe-loot` and resolved its manifest
+    glob `data/sql/db-world/*.sql` to nothing at all. The draft line here read
+    "nothing to apply", and it was false: that clone carries
+    `data/sql/db-world/base/aoe_loot_module_string.sql`, one directory deeper —
+    the very file FACT 1 watched the importer apply, moving `acore_world.updates`
+    2967 → 2968 an hour earlier. Two sibling modules cloned the same minute put
+    theirs straight in `db-world/` (mod-solocraft: 1 file; mod-transmog: 3, plus
+    an `updates/` folder), so the layout is per-repository and the manifest's
+    glob is Yu'lon's own bookkeeping, not the importer's rule — upstream's
+    `UpdateFetcher.cpp:159-186` walks the module's `data/sql` tree itself and
+    never sees that pattern. So "the glob matched nothing" means this app cannot
+    count, NOT that the module has no SQL, and replacing one confident lie with
+    a quieter one would have been the whole of this box's defect again.
+    """
+    lines = []
+    for step in pending:
+        where = f"the {step.db} database"
+        if step.files is None:
+            lines.append(
+                f"  ! NOT applied: {step.path} → {where}, and this app could not work out "
+                "which files that is"
+            )
+        elif not step.files:
+            lines.append(
+                f"  ! NOT applied: nothing in the clone matches {step.path}, so this app "
+                f"cannot say how much SQL {where} is owed — the module may still carry some "
+                "in a folder this pattern misses, and AzerothCore's importer looks for itself"
+            )
+        else:
+            count = len(step.files)
+            plural = "" if count == 1 else "s"
+            lines.append(f"  ! NOT applied: {count} file{plural} matching {step.path} → {where}")
+    return lines
+
+
 def _format_report(report: ApplyReport) -> str:
-    lines = [f"{report.action} {report.item_id}:"]
+    """The run, drawn so that every tick is something that happened.
+
+    Two things were wrong with this function on 2026-09-07 and they are the same
+    thing twice: it stated as fact what it had not checked, and it named a next
+    action that does not exist.
+
+    The ticks came from `ApplyReport.done`, and `apply.py` put its deferred SQL
+    step in that list — so the live applier reported `DONE: sql
+    data/sql/db-world/*.sql -> world: left to ac-db-import on next start` over
+    an install where the SQL was never applied and nothing was going to apply
+    it. That half is fixed in `apply.py`; here it means `pending_sql` is drawn
+    with the other mark and the other verb (see `_pending_sql_lines`).
+
+    The closing line said a REBUILD was required, which is true and useless:
+    there is no rebuild control (`NO_REBUILD_CONTROL`). It also said it for
+    every C++ module and for nothing else, which is the right split by accident
+    — counted through `parse_manifest` on 2026-09-07, `build.rebuild` is true
+    for 20 of the 41 shipped manifests, all of type `module`, and false for the
+    other 21 (7 ale, 2 keg, 11 mod, and `mod-arac`). A data-only one really does
+    work without a recompile, so "this needs a rebuild" and "restart to apply"
+    are two different messages about two different halves of the catalog, and
+    the report says which half this item is in rather than leaving the reader to
+    infer it from the presence of a warning.
+
+    Nothing here is asserted about the machine. Every claim is about this app's
+    own code, which is the same code on Windows as on the Linux box the
+    measurements were taken on — deliberately, because the install the real user
+    runs was built by the DML bash installer and this app has never been run
+    against one of those.
+    """
+    item = report.item_id
+    lines = [f"{report.action} {item}:"]
     lines += [f"  ✓ {step}" for step in report.done]
     lines += [f"  – skipped: {step}" for step in report.skipped]
+    lines += _pending_sql_lines(report.pending_sql)
     if report.rebuild_required:
-        lines.append("  ⚠ worldserver REBUILD required before this takes effect")
+        if report.action == "remove":
+            lines.append(
+                f"  ⚠ {item} is a C++ module: it is off disk now, but the worldserver still "
+                f"runs whatever was compiled into it, and {NO_REBUILD_CONTROL}. If {item} was "
+                "in the last build it is still in there, and will be until someone rebuilds "
+                "by hand."
+            )
+        else:
+            lines.append(
+                f"  ⚠ {item} is a C++ module: it does nothing until its code is compiled into "
+                f"the worldserver, and {NO_REBUILD_CONTROL}. It is on disk and inert until "
+                "someone rebuilds by hand."
+            )
     elif report.restart_recommended:
-        lines.append("  ⚠ restart the server to apply")
+        lines.append("  ⚠ Press Stop and then Start on the Server tab to apply this.")
+    if report.pending_sql:
+        # Every deferred step, including the one whose glob matched nothing: a
+        # zero match is this app failing to count, not the module having no SQL
+        # (see `_pending_sql_lines`, and mod-aoe-loot on 2026-09-07). Warning
+        # about SQL that turns out not to exist costs a sentence; staying quiet
+        # about SQL that does is the defect this box is named after.
+        also = " either" if report.rebuild_required else ""
+        lines.append(f"  ⚠ No button here applies that SQL{also}: {NO_IMPORT_CONTROL}.")
     return "\n".join(lines)
 
 

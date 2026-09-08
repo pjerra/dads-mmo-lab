@@ -25,8 +25,10 @@ replaced with the `(name, guid)` cursor; copying it produces a TypeError on the
 paging stage, mid-gate, on a box where the server had to be started for the run.
 Nobody should copy that file again.
 
-Four things here were measured on `~/vanilla-75b` on 2026-09-07 with the server
-DOWN, and are asserted rather than discovered:
+RUN, end to end, on 2026-09-07 between 20:59:53Z and 21:05:44Z with the stack up
+and its pool full; `transcript.txt` beside this file is the run. What follows was
+read off `~/vanilla-75b` with the server DOWN earlier that day and is asserted
+here rather than discovered -- every one of them held when the server came up:
 
   * the marker is `RNDBOT`, `etc/aiplayerbot.conf:57`, with Min/Max 500 at :51-52
   * there is no `playerbots` schema in the install's volume, so `registry: null`
@@ -39,6 +41,18 @@ DOWN, and are asserted rather than discovered:
     install's `etc/mangosd.conf:931` reads `AllowTwoSide.WhoList = 0`. The same
     handler also honours `GM.InWhoList.Level` (`mangosd.conf:1278` = 3) and the
     client's own level range.
+
+Min/Max 500 is a number of SESSIONS and not of characters, which the run settled:
+the tab counted 900 bot characters while 500 were online, at 20:59:53Z and again
+at 21:05:07Z. The pool was full for the whole run, so no reading here is a
+half-filled server being read early.
+
+Every line number above and below was re-checked against this tree on 2026-09-07
+after the run. Four inherited citations were WRONG and are corrected in place --
+`dbreads.py:132-137` for the catalog-default fallback is really :144-158, the
+resolver's blank refusal :166-173 is really :174-181, `botlist.py:138-144` is
+really :147-153, and `apply.py:499-501` is really :500-503. They were all
+plausible and all off; a citation is a claim like any other.
 """
 
 from __future__ import annotations
@@ -51,6 +65,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path.home() / "gate85c" / "pylauncher"))
+# Its OWN copy of the tree, and not the `~/gate84c/pylauncher` the box already
+# had. That copy's `yulon/ui/controller_view.py` was a commit behind (md5
+# 5b10b774 against HEAD's 1db1d8b1, 2026-09-07): the manifest-prompt work landed
+# after it was taken. Nothing on the bot path differs, which is the point --
+# a gate cannot report that a difference was harmless without first knowing
+# there was one, and a shared checkout on a box where other lanes run is a
+# thing that moves under the run.
 
 from yulon import botlist, dbreads  # noqa: E402
 from yulon.catalog.catalog import load_catalog  # noqa: E402
@@ -95,7 +116,7 @@ def by_hand(statement: str) -> str:
         MYSQL_PWD=$(cat ~/vanilla-75b/.db_password) \\
           docker exec -e MYSQL_PWD -i vanilla-db mariadb -uroot -N -B -e '<sql>'
 
-    with the password in the ENVIRONMENT and never in argv. `apply.py:499-501`
+    with the password in the ENVIRONMENT and never in argv. `apply.py:500-503`
     refuses to put a statement in argv for exactly this reason -- argv is
     world-readable (`ps`, Task Manager, /proc/<pid>/cmdline) -- and m910q is a
     shared box where other gates run at the same time.
@@ -115,11 +136,11 @@ def fake_conf(name: str, value: str) -> Path:
     A COPY OF THE DIRECTORY, not of the file: `dbreads.resolve_marker` opens
     `<dir>/etc/aiplayerbot.conf`, so a conf dropped at the root of a temporary
     directory is simply not found -- and a not-found conf is NOT a refusal here.
-    `dbreads.py:132-137` returns the catalog default on FileNotFoundError, and
+    `dbreads.py:144-158` returns the catalog default on FileNotFoundError, and
     wow-vanilla's catalog default is `rndbot`, which is this install's live
     value. The blank-marker stage would then have answered with a working marker
     and a plausible non-zero total (adversarial review of 8.5c's plan,
-    2026-09-07). `gate81c.py:93-107` had the shape right; this is it.
+    2026-09-07). `gate81c.py:92-97` had the shape right; this is it.
     """
     root = Path("/tmp") / name
     shutil.rmtree(root, ignore_errors=True)
@@ -214,8 +235,8 @@ def stage_refuse() -> None:
 
     TWO refusals live on this path and they are not the same one. Through
     `_BotBrowser.page()` the resolver refuses first, and its sentence names the
-    conf KEY and the FILE (`dbreads.py:166-173`); `botlist.page`'s own refusal
-    (`botlist.py:138-144`, "an empty marker would match every account") is
+    conf KEY and the FILE (`dbreads.py:174-181`); `botlist.page`'s own refusal
+    (`botlist.py:147-153`, "an empty marker would match every account") is
     reached only by handing it a `Marker(prefix='')` directly, which is what
     8.5a did. Both are exercised here and each is labelled, because "the marker
     refused" said of a screenshot does not say which of them.
@@ -259,7 +280,7 @@ def stage_warn() -> None:
     `test_a_marker_matching_nothing_while_characters_exist_warns` already covers
     in CI; the live gate adds something only when the resolver, the clause
     builder, the server and the sentence are all in the loop (adversarial review
-    of 8.5c's plan, 2026-09-07). `gate81c.py:93` did it this way on this same
+    of 8.5c's plan, 2026-09-07). `gate81c.py:92-105` did it this way on this same
     install.
 
     8.5b reached this clause first, on TBC, and settled its wording: the tab
@@ -284,6 +305,16 @@ def stage_warn() -> None:
     )
     everyone = by_hand(f"SELECT COUNT(*) FROM {TABLE};")
     say(f"by hand, the same marker: {hand_zero}; characters on the server: {everyone}")
+
+    # The ground this stage stands on. Without it the warning is a sentence
+    # about a server that might simply have no bots, and "the assertion was
+    # already true before the command" is 8.4a's own defect. Read at the same
+    # moment through the same seam, with only the conf swapped.
+    live = services().bots.page()
+    say(f"the live install at the same moment: total={live.total} warning={live.warning!r}")
+    assert live.total and live.warning == "", (
+        "the live marker is not answering either; this stage would prove nothing"
+    )
 
     assert page.problem == "", "it failed rather than answering"
     assert page.total == 0 == int(hand_zero)
@@ -324,7 +355,7 @@ def stage_filterzero() -> None:
     assert unfiltered.warning == ""
 
     # `%` and `_` are the two LIKE wildcards, and this is the escaping
-    # (`botlist.py:107-116`, `!` because NO_BACKSLASH_ESCAPES is real) exercised
+    # (`botlist.py:116-125`, `!` because NO_BACKSLASH_ESCAPES is real) exercised
     # against a live MariaDB rather than against a stub. Unescaped, `%_` matches
     # every name of at least one character and the total would be the whole
     # list; escaped, it is a literal two-character name nobody has.
@@ -469,10 +500,34 @@ def races() -> dict[int, str]:
     return out
 
 
+def race_names() -> dict[int, str]:
+    """Each race's own name, so a person can check the number against a word.
+
+    Field 17 is `m_name_lang`'s enUS slot (`DBCStructure.h:199`), an offset into
+    the string block that begins at `records * size + 20`. Added after the first
+    run: `races()` answered `race 6: HORDE`, and "6 is Tauren" was a thing this
+    session would otherwise have known only by remembering it. A faction handed
+    to another lane as a bare number is a fact nobody downstream can check.
+    """
+    path = SERVER_DIR / "data" / "dbc" / "ChrRaces.dbc"
+    blob = path.read_bytes()
+    _magic, count, fields, size, _strings = struct.unpack("<4siiii", blob[:20])
+    block = 20 + count * size
+    out: dict[int, str] = {}
+    for i in range(count):
+        row = struct.unpack(f"<{fields}i", blob[20 + i * size : 20 + (i + 1) * size])
+        start = block + row[17]
+        out[row[0]] = blob[start : blob.index(b"\0", start)].decode("utf-8", "replace")
+    return out
+
+
 def stage_races() -> None:
-    said = races()
+    said, named = races(), race_names()
     for race, team in sorted(said.items()):
-        say(f"race {race}: {team}")
+        say(f"race {race} ({named[race]}): {team}")
+    assert named[1] == "Human" and named[6] == "Tauren", (
+        f"the name block does not read as a race list: {named}"
+    )
     assert said.get(11) is None, "race 11 exists here; 8.5a's map may apply after all"
     say(f"PASSED: the map came off {SERVER_DIR / 'data/dbc/ChrRaces.dbc'}, not off a sibling gate")
 
@@ -513,7 +568,10 @@ def stage_who() -> None:
     )
     asker_race = int(rows[0][2])
     team = races()[asker_race]
-    say(f"asking character: {rows[0][1]}, race {asker_race} ({team}), level {rows[0][3]}")
+    say(
+        f"asking character: {rows[0][1]}, race {asker_race} "
+        f"({race_names()[asker_race]}, {team}), level {rows[0][3]}"
+    )
 
     browser = services().bots
     online: list[str] = []

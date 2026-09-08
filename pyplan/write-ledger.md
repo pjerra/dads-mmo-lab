@@ -112,6 +112,8 @@ descriptions are written by hand.
 | `networking.py::write_client_realmlist::write_text` | `realmlist.wtf` in the user's client folder | yes |
 | `platform.py::_download_curl::unlink` | the `.part` file after a failed download | n/a |
 | `platform.py::download_verified::replace` | a verified download renamed onto its final name | n/a |
+| `purge.py::remove_tree::shutil.rmtree` | **new (8.9a)** the whole server folder of the install being uninstalled, and the largest single write in this table. Twice in one function is one row: the plain delete, then the retry after `_clear_read_only()`. It NEVER swallows a failure - the Rust prior art's `let _ = remove_dir_all(...)` reports a successful uninstall on Windows having deleted nothing | **no - the purge refuses while any container of the project is running**, asked of `docker.running_census().ours` before any command is issued |
+| `purge.py::_clear_read_only::os.chmod` | **new (8.9a)** the write bit, back onto every file and directory under the folder the delete has already failed on once. Git writes packs and loose objects read-only and Windows honours that attribute, so a bare `rmtree` stops partway and leaves a checkout that is neither an install nor absent | **no** - same moment, after the same refusal |
 | `state.py::load_state::replace` | an unreadable `state.json` moved aside to a backup | n/a |
 | `state.py::save_state::replace` | `state.json` renamed into place | n/a |
 | `state.py::save_state::write_text` | `state.json`, to a temp name | n/a — the app's own record |

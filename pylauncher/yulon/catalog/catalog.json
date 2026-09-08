@@ -98,7 +98,9 @@
           "inventory_column": "item"
         },
         "teleport_command": "teleport name",
-        "mail_item_cap": 12
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": {
@@ -492,7 +494,9 @@
       "play": {
         "equipped": { "template_column": "item_template" },
         "teleport_command": "tele name",
-        "mail_item_cap": 12
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
@@ -887,7 +891,10 @@
       "play": {
         "equipped": { "template_column": "item_template" },
         "teleport_command": "tele name",
-        "mail_item_cap": 1
+        "mail_item_cap": 1,
+        "revive_offline": true,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
@@ -1216,6 +1223,16 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 1,
+        "revive_offline": true,
+        "rename_command": "rename",
+        "rename_offline_refusal": "has to be logged in before a rename can be flagged on this server -- the same command run on an offline character here replaces the name with the character's guid instead, so it is not sent",
+        "set_level_command": null,
+        "set_level_absent_reason": "No set-level control on this server. Nothing its console can run moves an existing character to a level you pick: `.levelup` is the one that would, and the console is not allowed to run it, while `.rndbot <bot> level` ignores the number it is handed and re-rolls that bot at the level it already has. What the console can do is `.reset level`, which puts a character who is logged in back to the configured starting level, and `.rndbot create level=<n>`, which makes a NEW character at the level you name rather than moving one that is already there."
       },
       "accounts": {
         "level": { "level_column": "rank", "max_level": 4 },

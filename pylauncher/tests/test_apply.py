@@ -180,7 +180,91 @@ def test_module_install_touches_include_sh_activates_conf_and_writes_keys(tmp_pa
     assert "AuctionHouseBot.EnableSeller = 1\n" in conf
     assert conf.endswith("AuctionHouseBot.NewKey = 7\n")  # absent key is appended
     assert report.rebuild_required is True
-    assert any("ac-db-import" in step for step in report.done)  # db-import SQL is NOT run here
+    # db-import SQL is NOT run here. Until 2026-09-07 that fact was in `done`.
+    assert not any("sql" in step for step in report.done)
+    assert [p.db for p in report.pending_sql] == ["world"]
+
+
+def _ahbot_git(*sql_files: str) -> _FakeGit:
+    files = {"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"}
+    files.update({name: f"-- {name}" for name in sql_files})
+    return _FakeGit(files)
+
+
+def test_db_import_sql_is_pending_with_the_files_it_really_found(tmp_path: Path) -> None:
+    """8.7a: a step nothing ran must not be in `done`, and the count must be real.
+
+    Measured on yulon-ubuntu 2026-09-07: `apply.py` appended
+    `sql data/sql/db-world/*.sql -> world: left to ac-db-import on next start`
+    to `done` having run nothing and looked at nothing — not even whether the
+    glob matched a file — and the Modules tab ticks every `done` entry. So the
+    two things this asserts are the two things that were missing: the step is
+    not claimed, and the glob was actually resolved against the clone.
+    """
+    git = _ahbot_git("data/sql/db-world/b.sql", "data/sql/db-world/a.sql")
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+
+    report = applier.install(parse_manifest(MODULE), {"bot_guid": "42"})
+
+    assert not any("sql" in step for step in report.done)
+    assert report.skipped == ()
+    assert len(report.pending_sql) == 1
+    pending = report.pending_sql[0]
+    assert pending.db == "world"
+    assert pending.path == "data/sql/db-world/*.sql"
+    assert pending.files == ("data/sql/db-world/a.sql", "data/sql/db-world/b.sql")
+
+
+def test_a_caller_tells_applied_from_not_applied_without_reading_a_sentence(
+    tmp_path: Path,
+) -> None:
+    """The whole point of the field: `pending_sql` empty means nothing is owed.
+
+    A caller that decided by grepping "left to ac-db-import" out of `done` would
+    be the same defect one layer up — the report's own English is not an API.
+    """
+    ale_git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"})
+    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(parse_manifest(ALE))
+    assert direct.pending_sql == ()
+
+    deferred = Applier(
+        tmp_path / "mod", git=_ahbot_git("data/sql/db-world/a.sql"), sql=_FakeSql()
+    ).install(parse_manifest(MODULE), {"bot_guid": "42"})
+    assert deferred.pending_sql != ()
+
+
+def test_a_db_import_glob_matching_nothing_reports_none_rather_than_a_guess(
+    tmp_path: Path,
+) -> None:
+    """An empty match is a fact worth having: the clone brought no SQL at all.
+
+    `_run_sql` raises for a direct step whose file is missing, but a db-import
+    step must not — upstream's own updater joins the module's `data/sql` path
+    and skips what is not there (`UpdateFetcher.cpp:159-186`), so a module with
+    no SQL is normal, not broken. It is still not "one file was applied".
+    """
+    report = Applier(tmp_path, git=_ahbot_git(), sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    assert report.pending_sql[0].files == ()
+
+
+def test_a_templated_db_import_path_answers_unknown_not_zero(tmp_path: Path) -> None:
+    """`{key}` in a db-import path is a count this run cannot take, not a zero.
+
+    No shipped manifest has one, and `_action_templates` deliberately leaves
+    db-import paths out of `required_prompts` — so a value for the key was never
+    asked for and rendering it here would raise on a step that is not being run.
+    Globbing the raw `{key}` instead would match nothing and report a confident
+    "no files", which is the lie this box exists to remove. `None` is the third
+    answer, the same one `importer_sees_modules()` keeps for "cannot tell".
+    """
+    step = {"db": "world", "path": "data/sql/{flavour}/*.sql", "applied_by": "db-import"}
+    data = {**MODULE, "sql": [step]}
+    report = Applier(tmp_path, git=_ahbot_git("data/sql/db-world/a.sql"), sql=_FakeSql()).install(
+        parse_manifest(data), {"bot_guid": "42"}
+    )
+    assert report.pending_sql[0].files is None
 
 
 def test_missing_template_value_is_an_error_not_garbage(tmp_path: Path) -> None:
@@ -1768,3 +1852,194 @@ def test_the_relocation_licence_needs_a_clone_id_that_is_a_string(
 
     assert (clone / "src" / "mine.cpp").read_bytes() == before
     assert sql.statements == [] and sql.files == []
+
+
+# ------------------------------------------------- the two AH bot modules
+#
+# FACT 3 of the 2026-09-07 night's measurements: `mod-ah-bot` and
+# `mod-ah-bot-plus` are the only 2 of the 41 shipped manifests carrying a prompt
+# with no default, and the Modules tab called the applier with no values at all,
+# so the only thing either of them could produce was
+# `conf AuctionHouseBot.GUIDs: no value for {bot_guid}` — AFTER the clone.
+
+
+class _FakeReader(_FakeSql):
+    """A `SqlRunner` that can also be read, like the real `DockerSql` can.
+
+    `rows` is what `query()` hands back; `""` is the answer a SELECT gives for
+    "no such row", which is the case the whole existence check exists for. A
+    reader whose `fail` is set raises instead, which is a DIFFERENT answer and
+    must not be confused with the empty one: a database that is stopped has not
+    said the character is missing.
+    """
+
+    def __init__(self, rows: str = "", fail: str = "") -> None:
+        super().__init__()
+        self.rows = rows
+        self.fail = fail
+        self.queries: list[tuple[str, str]] = []
+
+    def query(self, db: str, statement: str) -> str:
+        self.queries.append((db, statement))
+        if self.fail:
+            raise RuntimeError(self.fail)
+        return self.rows
+
+
+def _shipped(item_id: str) -> Any:
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    return wotlk_modules.store().load("module", item_id)
+
+
+AHBOT_DIST = (
+    "[worldserver]\nAuctionHouseBot.Account = 0\nAuctionHouseBot.GUID = 0\n"
+    "AuctionHouseBot.GUIDs = 0\nAuctionHouseBot.EnableSeller = 0\n"
+)
+
+
+def test_the_ah_bot_install_refuses_an_unanswered_prompt_before_it_clones(tmp_path: Path) -> None:
+    """The headline: no answer installs NOTHING, not a half-installed module."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+
+    with pytest.raises(ApplyError) as refusal:
+        applier.install(_shipped("mod-ah-bot"))
+
+    assert "GUID of the AH bot character" in str(refusal.value)
+    assert git.calls == [], "it cloned before it checked the answer it was given"
+    assert not (tmp_path / "modules" / "mod-ah-bot").exists()
+
+
+def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Path) -> None:
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+
+    for bad, said in (
+        ("", "cannot be left empty"),
+        ("  ", "cannot be left empty"),
+        ("four", "whole number"),
+        ("42x", "whole number"),
+        ("1.5", "whole number"),
+    ):
+        with pytest.raises(ApplyError) as refusal:
+            applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": bad})
+        assert said in str(refusal.value), (bad, str(refusal.value))
+        assert "GUID of the AH bot character" in str(refusal.value), bad
+    assert git.calls == []
+    assert not (tmp_path / "modules").exists(), "a refused install left a folder behind"
+
+
+def test_installing_the_ah_bot_with_a_real_guid_writes_that_number(tmp_path: Path) -> None:
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="Ahbot\n")
+    report = Applier(tmp_path, git=git, sql=reader).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+    )
+
+    conf = (tmp_path / "env/dist/etc/modules/mod_ahbot.conf").read_text(encoding="utf-8")
+    assert "AuctionHouseBot.GUID = 42\n" in conf
+    assert "AuctionHouseBot.Account = 7\n" in conf
+    assert report.rebuild_required is True
+    assert [db for db, _ in reader.queries] == ["characters", "characters"]
+    assert "42" in reader.queries[0][1]
+
+
+def test_a_guid_that_names_no_character_is_refused_by_name(tmp_path: Path) -> None:
+    """The silent no-op FACT 5 of the module's own behaviour: it just does nothing."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows=""))
+
+    with pytest.raises(ApplyError) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    assert "999" in str(refusal.value)
+    assert "character" in str(refusal.value)
+    assert git.calls == []
+
+
+def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Path) -> None:
+    """ "I could not check" is said out loud, never spelled like "I checked"."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        _shipped("mod-ah-bot-plus"), {"bot_guid": "42"}
+    )
+    assert any(
+        "not checked" in s.lower() and "bot_guid" in s for s in report.skipped
+    ), report.skipped
+
+    # A reader that RAISED is the same answer, not "the character is missing":
+    # a stopped database must not make a module uninstallable.
+    stopped = _FakeReader(fail="Error response from daemon: container not running")
+    second = Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped)
+    report2 = second.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "42"})
+    assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
+
+
+def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:
+    """Removing the AH bot renders no template, so it must ask the user nothing."""
+    ahbot = _shipped("mod-ah-bot")
+    assert [p.key for p in apply_module.required_prompts(ahbot, "install")] == [
+        "bot_guid",
+        "bot_account",
+    ]
+    assert apply_module.required_prompts(ahbot, "remove") == ()
+
+    every = _shipped_all()
+    unanswered = {
+        m.id
+        for m in every
+        if any(p.default is None for p in apply_module.required_prompts(m, "install"))
+    }
+    assert unanswered == {"mod-ah-bot", "mod-ah-bot-plus"}, unanswered
+
+
+def test_every_other_shipped_manifest_still_installs_without_being_asked_anything() -> None:
+    """The 39 that were never the problem must not have become uninstallable.
+
+    `_check_values()` began refusing an answer `check_answer()` rejects on
+    2026-09-07, as the first statement of `install()`. That is the fix for
+    `mod-ah-bot`, and it is also a NEW way for a manifest that worked to stop
+    working: a `choice` whose default is not among its own `choices`, a `bool`
+    defaulting to a word this app does not know, an `int` defaulting to `"1.5"`
+    — each of those used to be written into a conf file unread, and each is now
+    a refusal before the clone.
+
+    The sibling test above pins WHICH manifests have to ask a human something.
+    This one pins that every other answer the app fills in for itself is one it
+    would accept, which is the half that turns a shipped default into a broken
+    Install button. Counted on 2026-09-07 over the 41 `wow-wotlk` manifests this
+    sweeps: 54 prompts, of which exactly 3 carry no default — `mod-ah-bot`'s two
+    and `mod-ah-bot-plus`'s one — so 51 defaults are asserted here.
+
+    It was watched failing before it was kept: setting `hearthstone-cd`'s
+    `cooldown` default to `"45_Min_Nope"` produced
+
+        AssertionError: ["hearthstone-cd install cooldown='45_Min_Nope':
+        choose one of: 1_Sec, 1_Min, 5_Min, 15_Min, 30_Min"]
+    """
+    refused = []
+    for manifest in _shipped_all():
+        for action in ("install", "configure", "remove"):
+            for prompt in apply_module.required_prompts(manifest, action):
+                if prompt.default is None:
+                    continue  # the sibling test owns which manifests may do this
+                problem = apply_module.check_answer(prompt, prompt.default)
+                if problem:
+                    refused.append(
+                        f"{manifest.id} {action} {prompt.key}={prompt.default!r}: {problem}"
+                    )
+    assert refused == [], refused
+
+
+def _shipped_all() -> list[Any]:
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    store = wotlk_modules.store()
+    out: list[Any] = []
+    for kind in ("module", "ale", "mod", "keg"):
+        try:
+            out.extend(store.load_all(kind))
+        except Exception:  # a family this game does not ship
+            continue
+    return out

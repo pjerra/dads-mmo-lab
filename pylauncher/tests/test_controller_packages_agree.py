@@ -267,6 +267,17 @@ def test_the_dump_the_restore_and_the_listing_all_use_the_declared_client() -> N
         monkey.undo()
 
 
+_NO_UNINSTALL_YET = frozenset({"wow-tbc", "wow-vanilla", "wow-tortoise"})
+"""The games whose tab has no Uninstall yet, and the box that removes each name.
+
+`wow-vanilla` leaves this set in **8.9b**, which is the second and last of the
+two family boxes. `wow-tbc` and `wow-tortoise` are CMaNGOS forks too and inherit
+the same mechanism, but neither has a box yet -- so they are named here rather
+than left to be noticed, and this test fails the day one of them is wired
+without this line being deleted.
+"""
+
+
 def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Path) -> None:
     """7.9's "mirroring `controller_wow_wotlk`", asked of the OBJECT the view uses.
 
@@ -367,7 +378,27 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # 8.4c's block landed first and this was the RED that asked for the
         # `play=` line in `_for_vanilla`.
         unplayed = {"play"} if entry.play is None else set()
-        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed | unplayed
+        # 8.9a's uninstall, and the one seam here whose absence is decided by a
+        # BOX rather than by a fact in the entry -- because that is what the box
+        # says. Uninstall is gated on two FAMILIES, not four games: 8.9a is
+        # AzerothCore (wow-wotlk) and 8.9b is CMaNGOS (wow-vanilla), and
+        # `phase8-decisions.md` calls that the one place owner answer 3's "one
+        # box per family" is deliberately not followed, because the mechanism is
+        # the compose project and the folder -- the engine's, not the
+        # emulator's. So the entry carries nothing that could decide it, and the
+        # list is spelled out with its expiry: wow-tbc and wow-tortoise share
+        # wow-vanilla's engine and inherit the seam when a box wires them.
+        unremovable = {"uninstall"} if game in _NO_UNINSTALL_YET else set()
+        allowed = (
+            module_surface
+            | unmeasured
+            | unwired
+            | unlisted
+            | unbrowsed
+            | unprobed
+            | unplayed
+            | unremovable
+        )
         if game == "wow-wotlk":
             assert (
                 set(absent) == unprobed
