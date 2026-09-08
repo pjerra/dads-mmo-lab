@@ -48,7 +48,9 @@ and the same two lines in the other two), so `start_staged()` really did the sta
 of the three "all three up" lines is a restatement of the state the run began in. `ground-end.txt`
 (`23:53:57`) closes the same loop: no game port listening, every game container `Exited`,
 and the two absent backup directories now hold 10 and 8 entries — created by this run,
-which is the independent confirmation that `backup()` wrote where it said it did.
+which is the independent confirmation that `backup()` wrote where it said it did. (They were
+emptied again at cleanup, after `ground-end.txt` was taken; `79-dump-cleanup.txt` is that
+transaction, and it names every file before removing it.)
 
 `ground-after-tbc.txt`, `ground-after-vanilla.txt` and `ground-after-tortoise.txt` are the
 same probe after each game, and each shows exactly one game's three containers up.
@@ -203,15 +205,22 @@ service assembly both change"* — is visible in one frame.
 `ground-end.txt` plus the inspect in `79-tbc-stop-abort.log`: **no game server up**, no game
 port listening, every game container `Exited`, `r6` (not ours) still up, 28 GB free.
 
-What this run added and left on the box, on purpose, as evidence:
+**The dumps this run wrote were removed, and the removal is itself a record**
+(`79-dump-cleanup.txt`, which lists every file by name and size before deleting it, and
+re-counts afterwards):
 
-* `~/tbc-7.4c/sql_scripts/backups` 13 → 21 entries, `~/vanilla-75b/…` absent → 10,
-  `~/tortoise-server/…` absent → 8. These are the dumps `backup()` wrote plus the pre-restore
-  safety dumps `restore()` took; they are what `verify_dump()` and `restore()` were measured
-  on, so deleting them would delete the evidence. Roughly 1 GB in total (`ground-start`
-  29 GB free → `ground-end` 28 GB).
-* `~/lane79/` — the checkout, the runner, the drivers and `out/`, which is what this folder is
-  a copy of.
+| | before | after | what `after` is |
+|---|---|---|---|
+| `~/tbc-7.4c/sql_scripts/backups` | 21 entries, 1.2 G | **13 entries, 714 M** | the 13 earlier lanes left; `ground-start.txt` recorded 13 |
+| `~/vanilla-75b/sql_scripts/backups` | 10 entries, 322 M | **0 entries** | `ground-start.txt` recorded the directory as ABSENT; the app made it |
+| `~/tortoise-server/sql_scripts/backups` | 8 entries, 445 M | **0 entries** | the same |
+
+Only files matching this run's own `20260908_23*` stamps were removed, which is why TBC's
+thirteen survive. The two now-empty directories are left in place, because the app is what
+creates them. Disk is back to **29 GB free**, the figure `ground-start.txt` opens with.
+
+Kept on the box on purpose: `~/lane79/` — the checkout, the runner, the drivers and `out/`,
+which is what this folder is a copy of.
 
 Nothing was installed, reinstalled, rebuilt or removed. No account was created. No
 configuration file was written.
@@ -230,5 +239,6 @@ configuration file was written.
 | `ground-start.txt`, `ground-after-*.txt`, `ground-end.txt` | the same probe, five times |
 | `stops.txt` | all six `Controller.stop()` calls, status either side |
 | `79-tbc-stop-abort.log` | the exit-139 finding: inspect, whole-log counts, and the shutdown itself |
+| `79-dump-cleanup.txt` | every dump this run wrote, named and sized, then removed, then re-counted |
 | `run.log` | provenance header, per-game exit code and elapsed time |
 | `shots/` | twelve frames and `shots.txt`, the liveness record for each |
