@@ -118,10 +118,23 @@ WORKDIR /src/_build
 #      not declared`, and a dozen more of the same shape: a 2.7 implementation
 #      against a 2.8 header.
 #
-# So the choice is theirs to make or ours to work around, and the workaround is
-# a base-image bump -- which swaps the compiler under a 2005-era codebase at the
-# same time, and is a decision rather than a fix. Left undone deliberately; the
-# stack on m910q still runs the image built from 7f2957e, which has no SOAP.
+# So the workaround is a base-image bump, and it was MEASURED on m910q the same
+# night rather than left as a guess. Building this exact Dockerfile with both
+# stages on `ubuntu:24.04` (glibc 2.39, GCC 13) SUCCEEDS in 46 minutes, and the
+# binary it produces really does carry the interface:
+#
+#     ns1__executeCommand, soap_serve, urn:MaNGOS, SOAP.Enabled
+#     objdump -T ... | GLIBC_2.38   <- the floor their archive imposes
+#
+# That last line is the whole cost of the decision and is why the bump cannot be
+# builder-only: the RUNTIME stage must also be >= glibc 2.38, or the binary will
+# not start. Both `FROM` lines move together or neither does.
+#
+# NOT DONE HERE, deliberately, because it is a shipped installer change with
+# user-visible consequences -- a newer compiler under a 2005-era codebase and a
+# raised glibc floor for every Tortoise user -- and that is the owner's call, not
+# a fix to make quietly at three in the morning. The stack on m910q still runs
+# the image built from 7f2957e, which has no SOAP and still locks accounts out.
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
