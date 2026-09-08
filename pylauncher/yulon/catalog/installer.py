@@ -378,7 +378,8 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
         f"are not touched.\n\n"
         f"The build you have now is kept as a rollback while this runs. If the new build does "
         f"not come up, the old one is put back automatically and the server is started on it "
-        f"again.\n\n"
+        f"again. That rollback covers the server build only: anything the new build writes "
+        f"into the database on its first start is not put back.\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."
     )

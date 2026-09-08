@@ -182,6 +182,18 @@ lists the pair side by side and a purge that enumerates the install's refs can
 find the leftover by the same rule.
 """
 
+FAILED_TAG_SUFFIX = "-failed"
+"""What the NEW build is named while the old one is being put back over its tags.
+
+Added on the adversarial review of 2026-09-08. The restore moves one tag at a
+time, and a `docker tag` that fails on the second leaves the first ref on the
+old build and the rest on the new -- a server nobody has run, reported as if
+it were one thing. Giving the new build its own name BEFORE any tag moves is
+what makes a failure part-way undoable: the refs already moved are moved back
+onto this name, and "the tags still name the new build" is then true of all of
+them. Removed once the restore has settled either way.
+"""
+
 REBUILD_OPENING_NOTE = (
     "You can stop this at any time; stopping before the containers are replaced leaves the "
     "server you have now exactly as it is. This does three things and nothing else: it "
@@ -1859,35 +1871,43 @@ class StagedInstaller:
     ) -> Generator[str, None, tuple[str, ...]]:
         """Give every image the compile will overwrite its `-rollback` name, or say why not.
 
-        Three answers, and the middle one is the refusal (owner answer 2):
+        One answer and three refusals, all before the compile (owner answer 2:
+        ALWAYS keep a rollback):
 
         * the images are all there and all tagged -- the rollback is kept;
-        * the images are there and docker will not tag one -- REFUSED before
-          the compile, with the tags already made taken back, because
-          building anyway would overwrite the only copy of the running build
-          with the rollback the owner asked for unkept. Docker's words are in
-          the sentence: "read-only layer store" is a different evening from
-          "no such image";
-        * the images are not all there, or docker will not say -- nothing to
-          keep, SAID rather than skipped, and the rebuild goes on. A user who
-          read the confirmation's promise is owed the sentence that this press
-          has none; refusing here would make a daemon that cannot answer an
-          image question block the compile that would answer it.
+        * the images are there and docker will not tag one -- refused, with
+          the tags already made taken back, because building anyway would
+          overwrite the only copy of the running build with the rollback the
+          owner asked for unkept. Docker's words are in the sentence:
+          "read-only layer store" is a different evening from "no such image";
+        * the images are not all there -- refused, and the sentence names the
+          button that repairs that: Install's resume rebuilds missing images,
+          this one only replaces present ones;
+        * docker will not say whether they are there -- refused. `None` is
+          "could not ask", and destructive work on an unanswered question
+          fails closed.
 
-        Returns the rollback names kept, empty when none was.
+        Until the adversarial review of 2026-09-08 the last two went ahead
+        with a sentence saying no rollback was kept, which contradicted the
+        confirmation the user had just agreed to and made the one press with
+        no safety net look exactly like the others.
+
+        Returns the rollback names kept -- never empty on a return.
         """
         present = self._seams.images_built(refs)
+        if present is None:
+            raise InstallerError(
+                "Docker would not say whether this install's images exist, so the build you "
+                "have now could not be kept as a rollback and nothing was compiled over it. "
+                "Nothing was started. Check the docker daemon is up, then press Rebuild again."
+            )
         if not present:
-            why = (
-                "docker would not say whether this install's images exist"
-                if present is None
-                else "this install's images are not all on the daemon under their tags"
+            raise InstallerError(
+                "This install's images are not all on the daemon under their tags, so there "
+                "is no build to keep as a rollback, and a rebuild does not run without one. "
+                "Nothing was started. Press Install on this folder instead: its resume "
+                "rebuilds the missing images, and Rebuild works from then on."
             )
-            yield (
-                f"No rollback was kept: {why}, so there is nothing to put back if the new "
-                f"build does not come up. The compile goes ahead."
-            )
-            return ()
         kept: list[str] = []
         for ref in refs:
             back = ref + ROLLBACK_TAG_SUFFIX
@@ -1938,17 +1958,45 @@ class StagedInstaller:
             printed = self._seams.world_output(spec).text.strip().splitlines()
             last_words = "\n".join(printed[-5:])
         yield "Putting the build from before this rebuild back."
-        problems = [
-            problem
-            for ref, back in zip(refs, kept, strict=True)
-            if (problem := self._seams.tag_image(back, ref))
-        ]
-        if problems:
-            return (
-                f"{failure} Putting the build from before this rebuild back failed too "
-                f"({'; '.join(problems)}), so the tags still name the new build. The old "
-                f"images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
-            )
+        # The new build gets its own name FIRST, so a retag that fails part-way
+        # can be undone onto it (`FAILED_TAG_SUFFIX`). If even that fails,
+        # nothing has moved yet and the sentence below is already true.
+        failed = [ref + FAILED_TAG_SUFFIX for ref in refs]
+        named: list[str] = []
+        for ref, name in zip(refs, failed, strict=True):
+            problem = self._seams.tag_image(ref, name)
+            if problem:
+                self._let_go(named)
+                return (
+                    f"{failure} Putting the build from before this rebuild back was not "
+                    f"attempted, because the new build could not be given a name to undo "
+                    f"onto ({problem}); the tags still name the new build, all of them. The "
+                    f"old images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                )
+            named.append(name)
+        moved: list[str] = []
+        for ref, back in zip(refs, kept, strict=True):
+            problem = self._seams.tag_image(back, ref)
+            if problem:
+                undone = [r for r in moved if not self._seams.tag_image(r + FAILED_TAG_SUFFIX, r)]
+                mixed = [r for r in moved if r not in undone]
+                self._let_go(named)
+                if mixed:
+                    return (
+                        f"{failure} Putting the build from before this rebuild back failed "
+                        f"part-way ({problem}) and undoing it failed too, so the tags are "
+                        f"MIXED: {', '.join(mixed)} name the old build and the rest name the "
+                        f"new one. Do not start this server until they agree; the old images "
+                        f"are under their {ROLLBACK_TAG_SUFFIX} tags."
+                    )
+                return (
+                    f"{failure} Putting the build from before this rebuild back failed "
+                    f"({problem}), and the {len(undone)} tag(s) already moved were moved back, "
+                    f"so the tags still name the new build, all of them. The old images are "
+                    f"on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+                )
+            moved.append(ref)
+        self._let_go(named)
         if not touched:
             self._let_go(kept)
             return (
@@ -1960,18 +2008,28 @@ class StagedInstaller:
             if last_words
             else ""
         )
+        # What an image rollback does NOT put back, said in the same sentence
+        # as the restore: the incident this answers (Tortoise, 2026-09-08) was
+        # the new binary's own updater migrating the world database at
+        # startup. The owner chose the image rollback knowing that; the user
+        # is told it here rather than left to find out (adversarial review).
+        database = (
+            "\nWhat the new build wrote into the database on its first start, if anything, "
+            "is NOT put back by this -- the lines above say whether its updater ran -- so "
+            "the old build is running on the database as the new one left it."
+        )
         try:
             yield from self.stage_recreate(ctx)
             yield from self.wait_for_ready(ctx, self._native().ready)
         except InstallerError as second:
             return (
                 f"{failure} The build from before this rebuild was put back, but it did not "
-                f"report ready either: {second}{said}"
+                f"report ready either: {second}{said}{database}"
             )
         self._let_go(kept)
         return (
             f"{failure} The build from before this rebuild was put back and is running "
-            f"again.{said}"
+            f"again.{said}{database}"
         )
 
     def _let_go(self, kept: Sequence[str]) -> None:

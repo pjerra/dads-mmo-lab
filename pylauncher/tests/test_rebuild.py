@@ -519,17 +519,39 @@ def test_the_failure_names_it_when_the_old_build_does_not_come_up_either(
     assert "did not report ready either" in said, said
 
 
-def test_a_rebuild_with_no_images_to_keep_says_no_rollback_was_kept(tmp_path: Path) -> None:
-    """Nothing on the daemon under this install's tags means nothing to restore.
+def test_a_rebuild_with_images_missing_refuses_rather_than_compiling_without_a_rollback(
+    tmp_path: Path,
+) -> None:
+    """Nothing to keep is a refusal, not a warning. Owner answer 2 says ALWAYS.
 
-    Said rather than silently skipped: a user who read the confirmation's
-    promise of a rollback is owed the sentence that this press has none.
+    Until the adversarial review of 2026-09-08 this pressed on with a sentence
+    saying no rollback was kept -- which contradicted the confirmation the
+    user had just agreed to, and made the one press with no safety net the one
+    that looked most like the others. A finished install whose images are
+    gone is Install's to repair (its resume rebuilds them), not this button's.
     """
-    rec = Recorder(images=False)
+    rec = Recorder(images=True)
     server_dir = a_finished_install(rec, tmp_path)
-    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    rec.images = False
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
     assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
-    assert any("no rollback" in line.lower() for line in said), said
+    assert "Nothing was started" in str(raised.value)
+    assert "Install" in str(raised.value), str(raised.value)
+
+
+def test_a_daemon_that_will_not_say_whether_the_images_exist_is_a_refusal_too(
+    tmp_path: Path,
+) -> None:
+    """`None` is "could not ask", and destructive work on an unanswered question fails closed."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.images = None
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
+    assert "would not say" in str(raised.value), str(raised.value)
 
 
 def test_a_rollback_that_cannot_be_kept_refuses_before_the_compile(tmp_path: Path) -> None:
@@ -552,3 +574,88 @@ def test_the_rollback_is_in_the_confirmation_the_user_agrees_to(tmp_path: Path) 
     """The confirmation is where the price and the safety net are both read."""
     text = rebuild_confirmation(ENTRY, tmp_path / "wow")
     assert "rollback" in text.lower() or "put back" in text.lower(), text
+
+
+def test_a_restore_that_fails_halfway_puts_every_tag_back_on_the_new_build(
+    tmp_path: Path,
+) -> None:
+    """Half the refs on the old build and half on the new is a server nobody has tested.
+
+    Adversarial review, 2026-09-08: the restore retagged each ref on its own
+    and, on a failure, reported "the tags still name the new build" -- false
+    for the refs already put back. Now the new build is given its own name
+    before any ref moves, and a failure part-way retags the moved ones back
+    onto it, so the sentence "still on the new build" is true of all of them.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    rec.ready = False
+    restores_seen = 0
+
+    def tag_image(src: str, dst: str) -> str:
+        nonlocal restores_seen
+        rec.calls.append(f"tag:{src}->{dst}")
+        if src in backs:
+            restores_seen += 1
+            if restores_seen == 2:
+                return "Error response from daemon: layer store is read-only"
+        return ""
+
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, tag_image=tag_image).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    # The one ref that moved was moved back onto the new build's own name.
+    failed_name = refs[0] + native.FAILED_TAG_SUFFIX
+    assert f"tag:{failed_name}->{refs[0]}" in rec.calls, rec.calls
+    assert "still name the new build" in said, said
+    assert "put back and is running" not in said, said
+    # And no recreate happened on a mixed set.
+    assert rec.calls.count("recreate") == 1, rec.calls
+
+
+def test_the_new_build_gets_its_own_name_before_any_tag_is_moved(tmp_path: Path) -> None:
+    """The compensating retag above needs the new build addressable; that name is made first."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready = False
+    with pytest.raises(InstallerError):
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    named = [f"tag:{r}->{r}{native.FAILED_TAG_SUFFIX}" for r in refs]
+    restores = [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]
+    for n in named:
+        assert n in rec.calls, rec.calls
+    assert max(rec.calls.index(n) for n in named) < min(rec.calls.index(s) for s in restores)
+
+
+def test_the_rollback_sentence_says_the_database_is_not_part_of_what_was_put_back(
+    tmp_path: Path,
+) -> None:
+    """An image rollback is not a system rollback, and the sentence must not read as one.
+
+    The Tortoise incident this feature answers (2026-09-08) was the new
+    binary's own updater migrating the world database at startup and then
+    cancelling the server. Putting the old binary back does not put those
+    rows back. The owner chose the image rollback knowing that (answer 2);
+    what the adversarial review added is that the user must be told it in
+    the same sentence that says the old build is running again.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, wait_ready=_answers(False, True)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    said = str(raised.value)
+    assert "running again" in said, said
+    assert "database" in said and "NOT put back" in said, said
+
+
+def test_the_confirmation_says_what_the_rollback_does_not_cover(tmp_path: Path) -> None:
+    text = rebuild_confirmation(ENTRY, tmp_path / "wow")
+    assert "database" in text.lower(), text
+    low = text.lower()
+    assert low.index("rollback") < low.index("database", low.index("rollback")), text
