@@ -159,6 +159,25 @@ Put back through the app's own Start and then read, not assumed (`81a-4-restore.
 * Nothing else: no conf file, no database write, no account, no character, no module, no realm row.
   The 8.7a press in the sibling folder ran first, and everything it changed it put back.
 
+**And one restart that was not this press's**, read eight minutes after it finished and left here
+because the rebuild lane recorded the same shape twice on this box and could not explain it:
+
+```
+docker inspect ac-authserver → started 2026-09-08T23:16:12.971Z, RestartCount 0, exit 0
+docker events --since 25m --filter container=ac-authserver
+  1788909372 kill   1788909372 stop   1788909372 die   1788909373 start   1788909373 restart
+```
+
+That sequence is what `docker restart` produces — a command somebody issued, not a crash and not the
+daemon's restart policy (which shows as `die` then `start` with `RestartCount` climbing). The
+rebuild lane wrote that `docker events` for its own window was **empty**; here it is not, so this
+occurrence is explained as far as *a restart command was run*, and no further. It was not this lane:
+my connections to this box are in `~/claude-activity.log` at 01:12:26 and 01:19:57 VM local with
+nothing between, while `journalctl -u ssh` shows six other key-authenticated sessions from
+`172.30.48.1` between 01:15:13 and 01:16:04 — another lane, working unannounced on the activity
+terminal. Named rather than guessed at, because "unexplained" and "somebody else's" are different
+claims and only the second one is supported here.
+
 ## Files
 
 | file | what it is |
