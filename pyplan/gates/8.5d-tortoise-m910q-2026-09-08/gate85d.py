@@ -1,9 +1,16 @@
 """The 8.5d live gate: browsing this server's bots on WoW Tortoise.
 
-NOT YET RUN. Written 2026-09-08 while the Tortoise stack was DOWN and another
-lane held the one-server-at-a-time slot on m910q, so every number below is a
-prediction to be checked, not a reading. `README.md` beside this file says the
-same thing at the top, and no transcript exists yet.
+RUN 2026-09-07 23:13Z-23:14Z on m910q against the live Tortoise stack (which had
+been up 24 minutes when the first stage started). The ten server-side stages all
+passed; `transcript.txt` beside this file is their output with the clock on every
+line, and `README.md` is the record. Clause (4)'s client half was NOT driven --
+this lane held m910q but not the game client on `vmhost` -- so everything below
+about `/who` is still a prediction, and everything about the database, the confs,
+the DBC and the app is now a reading.
+
+Written 2026-09-08 (local) with the stack DOWN, which is why the header used to
+say "NOT YET RUN"; the predictions it carried were checked one at a time by the
+stages, and the four that were wrong are named in README.md.
 
 Usage:  ~/gate81b-venv/bin/python gate85d.py <stage>
 
@@ -592,11 +599,22 @@ def stage_wholaw() -> None:
 
     The four that matter, `src/game/Handlers/MiscHandler.cpp`:
 
+      :122  `if (security == SEC_PLAYER)` -- the guard the next two sit inside
       :125  faction filter, and ONLY when the asker is SEC_PLAYER
       :129  a subject above `GM.InWhoList.Level` is dropped
-      :140  a subject outside the LEVEL RANGE THE CLIENT SENT is dropped
-      :253  a 30-SECOND COOLDOWN, again only for a SEC_PLAYER asker: a second
-            /who inside 30 s returns silently, with no answer at all. That is
+      :142  a subject outside the LEVEL RANGE THE CLIENT SENT is dropped.
+            Re-read on the box 2026-09-07 23:16Z: this file said `:140` when it
+            was written blind, and :140 is not the line.
+      :253  a 30-SECOND COOLDOWN: a second /who inside 30 s returns silently,
+            with no answer at all. Re-read on the box: the CHECK at :253 applies
+            to every asker unless the player carries
+            `CUSTOM_PLAYER_FLAG_BYPASS_WHO_COOLDOWN`; what is SEC_PLAYER-only is
+            the STAMP, `:326-327` `if (GetSecurity() == SEC_PLAYER)
+            m_lastWhoRequest = time(nullptr);` -- so a GM asker never refreshes
+            the timestamp and therefore always passes. The conclusion this file
+            was written with is right; the line it cited for it was the check.
+            The asker this run found is rank 0, so the cooldown fully applies to
+            it and 35 s between names is not optional. That is
             this fork's own, it is not on the two sibling trees, and it looks
             exactly like a miss on a screenshot.
     """
@@ -617,8 +635,10 @@ def stage_wholaw() -> None:
         else "so on this install a SEC_PLAYER asker sees only its own faction"
     )
     say(
-        "the 30-second /who cooldown (MiscHandler.cpp:253-255) applies to a SEC_PLAYER asker "
-        "and is bypassed by a GM one; the driver waits 35 s between names either way"
+        "the 30-second /who cooldown: the CHECK (MiscHandler.cpp:253) applies to every asker "
+        "that has not got CUSTOM_PLAYER_FLAG_BYPASS_WHO_COOLDOWN, but the STAMP (:326-327) is "
+        "written only for a SEC_PLAYER asker, so a GM one never refreshes it and always passes; "
+        "the driver waits 35 s between names either way"
     )
     say("PASSED: the rules were read off this install, not inherited")
 
