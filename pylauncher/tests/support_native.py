@@ -145,6 +145,13 @@ class Recorder:
     db_start_error: str = ""
     db_healthy: bool = True
     ready: bool = True
+    tag_problem: str = ""
+    """What `docker tag` answers when it refuses, or empty when it tags.
+
+    The rebuild's rollback is kept through this seam, and a double that could
+    only ever succeed could not produce the refusal the engine has to make
+    BEFORE it compiles over the only copy of the running build.
+    """
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading", restarts=0, status="running"
@@ -518,6 +525,8 @@ class Recorder:
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=lambda spec, ready: self.ready,
             world_output=lambda spec: self.world_output,
+            tag_image=self.tag_image,
+            remove_image=self.remove_image,
             # An INERT SELinux by default: not enforcing, on a filesystem that
             # could hold a label if it were. That is Ubuntu/Arch/macOS, which
             # is what every other test in both files is about, and it keeps
@@ -553,6 +562,16 @@ class Recorder:
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
         return True
+
+    def tag_image(self, src: str, dst: str) -> str:
+        """`docker.tag_image()`: recorded as `tag:<src>-><dst>`, refused as `tag_problem`."""
+        self.calls.append(f"tag:{src}->{dst}")
+        return self.tag_problem
+
+    def remove_image(self, ref: str) -> str:
+        """`docker.remove_image()`: recorded as `rmi:<ref>`, always allowed here."""
+        self.calls.append(f"rmi:{ref}")
+        return ""
 
     def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         """`docker.recreate_staged()` — `start` with `--force-recreate`.

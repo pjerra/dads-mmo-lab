@@ -348,6 +348,11 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
     * *what happens to the server* — it goes down when the containers are
       replaced and comes back when it reports ready. Users are told this
       BEFORE they agree, not in the log afterwards;
+    * *what happens if the new build is broken* — the old one is kept and put
+      back by itself (`native.ROLLBACK_TAG_SUFFIX`; owner answer 2, 2026-09-08),
+      said here because it is the difference between "an hour and a working
+      server either way" and "an hour and maybe no server", and only the first
+      is a question a person can say yes to without a spare evening;
     * *what saying no costs* — nothing at all, said in as many words. A
       confirmation that does not say so is answered by the people who are
       unsure, and the unsure ones are the ones who most need to be able to
@@ -371,6 +376,9 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. Your characters, accounts and databases "
         f"are not touched.\n\n"
+        f"The build you have now is kept as a rollback while this runs. If the new build does "
+        f"not come up, the old one is put back automatically and the server is started on it "
+        f"again.\n\n"
         f"Say no and nothing happens at all — the server you have now keeps running, exactly "
         f"as it is."
     )

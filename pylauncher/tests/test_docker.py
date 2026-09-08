@@ -5801,6 +5801,40 @@ def test_remove_image_reports_an_image_in_use_as_a_warning_not_a_failure(
     assert "in use" in docker.remove_image("yulon.local/ac-wotlk-authserver:native-1")
 
 
+def test_tag_image_gives_one_ref_a_second_name_and_touches_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker tag <src> <dst>`: the rebuild's rollback is a name, not a copy.
+
+    Owner answer 2 (2026-09-08): keep the working build before compiling over
+    its tag. A tag costs no disk of its own; the old image only starts costing
+    disk once the build has replaced the tag it shared.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        calls.append(cmd)
+        return _completed()
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    src = "yulon.local/ac-wotlk-worldserver:native-243c46e3"
+    assert docker.tag_image(src, src + "-rollback") == ""
+    assert calls == [["docker", "image", "tag", src, src + "-rollback"]]
+
+
+def test_tag_image_reports_a_missing_source_in_the_daemons_own_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller decides what an untaggable image means; this only says what docker said."""
+
+    def fake_run(cmd: list[str], cwd=None, timeout: float | None = None):
+        return _completed(1, stderr="Error response from daemon: No such image: x:y")
+
+    monkeypatch.setattr(docker.runner, "run", fake_run)
+    said = docker.tag_image("x:y", "x:y-rollback")
+    assert "No such image" in said
+
+
 def test_nothing_in_this_module_ever_prunes_the_daemon() -> None:
     """`image prune`, `builder prune` and `system prune` reach every project on the box.
 

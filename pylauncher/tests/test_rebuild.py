@@ -38,7 +38,7 @@ from tests.support_native import ENTRY, Recorder, engine, install
 from yulon import docker
 from yulon.apply import CLONE_DIRS, Applier
 from yulon.catalog import composegen, native
-from yulon.catalog.installer import InstallerError, InstallOptions
+from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 
 PYPLAN = Path(__file__).resolve().parents[2] / "pyplan"
 RENDERED = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
@@ -391,3 +391,164 @@ def test_the_confirmation_says_what_it_costs_before_it_says_yes(tmp_path: Path) 
     assert "minutes" in lowered, "the question does not say how long"
     assert "stopped" in lowered, "the question does not say the server goes down"
     assert "say no and nothing happens" in lowered, "the question does not say what no costs"
+
+
+# -- the rollback: owner answer 2, 2026-09-08 -----------------------------------
+#
+# "Always keep a rollback, and restore it automatically if the world does not
+# come up. Tag the working image before building; if the worldserver does not
+# reach ready within its window, retag, bring the old one back, and show what
+# the log said." It is the recipe that saved m910q on the night of 2026-09-08,
+# done by hand after a Tortoise rebuild crash-looped on 173 migrations; these
+# tests make it the app's. `pyplan/phase8-owner-answers-2026-09-08.md` §2.
+
+
+def _refs(server_dir: Path) -> tuple[str, ...]:
+    return composegen.built_image_refs(ENTRY, server_dir, platform_id=lambda: "macos")
+
+
+def _rollback_refs(server_dir: Path) -> tuple[str, ...]:
+    return tuple(ref + native.ROLLBACK_TAG_SUFFIX for ref in _refs(server_dir))
+
+
+def _answers(*values: bool):
+    """A `wait_ready` seam that answers `values` in order, then the last one for ever."""
+    queue = list(values)
+
+    def wait_ready(spec: object, ready: object) -> bool:
+        if len(queue) > 1:
+            return queue.pop(0)
+        return queue[0]
+
+    return wait_ready
+
+
+def test_a_rebuild_keeps_the_running_build_under_a_rollback_tag_before_compiling(
+    tmp_path: Path,
+) -> None:
+    """Every image the build will overwrite gets a second name FIRST.
+
+    `docker compose build` writes the new image over the same tag the running
+    containers were created from, so without this the old build is gone the
+    moment the compile finishes -- which is why the m910q rollback had to be
+    prepared by hand before the rebuild rather than after it failed.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    tags = [c for c in rec.calls if c.startswith("tag:")]
+    assert tags == [f"tag:{r}->{r}{native.ROLLBACK_TAG_SUFFIX}" for r in _refs(server_dir)]
+    assert rec.calls.index(tags[-1]) < rec.calls.index("build"), rec.calls
+
+
+def test_a_rebuild_whose_server_never_comes_up_puts_the_old_build_back(
+    tmp_path: Path,
+) -> None:
+    """The new build never reports ready: the rollback tags go back, the containers are
+    recreated on them, and the failure the user reads says both what happened and that
+    the old build is running again."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, wait_ready=_answers(False, True)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    refs, backs = _refs(server_dir), _rollback_refs(server_dir)
+    restores = [f"tag:{b}->{r}" for r, b in zip(refs, backs, strict=True)]
+    for restore in restores:
+        assert restore in rec.calls, rec.calls
+    recreates = [i for i, c in enumerate(rec.calls) if c == "recreate"]
+    assert len(recreates) == 2, rec.calls
+    assert rec.calls.index(restores[-1]) < recreates[1], rec.calls
+    said = str(raised.value)
+    assert "never reported ready" in said
+    assert "put back" in said and "running again" in said, said
+
+
+def test_a_rebuild_that_comes_up_lets_the_rollback_go(tmp_path: Path) -> None:
+    """Success removes the second name, so the old build stops costing disk.
+
+    Owner answer 2 names the price as "one image's worth of disk WHILE a
+    rebuild runs" -- not for ever. Removed after `ready`, never before it.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    rmis = [c for c in rec.calls if c.startswith("rmi:")]
+    assert rmis == [f"rmi:{b}" for b in _rollback_refs(server_dir)], rec.calls
+    assert rec.calls.index(rmis[0]) > rec.calls.index("recreate"), rec.calls
+    assert said[-1] == f"{ENTRY.name} was rebuilt and is running in {server_dir}"
+
+
+def test_a_failed_compile_leaves_the_running_server_alone(tmp_path: Path) -> None:
+    """A build that fails leaves the old tag in place, so there is nothing to restore
+    and no reason to touch a server that is still running the build it had."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "recreate" not in rec.calls, rec.calls
+    assert not [
+        c
+        for c in rec.calls
+        if c.startswith("tag:") and "->" in c and c.endswith(tuple(_refs(server_dir)))
+    ], "a failed build was 'restored' over a tag it never changed"
+    # The duplicate name is let go: the old image is still the live tag.
+    assert [c for c in rec.calls if c.startswith("rmi:")] == [
+        f"rmi:{b}" for b in _rollback_refs(server_dir)
+    ], rec.calls
+    assert "put back" not in str(raised.value)
+
+
+def test_the_failure_names_it_when_the_old_build_does_not_come_up_either(
+    tmp_path: Path,
+) -> None:
+    """Both builds failing to report ready is the one outcome a rollback cannot fix,
+    and the sentence must not claim the server is running again."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    rec.ready = False
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "put back" in said, said
+    assert "running again" not in said, said
+    assert "did not report ready either" in said, said
+
+
+def test_a_rebuild_with_no_images_to_keep_says_no_rollback_was_kept(tmp_path: Path) -> None:
+    """Nothing on the daemon under this install's tags means nothing to restore.
+
+    Said rather than silently skipped: a user who read the confirmation's
+    promise of a rollback is owed the sentence that this press has none.
+    """
+    rec = Recorder(images=False)
+    server_dir = a_finished_install(rec, tmp_path)
+    said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
+    assert any("no rollback" in line.lower() for line in said), said
+
+
+def test_a_rollback_that_cannot_be_kept_refuses_before_the_compile(tmp_path: Path) -> None:
+    """The images exist and docker will not tag them: nothing is compiled.
+
+    Building anyway would overwrite the only copy of the running build with
+    the rollback the owner asked for unkept -- the one state answer 2 rules
+    out. Refused with docker's own words and before the confirmation's cost.
+    """
+    rec = Recorder(images=True, tag_problem="Error response from daemon: read-only layer store")
+    server_dir = a_finished_install(rec, tmp_path)
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert "build" not in rec.calls, rec.calls
+    assert "read-only layer store" in str(raised.value)
+    assert "Nothing was started" in str(raised.value)
+
+
+def test_the_rollback_is_in_the_confirmation_the_user_agrees_to(tmp_path: Path) -> None:
+    """The confirmation is where the price and the safety net are both read."""
+    text = rebuild_confirmation(ENTRY, tmp_path / "wow")
+    assert "rollback" in text.lower() or "put back" in text.lower(), text

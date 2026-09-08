@@ -1013,6 +1013,29 @@ def remove_image(ref: str, *, wsl_distro: str | None = None) -> str:
     return said
 
 
+def tag_image(src: str, dst: str, *, wsl_distro: str | None = None) -> str:
+    """Give the image at `src` the second name `dst`. Returns why it could not, or `""`.
+
+    The rebuild's rollback (owner answer 2, 2026-09-08). A tag is a name and
+    not a copy: it costs nothing until `docker compose build` writes a new
+    image over `src`, at which point the old image lives on under `dst` and
+    starts costing its own disk -- the price the owner accepted, for as long as
+    the rebuild runs. `remove_image(dst)` is how it is let go.
+
+    Docker's own words come back rather than a verdict, because what an
+    untaggable image MEANS is the caller's question: for the rebuild, "no such
+    image" on a tag the install claims to have built is a reason to refuse
+    before compiling over it, not a warning.
+    """
+    proc = _docker(["image", "tag", src, dst], wsl_distro=wsl_distro)
+    if proc.returncode == 0:
+        logger.info(f"tagged {src} as {dst}")
+        return ""
+    said = proc.stderr.strip()
+    logger.warning(f"could not tag {src} as {dst}: {said}")
+    return said
+
+
 LOG_TAIL_LINES = 2000
 """How many log ENTRIES of a container's log a snapshot keeps.
 

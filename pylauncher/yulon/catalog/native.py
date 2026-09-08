@@ -165,6 +165,23 @@ So each clause is now a claim something is responsible for keeping:
   `recorded=False` stages, which is why a resume always ends with a live server.
 """
 
+ROLLBACK_TAG_SUFFIX = "-rollback"
+"""What the build a rebuild is about to overwrite is tagged as, while it runs.
+
+Owner answer 2 (2026-09-08): *always keep a rollback, and restore it
+automatically if the world does not come up.* `docker compose build` writes the
+new image over the tag the running containers were created from, so the old
+build is gone the moment the compile finishes unless it has a second name
+first. This is that name: `<ref>-rollback`, one per image in
+`composegen.built_image_refs()`. It is the recipe that brought m910q's Tortoise
+back on the night of 2026-09-08 -- `docker tag` before, retag and recreate after
+-- done by hand then and by `StagedInstaller.rebuild()` now.
+
+A suffix on the TAG rather than a second repository name, so `docker images`
+lists the pair side by side and a purge that enumerates the install's refs can
+find the leftover by the same rule.
+"""
+
 REBUILD_OPENING_NOTE = (
     "You can stop this at any time; stopping before the containers are replaced leaves the "
     "server you have now exactly as it is. This does three things and nothing else: it "
@@ -1316,6 +1333,17 @@ class Seams:
     `docker.staged_up_argv()` holds why the force is asked for rather than left
     to compose.
     """
+    tag_image: Callable[[str, str], str] = docker.tag_image
+    remove_image: Callable[[str], str] = docker.remove_image
+    """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
+
+    Two seams and not one `docker` handle, for the reason `recreate` is its
+    own: a test that could not see the tag happen BEFORE the build, or the
+    restore happen AFTER the ready wait failed, could not see the two bugs
+    that would make the rollback decorative -- a rollback tagged after the
+    compile is a copy of the new build, and one restored without a recreate
+    leaves the failed build running.
+    """
     wait_db_healthy: Callable[[docker.ContainerSpec], bool] = docker.wait_db_healthy_for
     wait_ready: Callable[[docker.ContainerSpec, docker.ReadySpec], bool] = docker.wait_ready_for
     world_output: Callable[[docker.ContainerSpec], WorldOutput] = _world_output
@@ -1784,11 +1812,172 @@ class StagedInstaller:
             secrets=self.resolve_secrets(server_dir),
             force_build=True,
         )
-        state = yield from self._staged(self.rebuild_stages(), ctx)
+        refs = self.built_image_refs(ctx)
+        kept = yield from self._keep_rollback(ctx, refs)
+
+        # Two facts the failure path needs and a stage cannot return: whether
+        # the compile FINISHED (the live tags name the new image from then on)
+        # and whether the containers were TOUCHED (from then on the old build
+        # is not what is running). Read off the stages as they pass rather
+        # than guessed from the exception's wording.
+        built = False
+        touched = False
+
+        def build(stage_ctx: StageContext) -> Iterator[str]:
+            nonlocal built
+            yield from self.stage_build(stage_ctx)
+            built = True
+
+        def recreate(stage_ctx: StageContext) -> Iterator[str]:
+            nonlocal touched
+            touched = True
+            yield from self.stage_recreate(stage_ctx)
+
+        first, second, *rest = self.rebuild_stages()
+        stages = (replace(first, run=build), replace(second, run=recreate), *rest)
+        try:
+            state = yield from self._staged(stages, ctx)
+        except InstallerError as exc:
+            if not kept:
+                raise
+            if not built:
+                # A compile that failed or was stopped leaves the live tags on
+                # the build that is running: the second name is a duplicate.
+                self._let_go(kept)
+                raise
+            message = yield from self._restore_rollback(ctx, refs, kept, touched, str(exc))
+            self._record_error(server_dir, ctx.state, message)
+            raise InstallerError(message) from exc
+        self._let_go(kept)
         logger.info(f"rebuild of {self.entry.id} finished")
         self._clear_error(server_dir, state)
         yield REBUILD_CLOSING_NOTE
         yield f"{self.entry.name} was rebuilt and is running in {server_dir}"
+
+    def _keep_rollback(
+        self, ctx: StageContext, refs: Sequence[str]
+    ) -> Generator[str, None, tuple[str, ...]]:
+        """Give every image the compile will overwrite its `-rollback` name, or say why not.
+
+        Three answers, and the middle one is the refusal (owner answer 2):
+
+        * the images are all there and all tagged -- the rollback is kept;
+        * the images are there and docker will not tag one -- REFUSED before
+          the compile, with the tags already made taken back, because
+          building anyway would overwrite the only copy of the running build
+          with the rollback the owner asked for unkept. Docker's words are in
+          the sentence: "read-only layer store" is a different evening from
+          "no such image";
+        * the images are not all there, or docker will not say -- nothing to
+          keep, SAID rather than skipped, and the rebuild goes on. A user who
+          read the confirmation's promise is owed the sentence that this press
+          has none; refusing here would make a daemon that cannot answer an
+          image question block the compile that would answer it.
+
+        Returns the rollback names kept, empty when none was.
+        """
+        present = self._seams.images_built(refs)
+        if not present:
+            why = (
+                "docker would not say whether this install's images exist"
+                if present is None
+                else "this install's images are not all on the daemon under their tags"
+            )
+            yield (
+                f"No rollback was kept: {why}, so there is nothing to put back if the new "
+                f"build does not come up. The compile goes ahead."
+            )
+            return ()
+        kept: list[str] = []
+        for ref in refs:
+            back = ref + ROLLBACK_TAG_SUFFIX
+            problem = self._seams.tag_image(ref, back)
+            if problem:
+                self._let_go(kept)
+                raise InstallerError(
+                    f"The build you have now could not be kept as a rollback ({problem}), so "
+                    f"nothing was compiled over it. Nothing was started; the server you have "
+                    f"is running exactly as it was."
+                )
+            kept.append(back)
+        yield (
+            f"Kept the build you have now as a rollback ({len(kept)} images tagged "
+            f"{ROLLBACK_TAG_SUFFIX}). If the new build does not come up it is put back "
+            f"automatically."
+        )
+        return tuple(kept)
+
+    def _restore_rollback(
+        self,
+        ctx: StageContext,
+        refs: Sequence[str],
+        kept: Sequence[str],
+        touched: bool,
+        failure: str,
+    ) -> Generator[str, None, str]:
+        """Put the old build back after a compile that finished and a server that did not.
+
+        Returns the sentence the user reads -- the original failure first,
+        then what was done about it and how that went -- because the panel
+        shows one message and a rollback that hides the failure it answered
+        would be reporting a success that nobody asked for.
+
+        **The world's last words are read BEFORE the containers are replaced**,
+        because the recreate that brings the old build back removes the
+        failed container and its log with it; after that, "show what the log
+        said" (owner answer 2) could only point at a log that is gone.
+
+        `touched` False is the compile-finished, containers-not-yet-replaced
+        window: the running server IS the old build, only the tags name the
+        new one. Then the tags go back and nothing is restarted, which is what
+        `REBUILD_OPENING_NOTE` promised a stop before the replacement costs.
+        """
+        spec = self.entry.container_spec()
+        last_words = ""
+        if touched:
+            printed = self._seams.world_output(spec).text.strip().splitlines()
+            last_words = "\n".join(printed[-5:])
+        yield "Putting the build from before this rebuild back."
+        problems = [
+            problem
+            for ref, back in zip(refs, kept, strict=True)
+            if (problem := self._seams.tag_image(back, ref))
+        ]
+        if problems:
+            return (
+                f"{failure} Putting the build from before this rebuild back failed too "
+                f"({'; '.join(problems)}), so the tags still name the new build. The old "
+                f"images are on the daemon under their {ROLLBACK_TAG_SUFFIX} tags."
+            )
+        if not touched:
+            self._let_go(kept)
+            return (
+                f"{failure} The tags were put back to the build that is running, and no "
+                f"container was replaced."
+            )
+        said = (
+            f" Before it was replaced, {spec.world} had printed:\n{last_words}"
+            if last_words
+            else ""
+        )
+        try:
+            yield from self.stage_recreate(ctx)
+            yield from self.wait_for_ready(ctx, self._native().ready)
+        except InstallerError as second:
+            return (
+                f"{failure} The build from before this rebuild was put back, but it did not "
+                f"report ready either: {second}{said}"
+            )
+        self._let_go(kept)
+        return (
+            f"{failure} The build from before this rebuild was put back and is running "
+            f"again.{said}"
+        )
+
+    def _let_go(self, kept: Sequence[str]) -> None:
+        """Remove the rollback names. A refusal is logged by the seam and changes nothing here."""
+        for back in kept:
+            self._seams.remove_image(back)
 
     def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
         """The two folders this button cannot help, refused by name before anything runs.
