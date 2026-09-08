@@ -2354,6 +2354,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "retry still cannot finish. A failure on any single entry is skipped here on purpose "
         "- the report belongs to the rmtree that follows, not to one chmod"
     ),
+    ("purge.py", "_remove_unenterable"): (
+        "walks the same tree, after the same first failure, to find the entries the walk "
+        "cannot ENTER - on Windows a WSL-made symlink the clone container left as an LX "
+        "reparse point, on POSIX a directory whose mode refuses scandir - and `os.rmdir`s "
+        "each one where it stands, which removes a link rather than following it. It "
+        "decides no write on its own: the folder is one the user asked to remove and the "
+        "delete has already failed once, and an rmdir it cannot do is left for the retry "
+        "to name against the tree"
+    ),
     ("party.py", "deploy"): (
         "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
         "anything of the user's, and the folder it goes on to write is created by the same "

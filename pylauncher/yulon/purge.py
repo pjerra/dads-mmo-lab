@@ -647,12 +647,61 @@ def remove_tree(path: Path) -> None:
     except OSError:
         logger.info(f"{path} would not delete; clearing read-only flags and retrying")
         _clear_read_only(path)
+        _remove_unenterable(path)
         try:
             shutil.rmtree(path)
         except OSError as exc:
             raise PurgeError(_undeletable(path, exc)) from exc
     if path.exists():
         raise PurgeError(_undeletable(path, "it is still there afterwards"))
+
+
+def _remove_unenterable(path: Path) -> None:
+    """`os.rmdir` every directory entry under `path` that a walk cannot enter.
+
+    The second stop the Windows press found, after the read-only one -- measured
+    on `yulon-win11` 2026-09-08 on a real WotLK install
+    (`pyplan/gates/8.9a-wotlk-yulon-win11-2026-09-08/`): AzerothCore's clone
+    stage runs git inside a Linux container with the server dir bind-mounted,
+    so every symlink in the repository lands on NTFS as an
+    `IO_REPARSE_TAG_LX_SYMLINK` reparse point (`0xa000001d`). Python does not
+    know that tag: `entry.is_symlink()` answers False and
+    `entry.is_dir(follow_symlinks=False)` answers True, so `shutil.rmtree`
+    recurses into it and dies with `[WinError 1920] The file cannot be accessed
+    by the system` -- on both presses, with the containers, volumes and images
+    already gone and the folder stuck at 12,405 entries. `_clear_read_only()`
+    cannot help; the entry is not read-only, it is unreadable.
+
+    What the box answered when asked (`probe_lxsymlink.py`): `os.rmdir` removes
+    the reparse point itself, and with it gone `rmtree` walks the rest. The
+    POSIX shape of the same stop is a directory whose mode refuses `scandir`,
+    which `os.rmdir` also takes when it is empty; a non-empty one it cannot
+    take is left for the retry to name. Never follows anything: `rmdir` on a
+    link removes the link, and that is the property that makes this safe to
+    run over a checkout that may point outside itself.
+    """
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                children = list(entries)
+        except OSError:
+            if current == path:
+                return
+            try:
+                os.rmdir(current)
+                logger.info(f"removed an entry the walk could not enter: {current}")
+            except OSError as exc:
+                logger.info(f"could not remove {current}, leaving it for the retry: {exc}")
+            continue
+        for entry in children:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                stack.append(Path(entry.path))
 
 
 def _undeletable(path: Path, problem: object) -> str:
