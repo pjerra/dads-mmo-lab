@@ -7,7 +7,9 @@ answers questions 1–3 of `pyplan/gates/8.6-wotlk-yulon-ubuntu-2026-09-08/READM
 **Box:** `yulon-ubuntu2` (12 vCPU, 16 GB), the fresh AzerothCore WotLK install at `/home/pk/wowserver`
 built through the app's own engine tonight (`~/wotlk-install.log`, `INSTALL RETURNED CLEANLY` at
 20:18:43Z). **Tree:** this lane's worktree, `e40f4590` for everything up to the first press and
-`5a7e8baa` (this lane's fix) for the second. **Checkpoint taken before anything was written:**
+`5a7e8baa` (this lane's fix) for the ones after it. **Three presses, not two** — press 1 on the
+unfixed tree, then 2a and 2b on the fixed one; the reason there are two of the latter is written
+under *2 — the rollback*, and it was my mistake rather than the app's. **Checkpoint taken before anything was written:**
 `rebuild-before-ale-2026-09-09` on the Hyper-V host, 22:21:39 host local. Every action was announced
 on that box's activity terminal first. **Left running:** the whole stack, up, on the build press 2
 made — see *Left on the box*.
@@ -121,7 +123,16 @@ press, so the claim in the press's own log and the state of the daemon are two s
 `703ea6521431` is the image id the ground reading recorded under the running container. The rollback
 names the build that was running, and the world is untouched while the compile runs.
 
-The **other end** of that is press 2 (`5-press2-rollback-kept-then-let-go.png`):
+The **other end** of that is the presses on the fixed tree. `press2-rollback-watch.log`, from outside:
+
+```
+21:13:20Z  count: 2      ← the two stale tags press 1's kill left; see below
+21:13:35Z  count: 4      ROLLBACK …worldserver-rollback  8d99cf823bfc   ← press 1's build, the one running
+   …       count: 4      (five samples, ~60 s)
+21:14:57Z  count: 0      and the images now name worldserver 008648f92bf5 — a build that did not exist before
+```
+
+and `press2-rebuild.log`, from inside the next one (`5-press2-rollback-kept-then-let-go.png`):
 
 ```
 ground: -rollback tags = []                                   ← before
@@ -131,7 +142,17 @@ ground: -rollback tags = []                                   ← before
 after: -rollback tags (must be none) = []                     ← after
 ```
 
-Absent → present during → gone after, all three read rather than assumed.
+Absent → present during → gone after, all three read rather than assumed, twice.
+
+**Those are two different presses, and that was an accident of mine.** Two `ssh` launches I believed
+had failed both eventually ran, so the fixed tree was pressed twice in a row: **press 2a**
+(21:13:36Z → ~21:14:50Z, worldserver `008648f92bf5`) and **press 2b** (21:15:02Z → 21:16:05Z,
+`cad2566406d2`). Both returned cleanly. 2b's start truncated `rebuild.log`, so **press 2a's own log is
+gone** — what survives of it is the watcher's reading above, which is the half taken from outside
+anyway. The two are named apart here rather than merged into one tidy press, because the rollback arc
+in the watcher and the rollback arc in the log are not the same run and a reader would otherwise
+match a timestamp to the wrong one. The fix is confirmed twice over rather than once, which is the
+only good thing about it.
 
 **A refusal `_let_go` can meet, measured by accident.** When this lane removed the stale tags press 1
 left behind, two of the four `docker rmi` calls were refused:
@@ -255,7 +276,8 @@ Measured, and different from the 35–72 minutes the brief expected:
 | | compile | recreate → ready | total |
 | --- | --- | --- | --- |
 | press 1 (ALE added: CMake reconfigure, 1899 objects) | 20:28:18Z → 20:38:42Z, **~10 min** | 20:38:42Z → the world was up by 20:42 | (never returned — the defect above) |
-| press 2 (nothing changed: every layer cached) | 21:13:36Z → 21:15:12Z, **96 s** | 21:15:35Z → ready 21:16:05Z, **30 s** | **63.4 s** of press time |
+| press 2a (nothing changed: every layer cached) | ~21:13:40Z → ~21:14:10Z | recreated 21:14:13Z, done by 21:14:50Z | **~75 s** (watcher; its own log was truncated) |
+| press 2b (same again, immediately after) | 21:15:02Z → 21:15:12Z | 21:15:35Z → ready 21:16:05Z, **30 s** | **63.4 s** |
 
 The install's own `build` stage on the same tree ran **19:42:13Z → 20:07:14Z, 25 minutes** (the
 compile itself 19:44:27Z → ~20:06Z, 1834 objects), and its `ready` stage 20:15:32Z → 20:18:43Z,
@@ -274,15 +296,19 @@ is only true before the install's last act. Named here rather than decided quiet
 answers it one way (the realm line, on this install's world port), and that is a choice made in the
 silence.
 
-## Two things left unexplained, rather than explained away
+## Things left unexplained, rather than explained away
 
-1. **`ac-worldserver` was started again at 21:11:45Z**, between the two presses and by nothing this
-   lane ran. Same container id (`a00c43a0…`, created 20:38:49Z), `RestartCount` still 0, and a clean
-   boot from `Starting worldserver...` on the same image `8d99cf82`. `docker events` for that window
-   is empty, and `systemctl show docker` says `NRestarts=0` with the daemon up since boot — so it was
-   not a crash-restart and not a daemon restart. It coincides with two `ssh … setsid …` launches that
-   left no log file and no evidence of having run. I could not attribute it and am not going to guess;
-   it changed no image and no conclusion above, and both readings that matter were taken after it.
+1. **`ac-worldserver` was started again at 21:11:45Z**, before press 2a and by nothing this lane
+   knowingly ran. Same container id (`a00c43a0…`, created 20:38:49Z), `RestartCount` still 0, and a
+   clean boot from `Starting worldserver...` on the same image `8d99cf82`. `docker events` for that
+   window is empty, `systemctl show docker` says `NRestarts=0` with the daemon up since boot, there
+   is no cron and no watchtower-style container, and `dmesg` shows no OOM kill — so it was neither a
+   crash-restart nor a daemon restart. It sits in the same minutes as the duplicate launches above
+   and is very probably mine, but "very probably" is not a measurement and I am not going to write it
+   down as one. It changed no image and no conclusion here; every reading that matters was taken
+   after it. **`ac-authserver` did the same at 21:24:28Z**, after this lane had finished pressing
+   anything — same container, `RestartCount` 0, exit code 0, and it came back advertising the realm.
+   The box is being left with that unexplained, which whoever takes it next should know.
 2. **Press 1's `ready` stage was killed, not cancelled.** `rebuild()` was handed no cancel event, so
    the process was killed with `pkill`. What that left, read immediately after: the live tags naming
    the NEW build, four `-rollback` tags naming the old one, no `-failed` tags, and the containers up
