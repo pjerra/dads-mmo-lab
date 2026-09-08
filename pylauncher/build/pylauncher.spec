@@ -6,6 +6,7 @@
 # sys._MEIPASS with the SAME relative names as in the source tree:
 #   manifests/            -> <bundle>/manifests
 #   catalog/installers/** -> <bundle>/catalog/installers/**
+#   lua/**                -> <bundle>/lua/**
 # The app bundles a self-contained Python + PySide6 + pydantic; end users never
 # install Python (README §3b).
 
@@ -30,6 +31,12 @@ block_cipher = None
 datas = [
     (os.path.join(ROOT, "manifests"), "manifests"),
     (os.path.join(ROOT, "catalog", "installers"), os.path.join("catalog", "installers")),
+    # `lua/` is My Party's server-side bridge (8.6): scripts the app copies into
+    # somebody's server folder, never imports. A tree for the same reason as
+    # above -- a family added under it must not need an edit here. Left out, the
+    # bridge would deploy from a checkout and find nothing from a release build,
+    # which is precisely the failure `party.deploy` refuses to report as success.
+    (os.path.join(ROOT, "lua"), "lua"),
     # Non-Python package data: the catalog lives next to its models.
     (os.path.join(ROOT, "yulon", "catalog", "catalog.json"), os.path.join("yulon", "catalog")),
 ]
