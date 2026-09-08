@@ -941,7 +941,8 @@
         "notes": [
           "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
         ]
-      }
+      },
+      "has_manifests": true
     },
     {
       "id": "wow-tortoise",

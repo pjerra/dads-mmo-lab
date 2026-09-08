@@ -60,9 +60,13 @@ alternative to a third copy of the SRP6 arithmetic and the restore machinery.
 Giving it a home that is not one game's package is a change to files this
 package does not own, and is left undone rather than half-done.
 
-There is no `modules.py`. That module binds a manifest tree, and `wow-vanilla`
-has no `has_manifests` in the catalog and no `manifests/wow-vanilla/`
-directory — so a module store here would be a store over nothing.
+`modules.py` arrived with 8.7c, and until then this paragraph said there was
+none — the entry had no `has_manifests` and there was no `manifests/wow-vanilla/`
+tree, so a store here would have been a store over nothing. Both are now true,
+and what that module binds is this tree's own manifest set rather than the TBC
+one it shares a shape with: mangos-classic has `AllowTwoSide.Interaction.Trade`
+where mangos-tbc has no such key, so the two forks' cross-faction sets are ten
+keys and nine.
 """
 
 from __future__ import annotations

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "motd",
+  "name": "Message of the Day",
+  "type": "mod",
+  "game": "wow-vanilla",
+  "description": "The line every player is greeted with at login.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Motd",
+          "default": "\"{motd}\"",
+          "note": "mangosd reads this once, at startup; the console reports it with `.server motd`"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Motd[ \\t]*=.*$",
+      "replace": "Motd = \"Welcome to the Continued Massive Network Game Object Server.\"",
+      "regex": true,
+      "when": "remove",
+      "note": "read off ~/vanilla-75b/etc/mangosd.conf:876 on m910q, 2026-09-08 - the line mangos-classic ships"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "motd",
+      "question": "Message of the day",
+      "kind": "string",
+      "default": "Welcome!"
+    }
+  ],
+  "notes": [
+    "The one manifest whose effect the running server states back. In THIS tree the command",
+    "table row is `src/game/Chat/Chat.cpp:797` -> ChatHandler::HandleServerMotdCommand, with",
+    "allowConsole true, and the answer is printed at `src/game/Chat/Level0.cpp:280-282` from",
+    "sWorld.GetMotd(). Both were read in ~/vanilla-75b/src/mangos-classic on 2026-09-08; the",
+    "TBC sibling's row is a different line of a different checkout and was not inherited.",
+    "Note `Chat.cpp:785` binds a SECOND \"motd\" - HandleServerSetMotdCommand, under `server set`",
+    "- which changes the value for this run only and does not write the conf. This mod writes",
+    "the file, which is what survives the restart.",
+    "Do not put a double quote in the text: the value is written into a quoted conf field."
+  ]
+}

@@ -83,6 +83,7 @@ from yulon.controller_wow_vanilla import accounts as vanilla_accounts
 from yulon.controller_wow_vanilla import console as vanilla_console
 from yulon.controller_wow_vanilla import controller as vanilla_controller
 from yulon.controller_wow_vanilla import maintenance as vanilla_maintenance
+from yulon.controller_wow_vanilla import modules as vanilla_modules
 from yulon.controller_wow_wotlk import accounts as wotlk_accounts
 from yulon.controller_wow_wotlk import console as wotlk_console
 from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
@@ -995,8 +996,14 @@ def _for_vanilla(
     this entry names no import service. A button whose only outcome is a
     refusal is worse than no button; the state is still knowable through that
     function for anything that wants to report it rather than act on it.
+
+    `client_dir` is accepted and passed to the applier since 8.7c. It used to be
+    `del client_dir`, which was right while this tab had no manifests at all;
+    now it has some, and although nothing in `manifests/wow-vanilla/` declares a
+    `client[]` step today, handing over the folder the user picked is one
+    binding rather than a `del` a future manifest would have to come back and
+    undo — the same call the TBC factory makes.
     """
-    del client_dir
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -1069,6 +1076,28 @@ def _for_vanilla(
         channel_setup=channel,
         accounts=accounts_admin,
         play=characters_admin,
+        # 8.9b, and the second and last of the two FAMILY boxes uninstall is
+        # gated on. The four seams are the ones every install has and the
+        # construction is `_for_wotlk`'s, deliberately: the mechanism is the
+        # compose project and the folder, which belong to the engine and not to
+        # the emulator. What differs on this tree is not the seams but what the
+        # ticked path costs — `wow-vanilla`'s database password is GENERATED per
+        # install into `.db_password` inside the folder this deletes, so
+        # `purge.Uninstaller` copies it out through `yulon.dbsecret` before
+        # removing anything and refuses the whole press if it cannot. WotLK's
+        # plan is `fixed`, so 8.9a kept nothing and could not exercise that at
+        # all; this is its first press. `image_refs` is the BUILT refs and never
+        # the pulled database image: `mariadb:11` is shared with `wow-tbc`,
+        # which 8.9a's box had no way to notice (`mysql:8.4` is nobody else's).
+        uninstall=purge.Uninstaller(
+            game=entry.id,
+            server_dir=server_dir,
+            spec=spec,
+            image_refs=composegen.built_image_refs(entry, server_dir),
+            logs_dir=platform.config_dir() / "logs",
+            wsl_distro=wsl_distro,
+            forget=forget_record(entry.id, server_dir),
+        ),
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -1080,8 +1109,19 @@ def _for_vanilla(
         create_account=lambda name, pw, gm: vanilla_accounts.create_account(
             sql, name, pw, gm_level=gm
         ),
-        store=_no_manifest_store(entry),
-        applier=None,
+        # 8.7c. `sql=sql`, the SAME runner the console and the account tile use,
+        # which is what `vanilla_modules.applier()` requires it for: it carries
+        # this install's generated password (read once, above) and this game's
+        # schema map, so a SQL mod reaches `mangos` and not `acore_world`. The
+        # manifests behind this store are this tree's own and not the TBC set —
+        # `cross-faction` is ten keys here, because mangos-classic has
+        # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
+        store=vanilla_modules.store() if entry.has_manifests else None,
+        applier=(
+            vanilla_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+            if entry.has_manifests
+            else None
+        ),
         backup=lambda: vanilla_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
         plan_restore=lambda path: vanilla_maintenance.plan_restore(
             path, server_dir, wsl_distro=wsl_distro
