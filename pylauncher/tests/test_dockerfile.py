@@ -1131,8 +1131,9 @@ def test_write_says_it_could_not_tell_when_the_file_cannot_be_read(
     """The third answer. An unreadable file is not evidence of anything.
 
     `composegen.is_ours()` folds this into False, which reads back to the user as "that
-    file was not written by Yu'lon ... point the install at an empty folder" — a claim
-    about a file nobody could open, and the wrong remedy for a permission problem.
+    file was not written by Yu'lon ... move that file aside and press again, or point a
+    new install at an empty folder" — a claim about a file nobody could open, and the
+    wrong remedy for a permission problem.
     """
     text, ignore = dockerfile.render(templates(tmp_path), TOKENS, secrets=SECRETS)
     server = server_dir(tmp_path)
@@ -1164,6 +1165,55 @@ def test_write_says_it_could_not_tell_when_a_directory_is_in_the_way(tmp_path: P
         dockerfile.write(server, text, ignore)
     assert "not written by Yu'lon" not in str(caught.value)
     assert (server / "Dockerfile").is_dir()
+
+
+# -- write: the refusal sentences under Rebuild, not just Install -------------
+
+
+def test_the_refusal_sentences_carry_no_install_only_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Since T8 (`67eb7d70`) a Rebuild renders the recipe again through `write()`, so both
+    refusals below are reachable from the Server tab's Rebuild on a folder that already
+    holds a working install, not only from a first Install. `write()` takes no path
+    parameter to tell the two callers apart, so neither sentence may say "point the
+    install" — throwing an existing server away is not the fix for a rebuild — or
+    "nothing was installed", which is simply false when the caller pressed Rebuild.
+
+    Mutation: restore either old sentence (the THEIRS clause ending "Point the install at
+    an empty folder, or move that file aside.", or the UNREADABLE clause containing
+    "Nothing was touched and nothing was installed.") and this test is the one that goes
+    red.
+    """
+    theirs_root = tmp_path / "theirs"
+    text, ignore = dockerfile.render(templates(theirs_root), TOKENS, secrets=SECRETS)
+    theirs_server = server_dir(theirs_root)
+    (theirs_server / "Dockerfile").write_text("FROM somebody-elses:image\n", encoding="utf-8")
+    with pytest.raises(dockerfile.DockerfileError) as theirs:
+        dockerfile.write(theirs_server, text, ignore)
+    theirs_message = str(theirs.value).lower()
+    assert "point the install" not in theirs_message
+    assert "nothing was installed" not in theirs_message
+
+    unreadable_root = tmp_path / "unreadable"
+    text2, ignore2 = dockerfile.render(templates(unreadable_root), TOKENS, secrets=SECRETS)
+    unreadable_server = server_dir(unreadable_root)
+    (unreadable_server / "Dockerfile").write_text(
+        f"{composegen.GENERATED_MARKER}\nFROM debian:12\n", encoding="utf-8"
+    )
+    real_open = Path.open
+
+    def refusing_open(self: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        if self.name == "Dockerfile" and "w" not in mode:
+            raise PermissionError(13, "Permission denied")
+        return real_open(self, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "open", refusing_open)
+    with pytest.raises(dockerfile.DockerfileError) as unreadable:
+        dockerfile.write(unreadable_server, text2, ignore2)
+    unreadable_message = str(unreadable.value).lower()
+    assert "point the install" not in unreadable_message
+    assert "nothing was installed" not in unreadable_message
 
 
 # -- write: the text handed in ------------------------------------------------
