@@ -2663,3 +2663,323 @@ def test_a_folder_source_never_asks_git_anything(tmp_path: Path) -> None:
     assert origins.asked == []
     assert git.asked_about == [] and git.branches_asked == []
     assert git.calls == []
+
+
+# ------------------------------------------- the running-world guard (8.7a)
+#
+# `checklist.md:2501`: *a module whose SQL targets the world database is refused
+# while the server runs, with the step named and no rows written, and applies
+# once the server is stopped.* Owner answer 7 is the rule
+# (`phase8-parity-decisions.md:44`); `WORLD_HELD_DBS` is the enumeration.
+#
+# The subject is the shape the shipped catalog actually has. The brief for this
+# work said there was exactly ONE direct SQL step across the four games'
+# manifests (`wow-wotlk/modules/mod-arac.json`); loading every manifest through
+# `parse_manifest` says **44**, across 30 files and all four games, because
+# `SqlStep.applied_by` DEFAULTS to `"direct"` (`manifest.py:136`) and a step that
+# names no route is one. So a manifest with several direct `world` steps is the
+# ordinary case, not a contrived one — `all-stackables` ships three on install
+# and two on remove for TBC, Tortoise and Vanilla — and it is what makes "a
+# guard that refuses after the first statement" a shape a test can catch.
+
+
+STACKABLES: dict[str, Any] = {
+    "id": "all-stackables",
+    "name": "All Stackables",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "source": {"repo": "DadsMmoLab/dads-mmo-lab", "sparse_path": "mods/all-stackables"},
+    "sql": [
+        {"db": "world", "statement": "CREATE TABLE yulon_stackable_backup (entry INT);"},
+        {"db": "world", "path": "up.sql"},
+        {"db": "world", "path": "down.sql", "when": "remove"},
+    ],
+}
+
+
+def _stackables_git() -> _FakeGit:
+    return _FakeGit({"up.sql": "UPDATE item_template SET stackable = 200;\n", "down.sql": "-- d\n"})
+
+
+def _one_step(db: str, **over: Any) -> dict[str, Any]:
+    """A manifest whose whole content is one direct SQL step against `db`."""
+    return {
+        "id": f"one-{db}",
+        "name": "One Step",
+        "type": "mod",
+        "game": "wow-wotlk",
+        "source": {"repo": "DadsMmoLab/dads-mmo-lab"},
+        "sql": [{"db": db, "statement": "SELECT 1", **over}],
+    }
+
+
+class _Seam:
+    """A `world_running` seam that records how often it was asked."""
+
+    def __init__(self, answer: bool | None) -> None:
+        self.answer = answer
+        self.asked = 0
+
+    def __call__(self) -> bool | None:
+        self.asked += 1
+        return self.answer
+
+
+def test_direct_world_sql_is_refused_while_the_world_runs(tmp_path: Path) -> None:
+    """The whole clause, in the words the user reads.
+
+    Catches the guard being deleted, and a `raise` softened into a log line:
+    the message is asserted whole, so a refusal that stops naming the steps or
+    stops saying no rows were written fails here rather than being noticed live.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the world server is running, and it holds world in memory and writes "
+        "back over whatever it finds there. No SQL was run and no rows were written: "
+        "sql inline → world, sql up.sql → world. Press Stop, then install again — the steps "
+        "this run already took repeat, and the SQL follows them."
+    )
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_refusal_lands_before_the_first_statement_not_between_two(tmp_path: Path) -> None:
+    """A guard that refuses after the first statement is worse than none.
+
+    `all-stackables` install-time SQL is `CREATE TABLE … backup` followed by the
+    `UPDATE item_template` the backup exists to undo. Run the first and refuse
+    the second and the mod is half applied with no way for a reader to tell.
+    So the check is a pre-pass over the action's steps and not a test inside the
+    loop: this asserts the FIRST statement never reached the runner either, and
+    that both steps are named in one sentence.
+
+    Catches the guard moved into `_sql`'s loop or into `_run_sql`, where step 1
+    would run and step 2 would be refused.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert sql.statements == []  # the inline step is FIRST and it did not run
+    assert sql.files == []
+    assert "sql inline → world" in str(raised.value)
+    assert "sql up.sql → world" in str(raised.value)
+
+
+@pytest.mark.parametrize("db", ["characters", "world", "playerbots"])
+def test_every_database_a_running_world_holds_is_refused(tmp_path: Path, db: str) -> None:
+    """`WORLD_HELD_DBS` is the union of what the pages name, asserted one by one.
+
+    Catches the set shrunk to `{"world"}` — which `checklist.md:2501` alone
+    would permit and owner answer 7 and `c-operators-risk.md:90` would not.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(_one_step(db)))
+    assert sql.statements == []
+
+
+def test_an_auth_step_is_never_the_reason_for_a_refusal(tmp_path: Path) -> None:
+    """Account rows are not held by the worldserver, and no page asks for them.
+
+    Catches the membership test degenerating to "every step is guarded", which
+    would refuse an install with the world up that nothing in the plan forbids.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    report = applier.install(parse_manifest(_one_step("auth")))
+    assert sql.statements == [("auth", "SELECT 1")]
+    assert report.skipped == ()
+
+
+def test_an_ale_step_runs_because_no_page_names_that_database(tmp_path: Path) -> None:
+    """The one place this guard is deliberately silent, recorded as a decision.
+
+    `acore_ale` is the ALE Lua engine's own schema and it lives inside the
+    worldserver process, so the reason `characters`/`world`/`playerbots` are
+    guarded plausibly reaches it. Owner answer 7, `checklist.md:2501` and both
+    design pages name it nowhere, and one shipped step targets it
+    (`manifests/wow-wotlk/ale/paragon.json`). Left running rather than quietly
+    decided for; this test is what makes the decision visible if it changes.
+
+    Catches `"ale"` being added to `WORLD_HELD_DBS` without an owner answer —
+    which would be the same fault in the other direction.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    applier.install(parse_manifest(_one_step("ale")))
+    assert sql.statements == [("ale", "SELECT 1")]
+
+
+def test_an_unguarded_step_beside_a_guarded_one_does_not_run_either(tmp_path: Path) -> None:
+    """Half a manifest is not an outcome anybody asked for.
+
+    The `auth` step is FIRST, so a guard that filtered step by step and let the
+    permitted ones through would have written it before reaching the refusal.
+    Nothing is lost by refusing it: the second press re-runs it.
+
+    Catches a per-step filter that runs what it does not refuse.
+    """
+    data = _one_step("auth")
+    data["sql"] = [
+        {"db": "auth", "statement": "INSERT INTO account VALUES (1)"},
+        {"db": "world", "statement": "UPDATE item_template SET stackable = 200"},
+    ]
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(data))
+    assert sql.statements == []
+
+
+def test_with_the_world_stopped_every_step_runs(tmp_path: Path) -> None:
+    """The other half of the clause: *applies once the server is stopped*.
+
+    Catches the condition inverted, and catches a guard that refuses on any
+    answer at all rather than on "not a clear no".
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+    report = applier.install(parse_manifest(STACKABLES))
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+    assert report.skipped == ()
+
+
+def test_a_seam_that_cannot_tell_refuses_rather_than_running(tmp_path: Path) -> None:
+    """`None` is "could not ask", which is not "not running" — fail closed.
+
+    The same three-valued discipline `docker._running()` keeps for a project it
+    cannot read, and the reason the seam is typed `bool | None`.
+
+    Catches `if running is False: return` written as `if not running: return`,
+    where `None` is falsy and the SQL would go into a world nobody asked about.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: None)
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert "the seam gave no answer" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_a_seam_that_raises_refuses_and_carries_the_reason(tmp_path: Path) -> None:
+    """A dead Docker daemon is a refusal with a reason, not a traceback.
+
+    Catches the `try` removed — which turns a probe failure into an unhandled
+    exception in the middle of an install — and catches the reason dropped from
+    the sentence, which leaves the user a refusal they cannot act on.
+    """
+
+    def boom() -> bool:
+        raise OSError("docker daemon not reachable")
+
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=boom)
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+    assert "OSError: docker daemon not reachable" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_with_no_seam_the_behaviour_is_the_one_every_caller_has_today(tmp_path: Path) -> None:
+    """`c-operators-risk.md:345`: with the seam absent, today's behaviour.
+
+    No shipped caller passes `world_running` yet, so this is the path every
+    press in the app currently takes — and it must be byte for byte what it was
+    before the guard existed, or this change is a regression for four games at
+    once. Named here rather than left implicit: **until a caller wires the seam,
+    this guard protects nobody.**
+
+    Catches a default that fails closed, which would refuse every install.
+    """
+    sql = _FakeSql()
+    report = Applier(tmp_path, git=_stackables_git(), sql=sql).install(parse_manifest(STACKABLES))
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+    assert report.skipped == ()
+
+
+def test_the_db_import_route_is_not_touched_by_this_guard(tmp_path: Path) -> None:
+    """The other route's guard is `docker.apply_module_sql()`, not this one.
+
+    A db-import step writes nothing here — it is resolved into `pending_sql` and
+    handed to upstream's importer, which `docker.py:2029-2036` refuses while the
+    world is up. Refusing it here as well would refuse an install that writes
+    nothing, and would break the one route that already works.
+
+    Catches `applied_by == "direct"` dropped from the filter.
+    """
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path, git=_ahbot_git("data/sql/db-world/a.sql"), sql=sql, world_running=lambda: True
+    )
+    report = applier.install(parse_manifest(MODULE), {"bot_guid": "42"})
+    assert [p.db for p in report.pending_sql] == ["world"]
+    assert sql.statements == [] and sql.files == []
+
+
+def test_with_no_runner_the_older_message_survives_the_guard(tmp_path: Path) -> None:
+    """An install with no database writes nothing, so there is nothing to refuse.
+
+    Refusing here would replace a true sentence ("no SQL runner configured")
+    with one about a write that was never going to happen.
+
+    Catches the `self.sql is None` early return dropped from the guard.
+    """
+    applier = Applier(tmp_path, git=_stackables_git(), world_running=lambda: True)
+    report = applier.install(parse_manifest(STACKABLES))
+    assert report.skipped == ("sql → world: no SQL runner configured",) * 2
+
+
+def test_the_seam_is_not_asked_for_an_action_with_no_direct_sql(tmp_path: Path) -> None:
+    """Reading it costs a Docker call, and a refusal about nothing is noise.
+
+    `all-stackables` has install-time and remove-time SQL and none at configure
+    time, so `configure()` must not ask — and must not refuse.
+
+    Catches `step.when == when` dropped from the filter, which would refuse a
+    configure over a manifest whose SQL belongs to a different action.
+    """
+    seam = _Seam(True)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=seam)
+    report = applier.configure(parse_manifest(STACKABLES))
+    assert seam.asked == 0
+    assert report.done == () and report.skipped == ()
+
+
+def test_remove_time_sql_is_refused_and_the_clone_survives_to_be_undone(tmp_path: Path) -> None:
+    """The case that decides refuse-versus-skip, and the reason it is a raise.
+
+    A mod's remove-time SQL is its UNDO — `all-stackables` puts `item_template`
+    back from its backup table — and the statements straight after `_sql()` in
+    `remove()` delete the clone that file lives in. Report it as `skipped` and
+    the run reports a clean removal while the world keeps the change and the
+    only copy of the undo is gone. `remove()`'s own comment already puts its
+    refusals before the SQL for exactly this reason.
+
+    Catches the refusal turned into a `skipped` line, which would pass a test
+    that only ever looked at `install()`.
+    """
+    down = tmp_path / "sql_scripts" / "clones" / "all-stackables" / "down.sql"
+    installed = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql())
+    installed.install(parse_manifest(STACKABLES))
+    assert down.is_file()
+
+    sql = _FakeSql()
+    up = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError) as raised:
+        up.remove(parse_manifest(STACKABLES))
+
+    assert "sql down.sql → world" in str(raised.value)
+    assert "then remove again" in str(raised.value)
+    assert sql.files == []
+    assert down.is_file()  # the undo is still on disk to be run once the world is down
