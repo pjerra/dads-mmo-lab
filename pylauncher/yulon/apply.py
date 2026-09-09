@@ -1880,7 +1880,25 @@ class Applier:
         # having started nothing. Starting containers under a world this guard
         # is about to refuse would undo the guard's own advice on a stack the
         # user had Stopped.
-        self._start_the_database_for_direct_sql(manifest, when, log)
+        if self._start_the_database_for_direct_sql(manifest, when, log):
+            # THIRD, and the reason the guard is asked twice for one press.
+            # `start_database()` waits for the database to report healthy, up to
+            # 120 s (`docker._DB_HEALTHY_TIMEOUT_SECONDS`). The first reading is
+            # that old by the time the first statement would be sent, and the
+            # Server tab's Start is a button the same user can press in the
+            # meantime — as is a `compose up` in another terminal. A world
+            # started inside that window is holding these tables when the writes
+            # land, which is the whole of what this guard is for, and the report
+            # would have said the world was left stopped.
+            #
+            # The same sentence as the first refusal, deliberately: it is the
+            # same fact and the same remedy, and a second vocabulary for one
+            # rule is how a user comes to meet two. Nothing is reported when it
+            # raises — `install()` never returns a report — so the database this
+            # run started is left up and unmentioned. That is the safe side of
+            # the trade: a container that is running when it need not be, rather
+            # than rows written under a live world.
+            self._refuse_direct_sql_into_a_running_world(manifest, when)
         for step in manifest.sql:
             if step.when != when:
                 continue
@@ -1996,7 +2014,7 @@ class Applier:
             f"and the SQL follows them."
         )
 
-    def _start_the_database_for_direct_sql(self, manifest: Manifest, when: When, log: _Log) -> None:
+    def _start_the_database_for_direct_sql(self, manifest: Manifest, when: When, log: _Log) -> bool:
         """Make *"Press Stop, then install again"* a thing that can be done.
 
         The guard above tells a user to stop the server. The app's Stop is
@@ -2026,14 +2044,21 @@ class Applier:
           and where the logs are; nothing here knows better, and a paraphrase
           would send the operator looking in the wrong place. Nothing has run
           when this raises, for the same reason the guard is a pre-pass.
+
+        Returns whether the start seam was CONSULTED — not whether it started
+        anything. `_sql()` re-reads the running-world guard on a true answer,
+        because consulting it is what opens the window: the call can block for
+        up to two minutes waiting on health, and the world can come up inside
+        it. `False` here means nothing was asked of Docker and no time passed,
+        so the first reading is still the current one.
         """
         if self._start_database is None or self.sql is None:
-            return
+            return False
         direct = [
             step for step in manifest.sql if step.when == when and step.applied_by == "direct"
         ]
         if not direct:
-            return
+            return False
         try:
             started = self._start_database()
         except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
@@ -2044,6 +2069,7 @@ class Applier:
             ) from exc
         if started:
             log.done.append("started the database alone; the world server was left stopped")
+        return True
 
     def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:
         """Resolve a deferred step's glob so the count reported is a real one.

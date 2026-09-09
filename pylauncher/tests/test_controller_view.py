@@ -46,7 +46,7 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
-from yulon.manifest import Build, Manifest, ManifestType, Source
+from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
@@ -5293,3 +5293,109 @@ def test_a_job_ending_never_hands_back_a_button_the_game_cannot_use(
     assert (
         view.rebuild_button.isEnabled() is False
     ), "a job ending handed back a button whose action does not exist"
+
+
+# ------------------- the guard, on the button (8.7a / T7)
+
+
+_DIRECT_WORLD_MOD: dict[str, object] = {
+    "schema_version": 1,
+    "id": "world-sql",
+    "name": "World SQL",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "build": {"rebuild": False, "restart": True},
+    "sql": [{"db": "world", "statement": "UPDATE item_template SET stackable = 200"}],
+}
+
+
+def _no_sql_reaches_the_database(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record what the tab's REAL `DockerSql` was asked to run, without replacing it.
+
+    The applier under test is the one `for_entry()` built, holding the runner it
+    built -- nothing here reaches inside it. The two `SqlRunner` methods are
+    recorded on the class instead, which is the seam the engine calls, so a
+    statement that got past the guard is counted rather than shelled out.
+    """
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        DockerSql, "run_statement", lambda self, db, statement: sent.append((db, statement))
+    )
+    monkeypatch.setattr(DockerSql, "run_file", lambda self, db, path: sent.append((db, path.name)))
+    return sent
+
+
+def test_the_wotlk_modules_tab_refuses_direct_world_sql_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8.7a's second clause, on the applier `for_entry()` really hands the tab.
+
+    This is the test T2's press could not be: that gate wired `world_running`
+    onto the applier itself, because no shipped caller passed one, and its
+    README leads with *"met by the engine and by no button"*. Here nothing is
+    attached and no private field is touched -- `docker.world_running` is
+    patched, which is the function the view's own lambda calls, and the refusal
+    has to travel the whole shipped path to arrive.
+
+    Catches the four view sites rewired to anything but `docker.world_running`
+    (a patched function nobody calls changes nothing, and the real
+    `container_state` would shell out to the docker CLI, which `conftest`'s
+    guard fails on), the seam dropped between factory and `Applier`, and the
+    guard itself deleted.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "the world server is running" in str(raised.value)
+    assert "sql inline → world" in str(raised.value)
+    assert sent == [], "the guard is a pre-pass: nothing reached the runner"
+    assert asked == [WOTLK.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_wotlk_modules_tab_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `None` branch, on the button -- the one T2's press never saw live.
+
+    `docker.container_state()` answers an empty `ContainerState` for a missing
+    container and for a daemon that will not reply, and `.settled` turns that
+    into `False`, which through this guard is fail-OPEN. The view calls
+    `docker.world_running()` precisely so that arrives as `None`.
+
+    Catches a view site rewired to `container_state(...).settled` or to
+    `status == "running"`: both answer `False` here, the install would proceed,
+    and this test would find the statement sitting in `sent`.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert sent == []
