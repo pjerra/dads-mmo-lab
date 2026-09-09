@@ -1,6 +1,6 @@
 # T6 — Four record corrections the lead owes, each found by a reviewer on another ticket
 
-**Status:** REWORK (rejected by the lead 2026-09-09 12:10, round 1)
+**Status:** DONE, round 2 (hand reported 12:48; awaiting review 2)
 **Filed:** 2026-09-09 11:10 by the lead (Fable), from T1's eight reviews
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha — expected `d70642c6` or later)
 **File set (yours alone):** `pyplan/checklist.md` (line 2495 only), `pyplan/gates/8.6-panel-live-yulon-ubuntu2-2026-09-09/README.md`, `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`. No other file; no other line of the checklist.
@@ -60,3 +60,9 @@ Notes: the 7.10 README's list of bare local times reads exhaustive and is not (`
 4. `.../README.md:76-78` -- narrow both universals: "`ac-worldserver` runs UTC" is what was measured (one container); and "every Z timestamp the 8.6 record cites" becomes the ubuntu2 pages' Docker `started=` stamps, naming `part-2-party.md:26`, `part-2-bridge-absent.md:29,33`; say the 2026-09-08 folder's Z banners are gate-script stamps on a box never measured.
 5. Optional: the bare-local-times list at :46 says "among them" or lists :61 and :285 too; straight apostrophes in the quoted subject on 2495.
 Amend the single commit, re-run the gate, report.
+
+## Report, round 2 (hand, 2026-09-09 12:48)
+
+- sha `256c52a6` (amended, base `528f219e`); gate ALL GREEN, 3769 passed; diff `checklist.md | 2 +-`, `7.10-… README | 24 +`, `panel-live README | 29 +`.
+- 1: thirty-four minutes (verified `run.log:1`). 2: "last bullet" -> `README.md:74-94` anchored by the bullet's opening words; the universal removed there too. 3: `:9`. 4: both universals narrowed -- `ac-worldserver` the one container asked, no other measured; the Z stamps settled are the ubuntu2 pages' Docker `started=` readings (`part-2-party.md:26`, `part-2-bridge-absent.md:29,33`), and the 09-08 folder's Z banners are script stamps on the original, unmeasured box. 5: the bare-times list names `00:03:26`, `~00:26`, `00:31:32` too; six curly apostrophes on 2495 made straight, the quoted subject byte-identical to `2da4c516`'s.
+- Deviation: "no longer exists" replaced with "OffCritical since its host disk left the bus" (self-caught); cross-file citations anchored by quoted words as well as numbers.

@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** DONE, code half (hand reported 2026-09-09 12:02; awaiting review); live half queued for the box
+**Status:** REWORK, code half (rejected by the lead 2026-09-09 12:50, round 1); live half queued for the box
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -51,3 +51,16 @@
 - [high] Dismiss-all's confirmation is a global boolean (`party_panel.py:514-532`): armed, the user can change the master name or wait while the party changes, and the second press dismisses whatever `remove_all(master)` reads then -- a different set, or a different master, than the count the user confirmed. Must-fix: snapshot the normalised master and the exact bot identities when arming; before executing, re-read and require the same master and an unchanged set, else disarm and ask again; disarm on character-field edits; consider an expiry.
 - [medium] Spec reads race (`party_panel.py:340-361`): each class change starts an independent read whose completion carries only the names, so a slower mage read landing after a druid read fills the druid picker with mage specs, and the next Add sends a spec the seam refuses. Must-fix: carry the requested class (or a generation) into the completion and discard stale results; a deferred-job test that completes reads in reverse order.
 Fable verdict pending; the rejection body carries both.
+
+## Review 2, code half (cold Fable reviewer, 2026-09-09 12:46) -- REWORK, two
+
+1. A stale dismiss-all arm can fire against a different character (`party_panel.py:505-532`): the first press names the master and count but records nothing, and only `returnPressed` disarms -- arm on Pakka, retype Anmi, press -> `remove_all("Anmi")`. Remember the armed master and count, disarm on `textChanged`, test it.
+2. The seam's three new hand-offs in `InstallParty.add` (`party.py:1573-1580`: `specs=`, `max_level=`, `set_level=`) are under no test -- every spec/level test calls `add_bot` directly with those supplied; mutations `specs=()`, `max_level=None`, `set_level=None` are caught by nothing. One seam-level test through `_install(...).add(...)` closes all three.
+Notes: the seams are the same ones (spec whisper replaces autopick and gear follows; level through the same `InstallPlay` the factory builds; dismiss-all continues past a refusal); five weakened-assertion cases analysed, none true before its action; the eight mutations are not enumerated (two named); the new-test count is 32+11+1, not 28; spec-name behaviour matches the cited module claims, and refusing an unlisted spec in the app is sound given the in-game-only refusal (caveat: an inline `# comment` after a value is kept where the core would drop it); the level readback is from `characters.level`; threads clean; **the live half must prove** `characters.level` on an online bot after `.character level` (the core's async `CHAR_UPD_LEVEL` can lag -- if seen, poll like the join does), the level-then-spec order, the in-game "Spec not found", and the talent readback.
+
+## Rejection (lead, round 1) -- the union
+
+1. Bind the dismiss-all arm to the master and the exact bot set (both reviewers); disarm on `textChanged`; re-read before the second press; tests for the edited box and for a party that changed underneath.
+2. Discard stale spec reads by class or generation (Codex); a reversed-completion test.
+3. One seam-level test through `InstallParty.add` with spec and level (Fable).
+4. In the report: the eight mutations with the test that caught each; the recount.
