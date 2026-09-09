@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** DONE (hand reported 2026-09-09 15:35; awaiting review)
+**Status:** REWORK (rejected by the lead 2026-09-09 16:50, round 1)
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -39,3 +39,15 @@ Either way: TDD, the failing test first (an install whose on-disk Dockerfile dif
 
 - [medium] `native.py:250-252`: the opening note promises that stopping any time before the containers are replaced leaves the server "exactly as it is"; the new first stage rewrites a stale Dockerfile and records the stage in the install-state file before the compile, and on a cancel or a failed build the code only drops the rollback tags -- the previous Dockerfile is not put back, so the recipe the next build uses has changed. Must-fix: either keep and restore the previous generated Dockerfile (and `.dockerignore`, and the state) on every pre-recreate cancel or failure, or narrow the sentence to "the running containers stay as they are; the build recipe may already have been refreshed"; a test that cancels or fails right after `write-dockerfile` and asserts the promised disk state.
 Fable verdict pending; the rejection body carries both.
+
+## Review 2 (cold Fable reviewer, 2026-09-09 16:45) -- REWORK, one clause
+
+The mechanism verified in full (the family's own stage first, only with `dockerfile_dir`, only on difference; AzerothCore's three stages untouched; the positional hazard real, traced at the parent; the rollback functions untouched; every one of the five tests RED at the parent and the mutations mapped). Must-fix: `installer.py:395`'s new clause says "if you have edited **that file** yourself the rebuild stops" and "Nothing else in the folder is rewritten" -- but `_write_dockerfile` renders and writes **two** files, `Dockerfile` and `.dockerignore`, through one `dockerfile.write()`, which rewrites whichever differs and refuses either that carries no marker; a `.dockerignore` behind its template is rewritten while the dialog promised nothing else would be. Say both files, drop or rescope "nothing else"; `native.py:244`'s opening note the same. Notes: the refusal sentence for an unmarked file is install-shaped ("Point the install at an empty folder"), wrong advice under a rebuild, outside this file set; the `if wrappers: raise` branch has no test; `rebuild_stages()` now runs before `_keep_rollback`, an unclaimed improvement; a live-press list.
+
+## Rejection (lead, round 1) -- both reviews
+
+1. **Keep the cancel promise true** (Codex): the opening note says stopping before the containers are replaced leaves the server "exactly as it is", and the first stage now rewrites the recipe before the compile. Keep the previous generated `Dockerfile` and `.dockerignore` (the bytes as found) and put them back on every cancel or failure before `recreate`, alongside `_let_go`, with the state file's stage record. A test that cancels or fails right after `write-dockerfile` and asserts the disk state is the ground's. (Narrowing the sentence is the fallback; say why if you take it.)
+2. **The clause names what the stage writes** (Fable): both files, as "the build recipe"; drop "nothing else in the folder"; `native.py:244` the same.
+3. A test for the `if wrappers: raise` branch.
+4. Optional: the install-shaped refusal sentence under a rebuild is outside your set; describe the one-line change for the lead.
+Amend or add a commit (say which); gate; report.

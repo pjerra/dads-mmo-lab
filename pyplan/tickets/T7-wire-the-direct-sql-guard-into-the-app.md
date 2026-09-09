@@ -1,6 +1,6 @@
 # T7 — The direct-SQL guard reaches the app's own buttons, and "Stop, then install" can actually be done
 
-**Status:** OPEN
+**Status:** DONE, code half (hand reported 2026-09-09 16:48; awaiting review); live half queued for the box
 **Filed:** 2026-09-09 11:50 by the lead (Fable), from T2's live press
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/apply.py`; the four factory sites T2's reviewer located — `pylauncher/yulon/controller_wow_wotlk/modules.py` (`applier()`, near line 205), `pylauncher/yulon/controller_wow_tbc/modules.py`, `pylauncher/yulon/controller_wow_vanilla/modules.py`, and `pylauncher/yulon/controller_wow_tortoise/autoupdate.py` (`GuardedApplier` sets the *public* `world_running` near line 461, a different attribute from the private one the guard reads); `pylauncher/yulon/ui/controller_view.py` **only** at the module-Applier construction near lines 919-924 (T5 owns `_build_my_party_group` and the `MyPartySeam` Protocol — do not touch those, and start only after the lead says T5's code half is merged); `pylauncher/yulon/docker.py` only if `start_database()`'s signature must change; their test files (name them); `pyplan/write-ledger.md` if a write site moves; and a NEW `pyplan/gates/8.7a-guard-wired-yulon-ubuntu2-2026-09-09/` for the live half. **Not** `install_wiring.py` — T2's reviewer read it: it holds no `Applier` and wires no seam of this kind; the one existing `world_running` wiring is My Party's at `controller_view.py:948`, fail-closed on a blank inspect, which is the shape to copy. Not `pyplan/checklist.md`.
@@ -36,3 +36,13 @@ Repeat T2's press through the app's own surface: the refusal with the world up, 
 ## Report format (final message)
 
 `## Report (code half)` — sha, gate last line, diff stat, the construction sites (file:line, count), the tests and their mutations, deviations, status DONE (code half).
+
+## Report, code half (hand, 2026-09-09 16:48)
+
+- sha `ef0cee36` on `worktree-agent-ae3ae26e084b062b7` (base `583a61ce`); gate ALL GREEN 3787; diff 15 files +991/-36.
+- **13 construction sites wired**, found by an AST audit that asserts the count and what each site binds: the `Applier(...)` / `apply_module()` pairs in the TBC, Vanilla and WotLK factories, `GuardedApplier(...)` and the Tortoise pair, and **the four shipped Modules-tab appliers in `controller_view.py`** (`:937`, `:1224`, `:1382`, `:1503` -- four, not the one the ticket named). `world_running` is a required keyword-only parameter on all four factories; the audit also pins that each site binds `docker.world_running` (a site rewired to `.settled` is caught).
+- The seam: new `docker.world_running(container, *, wsl_distro)`: blank status -> `None` (fails closed), `running`/`restarting` -> `True`, else `False`; deliberately not `.settled`. My Party's wiring untouched.
+- Tortoise fixed at `autoupdate.py:458`: `GuardedApplier.__init__` forwards `world_running=` to `super().__init__`; `_guard()` narrows with `is True`.
+- The stopped-world path: `Applier._start_the_database_for_direct_sql()` runs from `_sql()` after the refusal, only with a `start_database` seam, a runner and a direct step in this action; the view binds `docker.start_database(...)`, which starts the database alone; `start_database()` returns `bool` and the report says `started the database alone; the world server was left stopped` only when it did; a failure raises `ApplyError` with Docker's sentence before anything runs.
+- Tests: 7 behavioural + 3 audit/census in `test_apply.py`, 2 in `test_docker.py`, 2 each in the TBC/Vanilla/Tortoise module tests, one call site in `test_catalog_view.py`; ten mutations caught (listed with their tests); one not caught and not real (`is True` vs `bool()` on `bool | None`). Census: 43 steps / 18 manifests / 4 games (the 44th direct step is `paragon.json`'s into `ale`).
+- Deviations: four `controller_view.py` sites edited, not one; `docker.py` gained a function; one annotation widened in `native.py:1378`; one call site in `test_catalog_view.py`; the test through `ControllerServices.for_entry()` belongs in `test_controller_view.py` (T5's, now merged) -- proposed, not written; write-ledger untouched; six laptop-only pre-existing failures.
