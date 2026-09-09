@@ -1,6 +1,6 @@
 # T15 — The two Dockerfile refusals give advice that is true under Rebuild as well as Install
 
-**Status:** OPEN (waiting for a lane; three are taken)
+**Status:** ACCEPT on the lead's own read (2026-09-09 14:24 CEST, 60-line wording diff, budget rule) -- merging
 **Filed:** 2026-09-09 12:55 CEST by the lead (Fable), from T8's reviewers (round 1 Fable note, round 2/3 item 4)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/families/dockerfile.py` **only** at the two refusal sentences in `write()`'s verdict handling (`_Verdict.THEIRS` near :630-634, `_Verdict.UNREADABLE` near :635-640 on `yulon-phase8b` at `67eb7d70`; verify), the module docstring at `:11` that repeats the THEIRS sentence, and the test file that pins those sentences (find it: `git grep -n "Point the install at an empty folder" -- pylauncher/tests`). Nothing else.
@@ -26,3 +26,7 @@ Reword the two sentences so each is true on both paths, without a path parameter
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, both sentences quoted before and after, the test and its mutation, deviations, status DONE.
+
+## Report (Sonnet hand, 2026-09-09 14:24 CEST) and the lead's read
+
+`bd5a1788` on base `7cd6913f`; gate ALL GREEN (3893); 2 files +60/-10. THEIRS now: "{path} was not written by Yu'lon, so it was not touched. Move that file aside and press again, or point a new install at an empty folder."; UNREADABLE now: "... that is not a pass. Nothing was touched. Make that file readable, or move it aside."; the module docstring at `:10-14` and one test docstring updated. New `test_the_refusal_sentences_carry_no_install_only_advice` drives both refusals and asserts neither contains "point the install" or "nothing was installed"; RED against the old wording, GREEN after; mutation (old THEIRS sentence restored) red on that test alone. Trailer `Co-Authored-By: Claude Sonnet 5` (the hand is Sonnet). The lead read the diff (both sentences keep their shape; the assertions are the install-only phrases; no other test pinned the old text) and merged without a cold reviewer.
