@@ -1210,18 +1210,24 @@ def _level_note(level: int | None, before: int | None, after: int | None, proble
     assertion was true before its action has proved nothing, and a bot the server
     happened to make at the level that was asked for is exactly that step.
 
-    **The "still reads" arm is a real failure on this tree, and 2026-09-09
-    measured its shape** (`pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09`).
-    Twice, through this panel, the console answered `You changed level of <bot>
-    to 42.` and `characters.level` went on reading 1 — and stayed 1 through a
-    forced `.saveall`, so it is not a write waiting for a save. The same command
-    sent by hand a few seconds later held, and again 25 s after a third bot
-    appeared. What that says is that the level is sent while the bot is still
-    being built: `add_bot` fires it the moment the GROUP ROW appears, and
-    playerbots is still initialising the character then and sets its level after.
-    The sentence therefore says what was read and does not explain it away —
-    the app has not yet earned a mechanism, and the fix (read back and re-send,
-    the way the join already polls) is a ticket rather than a guess.
+    **The "still reads" arm is what this tree does, and the wording is bounded by
+    what a committed artifact shows** — the folder is
+    `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09`.
+    Two presses are photographed: a level of 42 asked for at 13:12
+    (`panel-8-…png`, the row reading 1) and one of 55 at 13:17
+    (`panel-9-…png` with `panel-transcript.log:61-130`, the row reading 1 for the
+    sixty-eight seconds the bot stayed in the party, 13:17:35 to 13:18:43). The same readings carry
+    `Bafossan — level 42` and `Kenvadi — level 37`, so the column does show levels
+    that have changed — the row is not simply always 1.
+
+    What is NOT in that folder, and so is not asserted here: that a forced save
+    leaves it unwritten, that the same command sent later holds, and the timing
+    that would explain either. Those were run at the console and never captured,
+    and an earlier version of this docstring stated one of them as fact. So this
+    says what was seen and stops: whether such a level lands later, nothing the
+    app can read from here says. The fix — read back and re-send, the way the
+    join already polls — needs the timing measured and captured first, and is a
+    ticket rather than a guess.
     """
     if level is None:
         return ""
@@ -1240,9 +1246,8 @@ def _level_note(level: int | None, before: int | None, after: int | None, proble
     if after != level:
         return (
             f" The server accepted the level and characters.level still reads {after}, not "
-            f"{level} — so the level did NOT take. On this tree a level sent in the first "
-            "seconds after a bot appears has been seen not to hold; the same command a few "
-            "seconds later does."
+            f"{level}. On this tree that row has been seen to stay unwritten for as long as "
+            "this panel watched it, so take the level as not set until the row says otherwise."
         )
     return f" characters.level read {before} before the press and {after} after."
 

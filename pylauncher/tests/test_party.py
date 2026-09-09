@@ -1194,12 +1194,15 @@ def test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set
     )
     assert (result.level_before, result.level_after) == (1, 1)
     assert "still reads 1, not 60" in result.sentence
-    # MEASURED live on `yulon-ubuntu2` 2026-09-09: the console answered
-    # `You changed level of <bot> to 42.` and the row stayed 1 THROUGH a forced
-    # `.saveall`, so this is not a write waiting for a save -- the level did not
-    # take, because it was sent while playerbots was still building the bot. The
-    # sentence must say that and must not explain it away.
-    assert "did NOT take" in result.sentence
+    # Live on `yulon-ubuntu2` 2026-09-09 this arm was the answer to two presses,
+    # and both are in the gate folder: `panel-8-…png` (42 asked, row 1) and
+    # `panel-9-…png` with `panel-transcript.log:61-130` (55 asked, row 1 for the
+    # sixty-eight seconds the bot was in the party, 13:17:35 to 13:18:43).
+    # What the folder does NOT hold is a forced save leaving it unwritten, so the
+    # sentence claims no mechanism -- it says what was read, and where that
+    # leaves the reader.
+    assert "stay unwritten for as long as this panel watched it" in result.sentence
+    assert "not set until the row says otherwise" in result.sentence
 
 
 def test_a_refused_level_does_not_stop_the_spec_or_the_gear() -> None:

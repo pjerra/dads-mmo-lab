@@ -1,48 +1,47 @@
 # T5 live half — chosen spec, chosen level, dismiss all, pressed through the panel — yulon-ubuntu2, 2026-09-09
 
-**Is 8.6's definition of done met in full? No — and this run is why we know.** Two of the three
-controls work against a live server and are photographed doing it. The third, the **chosen level,
-does not**: the server accepts the command and the character keeps its old level, because the app
-sends it in the first seconds after the bot appears and playerbots is still building the character
-then. The app says so in its own words rather than reporting success, which is the only reason this
-page can be trusted about the other two.
+**Is 8.6's definition of done met in full? No.** Dismiss-all works against a live server and is
+photographed doing it. The chosen **spec** could not take effect here at all — this install has no
+premade specs deployed — though the run proved the app now offers exactly what the server has. The
+chosen **level** did not take: the server accepted the command and the row kept its old level.
 
-The run also **refuted a claim the code half shipped**: that a `playerbots.conf.dist` may be read
-when no conf is deployed. It may not, the server had loaded **zero** premade specs, and the picker
-was offering 63 names that could only ever fail — silently, in a chat window nothing in this app can
-read. That is fixed in this commit.
+**Read the capture column before believing a row.** The first version of this page stated a dozen
+console readings as fact and shipped no artifact for any of them; a reviewer caught it, and this
+version marks every claim. **captured** means a file in this folder shows it. **asserted** means it
+was read at the console during the run, was never written down, and is here only because removing it
+would hide what the conclusions were actually built on. Nothing marked *asserted* is load-bearing
+for any sentence in `party.py`.
 
-Pressed from `182fc92a`, plus the two corrections this run forced (in the same commit as this page).
-World `ac-worldserver` up throughout at **pid 409560** — the same pid at the first ground reading
-(12:38) and at release (13:21), so nothing here restarted the world.
+Pressed from `182fc92a` plus the corrections this run forced. `--checks` ALL GREEN on yulon-fedora.
 
-## What was pressed, and what answered
+## The world was up throughout
 
-Every line below is the panel's own transcript (`panel-transcript.log`, and the session log for the
-presses that preceded the corrections). The seam is `party.InstallParty`, built by
-`gate86b.build()`; the widget is the shipped `PartyPanel`; the presses are real clicks through
-`xdotool` on the VM's desktop, never `QPushButton.click()`.
-
-### 1. The spec picker reads THIS install's conf, per class — proved, then proved wrong, then fixed
-
-`panel-1-spec-picker-warlock.png` shows the picker open on six warlock specs and all nine
-preconditions `ok`, including `bridge_answered`. Choosing `warlock` re-read the list live:
-
-| class chosen | what the picker offered |
+| claim | capture |
 |---|---|
-| `warrior` (at start-up) | `arms pve, fury pve, prot pve, arms pvp, fury pvp, prot pvp` |
-| `warlock` | `affli pve, demo pve, destro pve, affli pvp, demo pvp, destro pvp` |
+| every press was answered, and the nine preconditions read `ok` including `bridge_answered` | **captured** — `panel-1`, `panel-4`, `panel-5`, `panel-6`, `panel-8`, `panel-9` all show `ok world_running` and the full list |
+| `ac-worldserver` at pid 409560 at 12:38 and again at 13:21, never restarted | **asserted** — read with `pgrep -f worldserver` over ssh and not captured. `gate86b.liveness()` prints status, `started_at` and restart count and **no pid**, so the pid in the first version of this page came from the shell, not from the driver |
+| every client capture is stamped with whether `Wow.exe` was alive | **captured** — `client-agent.log`, one `-- Wow.exe alive pid=2184` per `shoot` |
 
-Both lists came from `playerbots.conf.dist` — and **that was the defect**. Asked through the bridge
-what it actually had, the module answered (`client-4-spec-list-from-the-module.png`):
+## 1. The spec picker reads THIS install's conf — and the run overturned how
+
+`panel-1-spec-picker-warlock.png` (13:00, **captured**) shows the picker open on six warlock specs
+with the master named and the party empty. Choosing `warlock` re-read the list live.
+
+| class | what the picker offered | capture |
+|---|---|---|
+| `warlock` | `affli pve, demo pve, destro pve, affli pvp, demo pvp, destro pvp` | **captured** — `panel-1` |
+| `warrior` (at start-up) | `arms pve, fury pve, prot pve, arms pvp, fury pvp, prot pvp` | **asserted** — console only |
+
+Both lists came out of `playerbots.conf.dist`, and **that was the defect**. Asked through the bridge
+what it had, the module answered — **captured**, `client-4-spec-list-from-the-module.png`:
 
 ```
 To [Michaelah]: talents spec list
 [Michaelah] whispers: Total 0 specs found
 ```
 
-and refused every name, the invalid one and the valid one alike
-(`client-3-spec-refusal-in-game.png`):
+and refused every name, the invalid one and the valid one alike — **captured**,
+`client-3-spec-refusal-in-game.png`:
 
 ```
 To [Michaelah]: talents spec warglaive pvp
@@ -51,114 +50,130 @@ To [Michaelah]: talents spec destro pve
 [Michaelah] whispers: Spec destro pve not found
 ```
 
-Over the channel both whispers came back `outcome=yes` with **empty text** — the in-game-only
-refusal the code half predicted, measured. `sConfigMgr` loads the DEPLOYED conf; this box has only
-`playerbots.conf.dist`, so it has no premade specs at all. `PLAYERBOTS_CONF` now reads the deployed
-file only, and `panel-7-corrected-picker-agrees-with-server.png` is the corrected picker offering
-exactly one row, `let the server pick` — the app agreeing with the server instead of overruling it.
+That both whispers returned `outcome=yes` with **empty text** over the channel is **asserted**
+(console only) — but the two frames above are the point on their own: the refusal is in the game
+window, and nothing in the app's own surface ever showed it.
+
+`sConfigMgr` loads the DEPLOYED conf; this box has only `playerbots.conf.dist`, so it has no premade
+specs. `PLAYERBOTS_CONF` now reads the deployed file only, and
+`panel-7-corrected-picker-agrees-with-server.png` (**captured**) shows the corrected picker offering
+one row, `let the server pick` — the app agreeing with the server instead of overruling it.
+`panel-8` and `panel-9` show the same single row in later presses.
 
 **This is the ticket's own instruction working:** *"Measure it on the box, do not trust the list."*
-The list was not to be trusted, and neither was the sentence I wrote under it.
+The list was not to be trusted, and neither was the sentence written under it.
 
-### 2. The chosen level — the readback works; the app's own level press does not
+## 2. The chosen level — the readback works, the app's own level press does not
 
-`characters.level` reaching the panel is proved: `panel-9-level-did-not-take.png` shows
-`Bafossan — level 42` and `Kenvadi — level 37` in the group list, both read back out of the
-database after their levels were changed.
+| # | press | what the row read | capture |
+|---|---|---|---|
+| A | warlock, level **42** → `Bafossan` | `Bafossan — level 1`, one bot in the party | **captured** — `panel-8` (13:12) |
+| B | hunter, level **55** → `Jagyl` | `Jagyl — level 1`, and it stayed 1 for the 68 s from 13:17:35 to 13:18:43 | **captured** — `panel-9` (13:18) and `panel-transcript.log:61-130` |
+| C | the same readings carry `Bafossan — level 42` and `Kenvadi — level 37` | so the column does show levels that have changed | **captured** — `panel-9`, transcript from 13:17:17 |
 
-What does not work is the level THIS app sends. Twice, through the panel:
+That is the whole captured case, and it is what `party.py`'s sentence now rests on: the server
+accepted it, the row still reads the old value, and it stayed that way for as long as the panel
+watched — with no claim about why.
 
-```
-Jagyl joined the party, geared and specced. The server accepted the level and characters.level
-still reads 1, not 55 — so the level did NOT take. On this tree a level sent in the first seconds
-after a bot appears has been seen not to hold; the same command a few seconds later does.
-```
+**Everything below is asserted, not captured**, and no sentence in the app depends on it. It is
+listed because it is how the earlier conclusions were reached, and a reader deserves to know that
+the reasoning ran ahead of the evidence:
 
-The measurements behind that sentence, in order:
+* a third panel press (warlock, 42 → `Michaelah`) with the row read six times over 30 s, still 1;
+* `.character level Michaelah 42` by hand answering `You changed level of Michaelah to 42.` with the
+  row still 1, and a `.saveall` then making it 42;
+* press A's row staying 1 **through** a forced `.saveall`;
+* `.character level Bafossan 42` by hand, then a save, reading 42;
+* `dml_whisper … autogear` on a level-42 bot leaving it at 42;
+* a fresh bot levelled 25 s after it appeared, holding at 37.
 
-| # | what was done | what was read |
+`panel-8` also carries a sentence this folder now contradicts: *"an online character's row is
+written when it next saves, so the number here catches up later rather than now."* That explanation
+was built on the fourth bullet above — an uncaptured reading — and `party.py` no longer says it. The
+frame is kept rather than deleted: a page showing only the final wording would hide that it took two
+tries to stop explaining and start reporting.
+
+**Named as a finding, not fixed here:** the app's level press does not land, and the fix is a
+readback and a re-send on the join poll's machinery. The timing that would make it correct was never
+captured, so it is a ticket.
+
+## 3. Dismiss all — proved, including the refusal the reviewers argued about
+
+**First round** — three frames, clocks from the GNOME bar in each:
+
+| frame | clock | what it shows |
 |---|---|---|
-| 1 | panel press: warlock, `destro pve`, level 42 → bot `Michaelah` | `characters.level` = 1, six readings over 30 s |
-| 2 | `.character level Michaelah 42` by hand | `You changed level of Michaelah to 42.` — row still 1 |
-| 3 | `.saveall` | row = **42** |
-| 4 | panel press: level 42 → bot `Bafossan` | row = 1, **and still 1 after `.saveall`** |
-| 5 | `.character level Bafossan 42` by hand, then `.saveall` | row = **42** |
-| 6 | `dml_whisper … autogear` on Bafossan (level 42), then `.saveall` | row = **42** — autogear does not reset it |
-| 7 | new bot `Kenvadi`, waited **25 s**, then `.character level Kenvadi 37`, `.saveall` | row = **37** |
+| `panel-4-dismiss-all-armed.png` | 13:05 | armed on two — `Lexiguk — level 1`, `Michaelah — level 42`; button **Press again to dismiss 2 bots**; *"This uninvites 2 bots from Tfivepress's party -- Lexiguk, Michaelah -- and whispers each one to log out. Press Show this character's party to cancel."* |
+| `panel-5-unconfirmed-party-refused.png` | 13:06 | a third bot has joined; three rows; button back to idle; *"Tfivepress's party is not the one that was confirmed: 2 bots were agreed to and the group table now holds Kiteema, Lexiguk, Michaelah. Nothing was sent — show the party again and confirm what is there now."* |
+| `panel-6-dismiss-all-done.png` | 13:07 | re-confirmed and sent: no bots in the party, *"3 bots left the party: Kiteema, Lexiguk, Michaelah."* |
 
-Step 4 is the one that settles it: a forced save did not rescue the panel's level, so this is not a
-write waiting for a save. Step 7 says the same command works when it is late. Step 6 clears the
-whisper that follows it. What is left is the window between the bot's group row appearing — which is
-what `add_bot` polls on — and playerbots finishing the character.
+All three **captured**. That the third bot was added from the console with `dml_addclass`, and that
+`group_member` read 0 server-wide afterwards, are **asserted** — but `panel-5` shows the party
+gaining a row the panel had not confirmed, and `panel-6` shows the list empty, which is the claim
+that matters.
 
-**An intermediate sentence in this folder is wrong on purpose.** `panel-8-level-42-sentence.png`
-shows a first correction claiming the row *"catches up later"* when the character next saves. Step 4
-refuted it an hour later, and `panel-9` is the sentence that survived. Both frames are kept: a page
-that showed only the second would be hiding how the first was reached.
+**Second round** — fully **captured** in `panel-transcript.log`:
 
-**Not fixed here, and named as a finding:** the fix is to read the level back and re-send — the
-machinery is already in `add_bot`'s join poll — but the timing that would make it correct was
-measured tonight for the first time, and a poll invented on top of one evening's numbers is the kind
-of confident guess this feature has already paid for twice. It belongs in a ticket.
-
-### 3. Dismiss all — proved, including the refusal the reviewers asked for
-
-| time | what was pressed | what the panel said |
+| time | state | what the panel said |
 |---|---|---|
-| 13:05:27 | Dismiss every bot (first press) | *This uninvites 2 bots from Tfivepress's party — Lexiguk, Michaelah — and whispers each one to log out. Press Show this character's party to cancel.* Button: **Press again to dismiss 2 bots** |
-| 13:06:00 | a THIRD bot added from the console, panel not refreshed | group table now 3 bots; panel still showing 2 |
-| 13:06:21 | Dismiss every bot (second press) | *Tfivepress's party is not the one that was confirmed: 2 bots were agreed to and the group table now holds Kiteema, Lexiguk, Michaelah. Nothing was sent — show the party again and confirm what is there now.* |
-| 13:06:56 | re-read, armed on all three | *This uninvites 3 bots … — Kiteema, Lexiguk, Michaelah —* |
-| 13:07:27 | second press | **3 bots left the party: Kiteema, Lexiguk, Michaelah.** `group_member` rows: **0** |
+| 13:17:17 | 2 bots | party read: `Bafossan — level 42`, `Kenvadi — level 37` |
+| 13:17:31 | 2 bots | *Working — the server is being asked.* |
+| 13:17:34 | 2 bots | **the third panel press**: *"Jagyl joined the party, geared and specced. The server accepted the level and characters.level still reads 1, not 55…"* |
+| 13:17:35 | 3 bots | the row arrives one reading late: `Jagyl — level 1` |
+| 13:18:38 | 3 bots | armed: *"This uninvites 3 bots from Tfivepress's party -- Bafossan, Jagyl, Kenvadi --"* |
+| 13:18:41 | 3 bots | *Working —* |
+| 13:18:42 | 3 bots | **"3 bots left the party: Bafossan, Jagyl, Kenvadi."** |
+| 13:18:44 | 0 bots | rows empty, *"This character's party has no bots in it yet."* |
 
-`panel-5-unconfirmed-party-refused.png` is round 2's must-fix photographed against a live server: a
-party that gained a bot between the two presses is not the party that was confirmed, and the seam —
-not the panel — is what refused it. The count on screen had not changed; only the group table had.
-Repeated at 13:19:15 with `3 bots left the party: Bafossan, Jagyl, Kenvadi.` and the table back to 0.
+The row arriving and leaving one reading late is the panel drawing what the group table says rather
+than what it just asked for — the same honesty the 8.6 folder recorded.
 
-Also recorded for the reviewer who asked: **the bot manager's own timer did not move a bot inside a
-normal confirm interval.** The only party change between two presses in this run was the one this
-gate made on purpose.
+**The bot manager's own timer moved no bot inside a confirm interval**: the only party change
+between two presses in this run was the one made on purpose at 13:06. **Captured** for the second
+round (the transcript is continuous across 13:18:38–13:18:42 with the rows unchanged); **asserted**
+for the first.
 
-## Frames
+## Frames and files
 
-**The panel** (Hyper-V console captures of the VM, `vmshot.ps1`) — `panel-0-opened.png` (opened,
-nothing read), `panel-1-spec-picker-warlock.png`, `panel-2-class-spec-level-chosen.png`,
-`panel-4-dismiss-all-armed.png`, `panel-5-unconfirmed-party-refused.png`,
-`panel-6-dismiss-all-done.png`, `panel-7-corrected-picker-agrees-with-server.png`,
-`panel-8-level-42-sentence.png` (the sentence that was later refuted),
-`panel-9-level-did-not-take.png`.
+**The panel** — Hyper-V console captures of the VM (`vmshot.ps1` on the host), each carrying the
+GNOME clock: `panel-0-opened.png` (12:57), `panel-1-spec-picker-warlock.png` (12:58),
+`panel-2-class-spec-level-chosen.png`, `panel-4-dismiss-all-armed.png` (13:05),
+`panel-5-unconfirmed-party-refused.png` (13:06), `panel-6-dismiss-all-done.png` (13:07),
+`panel-7-corrected-picker-agrees-with-server.png`, `panel-8-level-42-sentence.png` (13:12),
+`panel-9-level-did-not-take.png` (13:18).
 
-**The game client** (screen captures on the Hyper-V host, each stamped with whether `Wow.exe` was
-alive) — `client-1-in-world-no-party.png`, `client-2-party-frame-with-bot.png` (Michaelah in the
-party frame under Tfivepress), `client-3-spec-refusal-in-game.png`,
-`client-4-spec-list-from-the-module.png`, `client-5-party-frame-after-dismiss-all.png`, and
-`a-`…`i-` from getting a character into the world.
+**The game client** — screen captures on the Hyper-V host, each stamped with `Wow.exe` liveness in
+`client-agent.log`: `client-1-in-world-no-party.png`, `client-2-party-frame-with-bot.png`
+(Michaelah under Tfivepress in the party frame), `client-3-spec-refusal-in-game.png`,
+`client-4-spec-list-from-the-module.png`, `client-5-party-frame-after-dismiss-all.png`, and `a-`…`i-`
+from getting a character into the world.
 
-**Its own account, and it is gone.** Master `Tfivepress` on account `YULONT5` (id 114), both made by
-this lane and both erased at the end — verified: no `YULONT5`, no `Tfivepress`, **no orphaned
-`account_access` rows**, `group_member` empty. `PERZI`'s `last_login` still reads 2026-09-08 23:24:16
-and `Pakka` is still level 6; `LootPet2.lua` untouched. The realm row was never touched
-(`100.99.204.5` on `address` and `localAddress`, mask `255.255.255.0`), so no authserver restart was
-owed or made. `Logger.ALE=4,Console Server` still at line 706.
+**The driver** — `panel86t5.py` (the shipped `PartyPanel` in a window built with
+`_build_my_party_group`'s own two lines; presses arrive as real `xdotool` clicks, never
+`QPushButton.click()`), `agentT5.ps1`, `panel-coords.txt`, `panel-transcript.log` (13:16:34–13:20:41).
+
+**Its own account.** Master `Tfivepress` on account `YULONT5` (id 114), both made by this lane. That
+they were erased at the end, with no orphaned `account_access` rows and `group_member` empty, and
+that `PERZI`'s `last_login`, `Pakka`'s level, `LootPet2.lua`, the realm row
+(`100.99.204.5` on both address columns, mask `255.255.255.0`) and `Logger.ALE=4,Console Server` at
+line 706 were all unchanged, is **asserted** — every one read over ssh and none captured. The realm
+row was never edited, so no authserver restart was owed or made.
 
 ## What this does NOT show
 
-* **The chosen level working.** It is the one clause of 8.6's line this run could not prove, and the
-  page leads with it rather than burying it.
-* **A chosen spec taking effect.** This install has no premade specs deployed, so `talents spec` had
-  nothing to pick from. What is proved is that the app now offers exactly what the server has, that
-  an unlisted name is refused by the app before it is sent, and that the module's refusal is
-  invisible over the channel. A tree with a deployed `playerbots.conf` has not been pressed.
-* **The talent readback.** With zero specs loaded there was nothing to read back;
-  `character_talent` held no rows for the bot.
-* **The panel and the client in one frame.** Captured separately, on two machines; a reader takes it
-  on the timestamps that the bot in `client-2` is the row in the panel at 13:01.
-* **The whole app.** These are the shipped `PartyPanel` in a window built by `panel86t5.py` with
-  `_build_my_party_group`'s own two lines; the tab around it, and reaching it from a cold start, are
-  not photographed here.
+* **The chosen level working.** The one clause of 8.6's line this run could not prove.
+* **A chosen spec taking effect.** No premade specs are deployed here, so `talents spec` had nothing
+  to pick from. Proved instead: the app offers exactly what the server has, an unlisted name is
+  refused before it is sent, and the module's refusal is invisible over the channel. **A tree with a
+  deployed `playerbots.conf` has not been pressed.**
+* **The talent readback.** With zero specs loaded there was nothing to read back.
+* **A console capture of any kind.** Every `ground`, `sql` and `send` output in this run was read in
+  a terminal and never written to a file; the box belongs to another ticket now, so they cannot be
+  re-taken here. That is the single biggest gap in this folder and the reason for the capture column.
+* **The panel and the client in one frame.** Captured separately, on two machines.
+* **The whole app.** The tab around the panel, and reaching it from a cold start, are not here.
 * **One class per press, not ten.** warlock, mage, priest and hunter were pressed; six of
   `party.BOT_CLASSES` were not.
-* **`8.6-panel-live-…/client-agent.log` carries a password** (`slow PANELGATE86`, line 32). This
-  folder's agent redacts it (`secret <13 chars>`, `client-agent.log:33`) — the earlier folder is
-  left as it was written, and this sentence is the correction.
+* **`8.6-panel-live-…/client-agent.log:28` carries a password** (`slow PANELGATE86`). This folder's
+  agent redacts it — `client-agent.log:33`, `cmd 005 : secret <13 chars>`. The earlier folder is
+  left as it was written and this sentence is the correction.
