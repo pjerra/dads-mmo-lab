@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** OPEN
+**Status:** DONE, code half (hand reported 2026-09-09 12:02; awaiting review); live half queued for the box
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -35,3 +35,13 @@
 ## Report format (final message; the lead appends it here)
 
 `## Report` — sha(s), gate last line, diff stat, the spec names the module accepted and refused (measured), the level readback pair, deviations flagged, status DONE (code half) / DONE (live half).
+
+## Report, code half (hand, 2026-09-09 12:02)
+
+- sha `de6b1e77` on `worktree-agent-a61dd0f02a5c31520` (base `7ab2caa0`); gate ALL GREEN, 3818 passed; diff 6 files +1680/-44 (`party.py` +519, `party_panel.py` +244, `controller_view.py` +25 Protocol only, three test files).
+- Spec: `read_spec_names`/`spec_names`/`spec_command` in `party.py`, seam `InstallParty.specs()`, a panel picker; `add_bot` sends `talents spec <name>` instead of `autopick`, `autogear` after. **Measured, not guessed**: the names come from the install's own `playerbots.conf` (`AiPlayerbot.PremadeSpecName.<class>.<n>`, read at press time; `.dist` fallback), loaded by `PlayerbotAIConfig.cpp:487-493`, compared with `==` in `ChangeTalentsAction.cpp:144`, refused at `:157` **into the game window** (invisible over SOAP -- so the app must refuse an unlisted spec itself), contiguous from 0 (`:138-142` breaks at the first empty). 63 names on the box; the prior art's static list is wrong for this tree (paladin has prot, DK has seven). No hard-coded list.
+- Level: `max_player_level` reads `MaxPlayerLevel` from the install's `worldserver.conf`; absent -> `None` and the control withheld (not the compiled 80); `InstallParty.level_setter` is 8.4a's `InstallPlay.set_level` over the same four seams; `Addition` carries `level_before`/`level_after` read from `characters.level`.
+- Dismiss all: `MassDismissal`/`dismiss_all`, seam `remove_all()`, a two-press arm naming the count; a refusal does not hide the others.
+- Tests: 28 new, RED first (messages recorded); 8 mutations run with `__pycache__` purged both sides, 8/8 caught.
+- Deviations: no static spec fallback; `MaxPlayerLevel` absent reads `None`; no catalog level-cap field (finding for `catalog.py`'s owner); no factory edit -- `InstallParty` builds its own `InstallPlay`; no spec readback in code (live half's); `_row` still shows the class number (follow-up); 5 laptop-only pre-existing failures in untouched files, green on fedora; `claude-say` is not installed on ubuntu2 (read-only ssh only).
+- Live half still owes: the module's in-game refusal for an invalid spec, the talents read back, `characters.level` before/after, dismiss-all with two bots.

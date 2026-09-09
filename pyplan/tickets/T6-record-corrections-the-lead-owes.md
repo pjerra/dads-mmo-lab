@@ -1,6 +1,6 @@
 # T6 — Four record corrections the lead owes, each found by a reviewer on another ticket
 
-**Status:** DONE (hand reported 2026-09-09 11:34; awaiting review)
+**Status:** REWORK (rejected by the lead 2026-09-09 12:10, round 1)
 **Filed:** 2026-09-09 11:10 by the lead (Fable), from T1's eight reviews
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha — expected `d70642c6` or later)
 **File set (yours alone):** `pyplan/checklist.md` (line 2495 only), `pyplan/gates/8.6-panel-live-yulon-ubuntu2-2026-09-09/README.md`, `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`. No other file; no other line of the checklist.
@@ -36,3 +36,27 @@ T1's reviewers, across four rounds, named four things that are false or missing 
 - Item 3: `daeae0a5` recorded as the nearest commit, `git log daeae0a5..528f219e -- party_panel.py controller_view.py` empty across 39 commits; not the press's sha.
 - Item 4: dates stated on both clocks; the run and its staging commit (`d8c08cb5`, 00:13 +0200 = 22:13Z on the 8th) both fall on 2026-09-08 in UTC; no reason given for the name.
 - Deviations: the ticket's "named for the evening it was staged" was unsupported (the staging commit is also after local midnight) -- the hand declined to give a reason; "a dozen commits" measured as 39; the host clock named rather than an offset invented.
+
+## Review 1 (Codex adversarial, 2026-09-09 12:00) -- REWORK, three citations
+
+- `8.6-panel-live-.../README.md:76-78` generalises one container measurement (`ac-worldserver`) to "every container"; narrow it to the measured one or measure the others.
+- `.../README.md:79-80` cites `8.7a-...ubuntu2-.../README.md:8` for the offset quote; it is on line 9.
+- `7.10-rerun-ubuntu2-2026-09-08/README.md:49-50` cites the panel-live README's "last bullet" for the clock, but this same commit appended the no-sha bullet after it; use a stable line citation, and do not repeat the universal.
+Fable verdict pending; the rejection body carries both.
+
+## Review 2 (cold Fable reviewer, 2026-09-09 12:06) -- REWORK, four
+
+1. `7.10-rerun-ubuntu2-2026-09-08/README.md:36` "twenty-five minutes after local midnight" -- `run.log:1` is 00:34:39, thirty-four.
+2. `.../README.md:50-51` cites the panel-live README's "last bullet" for the clock; after this same commit the last bullet is the no-sha paragraph.
+3. `8.6-panel-live-.../README.md:79` cites `8.7a-...ubuntu2-.../README.md:8` for the offset quote; it is line 9.
+4. `.../README.md:77-78` "every `...Z` timestamp the 8.6 record cites is a container's reading" is broader than measured: `8.6-wotlk-yulon-ubuntu-2026-09-08/` (the original box, never measured) has gate-script banners in Z. Narrow to the ubuntu2 pages' Docker `started=` stamps.
+Notes: the 7.10 README's list of bare local times reads exhaustive and is not (`~00:26` at :61, `00:03:26` at :285); curly apostrophes in the quoted commit subject on 2495; "Owed separately ... premise dissolved" is a judgement and the exit line still carries the old framing (the exit line's owner); the hand's four deviations all sound.
+
+## Rejection (lead, round 1) -- the union of both reviews, all in your three files
+
+1. `7.10-rerun-ubuntu2-2026-09-08/README.md:36` -- thirty-four minutes, not twenty-five.
+2. `.../README.md:50-51` -- replace "last bullet" with a stable citation to the clock bullet's line in the panel-live README; do not repeat the "every container" universal there either.
+3. `8.6-panel-live-.../README.md:79` -- `8.7a-...ubuntu2-.../README.md:9`.
+4. `.../README.md:76-78` -- narrow both universals: "`ac-worldserver` runs UTC" is what was measured (one container); and "every Z timestamp the 8.6 record cites" becomes the ubuntu2 pages' Docker `started=` stamps, naming `part-2-party.md:26`, `part-2-bridge-absent.md:29,33`; say the 2026-09-08 folder's Z banners are gate-script stamps on a box never measured.
+5. Optional: the bare-local-times list at :46 says "among them" or lists :61 and :285 too; straight apostrophes in the quoted subject on 2495.
+Amend the single commit, re-run the gate, report.

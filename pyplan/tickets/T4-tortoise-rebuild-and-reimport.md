@@ -1,6 +1,6 @@
 # T4 — Rebuild the Tortoise image on the m910q, then the reimport with no pre-application at all
 
-**Status:** OPEN
+**Status:** DONE (hand reported 2026-09-09 12:08; awaiting review) -- UPGRADED
 **Filed:** 2026-09-09 08:40 by the lead (Fable). **The owner authorised this rebuild** ("do all 4", 2026-09-09 ~08:30, against the lead's recommendation 4).
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/tortoise-reimport-live.sh` (its step 2 loses its migration half), and a NEW `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`. No product code; a catalog gap you confirm is a finding for the report (it is already named, below).
@@ -34,3 +34,13 @@ The install crash-looped at 07:xx on `TRUNCATE character_inventory_copy` — hon
 ## Report format (append `## Report`, mark DONE)
 
 Sha, gate last line, UPGRADED / ROLLED BACK, the counts table, the rebuild's duration, deviations flagged.
+
+## Report (hand, 2026-09-09 12:08)
+
+- sha `500412d9` on `worktree-agent-ac4d760e80e0fa2fc` (base `e2912690`); gate ALL GREEN, 3769 passed; `test_no_secrets_in_evidence` green first; diff 16 files +2933/-19: the live script (55 lines) and a new `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/` (README, 10 logs, 4 scripts).
+- **UPGRADED.** Updater: `Found 173 possible migrations for world`, 173 attempted, zero `failed to apply`, `World server is up and running! Loading time: 1 minutes 9 seconds`; the next start finds 173 and attempts 0. Counts: characters 903/903, accounts 109/110 (the app's own channel account `YULON_58C6FD1C`, rank 4), world migrations 158/173, char migrations 1/2. Fresh dumps of all four databases with the server stopped, counted inside the dumps, sha256 recorded, never needed.
+- The rebuild through `install_wiring.rebuild_for_app()`: 2525 s (40m58s compile, 7 s recreate, 61 s ready); the `-rollback` tag kept and let go as documented; in-image proof on `native-58c6fd1c` (`50ed3f49b637`, Ubuntu 24.04): `INSERT IGNORE INTO` 14, bare `^INSERT INTO` 0.
+- Catalog gap confirmed: `catalog.json:1113-1167` is `wow-tortoise`'s whole `sql.phases`, six phases, none naming `character_updates/`.
+- **Deviations, two of them product findings:** (1) **a bare Rebuild cannot carry the fix** -- `native.py:1763 rebuild_stages()` excludes `write-dockerfile`, so it compiles the Dockerfile on disk (rendered 2026-09-07, `FROM ubuntu:22.04`, zero `INSERT IGNORE`); the hand ran the family's `write-dockerfile` stage first. (2) Step 1 of the live script would have tagged the un-rewritten head image over the live tag and undone the rebuild; changed to prove the tag only. (3) The rebuild's own `ready` start applied 16 world + 1 char migration in order before the reimport (158->174; 174 = 173 files + one row for a migration the fork deleted); after the baseline reimport exactly 173. (4) **Repair cannot repair this tree**: `controller_wow_wotlk.accounts.reset_own_password:440-445` knows `mangos_srp6` and AzerothCore only; Tortoise is `mangos_sha`; the press died on `Unknown column 'salt'`; worked around by deleting the app's account and running both channel halves in one process; `server info` then `outcome=yes`. (5) No client-visible fact: only the 1.18.1 client connects and `~/clients` has 1.12.1 and 2.4.3. (6) `tw_logs` dumped a minute after the other three; a temporary worktree on the box, removed.
+- Not proved: the SOAP password-change verdict (8.3d); no client; no bots.
+- Box left: `r6` only; the Tortoise stack stopped.
