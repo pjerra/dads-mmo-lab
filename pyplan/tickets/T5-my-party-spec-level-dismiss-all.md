@@ -45,3 +45,9 @@
 - Tests: 28 new, RED first (messages recorded); 8 mutations run with `__pycache__` purged both sides, 8/8 caught.
 - Deviations: no static spec fallback; `MaxPlayerLevel` absent reads `None`; no catalog level-cap field (finding for `catalog.py`'s owner); no factory edit -- `InstallParty` builds its own `InstallPlay`; no spec readback in code (live half's); `_row` still shows the class number (follow-up); 5 laptop-only pre-existing failures in untouched files, green on fedora; `claude-say` is not installed on ubuntu2 (read-only ssh only).
 - Live half still owes: the module's in-game refusal for an invalid spec, the talents read back, `characters.level` before/after, dismiss-all with two bots.
+
+## Review 1, code half (Codex adversarial, 2026-09-09 12:24) -- REWORK, two
+
+- [high] Dismiss-all's confirmation is a global boolean (`party_panel.py:514-532`): armed, the user can change the master name or wait while the party changes, and the second press dismisses whatever `remove_all(master)` reads then -- a different set, or a different master, than the count the user confirmed. Must-fix: snapshot the normalised master and the exact bot identities when arming; before executing, re-read and require the same master and an unchanged set, else disarm and ask again; disarm on character-field edits; consider an expiry.
+- [medium] Spec reads race (`party_panel.py:340-361`): each class change starts an independent read whose completion carries only the names, so a slower mage read landing after a druid read fills the druid picker with mage specs, and the next Add sends a spec the seam refuses. Must-fix: carry the requested class (or a generation) into the completion and discard stale results; a deferred-job test that completes reads in reverse order.
+Fable verdict pending; the rejection body carries both.
