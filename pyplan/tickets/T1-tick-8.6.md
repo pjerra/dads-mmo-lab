@@ -117,3 +117,9 @@ The exit review's correction 3 carried the wrong date; the lead notes it for the
 - `:2508` "answered the same evening, 2026-09-08" with the folder-name trap stated on the line (ping logs against worlds started 20:39:08Z and 21:15:35Z); `:2471` "rebuilt the same night"; `README.md:24-26`; a sentence saying which folder each bare filename sits in.
 - Deviation of the hand's own: the record's heading is now "Pressed 2026-09-08/09" (rebuild and bridge on the 8th evening, client party frame and panel press on the 9th morning; sibling 8.5c spans dates the same way).
 - Flagged: a clock disagreement inside the evidence -- `part-2-party.md:3` says the VM clock is UTC, `8.7a-…ubuntu2-…/README.md:8` gives a two-hour offset (lead's); correction 6 (8.2e) fourth flag (lead's); T5's path resolves on origin only; docs-pin guard narrower while unticked.
+
+## Review 7 (Codex adversarial, round 4, 2026-09-09 10:50) — ACCEPT
+
+Dates match the cited logs; the 2026-09-08/09 heading spans the rebuild/bridge evening and the client/panel morning accurately; `:2508`'s definition of done byte-identical to `e2912690`. No material findings. Fable round-4 verdict pending; merge follows both.
+
+Lead's note for the merge: the clock disagreement the hand flagged is settled read-only on the box (10:34 local) -- the VM runs Europe/Oslo (+0200) and every container runs UTC, so `part-2-party.md:3` is wrong about the shell and right about all the `…Z` timestamps the lines cite.
