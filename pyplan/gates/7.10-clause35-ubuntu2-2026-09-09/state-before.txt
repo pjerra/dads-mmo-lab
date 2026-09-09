@@ -1,9 +1,9 @@
 === state-before ===
-taken (local): 2026-09-09T11:35:37+02:00   (UTC: 2026-09-09T09:35:37+00:00)
+taken (local): 2026-09-09T11:59:36+02:00   (UTC: 2026-09-09T09:59:36+00:00)
 --- docker ps ---
-ac-worldserver	Up About an hour	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
-ac-authserver	Up 35 seconds	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
-ac-database	Up About an hour (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
+ac-worldserver	Up 2 hours	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
+ac-authserver	Up 11 seconds	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-database	Up 2 hours (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
 --- worldserver pid ---
 409560 worldserver
 --- realmlist (address, localAddress, mask) ---

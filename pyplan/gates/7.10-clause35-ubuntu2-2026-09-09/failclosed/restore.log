@@ -1,28 +1,29 @@
 === restore, run by the EXIT trap ===
-the status this script is exiting with: 1
-taken (local): 2026-09-09T11:35:01+02:00
---- putting /etc/ufw rules back exactly as they were ---
-Status: inactive
-320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  /etc/ufw/user.rules
-f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  /etc/ufw/user6.rules
-320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  /home/pk/lane710b/out-t3-failclosed/ufw-user.rules.before
-f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  /home/pk/lane710b/out-t3-failclosed/ufw-user6.rules.before
--rw-r----- 1 root root 107 Feb 10  2026 /etc/ufw/user6.rules
--rw-r----- 1 root root 307 Feb 10  2026 /etc/ufw/user.rules
---- the realm row as found now ---
-192.168.77.77	192.168.77.77	255.255.255.0
---- forcing it to 100.99.204.5 on BOTH address columns, mask 255.255.255.0 ---
---- read back ---
-100.99.204.5	100.99.204.5	255.255.255.0
---- restarting ac-authserver so it re-reads the row it announces ---
+the status the drivers left: 1
+taken (local): 2026-09-09T11:59:24+02:00
+realm UPDATE targets row id: 1   (verification always reads id 1)
+--- ufw rules ---
+  user.rules  live=320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf before=320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  root:root 640
+  user6.rules live=f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60 before=f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  root:root 640
+  [RESTORED] /etc/ufw/user{,6}.rules match the copies taken before the Apply, root:root 640
+  ufw: Status: inactive
+--- the realm row ---
+  as found now (id 1): 192.168.77.77|192.168.77.77|255.255.255.0
+  read back (id 1): 100.99.204.5|100.99.204.5|255.255.255.0
+  wanted          : 100.99.204.5|100.99.204.5|255.255.255.0
+  [RESTORED] realmlist id 1 is 100.99.204.5|100.99.204.5|255.255.255.0 on all three columns
+--- ac-authserver ---
 ac-authserver
-[0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
-[0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
---- the account this run may have created, removed ---
-after the delete (expect no rows for it, and no orphan access row):
-101	3
-102	3
-103	3
-109	3
---- the world was never stopped or started by this lane ---
-409560 worldserver
+  the LAST 'Added realm' line written since 2026-09-09T09:59:24 UTC, when the restart began:
+    [0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
+  [RESTORED] ac-authserver restarted and now announces the realm at 100.99.204.5:8085
+--- the account this run may have created ---
+  before the delete: 0
+  after the delete: account rows=0  orphaned account_access rows (any id)=0
+  account_access now: 101:3,102:3,103:3,109:3
+  [RESTORED] WIDGET0909T3 is gone and no account_access row is orphaned
+--- the world ---
+  pid at the start of this script: 409560   now: 409560
+  [RESTORED] the world is up on the same pid it was on before this script ran (409560)
+  [RESTORED] state-final.txt written
+=== every restoration verified; this script exits 1 ===

@@ -1,8 +1,8 @@
-=== state-final ===
-taken (local): 2026-09-09T11:59:35+02:00   (UTC: 2026-09-09T09:59:35+00:00)
+=== state-before ===
+taken (local): 2026-09-09T11:58:38+02:00   (UTC: 2026-09-09T09:58:38+00:00)
 --- docker ps ---
 ac-worldserver	Up 2 hours	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
-ac-authserver	Up 10 seconds	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-authserver	Up About a minute	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
 ac-database	Up 2 hours (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
 --- worldserver pid ---
 409560 worldserver

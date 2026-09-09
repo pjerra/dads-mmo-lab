@@ -17,10 +17,12 @@ failed; on 09-09 the 8.7a lane had put `100.99.204.5` there so the owner's clien
 VM through the Hyper-V host, and it failed while saying nothing whatever about the widget.
 
 A corrected clause is worth nothing until it has been watched failing, so this folder contains
-three runs and not one: `clause35-falsify.log`, in which both corrected halves are driven until
-they FAIL and then until they PASS; `widget-run.log`, the full 33; and `failclosed/`, in which
-the runner itself is made to fail, because a harness that cannot report a failure is the same
-defect one level up.
+four runs and not one: `clause35-falsify.log`, in which both corrected halves are driven until
+they FAIL and then until they PASS; `widget-run.log`, the full 33; `failclosed/`, in which a
+driver is made to fail; and `failrestore/`, in which the harness's own restoration is made to
+fail — because a harness that cannot report a failure is the same defect one level up, and a
+restoration that cannot report one is that defect in the piece that protects the owner's live
+box.
 
 ---
 
@@ -167,10 +169,10 @@ widget. The password is passed in `MYSQL_PWD`, so it is on no command line these
 realmlist UPDATE; it did **not** run `ufw enable` — that is the plan's own refusal, rendered in
 full in the tab (`clause35-falsify.log:51`). `run-t3.sh` copies `/etc/ufw/user{,6}.rules` aside
 before the driver; the diff the apply made is appended to the driver's own log
-(`clause35-falsify.log:65-69`), and the restore is done by the EXIT trap, which restates
+(`clause35-falsify.log:65-102`), and the restore is done by the EXIT trap, which restates
 ownership and mode rather than leaving them to `cp -a` (the 2026-09-08 finding 3a) and prints
 the sha256s that prove it: `320f53e1…` and `f6696cd7…` on both the live files and the copies
-(`restore.log:4-11`). `ufw` was `inactive` before and after.
+(`restore.log:5-8`). `ufw` was `inactive` before and after.
 
 ---
 
@@ -239,13 +241,19 @@ smoothed:**
 `state-final.txt`, taken after everything:
 
 * **world up, still pid 409560** — never stopped, started or restarted by this lane.
-* **realm row `100.99.204.5` / `100.99.204.5`, mask `255.255.255.0`** — restored twice over: by
-  the driver's own B6 clause, then unconditionally by `run-t3.sh`, because a driver that died
-  between B1 and B6 would leave the owner's box advertising `192.168.77.77` and no assertion in
-  a process that is gone can put it back.
-* **`ac-authserver` restarted** after the restore, and its own log is the reading:
-  `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.`
-* **`ufw` inactive, rules byte-identical** to the copies taken before the Apply, root:root 640.
+* **realm row `100.99.204.5` / `100.99.204.5`, mask `255.255.255.0`** — restored twice over and
+  **verified** once: by the driver's own B6 clause, then unconditionally by the EXIT trap, which
+  re-reads `id 1` on all three columns and would have said `[RESTORATION FAILED]` if it did not
+  match (`restore.log:10-14`). A driver that died between B1 and B6 would leave the owner's box
+  advertising `192.168.77.77`, and no assertion in a process that is gone can put it back.
+* **`ac-authserver` restarted** after the restore, and the check is its own newest announcement
+  *since that restart began*, not any line in a tail: `Added realm "Yulon ubuntu2" at
+  100.99.204.5:8085.` (`restore.log:15-19`).
+* **`ufw` inactive, rules byte-identical** to the copies taken before the Apply, root:root 640 —
+  compared by sha256 rather than assumed (`restore.log:5-8`).
+* **The world is on the pid it started on**, checked rather than stated: the trap records
+  `pgrep worldserver` before the script does anything and compares it at the end
+  (`restore.log:25-27`).
 * **The owner's things untouched, and now actually watched.** `PERZI`'s `Pakka` (level 6) is
   there and 1002 characters; `Logger.ALE=4,Console Server` is still line **706** of
   `/home/pk/wowserver/env/dist/etc/worldserver.conf`, mtime 2026-09-08 23:11 — before this lane
@@ -262,7 +270,7 @@ smoothed:**
 * **The account this run created is gone.** `WIDGET0909T3` (id 111) was created by clause 11,
   which is why `state-after.txt` still lists it; the EXIT trap deletes it and its
   `account_access` row on the way out, and `state-final.txt` shows `account_access` back to
-  `101 102 103 109`, exactly `state-before.txt` (`restore.log:21-27`). Round 1 used a joined
+  `101 102 103 109`, exactly `state-before.txt` (`restore.log:20-24`). Round 1 used a joined
   multi-table `DELETE` that did not take and left an orphan access row to be removed by hand;
   it is two plain statements now, access first. The password
   `run-t3.sh:48` gives that account is a throwaway that authenticates nothing: the account it
@@ -271,8 +279,6 @@ smoothed:**
   No other password appears in this folder; every database reading passes its own in `MYSQL_PWD`
   rather than on a command line.
 * `/home/pk/lane710b/checkout` is left at `528f219e`, not the `2c9bd211` it was found on.
-
----
 
 ---
 
@@ -289,7 +295,8 @@ the clause this folder exists to repair: a reading that cannot come out wrong.
 fail-fast through `die`, and **everything that puts the box back is in an EXIT trap** — the ufw
 rules, the realm row on both address columns and its mask, the `ac-authserver` restart, and the
 account the run creates. The trap runs on the way out of a failure exactly as on the way out of a
-success and re-raises the status it was called with, so the script's exit code is the driver's.
+success and re-raises the status it was called with, so the script's exit code is the driver's
+-- and, since round 3, its own if a restoration did not verify (next section).
 
 **And it was run that way.** `failclosed/` is the same `run-t3.sh`, same box, same trap, with
 `T3_DRIVERS` pointed at a stand-in for `clause35_falsify.py` that does its B1 — reads the realm
@@ -299,17 +306,73 @@ ambiguous.
 
 | what had to happen | where it is |
 |---|---|
-| the driver exits 1 and the runner **stops there** | `failclosed/run.log:15-16` — `clause35_falsify.py exit 1`, `STOPPED: … (status 1)` |
-| the run is recorded as FAILED, not finished | `failclosed/run.log:18` — `T3 run FAILED, status 1, box restored by the EXIT trap` |
-| the runner's own exit status is the driver's | `RUNNER EXIT STATUS: 1` from the invoking shell |
-| the trap sees the damage | `failclosed/restore.log:12-13` — `the realm row as found now` → `192.168.77.77` |
-| and undoes it anyway | `failclosed/restore.log:14-16` — forced to `100.99.204.5` on both columns, mask `255.255.255.0`, read back |
-| the authserver re-reads it | `failclosed/restore.log:19-20` — `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` |
-| the world was never touched | `failclosed/restore.log:28` — pid `409560`, the one T2 left |
+| the driver exits 1 and the runner **stops there** | `failclosed/run.log:17-18` — `clause35_falsify.py exit 1`, `STOPPED: … (status 1)` |
+| the run is recorded as FAILED, not finished | `failclosed/run.log:20` — `T3 run FAILED, status 1, box restored and verified` |
+| the runner's own exit status is the driver's | `failclosed/run.log:21` — `RUNNER EXIT STATUS (as seen by the invoking shell): 1`, captured into the log rather than quoted from a terminal |
+| the trap sees the damage | `failclosed/restore.log:11` — `as found now (id 1): 192.168.77.77\|192.168.77.77\|255.255.255.0` |
+| and undoes it anyway, **and checks that it did** | `failclosed/restore.log:12-14` — read back on all three columns, then `[RESTORED]` |
+| the authserver re-reads it | `failclosed/restore.log:17-19` — the last `Added realm` line written *since the restart began* |
+| the world was never touched | `failclosed/restore.log:26-27` — pid `409560` at the start of the script and at the end |
+| and every step said so | `failclosed/restore.log:29` — `every restoration verified; this script exits 1` |
 
 `failclosed/clause35-falsify.log` carries the stub's own output under that name because the
 runner names each log for the driver it ran and the stand-in occupies that driver's place; its
 first lines say plainly which file it is.
+
+---
+
+## The trap had the same defect one level down, and that was exercised too
+
+Round 2's trap ran unconditionally, which is what was asked, and **checked nothing**. It saved
+the status it was called with and then ran `cp`, `chown`, an `UPDATE`, `docker restart` and two
+`DELETE`s with every result discarded — `set -u` and `pipefail`, no `errexit`. A realm UPDATE
+that matched no row, an authserver that came back announcing the wrong address, a `cp` that
+failed, a delete that did not take: any of them and the run still ended *"run finished"*, exit 0.
+That is the clause-that-cannot-fail defect for the third time, now in the piece whose whole job
+is protecting the owner's live box.
+
+**Round 3: every restoration step verifies its own postcondition against a fresh reading taken
+afterwards**, and a step that fails does not stop the ones after it — a run whose ufw restore
+failed still needs its realm row back.
+
+| step | what is read back afterwards |
+|---|---|
+| ufw | sha256 of `/etc/ufw/user{,6}.rules` against the `.before` copies, **and** `root:root 640` on both |
+| the realm row | `id 1` re-read and compared on **all three** columns against `100.99.204.5\|100.99.204.5\|255.255.255.0` |
+| ac-authserver | the **last** `Added realm` line written **since the restart began**, and it must name `100.99.204.5:8085` |
+| the account | zero rows for `WIDGET0909T3`, **and** zero orphaned `account_access` rows at any id |
+| the world | the pid now equals the pid recorded before the script did anything |
+| the final reading | `state-final.txt` exists and is non-empty |
+
+Any failure writes a distinct `[RESTORATION FAILED]` line, and the script then exits **90** —
+not the drivers' status, which is kept in the log beside it.
+
+**Exercised**, in `failrestore/`: the same runner and the same failing stub driver, with
+`T3_REALM_ROW_ID=9999` so the realm restore's `UPDATE` targets a row that does not exist while
+the verification reads `id 1`, the row this box actually advertises. That is a restoration that
+cannot succeed, and the check has to notice.
+
+| what had to happen | where it is |
+|---|---|
+| the drivers' own status is kept, not overwritten | `failrestore/restore.log:2` — `the status the drivers left: 1` |
+| the injection is on the record | `failrestore/restore.log:4` — `realm UPDATE targets row id: 9999   (verification always reads id 1)` |
+| the realm restore is caught | `failrestore/restore.log:14` — `[RESTORATION FAILED] realmlist id 1 reads '192.168.77.77…', wanted '100.99.204.5…' — the row this box advertises is WRONG` |
+| and so is what it caused | `failrestore/restore.log:19` — `[RESTORATION FAILED] ac-authserver's newest announcement since the restart is …192.168.77.77:8085…` |
+| the other restorations still ran | `failrestore/restore.log:8`, `:24`, `:27`, `:28` — ufw, the account, the world's pid and the final reading all `[RESTORED]` |
+| a distinct result, not the driver's | `failrestore/restore.log:29` and `failrestore/run.log:20-22` — `RESTORATION FAILED: 2 step(s) did not verify. The drivers' own status was 1.` |
+| a non-zero exit | `failrestore/run.log:23` — `RUNNER EXIT STATUS (as seen by the invoking shell): 90` |
+| the world stayed up throughout | `failrestore/restore.log:26-27` — pid `409560`, unchanged |
+| the row put back by hand afterwards | `failrestore/hand-restore.txt` — `192.168.77.77…` read out, the UPDATE, `100.99.204.5\|100.99.204.5\|255.255.255.0` read back, `ac-authserver` restarted and its newest `Added realm` line naming `100.99.204.5:8085`, pid still `409560` |
+
+**The exercise found a real defect in the check it was exercising.** The first version of the
+authserver check read `docker logs --tail 80` and asked whether *any* line named the target
+address. On the first failing-restoration run it **passed** — with the row deliberately left at
+`192.168.77.77` and the container announcing `192.168.77.77` — because a *previous* run's
+`Added realm … 100.99.204.5:8085` was still inside the last 80 lines. A stale marker read as a
+fresh one, in the check written to prevent exactly that. It reads only lines written since the
+restart began, and only the last announcement, and the run above is the one taken after the fix.
+The first run's log is not kept; what is kept is the corrected check and the reading that proves
+it bites.
 
 ## Files
 
@@ -319,14 +382,22 @@ first lines say plainly which file it is.
 | `clause35-falsify.log` | both corrected halves watched failing and then passing, plus the ufw copy-aside/restore and the authserver restart |
 | `clause35_falsify.py` | the driver that produced it |
 | `run-t3.sh` | the runner: state probes, the ufw handling, both drivers fail-fast, and the EXIT trap that puts the box back whatever happened |
-| `restore.log` | written by that trap: the ufw restore with its sha256s, the realm row forced back and read back, the authserver restart and its `Added realm` line, the account removed, the world still on pid 409560 |
-| `failclosed/` | the same runner invoked so a driver deliberately fails — see below |
-| `failclosed_stub.py` | the stand-in driver that moves the realm row and exits 1 |
+| `restore.log` | written by that trap, one `[RESTORED]` or `[RESTORATION FAILED]` line per step, each with the reading it was decided on |
+| `failclosed/` | the same runner invoked so a **driver** deliberately fails — the trap still runs and every step verifies |
+| `failrestore/` | the same runner invoked so a **restoration** deliberately fails — two `[RESTORATION FAILED]` lines, exit 90, the other steps still done |
+| `failclosed_stub.py` | the stand-in driver both of those use: it moves the realm row and exits 1 |
+| `failrestore/hand-restore.txt` | the realm row put back by hand after that deliberate failure, read back on all three columns, with the authserver's newest `Added realm` line |
 | `widget_driver.diff` | the complete change to `../7.10-rerun-ubuntu2-2026-09-09/drivers/widget_driver.py` — 46 insertions, 6 deletions, all of it the one clause and the two lane constants |
-| `run.log` | shas, versions, exits, elapsed |
+| `run.log` | shas, versions, the world's pid, the two knobs' values, exits, elapsed |
+| `gates.txt` | the two gate result lines for the commit this folder ships with, so the folder is self-contained |
 | `state-before.txt`, `state-after.txt`, `state-final.txt` | the box before the drivers, after them, and after the EXIT trap has put it back — `after` is the one that still lists the account the run created |
 | `ufw-user.rules.before`, `ufw-user6.rules.before` | the copies the restore was checked against |
 | `shots/` | 13 frames from the widget run + 4 from the falsify run, each with the containers `docker ps` reported up at the instant of the grab |
+
+`failclosed/` and `failrestore/` have **no `state-after.txt`**, and that is not an omission:
+`probe after` runs only after both drivers are green, and in those two invocations the first
+driver exits 1. Their `state-before.txt` and `state-final.txt` are the pair — before anything,
+and after the trap.
 
 **One thing this folder cannot claim.** `../7.10-rerun-ubuntu2-2026-09-09/drivers/widget_driver.py`
 now carries the correction, and that folder's own `widget-run.log` was produced by the file as it

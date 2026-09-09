@@ -20,22 +20,42 @@
 #      click" clause is only a reading if the name is new) and a new shots
 #      directory (so the 09-09 run's frames are not overwritten).
 #
-# FAIL-CLOSED (round 2). The round-1 version of this script logged each driver's
-# exit status and then threw it away: `run_driver` ended on an `echo`, so its
-# own return was that echo's 0, and with only `set -u` the script walked on
-# through the cleanup and printed "run finished" whatever had happened. A
-# falsification driver that died between B1 and B6 would have left the owner's
-# box advertising 192.168.77.77 under a log that said the run finished.
+# FAIL-CLOSED, in two layers, because each layer's fix exposed the next.
 #
-# So: `run_driver` returns the driver's status, both drivers are invoked
-# fail-fast through `die`, and everything that puts the box back -- the ufw
-# rules, the realm row on BOTH address columns and its mask, the authserver
-# restart, the account this run creates -- is in an EXIT trap. The trap runs on
-# the way out of a failure exactly as it does on the way out of a success, and
-# it re-raises the status it was called with, so the script's own exit code is
-# the driver's. `restore.log` is written by the trap and is therefore present in
-# both cases; `T3_ALLOW_FAILURE=1` says a non-zero exit is what this invocation
-# was for, which is how the fail-closed path was exercised on the box.
+#   Round 1 threw the drivers' exit status away: `run_driver` ended on an
+#   `echo`, so what it returned was that echo's 0, and with only `set -u` the
+#   script walked on through its cleanup and printed "run finished" whatever had
+#   happened. Round 2: `run_driver` returns the status, both drivers are invoked
+#   fail-fast through `die`, and everything that puts the box back moved into an
+#   EXIT trap so a failure could not skip it.
+#
+#   Round 2's trap then had the same defect one level down. It saved the status
+#   it was called with and checked NOTHING of its own: `cp`, `chown`, the realm
+#   UPDATE, `docker restart` and two DELETEs all ran with their results
+#   discarded, so a restoration that silently did not happen still ended the run
+#   "finished", exit 0. A trap that cannot report its own failure is worth as
+#   little as a clause that cannot fail, and it is the piece protecting the
+#   owner's live box.
+#
+#   Round 3: every restoration step below runs, then VERIFIES its own
+#   postcondition against a fresh reading taken afterwards -- the realm row read
+#   back on all three columns, the authserver's own "Added realm" line, the ufw
+#   files by sha256 against the copies plus their ownership and mode, the
+#   account and any orphaned account_access row gone, the world still on the pid
+#   it started on. A step that fails does not stop the ones after it (a run
+#   whose ufw restore failed still needs its realm row back); every failure is
+#   written as a distinct `[RESTORATION FAILED]` line, and the script then exits
+#   90 -- not the drivers' status, which stays in the log beside it.
+#
+# Two knobs exist only so those paths can be EXERCISED rather than asserted, and
+# both are named in this folder's README:
+#   T3_DRIVERS       point at a stand-in driver that fails on purpose
+#   T3_REALM_ROW_ID  the row the realm UPDATE targets (default 1). The
+#                    verification always reads id 1, the row this box actually
+#                    advertises, so pointing the UPDATE at a row that does not
+#                    exist is a restoration that cannot succeed, and the check
+#                    has to notice.
+#   T3_ALLOW_FAILURE says a non-zero exit is what this invocation was for.
 set -u
 set -o pipefail
 LANE=/home/pk/lane710b
@@ -52,12 +72,26 @@ export T3_SHOTS=$OUT/shots
 # What the box must hold when this script is done, whatever happened.
 REALM_ADDRESS=100.99.204.5
 REALM_MASK=255.255.255.0
+REALM_PORT=8085
+REALM_ROW_ID=${T3_REALM_ROW_ID:-1}
+RESTORE_FAILED_STATUS=90
 
 say() { ~/claude-say "$1" >/dev/null 2>&1; printf '%s %s\n' "$(date -Is)" "$1" >> /home/pk/claude-activity.log; }
 
-mysql_q() {  # mysql_q <statement>   -- password in the environment, never on a command line
-  docker exec -e MYSQL_PWD=password ac-database mysql -uroot -N -B -e "$1" 2>/dev/null
+mysql_q() {  # mysql_q <statement>
+  # The password reaches the client in MYSQL_PWD, and `docker exec -e MYSQL_PWD`
+  # with no `=value` takes it from THIS shell's environment, so the value is on
+  # no argv -- not the mysql client's inside the container, not `docker exec`'s
+  # out here. (Round 2 wrote `-e MYSQL_PWD=password` and a comment claiming the
+  # opposite; the comment is the part that was true, so the code moved to meet
+  # it.) The value itself is `password`, the AzerothCore compose fixture's
+  # default root password, which is not generated, is the same on every install
+  # this project makes, and reaches nothing off this box: `state-before.txt`
+  # shows ac-database published as `127.0.0.1:3306->3306/tcp`, loopback only.
+  MYSQL_PWD=password docker exec -e MYSQL_PWD ac-database mysql -uroot -N -B -e "$1" 2>/dev/null
 }
+
+sha_of() { sudo sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
 probe() {  # probe <file-tag>
   local f="$OUT/state-$1.txt"
@@ -100,65 +134,162 @@ probe() {  # probe <file-tag>
   echo "wrote $f"
 }
 
-# --- the EXIT trap: the box goes back whatever happened -----------------------
+# --- the EXIT trap: the box goes back whatever happened, and says whether it did
 RESTORED=0
+PROBLEMS=0
+
+note() { echo "$*" >> "$OUT/restore.log"; }
+
+verified() {  # verified <ok|fail> <what was checked, and what it read>
+  if [ "$1" = ok ]; then
+    note "  [RESTORED] $2"
+  else
+    PROBLEMS=$((PROBLEMS + 1))
+    note "  [RESTORATION FAILED] $2"
+    say "T3: RESTORATION FAILED -- $2"
+  fi
+}
+
 restore_the_box() {
-  local rc=$?
-  [ "$RESTORED" = 1 ] && exit "$rc"
+  local driver_rc=$?
+  [ "$RESTORED" = 1 ] && exit "$driver_rc"
   RESTORED=1
-  say "T3: restoring the box (this script is exiting $rc) -- ufw, realm row, authserver, account"
-  {
-    echo "=== restore, run by the EXIT trap ==="
-    echo "the status this script is exiting with: $rc"
-    echo "taken (local): $(date -Is)"
-    if [ -f "$OUT/ufw-user.rules.before" ]; then
-      echo "--- putting /etc/ufw rules back exactly as they were ---"
-      sudo cp -a "$OUT/ufw-user.rules.before"  /etc/ufw/user.rules
-      sudo cp -a "$OUT/ufw-user6.rules.before" /etc/ufw/user6.rules
-      # 2026-09-08 finding 3a: `cp -a` carries the COPY's ownership, and the copy
-      # was chowned to pk so the driver could read it. Ownership and mode restated.
-      sudo chown root:root /etc/ufw/user.rules /etc/ufw/user6.rules
-      sudo chmod 640 /etc/ufw/user.rules /etc/ufw/user6.rules
-      sudo ufw status 2>&1
-      sudo sha256sum /etc/ufw/user.rules /etc/ufw/user6.rules \
-        "$OUT/ufw-user.rules.before" "$OUT/ufw-user6.rules.before" 2>&1
-      sudo ls -l /etc/ufw/user.rules /etc/ufw/user6.rules 2>&1
+  say "T3: restoring the box (the drivers left status $driver_rc) -- ufw, realm row, authserver, account"
+  note "=== restore, run by the EXIT trap ==="
+  note "the status the drivers left: $driver_rc"
+  note "taken (local): $(date -Is)"
+  note "realm UPDATE targets row id: $REALM_ROW_ID   (verification always reads id 1)"
+
+  # --- 1. ufw ---------------------------------------------------------------
+  note "--- ufw rules ---"
+  if [ -f "$OUT/ufw-user.rules.before" ]; then
+    sudo cp -a "$OUT/ufw-user.rules.before"  /etc/ufw/user.rules
+    sudo cp -a "$OUT/ufw-user6.rules.before" /etc/ufw/user6.rules
+    # 2026-09-08 finding 3a: `cp -a` carries the COPY's ownership, and the copy
+    # was chowned to pk so the driver could read it. Ownership and mode restated.
+    sudo chown root:root /etc/ufw/user.rules /etc/ufw/user6.rules
+    sudo chmod 640 /etc/ufw/user.rules /etc/ufw/user6.rules
+    local live4 want4 live6 want6 owner4 owner6
+    live4=$(sha_of /etc/ufw/user.rules);  want4=$(sha_of "$OUT/ufw-user.rules.before")
+    live6=$(sha_of /etc/ufw/user6.rules); want6=$(sha_of "$OUT/ufw-user6.rules.before")
+    owner4=$(sudo stat -c '%U:%G %a' /etc/ufw/user.rules 2>/dev/null)
+    owner6=$(sudo stat -c '%U:%G %a' /etc/ufw/user6.rules 2>/dev/null)
+    note "  user.rules  live=$live4 before=$want4  $owner4"
+    note "  user6.rules live=$live6 before=$want6  $owner6"
+    if [ -n "$live4" ] && [ "$live4" = "$want4" ] && [ -n "$live6" ] && [ "$live6" = "$want6" ] \
+       && [ "$owner4" = "root:root 640" ] && [ "$owner6" = "root:root 640" ]; then
+      verified ok "/etc/ufw/user{,6}.rules match the copies taken before the Apply, root:root 640"
     else
-      echo "--- no ufw copy was taken yet, so nothing to put back ---"
+      verified fail "/etc/ufw rules do NOT match the copies taken before the Apply, or their ownership/mode moved"
     fi
-    echo "--- the realm row as found now ---"
-    mysql_q "SELECT address, localAddress, localSubnetMask FROM acore_auth.realmlist WHERE id=1;"
-    echo "--- forcing it to $REALM_ADDRESS on BOTH address columns, mask $REALM_MASK ---"
-    mysql_q "UPDATE acore_auth.realmlist SET address='$REALM_ADDRESS', localAddress='$REALM_ADDRESS', localSubnetMask='$REALM_MASK' WHERE id=1;"
-    echo "--- read back ---"
-    mysql_q "SELECT address, localAddress, localSubnetMask FROM acore_auth.realmlist WHERE id=1;"
-    echo "--- restarting ac-authserver so it re-reads the row it announces ---"
-    docker restart ac-authserver
+    sudo ufw status 2>&1 | sed 's/^/  ufw: /' >> "$OUT/restore.log"
+  else
+    note "  (no ufw copy was taken -- the run stopped before that step)"
+    verified ok "nothing to put back: no ufw copy exists, so nothing was changed"
+  fi
+
+  # --- 2. the realm row -----------------------------------------------------
+  note "--- the realm row ---"
+  note "  as found now (id 1): $(mysql_q "SELECT CONCAT_WS('|', address, localAddress, localSubnetMask) FROM acore_auth.realmlist WHERE id=1;")"
+  mysql_q "UPDATE acore_auth.realmlist SET address='$REALM_ADDRESS', localAddress='$REALM_ADDRESS', localSubnetMask='$REALM_MASK' WHERE id=$REALM_ROW_ID;"
+  local row want
+  # Always id 1: the row this box advertises is the thing that has to be right,
+  # whatever row the UPDATE above was aimed at.
+  row=$(mysql_q "SELECT CONCAT_WS('|', address, localAddress, localSubnetMask) FROM acore_auth.realmlist WHERE id=1;")
+  want="$REALM_ADDRESS|$REALM_ADDRESS|$REALM_MASK"
+  note "  read back (id 1): $row"
+  note "  wanted          : $want"
+  if [ "$row" = "$want" ]; then
+    verified ok "realmlist id 1 is $want on all three columns"
+  else
+    verified fail "realmlist id 1 reads '$row', wanted '$want' -- the row this box advertises is WRONG"
+  fi
+
+  # --- 3. ac-authserver re-reads it -----------------------------------------
+  # The first version of this check read `docker logs --tail 80` and asked
+  # whether ANY line in it named the target address. The failing-restoration
+  # exercise on 2026-09-09 caught it: with the row deliberately left at
+  # 192.168.77.77 the container announced 192.168.77.77, and the check passed
+  # anyway, because a PREVIOUS run's `Added realm ... 100.99.204.5:8085` was
+  # still inside the last 80 lines. A stale marker read as a fresh one -- the
+  # same defect this whole folder is about, found in the check written to
+  # prevent it. Two changes: only lines written since this restart began count
+  # (`--since`), and only the LAST announcement counts, because that is the one
+  # the container is now serving.
+  note "--- ac-authserver ---"
+  local since announced
+  since=$(date -u +%Y-%m-%dT%H:%M:%S)
+  if docker restart ac-authserver >> "$OUT/restore.log" 2>&1; then
     sleep 10
-    docker logs --tail 60 ac-authserver 2>&1 | grep -i "Added realm" \
-      || echo "(no 'Added realm' line in the last 60 -- look at the whole log)"
-    echo "--- the account this run may have created, removed ---"
-    mysql_q "SELECT id, username FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';"
-    # Round 2: round 1's joined multi-table DELETE did not take and left an
-    # orphan account_access row behind. Two plain statements, access first.
-    mysql_q "DELETE FROM acore_auth.account_access WHERE id IN (SELECT id FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT');"
-    mysql_q "DELETE FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';"
-    echo "after the delete (expect no rows for it, and no orphan access row):"
-    mysql_q "SELECT id, username FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';"
-    mysql_q "SELECT id, gmlevel FROM acore_auth.account_access ORDER BY id;"
-    echo "--- the world was never stopped or started by this lane ---"
-    pgrep -a worldserver || echo "(no worldserver process -- THIS WOULD BE A PROBLEM)"
-  } >> "$OUT/restore.log" 2>&1
+    announced=$(docker logs --since "$since" ac-authserver 2>&1 | grep -a "Added realm" | tail -1)
+    note "  the LAST 'Added realm' line written since $since UTC, when the restart began:"
+    note "    ${announced:-(none)}"
+    if [ -n "$announced" ] && printf '%s' "$announced" | grep -qF "at ${REALM_ADDRESS}:${REALM_PORT}"; then
+      verified ok "ac-authserver restarted and now announces the realm at ${REALM_ADDRESS}:${REALM_PORT}"
+    else
+      verified fail "ac-authserver's newest announcement since the restart is '${announced:-(none)}', not 'at ${REALM_ADDRESS}:${REALM_PORT}'"
+    fi
+  else
+    verified fail "docker restart ac-authserver did not succeed"
+  fi
+
+  # --- 4. the account this run creates --------------------------------------
+  note "--- the account this run may have created ---"
+  note "  before the delete: $(mysql_q "SELECT COUNT(*) FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';")"
+  # Round 2: round 1's joined multi-table DELETE did not take and left an orphan
+  # account_access row behind. Two plain statements, access first.
+  mysql_q "DELETE FROM acore_auth.account_access WHERE id IN (SELECT id FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT');"
+  mysql_q "DELETE FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';"
+  local left orphans
+  left=$(mysql_q "SELECT COUNT(*) FROM acore_auth.account WHERE username='$WIDGET_ACCOUNT';")
+  orphans=$(mysql_q "SELECT COUNT(*) FROM acore_auth.account_access aa LEFT JOIN acore_auth.account a ON a.id=aa.id WHERE a.id IS NULL;")
+  note "  after the delete: account rows=$left  orphaned account_access rows (any id)=$orphans"
+  note "  account_access now: $(mysql_q "SELECT GROUP_CONCAT(CONCAT(id,':',gmlevel) ORDER BY id) FROM acore_auth.account_access;")"
+  if [ "$left" = "0" ] && [ "$orphans" = "0" ]; then
+    verified ok "$WIDGET_ACCOUNT is gone and no account_access row is orphaned"
+  else
+    verified fail "$WIDGET_ACCOUNT rows left=$left, orphaned account_access rows=$orphans"
+  fi
+
+  # --- 5. the world was never this lane's to touch --------------------------
+  note "--- the world ---"
+  local pid_now
+  pid_now=$(pgrep worldserver | head -1)
+  note "  pid at the start of this script: ${WORLD_PID_AT_START:-unknown}   now: ${pid_now:-none}"
+  if [ -n "$pid_now" ] && [ "$pid_now" = "${WORLD_PID_AT_START:-}" ]; then
+    verified ok "the world is up on the same pid it was on before this script ran ($pid_now)"
+  else
+    verified fail "the worldserver pid was ${WORLD_PID_AT_START:-unknown} and is now ${pid_now:-none}"
+  fi
+
+  # --- 6. the final reading -------------------------------------------------
   probe final >/dev/null 2>&1
-  if [ "$rc" -ne 0 ]; then
-    say "T3: this run FAILED (status $rc); the box was put back anyway -- see $OUT/restore.log"
-    echo "=== T3 run FAILED, status $rc, box restored by the EXIT trap $(date -Is) ===" >> "$OUT/run.log"
+  if [ -s "$OUT/state-final.txt" ]; then
+    verified ok "state-final.txt written"
+  else
+    verified fail "state-final.txt was not written, so there is no final reading of this box"
+  fi
+
+  # --- the verdict ----------------------------------------------------------
+  if [ "$PROBLEMS" -gt 0 ]; then
+    note "=== RESTORATION FAILED: $PROBLEMS step(s) did not verify. The drivers' own status was $driver_rc. ==="
+    say "T3: RESTORATION FAILED -- $PROBLEMS step(s); exiting $RESTORE_FAILED_STATUS"
+    {
+      echo "=== T3 run: RESTORATION FAILED -- $PROBLEMS step(s) did not verify ==="
+      echo "the drivers' own status was $driver_rc; this script exits $RESTORE_FAILED_STATUS"
+      echo "$(date -Is)"
+    } >> "$OUT/run.log"
+    exit "$RESTORE_FAILED_STATUS"
+  fi
+  note "=== every restoration verified; this script exits $driver_rc ==="
+  if [ "$driver_rc" -ne 0 ]; then
+    say "T3: this run FAILED (status $driver_rc); the box was put back and every step verified"
+    echo "=== T3 run FAILED, status $driver_rc, box restored and verified $(date -Is) ===" >> "$OUT/run.log"
   else
     echo "=== T3 run finished $(date -Is) ===" >> "$OUT/run.log"
   fi
-  exit "$rc"
+  exit "$driver_rc"
 }
-trap restore_the_box EXIT
 
 die() {  # die <status> <message>
   local rc="$1"; shift
@@ -200,6 +331,8 @@ capture_ufw_effect() {  # what the Apply did, appended to the driver's own log
 }
 
 mkdir -p "$OUT" "$WIDGET_SHOTS"
+: > "$OUT/restore.log"
+WORLD_PID_AT_START=$(pgrep worldserver | head -1)
 echo "=== T3 clause-35 run started $(date -Is) ===" > "$OUT/run.log"
 {
   echo "code under test : $LANE/checkout at $(git -C "$LANE/checkout" rev-parse HEAD)"
@@ -214,8 +347,11 @@ echo "=== T3 clause-35 run started $(date -Is) ===" > "$OUT/run.log"
   echo "account         : $WIDGET_ACCOUNT (new tonight)"
   echo "shots           : $WIDGET_SHOTS"
   echo "QT_QPA_PLATFORM : $QT_QPA_PLATFORM"
+  echo "world pid       : ${WORLD_PID_AT_START:-none} (must be the same one when this script exits)"
   echo "T3_ALLOW_FAILURE: ${T3_ALLOW_FAILURE:-0}"
+  echo "T3_REALM_ROW_ID : $REALM_ROW_ID (the row the restore's UPDATE targets; the check reads id 1)"
 } >> "$OUT/run.log"
+trap restore_the_box EXIT
 
 say "T3: capturing server state before anything is pressed"
 probe before
@@ -240,4 +376,4 @@ RC=$?
 [ "$RC" -eq 0 ] || die "$RC" "widget_driver.py exited $RC, so a clause of the 33 failed"
 
 probe after
-say "T3: both drivers green; the EXIT trap now puts the box back"
+say "T3: both drivers green; the EXIT trap now puts the box back and checks that it did"

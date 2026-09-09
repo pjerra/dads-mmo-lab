@@ -1,0 +1,12 @@
+=== HAND RESTORE, immediately after the deliberate failure ===
+the row this deliberate failure left behind:
+192.168.77.77|192.168.77.77|255.255.255.0
+putting it back by hand (id 1, both address columns and the mask):
+read back:
+100.99.204.5|100.99.204.5|255.255.255.0
+restarting ac-authserver at 2026-09-09T09:58:51 UTC:
+ac-authserver
+the LAST Added realm line written since then:
+[0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
+world pid:
+409560

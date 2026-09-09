@@ -44,8 +44,12 @@ halves fail, on the live server, through the real widgets:
           255.255.255.0, and read back
 
 Every reading of the row is taken by `docker exec ac-database mysql`, a route
-that is not the widget. The password is passed in `MYSQL_PWD` so it is on no
-command line this log records.
+that is not the widget. The password reaches the client in `MYSQL_PWD` and the
+argv carries only the NAME (`docker exec -e MYSQL_PWD`), so the value is on no
+command line — not the client's inside the container, not `docker exec`'s out
+here. The value is `password`, the AzerothCore compose fixture's default root
+password: not generated, the same on every install this project makes, and
+reachable from nowhere else — ac-database is published as `127.0.0.1:3306`.
 
 Apply really does run: it adds two `ufw allow` rules (it does NOT run `ufw
 enable` — that refusal is the plan's own, see the warning it renders) and runs

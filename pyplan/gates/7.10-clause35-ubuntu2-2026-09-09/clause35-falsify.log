@@ -1,5 +1,5 @@
 === clause35_falsify.py ===
-started (local): 2026-09-09T11:35:38+02:00
+started (local): 2026-09-09T11:59:37+02:00
 command: /home/pk/dads-mmo-lab/pylauncher/.venv/bin/python /home/pk/lane710b/drivers-t3/clause35_falsify.py
 ---
 This plugin does not support propagateSizeHints()
@@ -19,14 +19,14 @@ PART A -- the PROPOSAL half: the plan text names the address the widget computed
        plan.lan_ip, the widget's own computed address: '172.30.48.189'
        the realm row, read by docker exec mysql: address='100.99.204.5' localAddress='100.99.204.5' mask='255.255.255.0'
        plan and row DISAGREE right now -- the old clause's answer was decided by this line; the corrected one's is not
-       [shot] 2026-09-09T11:35:39+0200  A-networking-tab-real-plan.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
+       [shot] 2026-09-09T11:59:38+0200  A-networking-tab-real-plan.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
 [OK]   A1  the plan the widget shows names the LAN address the widget itself computed -- plan.lan_ip='172.30.48.189' appears in the text on screen
 [FAIL] A2  the same clause, against a plan whose lan_ip is NOT what the tab shows -- mutant.lan_ip='192.168.77.77' does not appear in the text the widget rendered for '172.30.48.189' -- the clause SAYS SO, which is what the row-comparison could not do
        the tab, re-rendered by the widget's own _plan_ready for the mutant:
          Mode: lan   LAN IP: 192.168.77.77   public IP: -
          Ports: 3724, 8085   firewall: ufw
          Players set realmlist to: 172.30.48.189
-       [shot] 2026-09-09T11:35:39+0200  A-networking-tab-mutant-plan.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
+       [shot] 2026-09-09T11:59:38+0200  A-networking-tab-mutant-plan.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
 [OK]   A3  and passes again once the widget renders the plan it was given -- the clause follows the WIDGET ('192.168.77.77' now on screen), not the row ('100.99.204.5', unchanged throughout A)
        Show plan pressed again; the tab holds the real plan for '172.30.48.189'
 
@@ -38,9 +38,9 @@ PART B -- the APPLY half: the row becomes the plan's address, and only after App
        B1  read back: address='192.168.77.77' localAddress='192.168.77.77' mask='255.255.255.0'
 [OK]   B2  the ground disagrees with the plan, so the clause below has something to do -- row '192.168.77.77' != plan.lan_ip '172.30.48.189'; had they been equal this driver would have REFUSED, because a clause true before its action proves nothing
 [FAIL] B3  the row the server advertises holds the plan's LAN address -- row='192.168.77.77' plan.lan_ip='172.30.48.189' -- BEFORE Apply, and the clause fails, which is the whole point of correcting it
-       [shot] 2026-09-09T11:35:40+0200  B-networking-tab-before-apply.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
+       [shot] 2026-09-09T11:59:39+0200  B-networking-tab-before-apply.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
        B4  pressing the real Apply QPushButton (enabled=True)
-2026-09-09 11:35:40 INFO [yulon.networking] networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual
+2026-09-09 11:59:39 INFO [yulon.networking] networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual
        B4  what the tab appended after Apply:
          
          Applied:
@@ -50,7 +50,7 @@ PART B -- the APPLY half: the row becomes the plan's address, and only after App
          Could not do (run by hand):
            – Yu'lon opened the game ports in ufw's rule list but did NOT run `ufw enable`: turning a firewall on can only take reachability away, it is no part of making a server reachable, and on a machine you reach over SSH it takes away your own way in — which is exactly what it did to the box that found this (bug-checklist §39). ufw is left as you had it. To turn it on yourself, allow your SSH port FIRST: `sudo ufw allow <your ssh port>/tcp`, then `sudo ufw enable`.
          ⚠ restart the server so the new realmlist address is used
-       [shot] 2026-09-09T11:35:40+0200  B-networking-tab-after-apply.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
+       [shot] 2026-09-09T11:59:39+0200  B-networking-tab-after-apply.png  containers alive at capture: ['ac-database', 'ac-authserver', 'ac-worldserver']
        B5  the row, read again by docker exec mysql: address='172.30.48.189' localAddress='172.30.48.189' mask='255.255.255.0'
 [OK]   B5  the row the server advertises holds the plan's LAN address -- row '192.168.77.77' -> '172.30.48.189', plan.lan_ip '172.30.48.189' -- the SAME clause, the same expression, and the only thing that changed is that the button was pressed
        B6  putting the row back to 100.99.204.5 on both address columns, mask 255.255.255.0
@@ -61,7 +61,7 @@ PART B -- the APPLY half: the row becomes the plan's address, and only after App
 RESULT: 5 OK, 2 FAIL -- of which 2 FAILs were the point (A2 and B3)
 every evaluation went the way the docstring says it must: A1 OK, A2 FAIL, A3 OK, B2 OK, B3 FAIL, B5 OK, B6 OK
 ==============================================================================
---- exit code: 0   elapsed: 3s   finished: 2026-09-09T11:35:41+02:00
+--- exit code: 0   elapsed: 3s   finished: 2026-09-09T11:59:40+02:00
 --- ufw after the Apply press ---
 Status: inactive
 78538181b0c667fe107cb93bc1f296b63d5ccfcdb4e3b537a99c87eb07b4b16e  /etc/ufw/user.rules

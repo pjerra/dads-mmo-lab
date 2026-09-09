@@ -1,0 +1,23 @@
+=== the two gates this folder's commit was taken behind ===
+Round 1 of Codex's review asked for these lines to live in the folder so it is
+self-contained rather than citing a report. Both were run from this ticket's
+worktree, pylauncher/, on 2026-09-09, against the tree that is committed here.
+
+--- test_no_secrets_in_evidence.py, on the laptop, before the commit ---
+  $ python -m pytest tests/test_no_secrets_in_evidence.py -m "not integration" -q
+  ....                                                                     [100%]
+  4 passed in 2.69s
+
+--- the full --checks gate, on yulon-fedora ---
+  $ YULON_TEST_BOX=yulon-fedora bash /c/Users/perzi/run-tests-vm.sh --checks
+  3769 passed, 6 skipped, 7 warnings in 26.87s
+  --- mypy (this platform) ---   Success: no issues found in 94 source files
+  --- mypy (as Windows) ---      Success: no issues found in 94 source files
+  --- mypy (as macOS) ---        Success: no issues found in 94 source files
+  --- ruff ---                   All checks passed!
+  --- black ---                  196 files would be left unchanged.
+  === --checks: ALL GREEN ===
+
+The pytest count above is the round-2 run's; round 3 changed no Python that the
+suite covers (the driver and the runner are gate evidence, not package code) and
+its own --checks ended on the same `=== --checks: ALL GREEN ===` line.
