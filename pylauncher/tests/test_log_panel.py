@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -19,7 +20,8 @@ from tests.conftest import (
     spelled_bounds,
     wait_for_panel,
 )
-from yulon.ui.widgets.log_panel import LogPanel
+from yulon import runner
+from yulon.ui.widgets.log_panel import LogPanel, _StreamWorker
 
 STAMP = re.compile(r"^\[(\d\d:\d\d:\d\d)\] ")
 """The wall clock `append()` puts on every line. Elapsed is a header field, not a prefix."""
@@ -126,6 +128,116 @@ def test_stop_ends_an_endless_job(qapp: object) -> None:
     wait_for_panel(panel)
     assert finished and finished[0] == (True, "stopped")
     assert "tick 0" in panel.text()
+
+
+QUIET_CHILD = 600.0
+"""How long the child in `_quiet_stream` says nothing for. The CHILD'S OWN WORK, not a bound.
+
+The same standing as `JOB_PACE`: nothing here is judged by it and no wait in
+this file is sized from it. It is large so that the test cannot pass by the
+child ending on its own -- ten minutes of silence against `HANG_BOUND`'s sixty
+seconds -- which is exactly the shape the live gate found: the worldserver went
+quiet at 210 lines and the panel sat there for the full 120 s the probe allowed.
+
+It is spelled INTO the child's source rather than called here, so
+`conftest.spelled_bounds` cannot see it; that is honest for the same reason
+`JOB_PACE` is named at all -- the number has an argument behind it, written here.
+"""
+
+
+def _quiet_stream() -> Iterator[str]:
+    """One line, then a child that prints nothing and does not exit.
+
+    The Console tab's source in miniature. `follow_logs()` yields from
+    `runner.stream()`, so the panel's worker ends up blocked in `readline()` on
+    a pipe the child is not writing to -- and a `docker logs -f` on a world that
+    has gone quiet is precisely that. No `cancel` is passed, because the one
+    real call site (`controller_view.py:3107`) passes none.
+    """
+    yield from runner.stream(
+        [
+            sys.executable,
+            "-c",
+            f"import sys, time; print('following', flush=True); time.sleep({QUIET_CHILD})",
+        ]
+    )
+
+
+def test_stop_ends_a_source_blocked_inside_a_quiet_child(qapp: object) -> None:
+    """7.10's one FAIL, in a unit test: Stop must reach a source that is not between lines.
+
+    Measured on `yulon-ubuntu2` 2026-09-08
+    (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`), with
+    the panel's Stop clicked by `QTest.mouseClick` on the real
+    `ControllerServices.logs_source`: 120 seconds of
+    `running=True cancelled=True worker._stop=True lines=210`, then
+    `panel.wait(10000) -> False`, then `QThread: Destroyed while thread '' is
+    still running` and exit 134. The same probe's synthetic source -- one line
+    every 50 ms -- stopped 0.02 s after the click. So the button was not broken;
+    the flag it sets is read between lines, and there were no more lines.
+
+    NOT a Phase 8 regression: `git diff cfb4c04f d8ad7275 --
+    pylauncher/yulon/ui/widgets/log_panel.py` is empty. The tree has carried
+    this since before Phase 8 and chatty worldservers hid it.
+
+    The three mutations this catches, in the order they would be tried:
+    dropping `runner.end_streams_started_on()` from `request_stop()` (the panel
+    is still running at `HANG_BOUND` and `pump_until` says the condition never
+    came true); recording the worker's ident anywhere but on the worker's own
+    thread (nothing matches, same failure); and reporting the terminated
+    child's `CalledProcessError` as the job's outcome, which fails on the last
+    line here rather than the first.
+    """
+    panel = LogPanel()
+    finished: list[tuple[bool, str]] = []
+    panel.run_finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    panel.run(_quiet_stream, title="worldserver log")
+    pump_until(lambda: "following" in panel.text(), "the quiet child's only line")
+    panel.stop()
+    wait_for_panel(panel)
+
+    assert panel.running is False
+    assert panel.cancelled is True
+    assert panel.status_text() == "cancelled"
+    # The child was terminated, so the source raises `CalledProcessError` on its
+    # way out (exit 143 on the live box). A stop is not a failure, and the panel
+    # is the only thing that knows which of the two this was.
+    assert finished == [(True, "stopped")], finished
+
+
+def test_a_worker_told_to_stop_before_it_runs_never_starts_its_source(qapp: object) -> None:
+    """Stop between `thread.start()` and the OS scheduling the worker must not be a hang.
+
+    The window is real and it is the one case `end_streams_started_on()` cannot
+    cover: there is no child yet, so there is nothing to end, and the source is
+    about to block. `run()` reads the flag once BEFORE it calls the source,
+    which turns that ordering into an immediate "stopped".
+
+    Driven on the worker object rather than through `LogPanel.run()` because the
+    ordering cannot be produced through the public surface without a race:
+    `QThread::started` is delivered on the new thread, so nothing the GUI thread
+    does can hold it back.
+
+    Mutation this catches: removing the pre-check. The source is then entered,
+    `calls` is `[1]`, and the panel would be back to waiting on a line that
+    never comes.
+    """
+    calls: list[int] = []
+
+    def source() -> Iterator[str]:
+        calls.append(1)
+        return iter(["a line"])
+
+    worker = _StreamWorker(source)
+    finished: list[tuple[bool, str]] = []
+    worker.finished.connect(lambda ok, msg: finished.append((ok, msg)))
+
+    worker.request_stop()
+    worker.run()
+
+    assert calls == [], "the source was started after the stop was asked for"
+    assert finished == [(True, "stopped")], finished
 
 
 def _cancellable(release: threading.Event) -> Iterator[str]:

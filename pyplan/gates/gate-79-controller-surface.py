@@ -31,8 +31,14 @@ four signatures genuinely differ: TBC takes neither `realm_host` nor
 `realm_port` because that entry has no auth marker to spell, Vanilla defaults
 `realm_host` and accepts no port, and Tortoise and WotLK require both. A single
 spelling here would have had to invent arguments for two of the four, so the
-dispatch is a table keyed by catalog id (`_READY_CALLS`) and an id that is not
-in it stops the run.
+dispatch is a table keyed by catalog id and an id that is not in it stops the
+run. That table now lives in `ready_wait.py` beside this script, because a
+second gate script had copied its WotLK row by hand and both were wrong: the
+row TYPED a realm address, and the one game whose marker IS that address is the
+one it typed it for. Measured on `yulon-ubuntu2` 2026-09-09 -- killed after
+8 m 19 s against a world that had been up throughout, where the realm row's own
+pair answered in 0.3 s. `ready_wait.py`'s module docstring carries both halves
+of the measurement and what it must not undo.
 
 AND THE READY WAIT HAPPENS WHETHER OR NOT THIS RUN DID THE STARTING. On the
 2026-09-04 TBC re-run the baseline found all three containers already up -- a
@@ -73,13 +79,21 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Callable
 from pathlib import Path
-from types import ModuleType
 
-from yulon.catalog.catalog import load_catalog
-from yulon.log import use_utf8_streams
-from yulon.ui.controller_view import ControllerServices
+# `ready_wait` is this script's own directory. It was the `_READY_CALLS` table
+# below until 2026-09-09, when the 7.10 re-run measured what the copy of its
+# WotLK row in `7.10-rerun-ubuntu2-2026-09-08/wait_ready.py` cost: 8 m 19 s of
+# waiting against a world that was up, then a kill. Two scripts spelling one
+# call is what that table exists to stop, so the table moved to where both can
+# import it. Its module docstring carries the measurement.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ready_wait import READY_CALLS, unknown_game_error, wait_ready_for_game  # noqa: E402
+
+from yulon.catalog.catalog import load_catalog  # noqa: E402
+from yulon.log import use_utf8_streams  # noqa: E402
+from yulon.ui.controller_view import ControllerServices  # noqa: E402
 
 use_utf8_streams()
 
@@ -128,58 +142,9 @@ def running(names: list[str]) -> dict[str, bool]:
     return {name: name in out for name in names}
 
 
-class UnknownGameError(Exception):
-    """A catalog id this harness has no `wait_server_ready()` spelling wired for."""
-
-
-# How each game's `wait_server_ready()` is called, keyed by catalog id. A table
-# and not a chain of `if`s: the chain this replaced ended in an `else` whose
-# comment said "Tortoise", and `wow-wotlk` -- a game that has shipped in the
-# catalog the whole time -- was landing in it. That went unnoticed only because
-# WotLK happens to take the same two arguments Tortoise does. The next id added
-# would have been handed `("127.0.0.1", auth_port)` on the strength of an
-# `else`, and whatever came back would have been printed as that game's
-# readiness.
-_READY_CALLS: dict[str, Callable[[ModuleType, int], bool]] = {
-    # No realm arguments: this entry has no auth marker to spell, and its
-    # `wait_server_ready()` raises `TypeError` on anything but timeout/interval.
-    "wow-tbc": lambda module, auth_port: bool(module.wait_server_ready()),
-    # `realm_host` defaults and no port is accepted -- `ready.auth` is null.
-    "wow-vanilla": lambda module, auth_port: bool(module.wait_server_ready()),
-    "wow-tortoise": lambda module, auth_port: bool(
-        module.wait_server_ready("127.0.0.1", auth_port)
-    ),
-    "wow-wotlk": lambda module, auth_port: bool(module.wait_server_ready("127.0.0.1", auth_port)),
-}
-
-
-def unknown_game_error(game: str) -> UnknownGameError:
-    """The refusal for an id with no `_READY_CALLS` entry, worded once."""
-    return UnknownGameError(
-        f"this harness has no wait_server_ready() spelling wired for {game!r}, so it cannot "
-        f"tell whether that game's server is up and must not report on one. The ids it is "
-        f"wired for are: {', '.join(sorted(_READY_CALLS))}. To add {game!r}, give it its own "
-        f"_READY_CALLS entry with the arguments that game's own wait_server_ready() takes; "
-        f"borrowing another game's spelling is what this replaced."
-    )
-
-
-def wait_ready_for_game(game: str, auth_port: int) -> bool:
-    """That game's own `wait_server_ready()`, with the arguments it actually takes.
-
-    Raises:
-        UnknownGameError: `game` has no entry in `_READY_CALLS`.
-    """
-    call = _READY_CALLS.get(game)
-    if call is None:
-        raise unknown_game_error(game)
-    module = importlib.import_module(f"yulon.controller_{game.replace('-', '_')}.docker_ctl")
-    return call(module, auth_port)
-
-
 def main() -> int:
     game, server_dir = sys.argv[1], Path(sys.argv[2])
-    if game not in _READY_CALLS:
+    if game not in READY_CALLS:
         # Checked before docker is touched. Every section below asks a server a
         # question, and a run that cannot establish that the server is up cannot
         # honestly report the answers -- half a gate reads like a whole one.
@@ -216,7 +181,7 @@ def main() -> int:
     # question -- `docker start` returns long before mangosd is listening.
     try:
         t0 = time.monotonic()
-        baseline_ready = wait_ready_for_game(game, auth_port)
+        baseline_ready = wait_ready_for_game(entry, server_dir)
         # Not `ready_seconds`. That key belongs to section 7, which times a
         # `start_staged()` this run performed; a wait spent on the tail of
         # somebody else's start is a different measurement and gets a different
@@ -411,7 +376,7 @@ def main() -> int:
     section("time from start_staged() to this game's own ready marker")
     try:
         t0 = time.monotonic()
-        ready = wait_ready_for_game(game, auth_port)
+        ready = wait_ready_for_game(entry, server_dir)
         TIMES["ready_seconds"] = time.monotonic() - t0
         if ready:
             ok(f"reached ready {TIMES['ready_seconds']:.1f}s after start_staged() returned")
@@ -484,7 +449,7 @@ def main() -> int:
     try:
         services.controller.start()
         t0 = time.monotonic()
-        ready = wait_ready_for_game(game, auth_port)
+        ready = wait_ready_for_game(entry, server_dir)
         TIMES["ready_after_restore_seconds"] = time.monotonic() - t0
         print("running:", running([world, auth, db]), flush=True)
         if ready:
