@@ -16,6 +16,7 @@ implementation still matches on a pure-ASCII password.
 from __future__ import annotations
 
 import logging
+from typing import get_args
 
 import pytest
 
@@ -928,3 +929,136 @@ def test_an_unknown_scheme_is_refused_by_name_instead_of_defaulting() -> None:
         "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
     )
     assert sql.statements == [], "it touched the database before refusing"
+
+
+# -- the same refusal at every other dispatch on a scheme --------------------
+
+
+def test_an_unknown_scheme_stops_the_account_row_before_the_database_is_touched() -> None:
+    """`_account_row`'s `else` was AzerothCore's columns for every scheme but two.
+
+    T9 closed this in `reset_own_password`; the same shape survived one function
+    over. A fourth `Scheme` value added without a branch here does not read as
+    "this app cannot write that core": on a mangos-shaped table the insert dies
+    with `Unknown column 'salt'`, and on a table that happens to have `salt` and
+    `verifier` it writes a row that inserts cleanly and can never authenticate.
+
+    Driven through the public `create_account` rather than the private function,
+    because the recorder then proves the stronger fact — the scheme is settled
+    before the id lookup, so nothing was ASKED of the database either, not
+    merely nothing written.
+    """
+    sql = _Recorder()
+
+    with pytest.raises(accounts.AccountError) as caught:
+        accounts.create_account(
+            sql,
+            "bob",
+            "hunter2",
+            scheme="mangos_srp7",  # type: ignore[arg-type]
+        )
+
+    assert str(caught.value) == (
+        "'mangos_srp7' is not an account scheme this app knows how to write an account row "
+        "for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+    )
+    assert sql.statements == [], "it touched the database before refusing"
+
+
+def test_an_unknown_scheme_stops_the_gm_grant_instead_of_writing_account_access() -> None:
+    """`account_access` is AzerothCore's table alone, and was the fall-through.
+
+    The grant tested `scheme in ("mangos_sha", "mangos_srp6")` and sent
+    everything else to `INSERT INTO account_access` — which on a core that keeps
+    the level in a column of `account` is a table that does not exist, and on one
+    that has it is a level granted through the wrong door.
+    """
+    sql = _Recorder()
+
+    with pytest.raises(accounts.AccountError) as caught:
+        accounts._grant_gm(sql, 106, 3, "mangos_srp7")  # type: ignore[arg-type]
+
+    assert str(caught.value) == (
+        "'mangos_srp7' is not an account scheme this app knows how to grant a GM level on, "
+        "so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+    )
+    assert sql.statements == [], "it touched the database before refusing"
+
+
+def test_an_unknown_scheme_stops_the_gm_level_read_instead_of_reading_account_access() -> None:
+    """The read half of the same dispatch, and the one that says "read".
+
+    Nothing is written here, so the refusal does not claim there was: a sentence
+    that says "nothing was written" about a SELECT is the kind of detail that
+    sends someone looking for a row that was never in question.
+    """
+    sql = _Recorder()
+
+    with pytest.raises(accounts.AccountError) as caught:
+        accounts._gm_level(sql, 106, "mangos_srp7")  # type: ignore[arg-type]
+
+    assert str(caught.value) == (
+        "'mangos_srp7' is not an account scheme this app knows how to read a GM level from, "
+        "so nothing was read. Known: azerothcore, mangos_sha, mangos_srp6."
+    )
+    assert sql.statements == [], "it touched the database before refusing"
+
+
+def test_the_known_list_every_refusal_prints_comes_from_Scheme_itself() -> None:
+    """A hand-typed list goes stale the moment `Scheme` grows a fourth value.
+
+    T9's reviewer's finding: the list was typed into one message and pinned
+    verbatim by one test, so the value that made the refusal necessary would be
+    the one value it failed to mention — and no test would notice. Derived from
+    `get_args(Scheme)`, the alias is the only place the names are written.
+
+    Asked of the messages the functions really raise, not of the constant alone:
+    a constant nothing prints proves nothing about what a user is told.
+    """
+    known = get_args(accounts.Scheme)
+    assert len(known) == 3, known  # the alias itself, in case it lost a member
+    sql = _Recorder()
+    messages = []
+    for call in (
+        lambda: accounts.create_account(sql, "bob", "hunter2", scheme="mangos_srp7"),  # type: ignore[arg-type]
+        lambda: accounts._grant_gm(sql, 106, 3, "mangos_srp7"),  # type: ignore[arg-type]
+        lambda: accounts._gm_level(sql, 106, "mangos_srp7"),  # type: ignore[arg-type]
+        lambda: accounts.reset_own_password(
+            sql,
+            "YULON_243C46E3",
+            "n3w-p@ssw0rd1234",
+            scheme="mangos_srp7",  # type: ignore[arg-type]
+        ),
+    ):
+        with pytest.raises(accounts.AccountError) as caught:
+            call()
+        messages.append(str(caught.value))
+
+    assert len(messages) == 4
+    for message in messages:
+        for name in known:
+            assert name in message, message
+        assert accounts.KNOWN_SCHEMES in message, message
+    assert accounts.KNOWN_SCHEMES == ", ".join(known)
+
+
+def test_an_entry_that_declares_no_scheme_is_refused_rather_than_defaulted() -> None:
+    """The UI's two call sites passed `entry.accounts.scheme or "azerothcore"`.
+
+    The Tortoise binding already refuses that case with this sentence; the
+    shared UI path defaulted instead, which is the same guess by another spelling
+    — and the guess it makes is the one that inserts cleanly into a table with
+    those columns and never authenticates against one without them.
+    """
+    with pytest.raises(NotImplementedError) as caught:
+        accounts.checked_scheme(None, "wow-example")
+
+    assert str(caught.value) == (
+        "wow-example declares no account scheme, so this app does not know which columns "
+        "its `account` table has. Nothing was written. Create the account at the "
+        "worldserver console instead."
+    )
+    # A declared scheme comes back unchanged, so the helper cannot become a
+    # second place that decides what a core's columns are.
+    for declared in get_args(accounts.Scheme):
+        assert accounts.checked_scheme(declared, "wow-example") == declared

@@ -905,8 +905,16 @@ def _for_wotlk(
         server_dir,
         templates_root=resources.installers_dir(),
         install_id=composegen.install_id(server_dir),
+        # The scheme is the entry's or nothing: `or "azerothcore"` stood here
+        # until 2026-09-09, which handed an entry whose scheme is unmeasured the
+        # one guess that inserts cleanly into a table with those columns and
+        # never authenticates against one without them (T12).
         create=lambda name, pw, level: wotlk_accounts.create_account(
-            sql, name, pw, gm_level=level, scheme=entry.accounts.scheme or "azerothcore"
+            sql,
+            name,
+            pw,
+            gm_level=level,
+            scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
         ),
         # The repair seam, and the reason it is a different function from
         # `create`: `create_account` deliberately refuses to re-salt a row that
@@ -1016,7 +1024,13 @@ def _for_wotlk(
         # copying that would hand administrator to every account made from the
         # tile. The spin box defaults to 0 and the user raises it.
         create_account=lambda name, pw, gm: wotlk_accounts.create_account(
-            sql, name, pw, gm_level=gm, scheme=entry.accounts.scheme or "azerothcore"
+            sql,
+            name,
+            pw,
+            gm_level=gm,
+            # The tab disables its button for an entry that declares no scheme;
+            # this is the seam under it refusing rather than guessing (T12).
+            scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
         ),
         store=wotlk_modules.store() if entry.has_manifests else None,
         applier=module_applier,
