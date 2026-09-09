@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** ACCEPT (Fable 2026-09-09 12:42 CEST; Codex accepted round 2, its round-3 pass owed) -- merged `67eb7d70` 2026-09-09 12:43 CEST, suite running behind it
+**Status:** CLOSED -- merged `67eb7d70`, suite green behind it, 2026-09-09 12:45 CEST; hand retired, worktree removed; branch kept until the owed Codex round-3 pass; the two install-shaped refusal sentences (`dockerfile.py:630-640`) owed as a small ticket
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -96,3 +96,7 @@ Amend or add (say which); gate; report.
 
 Substantive round; nothing left for a round 4. `_recipe_ground` (`native.py:2274-2283`) three-valued; `_put_recipe_back` (`:2314-2366`) never touches an unreadable file, guards `unlink` with `exists`, keeps every call inside the per-file `try`, so a first-file failure still attempts the second; the state write wrapped; flow reaches `_let_go`/`_restore_rollback` unchanged; the `isinstance` narrowing claim correct. The clause at `installer.py:409-416` true against `_look` (`startswith(GENERATED_MARKER)`) and `write()`. The directory stand-in faithful for both readers; each test red at round 2 for the reason claimed and red under its mutation. Item 4 confirmed: `dockerfile.py:630-634` and `:635-640` reachable from Rebuild via `native.py:1883`; the suggested sentence true on both paths. Four files, ledger right, trailer clean.
 Notes: the "nothing was removed" sentence is loose for a `write_bytes` that failed mid-write ("may be partly written" truer); "put back exactly as it was" suppressed for the whole press when any file is left, the right call; the user-owns lines assertion is a guard, not RED-first, as asked; "is replaced" loose for an already-current file, same as the accepted "is written again".
+
+## Merge (lead, 2026-09-09 12:45 CEST)
+
+`git merge --no-ff b6178611` -> `67eb7d70`; `--checks` on `yulon-phase8b` behind it ALL GREEN; pushed. Owed from the reviews: the two refusal sentences at `dockerfile.py:630-634` and `:635-640` that give install-shaped advice under a rebuild (the hand's suggested wording is in the round-3 report); a live press of the rebuild through the app with a stale recipe on a box (the round-1 Fable reviewer's list).
