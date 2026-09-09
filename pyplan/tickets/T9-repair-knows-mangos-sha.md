@@ -1,6 +1,6 @@
 # T9 — Repair cannot repair a Tortoise install: the shared password reset does not know `mangos_sha`
 
-**Status:** OPEN
+**Status:** DONE (hand reported 2026-09-09 14:25; awaiting review)
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/controller_wow_wotlk/accounts.py` (`reset_own_password` and whatever it shares with `_account_row`), `pylauncher/yulon/controller_wow_tortoise/accounts.py` only if the binding must pass something new, `pylauncher/tests/test_accounts.py`, `pylauncher/tests/test_controller_wow_tortoise.py`. Not the UI, not `channel_setup.py`, not `pyplan/checklist.md`.
@@ -23,3 +23,12 @@
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the statement the new branch issues (quoted from the test), the tests and their mutations, deviations, status DONE.
+
+## Report (hand, 2026-09-09 14:25)
+
+- sha `edc7a486` on `worktree-agent-a8e4f31de20c1bafd` (base `583a61ce`); gate ALL GREEN 3772; diff 3 files +130/-1 (`controller_wow_wotlk/accounts.py` +40/-1, `test_accounts.py` +65, `test_controller_wow_tortoise.py` +26).
+- The new branch issues one statement, asserted whole: `UPDATE account SET sha_pass_hash = _utf8mb4 X'…' WHERE username = _utf8mb4 X'…';` -- `SHA1(UPPER(name):UPPER(password))` through the same `fold()` the writer uses (`mangos_password_hash()`), so a rotated password and a created one are indistinguishable to the auth server; `v`/`s` stay NULL. Tied to the module's own rule and to the 2026-08-26 live vector (`MANGOS_WRITTEN`, plus the `MixedCase`/`SoMePaSs` pair that separates "uppercase both" from the alternatives).
+- Unknown scheme: no default any more; `azerothcore` is its own named branch and the tail raises `AccountError` naming the scheme and the three known, with the seam untouched.
+- Tests RED first reproducing the live failure verbatim; four mutations killed (the branch deleted; the AzerothCore `else` restored; the binding hard-coding `azerothcore`; the hash's arguments swapped -- only the whole-statement assertion catches the last).
+- Dated docstring note: this tree reads `account.rank` at startup, so a reset password takes effect at the next login and a rank change does not.
+- Deviations/findings: (1) the cited `channel-ask.log` was not on the branch when written -- it is now (T4 merged at `546b2d6e`); (2) the Tortoise binding needed no change, a test added there instead; (3) **the same fall-through-to-AzerothCore shape survives in `_account_row`'s final `else` (:494), `_grant_gm` (:565) and `_gm_level` (:620)** -- lower live risk (`Scheme` is a Literal; the Tortoise binding raises for an entry with no scheme), left alone; **lead's follow-up**; (4) three laptop-only pre-existing failures in untouched files; (5) black wanted one rewrap, done; (6) **the session scratchpad is shared between hands**: the hand's `mutate.py` was overwritten mid-run by the T10 hand's mutation script; its restore had completed and the tree was verified, nothing lost -- **a live hazard for backup/restore mutation work; the lead's process fix**.
