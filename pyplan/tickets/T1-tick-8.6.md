@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** REWORK (rejected by the lead 2026-09-09 09:20, round 1)
+**Status:** DONE, round 2 (hand reported 09:31; awaiting review 2)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -63,3 +63,9 @@ Independently the same finding: the additions are sound and every citation resol
 5. Optional, not blocking: "19 tests over …" → say all nineteen landed in `8820984c`; spell the test paths `pylauncher/tests/…`.
 
 Amend the single commit (the lead reads "one commit" as one at merge), re-run the gate, report again.
+
+## Report, round 2 (hand, 2026-09-09 09:31)
+
+- sha `6b57f0ab` (amended, one commit, base `e2912690`); gate `=== --checks: ALL GREEN ===`, 3769 passed; diff `pyplan/checklist.md | 24 ++++++++++++++++--------`
+- All five items done: `:2500` bold rewritten as the dated record ("twice recorded failing before it was recorded working", 2026-08-20 / 2026-09-08 with the measured cause, answered 2026-09-09); correction 4 applied with the control named and dated; `:2470` corrected (box `yulon-ubuntu2`; `yulon-ubuntu` OffCritical since 2026-09-08; the hostname trap carried with `7.10-rerun-ubuntu2-2026-09-08/run.log:7`); the loaded-lines claim now cites `rebuild-live-…/README.md:189-195` and `9-clause5-server-debug.txt:17-21`; the nineteen tests attributed to `8820984c` alone with `pylauncher/tests/…` paths.
+- Deviations: (1) the reviewer's `controller_view.py:1587` / `:4220-4221` do not resolve on this tree -- the control is `REBUILD_BUTTON_LABEL` at `:1648`, button at `:4320-4321`; cited those. (2) one extra sentence at `:2470` ("No gate restores a checkpoint on yulon-ubuntu …") past-tensed, beyond correction 1, because leaving it live reinstated the rot. (3) correction 6 (`:2487`, 8.2e's SOAP clause) is false and on no ticket's items -- **lead's follow-up**. (4) the panel-live folder records no tree sha; `daeae0a5` cited as the surface's commit.
