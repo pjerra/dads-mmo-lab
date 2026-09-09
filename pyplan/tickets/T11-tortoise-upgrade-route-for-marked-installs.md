@@ -1,6 +1,6 @@
 # T11 — A Tortoise install that already carries an import marker gets the character updates too
 
-**Status:** OPEN
+**Status:** DONE pending one decision (hand reported 2026-09-09 13:35 CEST); the lead arms the flag -- back with the hand
 **Filed:** 2026-09-09 17:00 by the lead (Fable), from T10's Codex review (its [high]) and the Fable reviewer's note 2
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/families/cmangos.py` (the `_import` path and `MarkerGate`, or a new stage beside them), `pylauncher/yulon/catalog/catalog.py` only if a phase needs a "re-run on an established install" attribute, `pylauncher/tests/test_composegen.py` and the file where `MarkerGate.probe`'s table is pinned (name it). Not `catalog.json`'s phase list (T10 landed it), not the UI, not `pyplan/checklist.md`.
@@ -26,3 +26,15 @@ Either way: TDD, the failing test first (a marked install; today `_import` appli
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, which shape and why, what a marked install now does at start, the tests and their mutations, deviations, status DONE.
+
+## Report (hand, 2026-09-09 13:35 CEST)
+
+- Base `60f12b62`; one commit `c5e7d78c` on `worktree-agent-a57f3944a63a61195`; gate ALL GREEN (yulon-fedora, 3846 passed); diff 3 files +314/-1 (`test_families_cmangos.py` +190, `catalog/families/cmangos.py` +109/-1, `catalog.py` +16).
+- **Shape 1**: `SqlPhase.rerun_on_marked: bool = False`. `MarkerGate` untouched; the probe's five-branch table and its pin (`tests/test_sqlplan.py` J.6) unchanged. `_import` still runs the spine's table and returns without importing; before returning it calls `_rerun_on_marked()`, which applies only the flagged phases on both answers the family treats as finished (`imported` of any hash, and `populated`+complete -- an install made by the shell scripts has no marker row). Writes no marker, re-asks no verify rule, does not reach phase 0 (`create_schemas()` would rewrite `CREATE USER ... IDENTIFIED BY`), does ask `assert_update_level` for the runs it applied; a rejected run raises `sqlplan.apply()`'s sentence before `up`. Two log lines.
+- Tests (six, mutations applied and reverted): the route reached on `imported` and on `populated`+complete (the call deleted); unflagged phases still left alone (the filter widened to `phase.name is not None`, which also reds the two older marker-rule tests); no marker written, no verify re-asked (`write_marker` appended); fresh install applies once, not twice (the call hoisted); a refused run stops before the world starts (`InstallerError` softened); update level still asked (`check_update_levels` replaced). RED first recorded.
+- Rust: no `main-rust` tree; `origin/rust-main` is AzerothCore-only, no `character_updates`; its analogue is `ac-db-import`'s `updates` ledger plus `modmgr`'s "N SQL file(s) not yet applied" advisory; nothing to lift.
+- Deviations: (1) **the flag is armed on no entry** -- `catalog.json` was outside the set, so `wow-tortoise`'s `character updates` phase does not carry `"rerun_on_marked": true` and the route is reachable only by tests; the lead's call. (2) The ticket's paths were wrong: the family is `pylauncher/yulon/catalog/families/cmangos.py`; `test_composegen.py` holds nothing about `_import`, the tests went to `test_families_cmangos.py`; the probe pin is `test_sqlplan.py` J.6. (3) Scope beyond the sketch: `populated`+complete covered; `check_update_levels` asked. (4) `plan_hash` shifts for every entry (a new model field), harmless by the probe's own rule. (5) No box work; the m910q press is the lead's.
+
+## Lead's decision (2026-09-09 13:40 CEST)
+
+Arm it. The ticket's "not `catalog.json`'s phase list" meant do not add or reorder phases; the one key inside the phase T10 landed is the point of the ticket. File set widened to that key; the hand adds a second commit.
