@@ -40,12 +40,21 @@ class _Child:
 
     `_stream_lines()` fills `proc` in once `Popen` has returned, so it is None
     for a generator nobody has started — which has no child to end.
+
+    `started_on` is the ident of the thread that got the generator as far as
+    `Popen`, and it is filled in beside `proc` for the same reason: those two
+    facts are what `end_streams_started_on()` needs and they become true at the
+    same instant. It is the STARTING thread and not the creating one, because
+    `stream()` is lazy — a generator built on the GUI thread and iterated on a
+    worker's is the app's normal shape (`LogPanel`), and the child belongs to
+    whoever is blocked reading it.
     """
 
-    __slots__ = ("proc",)
+    __slots__ = ("proc", "started_on")
 
     def __init__(self) -> None:
         self.proc: subprocess.Popen[str] | None = None
+        self.started_on: int | None = None
 
 
 # Every `stream()` generator handed out and not yet collected, with the child
@@ -150,6 +159,76 @@ def _close_abandoned_streams() -> None:
 
 
 atexit.register(_close_abandoned_streams)
+
+
+def end_streams_started_on(ident: int) -> int:
+    """End the child of every live `stream()` that thread `ident` started. Returns how many.
+
+    **THE ONLY THING THAT CAN STOP A QUIET STREAM.** A thread inside
+    `for line in proc.stdout` is in a C-level `readline()`: no flag it owns is
+    read again until a line arrives, and a `docker logs -f` on a world that has
+    gone quiet never sends one. Measured on `yulon-ubuntu2` 2026-09-08 through
+    the panel's real Stop button
+    (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`): 120
+    seconds of `running=True cancelled=True worker._stop=True lines=210`, then
+    `panel.wait(10000) -> False`, then `QThread: Destroyed while thread '' is
+    still running` and exit 134. The same probe's synthetic source — one line
+    every 50 ms — stopped 0.02 s after the click, which is how the torrent was
+    ruled out and the blocked read ruled in. Ending the child closes the pipe,
+    the read returns EOF, and the thread runs the generator's own `finally`.
+
+    **Keyed on the thread, because a cancel token cannot get there.** `stream()`
+    is reached through wrappers — `docker.follow_logs()`, `run_attached()` — and
+    a token would have to be threaded through every one of them by every caller;
+    the Console tab's call site passes none today, which is the other half of
+    what the gate measured. A thread ident is something the caller of a job
+    already has, and it says exactly what a Stop button means: end what MY job
+    started. `docker.repair_import()`, whose docstring records that it "cannot
+    be cancelled, deliberately", runs on its own worker and so stays out of
+    reach — the filter is what keeps that promise, not the absence of a
+    parameter.
+
+    **It ends only what is live NOW.** A stream the same thread starts a moment
+    later is not affected, so a cancelled install's cleanup and rollback steps
+    still get to run. That is the difference between this and an ambient
+    per-thread cancel, which was the alternative and would have killed them.
+
+    **It does not wait, and that is the prior art's lesson, not ours.**
+    `origin/rust-main:crates/dml-core/src/proc.rs`'s `abandon()` — read on the
+    branch, because `pyplan/rust-prior-art.md` is silent on that file — says:
+    "`kill()` can fail, and the `wait()` that followed it was then INFINITE
+    against a process whose whole problem is that it outlives the deadline.
+    Measured 2026-08-03: a 600ms-bounded call returned after 605 SECONDS."
+    `_end_child()` ends in an unbounded `proc.wait()` and the caller here is the
+    thread that painted the button, so each ending goes to a thread nobody
+    joins — exactly `abandon()`'s shape.
+
+    **The status is still raised.** A terminated child exits non-zero (143 on
+    the live box) and `stream()` goes on raising `CalledProcessError` for it:
+    `docker.run_attached()` turns a raised status into a failed build and a
+    swallowed one into `AttachedRun(0, ...)`, so suppressing it here would
+    report a killed compile as a compile that worked. Whether a non-zero exit
+    was a refusal or a Stop is known only where the Stop happened, and that is
+    where it is said (`LogPanel._on_finished`).
+    """
+    with _LIVE_STREAMS_LOCK:
+        # Copied out under the lock and left before anything is terminated: the
+        # dictionary is weak and every other reader takes the same lock, and
+        # `_end_child()` can take seconds.
+        children = [
+            child
+            for child in _LIVE_STREAMS.values()
+            if child.started_on == ident and child.proc is not None
+        ]
+    for child in children:
+        proc = child.proc
+        assert proc is not None  # filtered above; narrows for the type checker
+        threading.Thread(
+            target=_end_child, args=(proc,), daemon=True, name=f"yulon-end-stream-{proc.pid}"
+        ).start()
+    if children:
+        logger.debug(f"ending {len(children)} stream child(ren) started on thread {ident}")
+    return len(children)
 
 
 def _cwd_arg(cwd: Path | None) -> str | None:
@@ -335,6 +414,7 @@ def _stream_lines(
         creationflags=creationflags(),
     )
     child.proc = proc
+    child.started_on = threading.get_ident()
     stderr_lines: list[str] = []
 
     def _drain_stderr() -> None:
