@@ -487,7 +487,7 @@ def updates_confirmation(
         f"Nothing else in the install plan is re-run. Your databases keep the completion marker "
         f"they already have — this press writes no new one — and your characters, accounts and "
         f"world are not otherwise written, and read only to learn which state they are in. If "
-f"they do not read as a finished import this "
+        f"they do not read as a finished import this "
         f"press stops and says so: it will not import them, and it will not clear anything.\n\n"
         f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
         f"until this has finished. A running world server holds these tables in memory "
