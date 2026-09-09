@@ -101,6 +101,7 @@ from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
+from yulon.ui.widgets.party_panel import PartyPanel
 
 logger = get_logger(__name__)
 
@@ -249,6 +250,23 @@ Two lists that have to stay in step would be a bug waiting; `zip(..., strict=Tru
 makes a seventh button added to one and not the other raise on the first
 selection rather than silently mislabel.
 """
+
+_NO_MY_PARTY = (
+    "Building a bot party from the launcher works on WoW WotLK only (owner decision, "
+    "2026-09-06). The route is a pair of AzerothCore modules — the mod-ale Lua bridge, "
+    "and mod-playerbots' own addclass — so {game} would need a route of its own before "
+    "there could be a control here. One that sent these commands at it would be a "
+    "button that cannot work."
+)
+"""The whole My Party surface on the three games that have no route to it.
+
+A sentence rather than a disabled panel, which is `_build_characters_tab`'s rule
+for the same situation: a control that cannot work is a promise this tab cannot
+keep. The scope is the owner's (`pyplan/phase8-parity-decisions.md:41`, "My Party
+WotLK-only; Browse Bots on all four") and the reason is the engine's, which is
+why no later box can change it by measuring something —
+`party.InstallParty.for_entry_is_possible` is the same rule spelled in the module
+this text is about."""
 
 _RENAME_OFFLINE_LABEL = "has to be logged in to be renamed"
 """What the button says when the tree's entry refuses an offline rename.
@@ -3849,36 +3867,47 @@ class ControllerView(QWidget):
     # --------------------------------------------------------------- bots tab
 
     def _build_bots_tab(self) -> None:
-        """Browsing the bots, for a game whose marker this app has measured.
+        """Browsing the bots, and My Party (8.6) under it — the design's two groups.
 
-        The whole tab is absent otherwise rather than empty: without a marker
-        the only honest list is every character on the server, which on this
-        install is 900 rows of which 500 are the answer.
+        Browse is absent rather than empty for a game whose marker this app has
+        not measured: without one the only honest list is every character on the
+        server, which on this install is 900 rows of which 500 are the answer.
+
+        The whole TAB is absent only when neither group has a seam. Written that
+        way rather than on `bots` alone because `services` is a dataclass and
+        anything can be handed to it: the factories only ever wire My Party
+        where the bot marker is measured too (`InstallParty.for_entry_is_possible`
+        requires `observability`, which is the same fact `bots` rides on), and a
+        capability that vanished because the OTHER group's seam was missing is
+        exactly the shape of bug this tab must not have.
         """
-        if self.services.bots is None:
+        if self.services.bots is None and self.services.my_party is None:
             return
         tab = QWidget(self)
         box = QVBoxLayout(tab)
-        self.bot_summary = QLabel("", tab)
+        browse = QGroupBox("Browse the bots", tab)
+        browse_box = QVBoxLayout(browse)
+        self.bot_summary = QLabel("", browse)
         self.bot_summary.setWordWrap(True)
-        self.bot_list = QListWidget(tab)
+        self.bot_list = QListWidget(browse)
         row = QHBoxLayout()
-        self.bot_filter = QLineEdit(tab)
+        self.bot_filter = QLineEdit(browse)
         self.bot_filter.setPlaceholderText("name begins with…")
         self.bot_filter.returnPressed.connect(self.filter_bots)
-        self.filter_bots_button = QPushButton("Find", tab)
+        self.filter_bots_button = QPushButton("Find", browse)
         self.filter_bots_button.clicked.connect(self.filter_bots)
-        self.previous_bots_button = QPushButton("Previous", tab)
+        self.previous_bots_button = QPushButton("Previous", browse)
         self.previous_bots_button.clicked.connect(self.previous_bot_page)
-        self.next_bots_button = QPushButton("Next", tab)
+        self.next_bots_button = QPushButton("Next", browse)
         self.next_bots_button.clicked.connect(self.next_bot_page)
         row.addWidget(self.bot_filter)
         row.addWidget(self.filter_bots_button)
         row.addWidget(self.previous_bots_button)
         row.addWidget(self.next_bots_button)
-        box.addWidget(self.bot_summary)
-        box.addWidget(self.bot_list)
-        box.addLayout(row)
+        browse_box.addWidget(self.bot_summary)
+        browse_box.addWidget(self.bot_list)
+        browse_box.addLayout(row)
+        browse.setVisible(self.services.bots is not None)
         # A stack of cursors, one per page seen. There is no arithmetic that
         # turns "where page three starts" into "where page two starts", so the
         # only way back is the key the earlier page was read with.
@@ -3886,7 +3915,35 @@ class ControllerView(QWidget):
         self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
         self._show_page_buttons()
+        box.addWidget(browse)
+        box.addWidget(self._build_my_party_group(tab))
         self._tabs.addTab(tab, "Bots")
+
+    def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
+        """My Party's panel, or the one line saying why this game has none (8.6).
+
+        The panel is handed `self._run`, so the work runs wherever this view's
+        work runs — one job runner for the tab, and the tests' inline runner
+        reaches the panel without the panel knowing there is such a thing.
+        """
+        group = QGroupBox("My Party", tab)
+        inside = QVBoxLayout(group)
+        self.my_party_absent = QLabel("", group)
+        self.my_party_absent.setWordWrap(True)
+        self.my_party_absent.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        seam = self.services.my_party
+        if seam is None:
+            self.party_panel: PartyPanel | None = None
+            self.my_party_absent.setText(_NO_MY_PARTY.format(game=self.entry.name))
+            inside.addWidget(self.my_party_absent)
+            return group
+        self.my_party_absent.setVisible(False)
+        self.party_panel = PartyPanel(seam, jobs=self._run, parent=group)
+        # The design's own cross-link (`b-users-surface.md:111`): a bot that just
+        # joined a party is a row the Browse list above has not got yet.
+        self.party_panel.party_changed.connect(self.refresh_bots)
+        inside.addWidget(self.party_panel)
+        return group
 
     def _show_page_buttons(self) -> None:
         """Neither button offers a page that is not there."""
