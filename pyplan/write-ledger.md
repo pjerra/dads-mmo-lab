@@ -103,10 +103,14 @@ from one.
 What is true of the press: it refuses unless `docker.world_running()` answers an
 explicit `False`, before the database is started and again after (a Start
 pressed during the health wait would otherwise put a live world behind the
-statements), it writes no completion marker, and it re-asks no `verify` rule. In
-this column it reads **no — the press refuses while the world is running, twice
-asked**. Closing the walk's blindness means teaching it `exec_stdin`, which is
-bigger than this ticket and is named rather than done.
+statements); it refuses unless the databases already read as a finished import,
+which is what keeps it out of the two arms of `stage_import()`'s table that
+would import everything (`absent`) or `DROP DATABASE` over every schema the plan
+names (`partial`) — the ordinary import is unreachable on this route rather than
+guarded on it; and it writes no completion marker and re-asks no `verify` rule.
+In this column it reads **no — the press refuses while the world is running,
+twice asked**. Closing the walk's blindness means teaching it `exec_stdin`, which
+is bigger than this ticket and is named rather than done.
 
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.

@@ -327,7 +327,8 @@ UPDATES_OPENING_NOTE = (
     "that are meant to be re-applied to a server that already exists. It does not start the "
     "world server, does not compile anything, does not fetch anything, and does not re-run the "
     "rest of the install — your databases keep the completion marker they already have and no "
-    "new one is written."
+    "new one is written. If they do not read as a finished import, this stops and says so "
+    "rather than importing them."
 )
 """What an updates press costs and what it leaves alone, said before the first stage.
 
@@ -335,6 +336,16 @@ UPDATES_OPENING_NOTE = (
 something `update_stages()` is responsible for, and the list is exactly as long
 as that tuple so it stays checkable. A constant and not a function because that
 tuple is one length for every family that has the stages at all.
+
+**The last sentence is what makes the two before it true**, and it was added in
+round 2. "Does not re-run the rest of the install" and "no new one is written"
+were claims about which arm of `import`'s five-branch table the press takes, and
+until `updates_only` existed the press did not choose that arm — `absent`
+imported everything and marked it, `partial` dropped every schema the plan names
+first. The rule this file keeps for opening notes is that a clause names
+something the tuple is responsible for; a clause that names what the tuple
+REFUSES belongs here for the same reason, because it is the only thing standing
+between these words and a press that contradicts them.
 """
 
 
@@ -369,6 +380,25 @@ class UpdateRoute:
     daemon. The audit is right to be spelling-based (a renamed helper stays
     covered), so the field is what moved.
     """
+
+
+def import_reads_as_finished(state: docker.ImportState) -> bool:
+    """Do these databases read as an import that COMPLETED? The one predicate.
+
+    The two answers `cmangos._import` treats as finished: a marker row of any
+    hash (`imported`), and `populated` with every schema carrying tables — the
+    second because an install made by the shell scripts has no marker row at all
+    and would otherwise be as exposed as before T11.
+
+    Written once because it is now asked from two places that must not disagree.
+    `_import` asks it to decide whether the ordinary import runs, and the
+    updates press asks it as a PRECONDITION — and if the precondition were even
+    slightly wider than the branch, a press that consented to a handful of files
+    would fall through into `stage_import()`'s table, whose `partial` arm drops
+    every schema the plan names and whose `absent` arm runs the whole import and
+    writes a completion marker (cold review of T14, round 1).
+    """
+    return state.state == "imported" or (state.state == "populated" and state.complete)
 
 
 def rerunnable_phases(plan: SqlPlan) -> tuple[SqlPhase, ...]:
@@ -451,12 +481,13 @@ def updates_confirmation(
         f"Apply the database updates {entry.name}'s install plan carries for a server that "
         f"already exists?\n\n"
         f"Folder: {server_dir}\n\n"
-        f"This applies {len(files)} SQL file(s), the whole of {named}, into this install's "
+        f"This applies {len(files)} SQL step(s), the whole of {named}, into this install's "
         f"databases:\n\n"
         f"{listing}\n\n"
         f"Nothing else in the install plan is re-run. Your databases keep the completion marker "
         f"they already have — this press writes no new one — and your characters, accounts and "
-        f"world are not otherwise read or written.\n\n"
+        f"world are not otherwise read or written. If they do not read as a finished import this "
+        f"press stops and says so: it will not import them, and it will not clear anything.\n\n"
         f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
         f"until this has finished. A running world server holds these tables in memory "
         f"and writes back over whatever it finds in them, so this press refuses while it is up. "
@@ -975,6 +1006,28 @@ class StageContext:
     learns to read it has to join that pairing or the prediction and the
     outcome can disagree, which is a refusal firing on a press that is about to
     compile.
+    """
+    updates_only: bool = False
+    """The press was an UPDATES press, so the import stage may apply the plan's
+    re-runnable phases and NOTHING else.
+
+    On the context for `force_build`'s reason — it is a fact about this press,
+    not about this install, and one engine object serves every press — and it
+    carries a much harder promise than that one does. `import` is the family's
+    own stage, and its body branches on a probe: the flagged-phase route is one
+    of five arms, and two of the others are a full multi-hour import that writes
+    a completion marker (`absent`) and a `DROP DATABASE` over every schema the
+    plan names (`partial`, through `gate.reset()` — reached even with
+    `service=None`, because `stage_import()` returns AFTER that block).
+
+    So a flag read late enough to be a precondition check is not enough: the
+    family reads this BEFORE it calls `stage_import()` at all, and the ordinary
+    import is unreachable on this route rather than merely guarded. Found by
+    T14's cold reviewer, whose reading of the round-1 tuple was that a press
+    consenting to three files could run the whole install's import against a
+    Tortoise install that had failed at that very stage, mint the app user's
+    password in memory and persist it nowhere — `db-password` is not in the
+    updates tuple.
     """
 
 
@@ -2149,6 +2202,7 @@ class StagedInstaller:
             state=state,
             cancel=cancel,
             secrets=self.resolve_secrets(server_dir),
+            updates_only=True,
         )
 
     def update_confirmation(self, options: InstallOptions | None = None) -> str:
@@ -2196,13 +2250,32 @@ class StagedInstaller:
         report healthy, and the Server tab's Start is a button the same user can
         press inside that window.
 
+        **The databases must already read as a finished import**, and that is
+        the precondition the round-1 tuple was missing. It is enforced by
+        `updates_only` on the context rather than by a check here, because a
+        check here would be a SECOND probe: `import`'s body probes and branches,
+        and between two probes the answer can differ — so the arm that drops
+        every schema the plan names would still be reachable on the second
+        answer. The family reads the flag before it calls `stage_import()` at
+        all. What this method refuses is the other half, which no probe can see:
+        an entry whose plan declares no re-runnable phase has nothing this route
+        could apply, so it is refused rather than handed to a family that might
+        not read the flag.
+
         Raises:
-            InstallerError: the world is up or unreadable, the plan could not be
-                expanded, a stage failed, or the press was cancelled. The
-                message is the sentence a user reads.
+            InstallerError: the entry has no re-runnable phase, the world is up
+                or unreadable, the databases do not read as a finished import,
+                the plan could not be expanded, a stage failed, or the press was
+                cancelled. The message is the sentence a user reads.
         """
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
+        if not update_phases(self.entry):
+            raise InstallerError(
+                f"{self.entry.name}'s install plan carries no phase meant to be re-applied to a "
+                f"server that already exists, so there is nothing for this to apply. Nothing was "
+                f"started. That is a fact about this game's plan, not about your install."
+            )
         yield f"Applying pending database updates for {self.entry.name} in {server_dir}"
         yield UPDATES_OPENING_NOTE
         # FIRST, before the database is started and before a secret is resolved:
@@ -2261,16 +2334,27 @@ class StagedInstaller:
         if running is False:
             return
         if running is None:
+            # The remedy names Docker FIRST, because this branch's most likely
+            # cause is not a running server: `container_state()` answers an
+            # empty state both for a container that is not there and for a
+            # daemon that will not reply, so "Stop the server" is advice that
+            # cannot be followed on a machine where Docker is down — the same
+            # unfollowable-instruction shape T7's ticket is titled after
+            # (cold review of T14, round 1).
             raise InstallerError(
                 f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
                 f"({why or 'the daemon gave no answer'}), and a running one holds these "
                 f"databases in memory and writes back over whatever it finds in them. Nothing "
-                f'was applied. Stop the server, then press "{UPDATES_BUTTON_LABEL}" again.'
+                f"was applied. Docker itself may be the thing that is not answering — it reads "
+                f"a stopped container and a daemon that is down the same way — so check that "
+                f"Docker is running, then press Stop on the Server tab if the server is up, and "
+                f'press "{UPDATES_BUTTON_LABEL}" again.'
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied. "
-            f'Press Stop, then press "{UPDATES_BUTTON_LABEL}" again — the database is started '
+            f"Press Stop on the Server tab, then press "
+            f'"{UPDATES_BUTTON_LABEL}" again — the database is started '
             f"on its own for it, and the world server stays down."
         )
 

@@ -15,6 +15,14 @@ server is up or unreadable, because the route writes DDL into the character
 database and a running worldserver holds that database in memory and saves it
 back over whatever it finds (owner answer 7, checklist 8.7a).
 
+The second precondition is the one round 1 did not have, and it is the larger
+half. `import` is the family's own stage and the flagged-phase route is ONE arm
+of a five-branch table: `absent` runs the whole plan and writes a completion
+marker, `partial` drops every schema the plan names first. A press that consented
+to a named list of files must reach neither, so `ctx.updates_only` is read before
+`stage_import()` is called at all and the ordinary import is unreachable on this
+route rather than guarded on it.
+
 What is unit-tested only: no press was run on a box for this change. The live
 half is `pyplan/gates/tortoise-updates-button-m910q-2026-09-09/`, and until it
 exists the m910q evidence for this route is T11's, through the CLI harness.
@@ -33,13 +41,16 @@ from tests.test_families_cmangos import (
     EVERY_PRESS,
     IMPORTED_OLDER_PLAN,
     MARKED_ONLY,
+    POPULATED_AND_COMPLETE,
     engine_with_sql,
     entry_with_sql,
     ready_to_import,
     rerun_plan,
 )
+from yulon import docker
 from yulon.catalog import native
 from yulon.catalog.catalog import SqlPhase, load_catalog
+from yulon.catalog.families import sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
 
@@ -54,9 +65,11 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> None:
     `test_families_cmangos.py`'s own `gated` is autouse THERE and reaches
     nothing here, so an engine driven from this file would take the real
     `MarkerGate` to a database that does not exist — and answer `absent`, which
-    is the one probe answer that makes a press import the whole plan. Copied for
-    that reason rather than shared: `test_rebuild.py` keeps the same four lines
-    under the name `cmangos_gate` and says so.
+    on the INSTALL route is the arm that imports the whole plan. On this route it
+    is a refusal (`_only_the_rerunnable_phases`), and the fixture is still what
+    makes these tests about the family rather than about a missing daemon. Copied
+    rather than shared: `test_rebuild.py` keeps the same four lines under the
+    name `cmangos_gate` and says so.
     """
 
     def gate(self: CmangosInstaller, ctx: native.StageContext) -> native.ImportGate:
@@ -245,8 +258,15 @@ def test_a_press_that_cannot_tell_whether_the_world_is_up_applies_no_sql(tmp_pat
     `False` — which through this guard would be fail-OPEN. `docker.world_running`
     answers `None` there instead, and this is the branch that costs.
 
-    Catches the seam read through `container_state(...).settled`, and the
-    `None` branch folded into the `False` one.
+    **The remedy has to name Docker**, and that is not decoration: the most
+    likely reason nobody can answer is that the daemon is not answering, and
+    "Stop the server, then press again" is then an instruction the user cannot
+    follow — the shape T7's ticket is titled after. Asked of the sentence,
+    because a refusal a user cannot act on is the defect, not the branch.
+
+    Catches the seam read through `container_state(...).settled`, the
+    `None` branch folded into the `False` one, and the dead-daemon clause
+    dropped from the remedy.
     """
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
@@ -255,6 +275,7 @@ def test_a_press_that_cannot_tell_whether_the_world_is_up_applies_no_sql(tmp_pat
     with pytest.raises(InstallerError) as raised:
         list(engine.update_databases(InstallOptions(server_dir=server_dir)))
     assert "could not tell whether" in str(raised.value)
+    assert "check that Docker is running" in str(raised.value)
     assert rec.sql_calls == [], rec.sql_calls
 
 
@@ -331,6 +352,127 @@ def test_a_clone_that_never_had_the_directory_refuses_naming_the_pattern(tmp_pat
         engine.update_confirmation(InstallOptions(server_dir=server_dir))
     assert "src/updates/*.sql" in str(raised.value)
     assert "may not have cloned completely" in str(raised.value)
+
+
+# -- the import state this press requires ------------------------------------
+
+
+NOT_FINISHED = {
+    "absent": docker.ImportState("absent", "no schema has tables"),
+    "partial": docker.ImportState("partial", "tw_char has tables, tw_world has none"),
+    "unreadable": docker.ImportState("unreadable", "the databases would not answer"),
+    "populated but incomplete": docker.ImportState(
+        "populated", "tw_logon holds rows, tw_world is empty", complete=False
+    ),
+}
+"""Every probe answer that is NOT a finished import, by the name a reader uses.
+
+Enumerated rather than sampled, because the danger is per ARM and the arms differ:
+`absent` runs the whole plan and writes a completion marker, `partial` drops every
+schema the plan names first (`gate.reset()`), and the two refusals are refusals
+about an INSTALL and say install-shaped things. A press that consented to a named
+list of files must reach none of them.
+"""
+
+
+@pytest.mark.parametrize("named", sorted(NOT_FINISHED))
+def test_a_press_against_databases_that_are_not_a_finished_import_applies_nothing(
+    tmp_path: Path, named: str
+) -> None:
+    """The precondition the round-1 tuple did not have, over all four answers it refuses.
+
+    `import` is the family's own stage, and the flagged-phase route is ONE arm of
+    a five-branch table. On `absent` that table imports the whole plan — hours,
+    `CREATE USER … IDENTIFIED BY` with a password this tuple has no `db-password`
+    stage to persist, and a completion marker — and on `partial` it first drops
+    every schema the plan names. Both are reachable from a controller tab, which
+    opens for any remembered folder and for "Use existing…", including a Tortoise
+    install that failed at or after `import` (cold review of T14, round 1).
+
+    Asserted on the three things that must not have happened: no SQL, no marker,
+    and no drop.
+
+    Catches `ctx.updates_only` never read (the press then falls into
+    `stage_import()`'s table: `absent` and `partial` go green with SQL in the
+    recorder, and the two refusals arrive in install-shaped words), and the
+    precondition widened to `state != "unreadable"` or to any single arm.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(NOT_FINISHED[named])
+    engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
+    with pytest.raises(InstallerError) as raised:
+        list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+    assert "do not read as a finished import" in str(raised.value)
+    assert named.split()[0] in str(raised.value), "the refusal does not say what it read"
+    assert "nothing was cleared" in str(raised.value)
+    assert rec.sql_calls == [], rec.sql_calls
+    assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], rec.sql_scripts
+    assert "reset" not in rec.calls, rec.calls
+
+
+@pytest.mark.parametrize("finished", [IMPORTED_OLDER_PLAN, POPULATED_AND_COMPLETE])
+def test_a_press_against_databases_that_read_as_finished_applies_the_flagged_phase(
+    tmp_path: Path, finished: docker.ImportState
+) -> None:
+    """Both answers the route accepts, so the precondition is not merely "the marker".
+
+    An install made by the shell scripts carries no marker row and reads
+    `populated` with every schema complete — which is the install T11's route
+    exists for, and a precondition narrowed to `imported` would lock it out of
+    the button while leaving it exposed to the restart loop.
+
+    Catches the predicate narrowed to `state == "imported"`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(finished)
+    engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
+    said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+    assert EVERY_PRESS in rec.sql_calls, rec.sql_calls
+    assert any(f"read as {finished.state}" in line for line in said), said
+
+
+def test_the_press_asks_the_databases_exactly_once(tmp_path: Path) -> None:
+    """One probe, and the reason it may not be two.
+
+    A precondition checked after `stage_import()` had already branched would be a
+    second question, and between two probes the answer can differ — so the arm
+    that drops every schema the plan names would still be reachable on the first
+    answer while the check passed on the second. `_Remembering` exists for this
+    exact hazard on the install route; here the route probes once itself and
+    hands the same answer to both the precondition and the re-run.
+
+    Catches `_only_the_rerunnable_phases()` calling `stage_import()` (which
+    probes again), and a precondition added in `_guard_then` on top of this one.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
+    list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+    assert rec.calls.count("probe") == 1, rec.calls
+
+
+def test_a_game_whose_plan_has_no_rerunnable_phase_refuses_the_press_itself(
+    tmp_path: Path,
+) -> None:
+    """The half no probe can see, refused by the spine before the tuple is built.
+
+    The button is not offered for such a game, but `update_databases()` is a
+    method and the greying is in the view — and a family that never learned to
+    read `ctx.updates_only` would take this press straight into
+    `stage_import()`'s table. AzerothCore is exactly that family: it imports
+    through a compose one-shot and carries no phase list at all. So the refusal
+    is here, where the plan is readable, rather than trusted to a family.
+
+    Catches the refusal deleted, and `update_phases()` consulted only by the view.
+    """
+    engine = installer_for(WOTLK)
+    with pytest.raises(InstallerError) as raised:
+        list(engine.update_databases(InstallOptions(server_dir=tmp_path / "wotlk")))
+    assert "no phase meant to be re-applied" in str(raised.value)
+    assert "Nothing was started." in str(raised.value)
 
 
 # -- the confirmation --------------------------------------------------------
