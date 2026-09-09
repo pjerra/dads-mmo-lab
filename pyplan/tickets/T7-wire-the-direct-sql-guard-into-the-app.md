@@ -75,3 +75,7 @@ Add a commit (do not amend); gate; report in the same format, with the new sha.
 - **Audit**: the docstring has three labelled parts (what it enumerates; what it cannot see -- alias, `partial`, `cls(...)`, a factory in a variable or dict, round 1's count claim withdrawn; the backstop -- the required keyword on all four factories). `_seam_source(value, name)` requires `value.id == name`; a direct helper test (`...reads_a_differently_named_pass_through_as_a_stranger`) because no live site exercises the tightening.
 - Round-2 mutations: the second refusal disabled (three race tests); the verdict softened to `is not True` (one race test + two seam tests); WotLK factory drops both seams (two factory tests + audit); WotLK view site -> `.settled` (two button tests + binding audit); `_seam_source` loosened (the helper test). Still equivalent and uncaught: `is True` vs `bool()` in Tortoise's `_guard()`.
 - Deviations: `test_controller_view.py` edited (two tests + one import, as the rejection allowed); round-1 deviations stand; write-ledger needs nothing. The reviewer's live-half notes carried into the live half.
+
+## Review, code half round 2 (Codex adversarial, 2026-09-09 18:10) -- NOT RUN
+
+Codex refused the run: "You've hit your usage limit ... try again at 3:04 PM." Owed; to be re-run on this commit range when the limit lifts. The Fable verdict decides the merge in the meantime; a later Codex finding becomes a follow-up ticket.
