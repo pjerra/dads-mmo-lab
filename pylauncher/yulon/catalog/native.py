@@ -71,7 +71,14 @@ from typing import ClassVar, Protocol
 
 from yulon import dbsecret, docker, git, networking, platform, resources, runner
 from yulon.catalog import composegen, preflight
-from yulon.catalog.catalog import CatalogEntry, EmulatorSource, NativeInstall, ReadyMarkers
+from yulon.catalog.catalog import (
+    CatalogEntry,
+    EmulatorSource,
+    NativeInstall,
+    ReadyMarkers,
+    SqlPhase,
+    SqlPlan,
+)
 from yulon.catalog.installer import (
     DockerUnavailableError,
     InstallerError,
@@ -301,6 +308,163 @@ def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
         "touch your database — your characters, accounts and the module SQL already applied are "
         "not read or written by this. The server is DOWN from the moment the containers are "
         "replaced until it reports ready."
+    )
+
+
+UPDATES_BUTTON_LABEL = "Apply pending database updates…"
+"""The updates control's label, here rather than in the view because the ENGINE says it.
+
+`REBUILD_BUTTON_LABEL` lives in `controller_view.py` and nothing below the view
+quotes it. This one is quoted by a refusal `update_databases()` raises — *"Press
+Stop, then press … again"* — and a refusal that names a button which does not
+exist under that name is exactly the defect T7's ticket is titled after: an
+instruction the user cannot follow. One string, so a rename moves both.
+"""
+
+UPDATES_OPENING_NOTE = (
+    "You can stop this at any time. This does two things and nothing else: it starts this "
+    "install's database on its own if it is down, and it applies the parts of the install plan "
+    "that are meant to be re-applied to a server that already exists. It does not start the "
+    "world server, does not compile anything, does not fetch anything, and does not re-run the "
+    "rest of the install — your databases keep the completion marker they already have and no "
+    "new one is written."
+)
+"""What an updates press costs and what it leaves alone, said before the first stage.
+
+`rebuild_opening_note()`'s counterpart, under the same rule: every clause names
+something `update_stages()` is responsible for, and the list is exactly as long
+as that tuple so it stays checkable. A constant and not a function because that
+tuple is one length for every family that has the stages at all.
+"""
+
+
+@dataclass(frozen=True)
+class UpdateRoute:
+    """The two halves of an updates control, wired together so they cannot arrive apart.
+
+    One field on `ControllerServices` rather than two optional callables, and
+    the pairing is the reason: a tab holding a `confirmation` with no `apply`
+    describes a press it cannot make, and one holding an `apply` with no
+    `confirmation` writes DDL into somebody's character database behind a dialog
+    nobody wrote. `None` for the whole thing is the only other legal state, and
+    it greys the control.
+
+    Both are built lazily over an engine constructed on the call, never at tab
+    build time — `install_wiring.rebuild_for_app()` holds that argument, and it
+    is the same one: four seams and an import gate for every tab the app opens,
+    for a control most of them will never press.
+    """
+
+    confirmation: Callable[[], str]
+    """The dialog's text for this install. Raises `InstallerError` if the plan
+    cannot be expanded against the folder — a clone that predates the directory
+    the phases name — in which case there is no press to offer."""
+    press: Callable[[threading.Event | None], Iterator[str]]
+    """Cancel in, lines out: `RebuildSource`'s shape, for the same panel.
+
+    Not spelled `apply`: `test_every_seam_for_wotlk_builds_says_which_daemon_it_means`
+    collects every name in the package that takes a `wsl_distro` keyword and
+    reports any call to one from this view without it — and `sqlplan.apply()`
+    is such a name, so `route.apply(cancel)` read as a seam addressing the wrong
+    daemon. The audit is right to be spelling-based (a renamed helper stays
+    covered), so the field is what moved.
+    """
+
+
+def rerunnable_phases(plan: SqlPlan) -> tuple[SqlPhase, ...]:
+    """The phases of one plan that an install already read as finished still applies.
+
+    The ONE filter. `CmangosInstaller._rerun_on_marked()` decides what a press
+    runs and `update_phases()` decides whether the control is offered at all,
+    and written twice those two could disagree in the direction that costs: a
+    button offered for a phase the route then skips reports success and applies
+    nothing. `SqlPhase.rerun_on_marked`'s own description is where the rule is
+    argued; this is where it is spelled.
+    """
+    return tuple(phase for phase in plan.phases if phase.rerun_on_marked)
+
+
+def update_phases(entry: CatalogEntry) -> tuple[SqlPhase, ...]:
+    """What a database-updates press would apply to an install of `entry`, in plan order.
+
+    Empty means the control is not offered — read off the catalog and never off
+    an id. Today exactly one entry answers non-empty (`wow-tortoise`'s
+    `character updates`), and a test enumerates the whole catalog so that stays
+    a fact about the data rather than a name in an `if`.
+
+    Empty for AzerothCore for a reason that is not "no phase is flagged there":
+    that family imports through a compose one-shot and carries no phase list in
+    the catalog at all, so there is nothing for a phase flag to sit on. The
+    `cmangos` block is therefore read directly rather than through a family
+    engine — the same shape `CatalogEntry._every_patch_names_a_source_this_entry_clones`
+    uses, and it keeps this readable without constructing an engine for every
+    tab the app opens (`install_wiring.rebuild_for_app()` holds that argument).
+    """
+    native_block = entry.install.native
+    block = native_block.cmangos if native_block is not None else None
+    if block is None:
+        return ()
+    return rerunnable_phases(block.sql)
+
+
+def updates_confirmation(
+    entry: CatalogEntry,
+    server_dir: Path,
+    phases: Sequence[str],
+    files: Sequence[str],
+) -> str:
+    """What the user agrees to before an updates press: the phases, the files, the two fears.
+
+    Authored here and not in the view, for `rebuild_confirmation()`'s reason:
+    it has assertions on it that run without Qt.
+
+    **The file list is expanded from the folder, never from the catalog's
+    glob.** A dialog reading `sql/character_updates/*.sql` while the press
+    streams three named files is a promise about a pattern; the caller hands
+    this the same `expand()` output the run will stream, so the two cannot
+    disagree about which files exist or about the order they go in.
+
+    Two facts a user cannot see and would be right to fear, and both are stated
+    rather than fixed — this control puts a button on the route T11 built and
+    changes nothing about what that route applies:
+
+    * **A file can be refused, and the press stops on it.** Every flagged phase
+      ships `on_error: fail`, and the case that is known to be reachable is
+      `MODIFY money INT(10) UNSIGNED` against a `guild_bank_money.money` that
+      has gone negative: MySQL's strict mode will not narrow it, and the client's
+      own last line names the file (T11's reviewer, note 2).
+    * **The marker does not move.** A marker row says the whole PLAN finished,
+      and one written after two of its phases would tell every later press
+      something it can never take back. So no marker is written here and no
+      `verify` rule is re-asked; the row already there goes on reading
+      `imported`.
+
+    A clone that predates the directory these phases name does not reach this
+    function at all: `expand()` refuses first, in `sqlplan._matches()`'s own
+    words, which name the pattern and the folder and say the sources may not
+    have cloned completely (note 4). That sentence is not wrapped in a second
+    one here — it is already the sentence a user reads.
+    """
+    named = ", ".join(phases)
+    listing = "\n".join(f"    {name}" for name in files)
+    return (
+        f"Apply the database updates {entry.name}'s install plan carries for a server that "
+        f"already exists?\n\n"
+        f"Folder: {server_dir}\n\n"
+        f"This applies {len(files)} SQL file(s), the whole of {named}, into this install's "
+        f"databases:\n\n"
+        f"{listing}\n\n"
+        f"Nothing else in the install plan is re-run. Your databases keep the completion marker "
+        f"they already have — this press writes no new one — and your characters, accounts and "
+        f"world are not otherwise read or written.\n\n"
+        f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
+        f"until this has finished. A running world server holds these tables in memory "
+        f"and writes back over whatever it finds in them, so this press refuses while it is up. "
+        f"The database alone is started if it is down; the world server is never started by "
+        f"this.\n\n"
+        f"If a file cannot be applied the press stops on it and says which file and why — "
+        f"nothing after it runs. The one refusal known to be reachable is a guild bank balance "
+        f"that has gone negative, which the column type these files set cannot hold."
     )
 
 
@@ -1571,6 +1735,29 @@ class Seams:
     exec_stdin: Callable[..., subprocess.CompletedProcess[str]] = docker.exec_stdin
     sql_query: Callable[[str, str, str, str | None, str], str] = docker.sql_query
     volume_exists: Callable[[str], bool] = docker.volume_exists
+    world_running: Callable[[str], bool | None] | None = None
+    """Is this install's world server up? Three-valued, and `None` is not "no".
+
+    `None` here means "nobody gave one", and `ask_world_running()` then goes to
+    `docker.world_running` — the same function T7 wired into every `Applier` the
+    app builds, so the two enforcement points of owner answer 7 answer from one
+    mapping rather than two.
+
+    A LATE lookup, like `selinux_enforcing` and `fs_type` above and unlike every
+    other seam in this class, and the reason is the test that matters most: the
+    button's own. `Seams`' other defaults are bound when this class is defined,
+    so a `monkeypatch` of the `docker` function they name never reaches an
+    engine — and the engine an updates press runs is built inside
+    `install_wiring.installer_for_app()`, where no test can hand it a fake.
+    Resolved on the call, `monkeypatch.setattr(docker, "world_running", ...)`
+    reaches the shipped path end to end, which is how T7's Modules-tab refusal
+    is proved and is the shape this copies.
+    """
+
+    def ask_world_running(self, container: str) -> bool | None:
+        """The world's state, through the seam if one was given, else `docker`'s own."""
+        ask = self.world_running
+        return (ask if ask is not None else docker.world_running)(container)
 
     def ask_selinux(self) -> bool | None:
         """Is SELinux enforcing — through the seam if one was given, else the host.
@@ -1892,6 +2079,199 @@ class StagedInstaller:
             self.stage_named("build"),
             Stage("recreate", self.stage_recreate, recorded=False),
             self.stage_named("ready"),
+        )
+
+    def update_stages(self) -> tuple[Stage, ...]:
+        """What an updates press runs: the database on its own, then the import stage.
+
+        Two stages, selected by name out of the family's own tuple for
+        `rebuild_stages()`'s reason, and the interesting half of this method is
+        the four that are NOT here. `up` is the one that matters: this press is
+        for a server somebody stopped in order to run it, and ending by starting
+        the world would put back the very thing the press refuses to run
+        alongside. `build`, `generate-compose` and `write-dockerfile` have
+        nothing to do with three SQL files.
+
+        `import` is exactly `_import`, which on an install the probe reads as
+        finished runs the marker rule's own table, applies the phases the plan
+        declares `rerun_on_marked` and returns (T11). This tuple does not
+        re-implement that route; it is the second way in to it, the first being
+        `engine.run()` through the CLI harness.
+
+        **Recorded off**, and it is the family's own stage with the record
+        taken away rather than a copy of the body. The install's `import` is
+        recorded and rightly — it imported. This press reaches the same body and
+        the body does not import, so a record written here would claim a stage
+        that did not happen, and an install whose state file has no `import` in
+        it (one made by the shell scripts, or one killed mid-install) would have
+        its next resume skip the import on the strength of this press. The same
+        rule `rebuild_stages()` applies to `recreate`, arrived at from the other
+        side: there the stage is not the install's, here the outcome is not.
+        """
+        return (
+            self.stage_named("start-db"),
+            replace(self.stage_named("import"), recorded=False),
+        )
+
+    def update_files(self, ctx: StageContext) -> tuple[str, ...]:
+        """What the re-runnable phases would stream into this install, in stream order.
+
+        The confirmation's list, named the way the run's own log names each run
+        (`PhaseRun.rel`: the path relative to the server dir, never an absolute
+        one and never the SQL text). Empty here on the spine: a family whose
+        import is a compose one-shot has no phase list to expand, and the button
+        is not offered for it anyway — `update_phases()` reads the same absence
+        off the catalog. The CMaNGOS family overrides it through the same
+        `expand()` call its re-run route makes.
+        """
+        return ()
+
+    def _update_context(self, server_dir: Path, cancel: threading.Event | None) -> StageContext:
+        """The context both halves of an updates press run under.
+
+        No state file is required and none is written. `rebuild()` refuses a
+        folder with no `.yulon-install.json` because a rebuild is this app's
+        claim on a folder it built; this press is the opposite case by design —
+        the install it exists for may well be one the shell scripts made, which
+        carries no state file and no marker row and is exactly the shape T11's
+        route recognises as `populated` and complete. Neither stage is recorded,
+        so nothing goes to disk; `_record_error()` writes only into a state file
+        that already exists.
+        """
+        state = read_state(server_dir, valid=self.stage_names()) or InstallState(
+            game_id=self.entry.id,
+            install_id=self._install_id(server_dir),
+            family=self.family,
+        )
+        return StageContext(
+            server_dir=server_dir,
+            client_dir=None,
+            state=state,
+            cancel=cancel,
+            secrets=self.resolve_secrets(server_dir),
+        )
+
+    def update_confirmation(self, options: InstallOptions | None = None) -> str:
+        """The dialog's text for this install, with the file list read off the folder.
+
+        Raises:
+            InstallerError: the plan could not be expanded against this folder —
+                most plausibly a clone that predates the directory the phases
+                name, which `sqlplan._matches()` refuses by pattern and folder
+                (T11's reviewer, note 4). Raised rather than swallowed into an
+                empty list: an empty list under this dialog's words would be a
+                confirmation for a press that applies nothing.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        phases = update_phases(self.entry)
+        return updates_confirmation(
+            self.entry,
+            server_dir,
+            [phase.name for phase in phases],
+            self.update_files(self._update_context(server_dir, None)),
+        )
+
+    def update_databases(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Apply the plan's re-runnable phases to an install that already exists. Yields live.
+
+        The button T11's reviewer said was owed (note 1): the route that puts a
+        file added to an install plan onto a server made before it existed was
+        reachable only from `engine.run()`, which for a GUI user means never —
+        the catalog tile greys to "Installed" once the app knows the folder, and
+        `rebuild_stages()` excludes `import` on purpose.
+
+        **The world is read before anything and again after the database is
+        up**, and both readings refuse on anything but an explicit `False`.
+        Owner answer 7 is the rule — no direct writes to `characters`/`world`
+        while the server is running — and T11's reviewer recorded (note 3) that
+        the route as it then stood wrote DDL into `tw_char` under a running
+        world, because `stage_start_db` returns as soon as the database is up
+        and nothing asked about the world. The second reading is T7's finding
+        from the applier's side: `start_database()` waits for the container to
+        report healthy, and the Server tab's Start is a button the same user can
+        press inside that window.
+
+        Raises:
+            InstallerError: the world is up or unreadable, the plan could not be
+                expanded, a stage failed, or the press was cancelled. The
+                message is the sentence a user reads.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        yield f"Applying pending database updates for {self.entry.name} in {server_dir}"
+        yield UPDATES_OPENING_NOTE
+        # FIRST, before the database is started and before a secret is resolved:
+        # a press against a live world must leave the stack exactly as it found
+        # it, and starting containers under a world this guard is about to
+        # refuse would undo the guard's own advice on a stack the user stopped.
+        self._refuse_updates_into_a_running_world()
+        self._check_cancel(cancel)
+        planned = self.update_stages()
+        # BY NAME, never positionally: T8 recorded what a positional wrapper
+        # cost when a stage was later prepended to the rebuild's tuple, and this
+        # tuple is one stage away from the same trap.
+        guarded = [stage for stage in planned if stage.name == "import"]
+        if not guarded:
+            raise InstallerError(
+                f"{self.entry.name} cannot be updated safely: its update tuple has no `import` "
+                f"stage to guard, so the second reading of the world would never happen. That "
+                f"is a bug in this build, not something you did. Nothing was started."
+            )
+        stages = tuple(
+            replace(stage, run=self._guard_then(stage)) if stage.name == "import" else stage
+            for stage in planned
+        )
+        ctx = self._update_context(server_dir, cancel)
+        yield from self._staged(stages, ctx)
+
+    def _guard_then(self, stage: Stage) -> Callable[[StageContext], Iterator[str]]:
+        """`stage`, with the world read once more immediately before its body runs."""
+
+        def run(ctx: StageContext) -> Iterator[str]:
+            self._refuse_updates_into_a_running_world()
+            yield from stage.run(ctx)
+
+        return run
+
+    def _refuse_updates_into_a_running_world(self) -> None:
+        """Owner answer 7 at this engine's own enforcement point. Fails closed.
+
+        A second enforcement point for one rule, not a second rule, and the
+        wording deliberately echoes `apply.Applier`'s and `docker.py`'s — *holds
+        them in memory and writes back over whatever it finds. Press Stop* — so
+        a user meets one rule and not three.
+
+        `None` and a seam that raises are both refusals, because *could not ask*
+        is not *not running*: `docker.container_state()` answers an empty state
+        for a missing container and for a daemon that will not reply, and the
+        one answer that would let DDL into a live world's tables is `False`.
+        """
+        container = self.entry.container_spec().world
+        why = ""
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            running, why = None, f"{type(exc).__name__}: {exc}"
+        if running is False:
+            return
+        if running is None:
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
+                f"({why or 'the daemon gave no answer'}), and a running one holds these "
+                f"databases in memory and writes back over whatever it finds in them. Nothing "
+                f'was applied. Stop the server, then press "{UPDATES_BUTTON_LABEL}" again.'
+            )
+        raise InstallerError(
+            f"{self.entry.name}'s world server is running, and it holds these databases in "
+            f"memory and writes back over whatever it finds in them. Nothing was applied. "
+            f'Press Stop, then press "{UPDATES_BUTTON_LABEL}" again — the database is started '
+            f"on its own for it, and the world server stays down."
         )
 
     def stage_recreate(self, ctx: StageContext) -> Iterator[str]:

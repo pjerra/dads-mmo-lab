@@ -85,6 +85,7 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    rerunnable_phases,
     secret_token_name,
     stop_abandoned_worker,
 )
@@ -1314,29 +1315,13 @@ class CmangosInstaller(StagedInstaller):
         `CREATE USER ... IDENTIFIED BY` and its grants, and this route runs
         against a server somebody is playing on.
         """
-        phases = tuple(phase for phase in plan.phases if phase.rerun_on_marked)
+        phases = rerunnable_phases(plan)
         if not phases:
             return
         db = self._native().db
         container = self.entry.container_spec().db
         password = ctx.secrets.db_password
-        try:
-            runs = sqlplan.expand(
-                plan.model_copy(update={"phases": phases}),
-                ctx.server_dir,
-                self._schemas(),
-                self._secret_tokens(ctx),
-            )
-        except InstallerError:
-            # The same ordering as the ordinary import's: every refusal
-            # `expand()` raises is already the sentence a user reads, and
-            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
-            # this one would wrap one finished sentence inside another.
-            raise
-        except (RuntimeError, OSError) as exc:
-            raise InstallerError(
-                f"The phases this install re-runs on every press could not be prepared: {exc}"
-            ) from exc
+        runs = self._rerunnable_runs(plan, ctx)
         if not runs:
             return
         named = ", ".join(phase.name for phase in phases)
@@ -1379,6 +1364,46 @@ class CmangosInstaller(StagedInstaller):
                 f"behind: {', '.join(failing)}."
             )
         yield f"{named}: applied. The import marker is unchanged."
+
+    def _rerunnable_runs(self, plan: SqlPlan, ctx: StageContext) -> tuple[sqlplan.PhaseRun, ...]:
+        """Every file and statement the flagged phases would apply, in the order they apply.
+
+        One expansion, two callers: the press's own (`_rerun_on_marked`) and the
+        confirmation's (`update_files`). Written twice, the dialog could offer a
+        file list the run then did not stream — which is the shape of promise
+        this project has already been bitten by once, in `rebuild_confirmation`
+        claiming "nothing else in the folder is rewritten" about a stage that
+        writes two files.
+        """
+        try:
+            return sqlplan.expand(
+                plan.model_copy(update={"phases": rerunnable_phases(plan)}),
+                ctx.server_dir,
+                self._schemas(),
+                self._secret_tokens(ctx),
+            )
+        except InstallerError:
+            # The same ordering as the ordinary import's: every refusal
+            # `expand()` raises is already the sentence a user reads, and
+            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
+            # this one would wrap one finished sentence inside another.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The phases this install re-runs on every press could not be prepared: {exc}"
+            ) from exc
+
+    def update_files(self, ctx: StageContext) -> tuple[str, ...]:
+        """The confirmation's file list, expanded from the folder this install lives in.
+
+        Named as the run's own log names each step — `PhaseRun.rel`, the path
+        relative to the server dir — so a user reading the dialog and a user
+        reading the transcript afterwards are reading the same strings.
+        """
+        plan = self._data().sql
+        if not rerunnable_phases(plan):
+            return ()
+        return tuple(run.rel for run in self._rerunnable_runs(plan, ctx))
 
     def _gate(self, ctx: StageContext) -> ImportGate:
         """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.

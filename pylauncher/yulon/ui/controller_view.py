@@ -70,9 +70,9 @@ from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
 from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
-from yulon.catalog import composegen
+from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry
-from yulon.catalog.installer import rebuild_confirmation
+from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import console as tbc_console
@@ -574,6 +574,17 @@ class ControllerServices:
     for a server adopted from a WSL distro — which is a fact about the INSTALL,
     not about this view, so the view never asks about distros.
     """
+    updates: native.UpdateRoute | None = None
+    """Apply the install plan's re-runnable phases to this server; None when it has none.
+
+    The second optional seam, greyed on `None` for the same reason as `rebuild`
+    above. `None` here is not a missing wiring: it is the honest answer for
+    three of the four games, whose plans declare no `rerun_on_marked` phase at
+    all, and `_updates_route()` reads that off the catalog rather than off an id.
+
+    One field holding a pair rather than two optional callables — see
+    `native.UpdateRoute` for why the halves must not be able to arrive apart.
+    """
 
     @classmethod
     def for_entry(
@@ -859,6 +870,43 @@ def _assemble(
         # prints "REBUILD required", but a CMaNGOS worldserver is compiled from
         # the same kind of checkout and its users patch it the same way.
         rebuild=install_wiring.rebuild_for_app(entry, server_dir, wsl_distro=wsl_distro),
+        # HERE for the same reason the rebuild is, and offered to far fewer
+        # installs: the phases exist or they do not, and that is a fact about
+        # `catalog.json` which every game's tab reads the same way.
+        updates=_updates_route(entry, server_dir, wsl_distro=wsl_distro),
+    )
+
+
+def _updates_route(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> native.UpdateRoute | None:
+    """The updates control's two halves for this install, or None when it has none.
+
+    Two reasons to answer None, and they are different facts:
+
+    * **The plan declares no re-runnable phase.** Three of the four games, and
+      it is read off the catalog (`native.update_phases()`) rather than off an
+      id, so a flag added to another entry's plan reaches the button with no
+      code change here.
+    * **The server lives inside a WSL distro.** `native.Seams` addresses the
+      local daemon and erases `wsl_distro` (its own docstring records the
+      boundary), so a press would ask THIS Docker about a container it has never
+      heard of. The guard would then refuse on `None` — safe, and saying the
+      wrong thing. Withholding the control says the true one, which is the rule
+      the app already applies to a missing pty and to a game with no manifests.
+
+    The engine is built inside each callable, per call, for the reason
+    `install_wiring.rebuild_for_app()` gives: four seams and an import gate for
+    every tab the app opens, for a control most of them will never press.
+    """
+    if wsl_distro is not None or not native.update_phases(entry):
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    return native.UpdateRoute(
+        confirmation=lambda: install_wiring.installer_for_app(entry).update_confirmation(options),
+        press=lambda cancel: install_wiring.installer_for_app(entry).update_databases(
+            options, cancel=cancel
+        ),
     )
 
 
@@ -2613,6 +2661,10 @@ class ControllerView(QWidget):
             self.uninstall_confirm_button.setEnabled(False)
             self.keep_characters_check.setEnabled(False)
             self.rebuild_button.setEnabled(False)
+            # And the updates press, for the importer's reason above rather than
+            # for symmetry: it reaches the same `import` stage against the same
+            # databases, so one while another action is live is two writers.
+            self.updates_button.setEnabled(False)
             # Refresh too, and this one is not symmetry. `recheck()` blanks
             # `problem_label` — which during an import is the live output the
             # user is watching — and then fires `Controller.import_state()`,
@@ -2658,6 +2710,10 @@ class ControllerView(QWidget):
             self.uninstall_confirm_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
             self.rebuild_button.setEnabled(self.services.rebuild is not None)
+            # Back to what this install can do, never unconditionally: three of
+            # the four games have no such phase and must not be handed a live
+            # button by any job of their own finishing.
+            self.updates_button.setEnabled(self.services.updates is not None)
 
     @Slot()
     def start_server(self) -> None:
@@ -4413,12 +4469,32 @@ class ControllerView(QWidget):
             "Compile the server again so modules installed since the last build are in it. "
             "Asks first — it takes as long as an install's compile and the server goes down."
         )
+        # Beside the Rebuild button and never on the Catalog tab's tile, which
+        # greys to "Installed" the moment the app knows the folder: an
+        # established install is operated from its controller view. The ellipsis
+        # is the same convention — it asks first, and the dialog names every file.
+        #
+        # Dead for three of the four games, and that is the honest state rather
+        # than a gap: only `wow-tortoise`'s plan declares a phase meant to be
+        # re-applied to a server that already exists (T10/T11).
+        self.updates_button = QPushButton(native.UPDATES_BUTTON_LABEL, tab)
+        self.updates_button.clicked.connect(self.apply_database_updates)
+        self.updates_button.setToolTip(
+            "Apply the SQL this server's install plan has gained since it was installed. "
+            "Asks first, names every file, and refuses while the server is running."
+        )
         # Its own panel, not the report box above it. `module_report` is a
         # `setPlainText` field that shows the LAST action's result, and a
         # multi-hour job written into it would show one line and then look
         # frozen — which is the exact reading that produced this feature's bug
         # report. `LogPanel` is timestamped, follows the bottom, carries a
         # ticking elapsed field and owns the Stop button, and it already exists.
+        #
+        # ONE panel for both long jobs on this tab, and shared rather than
+        # doubled: a rebuild and a database update must not run at once — they
+        # want the same containers — and a second panel would have to be locked
+        # against the first, registered with `log_panels()` for the exit path,
+        # and stopped by it. The panel's own `running` flag is that lock already.
         self.rebuild_log = LogPanel(tab)
         # The lock, in both directions. A rebuild replaces the containers the
         # Server tab's Start/Stop/Remove act on, so those go dead for its
@@ -4438,6 +4514,7 @@ class ControllerView(QWidget):
         row.addWidget(self.module_sql_button)
         row.addWidget(self.module_updates_button)
         row.addStretch(1)
+        row.addWidget(self.updates_button)
         row.addWidget(self.rebuild_button)
         box.addWidget(self.module_list, 2)
         box.addLayout(row)
@@ -4473,6 +4550,11 @@ class ControllerView(QWidget):
         # away from three of the four games for a reason that is about
         # manifests.
         self.rebuild_button.setEnabled(self.services.rebuild is not None)
+        # A third gate, separate again and for the mirror reason: this one is
+        # about the install PLAN, not about the store and not about the
+        # checkout. It is live for the one game whose plan declares a phase to
+        # be re-applied to a server that already exists.
+        self.updates_button.setEnabled(self.services.updates is not None)
 
     def reload_modules(self) -> None:
         """Fill the list from the store (every family), newest store contents first."""
@@ -4859,6 +4941,77 @@ class ControllerView(QWidget):
         return self.rebuild_log.run(
             lambda: source(cancel),
             title=f"Rebuilding {self.entry.name}",
+            cancel=cancel,
+        )
+
+    def apply_database_updates(self) -> bool:
+        """Ask, then apply this plan's re-runnable phases to the databases. False if not started.
+
+        The button T11's reviewer said was owed. That ticket built the route —
+        a phase declared `rerun_on_marked` is applied to an install the probe
+        already reads as finished, before the world starts, with no marker
+        written — and then found it had no way in from the app: the Catalog
+        tab's tile greys to "Installed" once the folder is known, and
+        `rebuild_stages()` excludes `import` on purpose, so for a GUI user with
+        an established Tortoise install *no button applies those three files*
+        was still true and the CLI harness was the only caller.
+
+        **The confirmation is composed before it is shown, and composing it can
+        refuse.** The file list is expanded from the folder rather than read off
+        the catalog's glob, so a clone that predates the directory those phases
+        name raises here — and that is the one refusal a user meets before any
+        question. It goes to `action_failed` (the app log, which is the file a
+        bug report is pasted from) and to a dialog, and nothing is started; a
+        `QMessageBox.question` over an empty file list would be a confirmation
+        for a press that applies nothing.
+
+        Everything else follows `rebuild_server()` exactly, and deliberately:
+        Yes/No with No as the default so Enter declines, `is ... Yes` so Escape
+        and the close button decline too, and the same panel — one long job on
+        this tab at a time, because a rebuild and an update want the same
+        containers.
+        """
+        route = self.services.updates
+        if route is None:
+            return False
+        if self.rebuild_log.running:
+            QMessageBox.information(
+                self,
+                "Already running",
+                "This server already has a job running on this tab. Wait for it to finish.",
+            )
+            return False
+        if self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish on the "
+                "Server tab, then press this again. Nothing was started.",
+            )
+            return False
+        try:
+            text = route.confirmation()
+        except InstallerError as exc:
+            logger.info(f"database updates for {self.entry.id} could not be described: {exc}")
+            self.action_failed.emit(str(exc))
+            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            return False
+        if (
+            QMessageBox.question(
+                self,
+                f"Apply database updates to {self.entry.name}?",
+                text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            is not QMessageBox.StandardButton.Yes
+        ):
+            logger.info(f"database updates for {self.entry.id} declined at the confirmation")
+            return False
+        cancel = threading.Event()
+        return self.rebuild_log.run(
+            lambda: route.press(cancel),
+            title=f"Applying database updates to {self.entry.name}",
             cancel=cancel,
         )
 

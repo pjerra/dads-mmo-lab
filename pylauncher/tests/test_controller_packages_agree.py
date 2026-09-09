@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from yulon import party
+from yulon.catalog import native
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -444,6 +445,17 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # once in the module, and this reads it rather than repeating it, so a
         # tree that ever gains the route fails this until its wiring lands.
         unpartied = set() if party.InstallParty.for_entry_is_possible(entry) else {"my_party"}
+        # T14's updates press, and the one seam here whose absence is decided by
+        # the install PLAN. A phase carrying `rerun_on_marked` is a promise that
+        # its own files are safe to re-apply to a server somebody is playing on,
+        # made per phase beside the notes that argue it (T11) -- so a tree with
+        # no such phase has nothing this control could apply, and a button there
+        # would report success having done nothing. Read off the catalog through
+        # the same function the wiring reads it with, so the day another entry's
+        # plan gains one this fails until that game's tab offers the press. It is
+        # absent on the REFERENCE too: AzerothCore imports through a compose
+        # one-shot and carries no phase list for a flag to sit on.
+        unupdatable = set() if native.update_phases(entry) else {"updates"}
         allowed = (
             unstocked
             | unmeasured
@@ -455,11 +467,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unremovable
             | unpartied
             | uncounted
+            | unupdatable
         )
         if game == "wow-wotlk":
+            reference = unprobed | unupdatable
             assert (
-                set(absent) == unprobed
-            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
+                set(absent) == reference
+            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"
         else:
             assert set(absent) <= allowed, (
                 f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "

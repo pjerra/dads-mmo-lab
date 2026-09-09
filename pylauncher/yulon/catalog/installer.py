@@ -817,6 +817,31 @@ class InstallEngine(Protocol):
     inside Docker provisioning, which a rebuild does not enter.
     """
 
+    def update_confirmation(self, options: InstallOptions | None = None) -> str: ...
+
+    def update_databases(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Apply the install plan's re-runnable phases to a server that already exists.
+
+    The pair T14 put a button on: the sentence a user agrees to, then the press.
+    Both are here rather than only on `native.StagedInstaller` because the
+    controller tab drives them through this Protocol, exactly as it drives
+    `rebuild` — an engine reached through `installer_for_app()` is typed as this
+    and nothing else, and a `cast` at the call site would hide the contract the
+    view depends on rather than state it.
+
+    No `ask`, for `rebuild`'s reason. `update_confirmation` raises
+    `InstallerError` when the plan cannot be expanded against the folder, which
+    is the shape a clone predating the phases' own directory takes; a family with
+    no such phase answers a confirmation naming none, and the view never offers
+    the control there (`native.update_phases()` decides that off the catalog).
+    """
+
 
 def installer_for(
     entry: CatalogEntry,
