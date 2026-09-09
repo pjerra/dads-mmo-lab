@@ -642,13 +642,26 @@ specs are not keyed by, which is a picker offering a class whose spec list is
 silently empty."""
 
 PLAYERBOTS_CONF = "env/dist/etc/modules/playerbots.conf"
-"""The module conf the premade spec names are read out of, `.dist` included.
+"""The module conf the premade spec names are read out of. The DEPLOYED file only.
 
-The prior art reads the deployed file and falls back to the shipped `.dist`
-(`rust-main:cli/src/50-party.sh:137-145`), and so does the server: on
-`yulon-ubuntu2` on 2026-09-09 there is a `playerbots.conf.dist` and no
-`playerbots.conf`, so a reader that looked only for the deployed name would
-offer no specs at all on the one install where My Party has ever worked."""
+**Measured on `yulon-ubuntu2`, 2026-09-09, and it cost this feature a live gate.**
+The first version of this read fell back to the shipped `playerbots.conf.dist`
+when no conf was deployed, on the prior art's example
+(`rust-main:cli/src/50-party.sh:137-145`) and on a sentence written here that
+nobody had checked: *"and so does the server"*. The server does not. That box has
+a `.dist` and no `playerbots.conf`, and asked through the bridge what specs it
+had, the module answered:
+
+    To [Michaelah]: talents spec list
+    [Michaelah] whispers: Total 0 specs found
+
+Zero. `sConfigMgr` loads the deployed file; a `.dist` beside it is a template on
+disk and not configuration. So the picker offered 63 names read out of a file the
+running server had never read, and every one of them came back
+`Spec <name> not found` — in the game window, where nothing this app can hear
+would ever have said so. A `.dist` is not a fallback here: with no deployed conf
+this install HAS no premade specs, `specs()` answers `()`, and `_spec_refusal`
+says exactly that."""
 
 SPEC_NAME_KEY = "AiPlayerbot.PremadeSpecName."
 
@@ -831,7 +844,12 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
 
 
 def spec_names(server_dir: Path) -> dict[int, tuple[str, ...]]:
-    """`read_spec_names` over this install's own `playerbots.conf`."""
+    """`read_spec_names` over the conf this install DEPLOYED, and no other.
+
+    See `PLAYERBOTS_CONF` for what reading the `.dist` instead cost: a picker
+    full of names the running server had never loaded, refused one at a time in
+    a chat window nothing here can read.
+    """
     return read_spec_names(_conf_text(server_dir / PLAYERBOTS_CONF))
 
 
@@ -851,8 +869,14 @@ def max_player_level(server_dir: Path) -> int | None:
 
 
 def _conf_text(path: Path) -> str:
-    """A conf file's text, falling back to the shipped `.dist` beside it."""
-    for candidate in (path, Path(f"{path}.dist")):
+    """A conf file's text, or "" — the DEPLOYED file, never the `.dist` template.
+
+    The server reads what is deployed. A `.dist` is what the module ships so a
+    person has something to copy, and reading it back as though it were in force
+    is how this app came to offer 63 premade specs to a server that had loaded
+    none (`PLAYERBOTS_CONF`, measured 2026-09-09).
+    """
+    for candidate in (path,):
         try:
             return candidate.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -1185,6 +1209,25 @@ def _level_note(level: int | None, before: int | None, after: int | None, proble
     The "already" arm is the gate rule in the app's own voice: a step whose
     assertion was true before its action has proved nothing, and a bot the server
     happened to make at the level that was asked for is exactly that step.
+
+    **The "still reads" arm is what this tree does, and the wording is bounded by
+    what a committed artifact shows** — the folder is
+    `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09`.
+    Two presses are photographed: a level of 42 asked for at 13:12
+    (`panel-8-…png`, the row reading 1) and one of 55 at 13:17
+    (`panel-9-…png` with `panel-transcript.log:61-130`, the row reading 1 for the
+    sixty-eight seconds the bot stayed in the party, 13:17:35 to 13:18:43). The same readings carry
+    `Bafossan — level 42` and `Kenvadi — level 37`, so the column does show levels
+    that have changed — the row is not simply always 1.
+
+    What is NOT in that folder, and so is not asserted here: that a forced save
+    leaves it unwritten, that the same command sent later holds, and the timing
+    that would explain either. Those were run at the console and never captured,
+    and an earlier version of this docstring stated one of them as fact. So this
+    says what was seen and stops: whether such a level lands later, nothing the
+    app can read from here says. The fix — read back and re-send, the way the
+    join already polls — needs the timing measured and captured first, and is a
+    ticket rather than a guess.
     """
     if level is None:
         return ""
@@ -1202,8 +1245,9 @@ def _level_note(level: int | None, before: int | None, after: int | None, proble
         )
     if after != level:
         return (
-            f" The level command was accepted and characters.level still reads {after}, "
-            f"not {level}."
+            f" The server accepted the level and characters.level still reads {after}, not "
+            f"{level}. On this tree that row has been seen to stay unwritten for as long as "
+            "this panel watched it, so take the level as not set until the row says otherwise."
         )
     return f" characters.level read {before} before the press and {after} after."
 
