@@ -231,7 +231,7 @@ smoothed:**
   is empty with an mtime of **2026-09-09 05:11**, four minutes after the 09-09 sweep's own
   `widget_driver.py` finished at 05:07:45 and six hours before this run started. Nothing in this
   lane reads or writes that directory except the Refresh press.
-* **Server uptime, 52 s → 1 h 57 s.** The 09-09 run pressed Send seconds after its restore
+* **Server uptime, 52 s → 2 h 11 min 28 s** (round 1 read 1 h 57 s; `widget-run.log:26` is round 4's). The 09-09 run pressed Send seconds after its restore
   driver restarted the world; tonight the world is the one T2 left up, pid 409560.
 
 ---
@@ -342,7 +342,7 @@ failed still needs its realm row back.
 | ac-authserver | the **last** `Added realm` line written **since the restart began** — in a window first shown to be empty — and it must name `100.99.204.5:8085` |
 | the account | zero rows for `WIDGET0909T3`, **and** zero orphaned `account_access` rows at any id |
 | the world | the pid now equals the pid recorded before the script did anything |
-| the final reading | `state-final.txt` exists and is non-empty |
+| the final reading | `state-final.txt` is non-empty and carries its three headings (`=== state-final ===`, `--- realmlist`, `--- the owner's things ---`; `run-t3.sh:297-300`) |
 
 Any failure writes a distinct `[RESTORATION FAILED]` line, and the script then exits **90** —
 not the drivers' status, which is kept in the log beside it.
@@ -417,8 +417,10 @@ started with.
 **`T3_REALM_ROW_ID` is checked before it is used.** It is interpolated unquoted into an `UPDATE`
 (`run-t3.sh:203`), so a non-numeric value would be SQL. `run-t3.sh:83` refuses one and exits 64,
 and it does so *before* the EXIT trap is installed, so a bad value stops the script before
-anything on the box is touched. Exercised in `realm-row-id-guard.txt`, with the realm row read
-afterwards to show it was not reached.
+anything on the box is touched. Exercised in `realm-row-id-guard.txt`. The proof that the UPDATE
+was not reached is the script's line order (the guard at `:83`, `mkdir` at `:366`, the trap at
+`:387`), not the row read afterwards -- `1 OR 1=1` would have SET the value the row already had,
+so that reading is identical either way; and the `exit: 64` line there is transcribed, not captured.
 
 ## Files
 
