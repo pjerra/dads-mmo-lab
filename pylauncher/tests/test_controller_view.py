@@ -21,6 +21,7 @@ from yulon import (
     docker,
     logsnap,
     networking,
+    party,
     purge,
     runner,
     useraccounts,
@@ -4170,6 +4171,111 @@ def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: 
     )
 
     assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
+
+
+# -- 8.6: My Party's surface -------------------------------------------------
+
+
+class _StubParty:
+    """Stands in for `party.InstallParty` — the seam the 8.6 gate script drove.
+
+    The panel's own behaviour is `test_party_panel.py`'s subject; what these
+    tests are about is that the tab really hands the panel the seam
+    `ControllerServices.my_party` holds, and that a game without one says why.
+    """
+
+    def __init__(self) -> None:
+        self.added: list[tuple[str, str]] = []
+
+    def state(self, master: str) -> party.PartyState:
+        return party.PartyState(True, "", (party.Precondition("bridge_answered", True, ""),))
+
+    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition:
+        self.added.append((master, klass))
+        return party.Addition(True, True, "Jilsur", True, True, "Jilsur joined the party.")
+
+    def remove(self, master: str, bot: str) -> party.Dismissal:
+        return party.Dismissal(True, True, f"{bot} left the party.")
+
+
+def _with_party(ps: _Ps, tmp_path: Path, seam: _StubParty) -> ControllerServices:
+    services = _with_bots(ps, tmp_path, _StubBots())
+    services.my_party = seam
+    return services
+
+
+def test_my_party_is_on_the_bots_tab_and_a_press_reaches_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause this box exists for: not reachable only from a script.
+
+    Every press in `pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/` went
+    through `gate86b.py`, which is what the exit review calls out
+    (`pyplan/phase8-exit-review-2026-09-09.md`, clause 3). This is the same seam
+    with a button on it.
+    """
+    seam = _StubParty()
+    view = ControllerView(
+        WOTLK, _with_party(ps, tmp_path, seam), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert "Bots" in [view._tabs.tabText(i) for i in range(view._tabs.count())]
+    assert view.party_panel is not None
+    assert seam.added == [], "the ground: nothing has been asked of the server yet"
+    view.party_panel.character.setText("Pakka")
+    view.party_panel.klass.setCurrentText("mage")
+    view.party_panel.add_bot()
+
+    assert seam.added == [("Pakka", "mage")]
+    # The seam's own sentence, read back off the panel. Without this the test
+    # passes on a press that RAISED: `run_inline` routes any exception to the
+    # panel's report, and the stub has already recorded the call by then. It
+    # passed exactly that way once — `party` was not imported in this file, so
+    # the stub's own return value was a `NameError` and nothing said so.
+    assert view.party_panel.report.text() == "Jilsur joined the party."
+
+
+def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games get the reason, which is the whole surface there.
+
+    Owner decision, 2026-09-06 (`pyplan/phase8-parity-decisions.md:41`): the
+    route is `mod-ale` plus `mod-playerbots`' `addclass`, both AzerothCore, so
+    there is nothing to wire — and a control that sent those commands at a
+    server that has never heard of them would be worse than none.
+    """
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, _StubBots()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert view.party_panel is None
+    assert "WoW WotLK only" in view.my_party_absent.text()
+
+
+def test_a_finished_party_press_re_reads_the_bot_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A bot that just joined a party is a row the Browse list has not got yet.
+
+    The cross-link the users-surface design names
+    (`pyplan/phase8-designs/b-users-surface.md:111`).
+    """
+    bots = _StubBots()
+    services = _with_bots(ps, tmp_path, bots)
+    services.my_party = _StubParty()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    assert view.party_panel is not None
+    view.party_panel.character.setText("Pakka")
+    asked_before = len(bots.asked)
+
+    view.party_panel.add_bot()
+
+    assert len(bots.asked) == asked_before + 1
+    assert view.party_panel.report.text() == "Jilsur joined the party.", (
+        "the press must have SUCCEEDED: `party_changed` fires on a failure too, so "
+        "without this the re-read is proved by a press that raised"
+    )
 
 
 def test_one_bot_is_a_bot_and_not_one_bots(qapp: object, ps: _Ps, tmp_path: Path) -> None:
