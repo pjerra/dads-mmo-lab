@@ -43,3 +43,9 @@ Sha, the gate's last line, the diff stat, and **deviations flagged** — anythin
 - diff `pyplan/checklist.md | 4 ++--` (lines 2500 and 2501)
 - 8.6 ticked with a Gated 2026-09-09 clause: box `yulon-ubuntu2`, code `daeae0a5` (surface) and `5a7e8baa`; all three folders; past-tense readings (engine False then True; "does not exist" then `DML-BRIDGE-READY`; Jilsur in the client's party frame; Kiteema through the panel with the row arriving at 06:05:55 after the join at 06:05:53); NOT-shown paragraph. Gate box and folder names corrected on 2500 and 2501. 8.7a not ticked.
 - Deviations flagged by the hand: (1) correction 3 NOT applied -- `:2500` still says "This route has never been recorded working" ahead of the Gated clause; (2) correction 4 NOT applied -- `:2500` still says "that rebuild is the owner's and is not automatic"; (3) correction 1 (`:2470`) not applied, out of the ticket's items; (4) no tree sha recorded in the panel-live folder, `daeae0a5` used and labelled as the surface's commit; (5) test paths spelled `tests/...`; (6) `OffCritical` wording from correction 1.
+
+## Review 1 (Codex adversarial, 2026-09-09 09:14) — REWORK
+
+- [high] `pyplan/checklist.md:2500` still says "This route has never been recorded working" and "that rebuild is the owner's and is not automatic"; the appended Gated clause and the exit review refute both. A ticked line that contradicts its own evidence misrepresents the product the moment the box is checked; a later paragraph does not correct false prose on the line itself.
+- Must-fix: rewrite both sentences on `:2500` in the exit review's dated formulation (failures 2026-08-20 and 2026-09-08 for a measured reason; answered 2026-09-09 once the engine was compiled in; the app's Rebuild control is user-initiated and was pressed live, while the manifest's rebuild flag is still not applied automatically). Re-run the docs-pin checks.
+- Fable reviewer's verdict pending; the rejection body will carry both.
