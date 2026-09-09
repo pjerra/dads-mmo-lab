@@ -1,4 +1,4 @@
-=== T3 clause-35 run started 2026-09-09T11:58:37+02:00 ===
+=== T3 clause-35 run started 2026-09-09T12:18:49+02:00 ===
 code under test : /home/pk/lane710b/checkout at 528f219e8c883bebdf2ee6c225f3d5468989442a
 interpreter     : /home/pk/dads-mmo-lab/pylauncher/.venv/bin/python  (Python 3.12.3)
 PySide6         : 6.11.2
@@ -19,5 +19,5 @@ STOPPED: clause35_falsify.py exited 1, so the falsification did not hold (status
 (T3_ALLOW_FAILURE=1: a non-zero exit is what this invocation was for)
 === T3 run: RESTORATION FAILED -- 2 step(s) did not verify ===
 the drivers' own status was 1; this script exits 90
-2026-09-09T11:58:51+02:00
+2026-09-09T12:19:02+02:00
 RUNNER EXIT STATUS (as seen by the invoking shell): 90

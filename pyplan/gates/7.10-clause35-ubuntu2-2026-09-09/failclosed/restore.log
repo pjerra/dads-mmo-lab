@@ -1,6 +1,6 @@
 === restore, run by the EXIT trap ===
 the status the drivers left: 1
-taken (local): 2026-09-09T11:59:24+02:00
+taken (local): 2026-09-09T12:19:35+02:00
 realm UPDATE targets row id: 1   (verification always reads id 1)
 --- ufw rules ---
   user.rules  live=320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf before=320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  root:root 640
@@ -13,8 +13,10 @@ realm UPDATE targets row id: 1   (verification always reads id 1)
   wanted          : 100.99.204.5|100.99.204.5|255.255.255.0
   [RESTORED] realmlist id 1 is 100.99.204.5|100.99.204.5|255.255.255.0 on all three columns
 --- ac-authserver ---
+  the window Docker will read is --since '2026-09-09T10:19:35Z' (Z, so UTC, not this box's +02:00)
+  'Added realm' lines already inside that window, BEFORE the restart: 0 (must be 0)
 ac-authserver
-  the LAST 'Added realm' line written since 2026-09-09T09:59:24 UTC, when the restart began:
+  the LAST 'Added realm' line written since 2026-09-09T10:19:35Z, when the restart began:
     [0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
   [RESTORED] ac-authserver restarted and now announces the realm at 100.99.204.5:8085
 --- the account this run may have created ---
@@ -25,5 +27,5 @@ ac-authserver
 --- the world ---
   pid at the start of this script: 409560   now: 409560
   [RESTORED] the world is up on the same pid it was on before this script ran (409560)
-  [RESTORED] state-final.txt written
+  [RESTORED] state-final.txt written, with its realmlist and owner's-things sections in it
 === every restoration verified; this script exits 1 ===

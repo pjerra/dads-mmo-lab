@@ -1,16 +1,20 @@
 === the two gates this folder's commit was taken behind ===
-Round 1 of Codex's review asked for these lines to live in the folder so it is
+Codex's round-1 review asked for these lines to live in the folder so it is
 self-contained rather than citing a report. Both were run from this ticket's
 worktree, pylauncher/, on 2026-09-09, against the tree that is committed here.
+
+Round 3 wrote a round-2 pytest count here with a note explaining why it had not
+been re-taken. That is an artifact restating an older reading, which is the
+thing this folder keeps finding, so these are the round-4 gate's own numbers.
 
 --- test_no_secrets_in_evidence.py, on the laptop, before the commit ---
   $ python -m pytest tests/test_no_secrets_in_evidence.py -m "not integration" -q
   ....                                                                     [100%]
-  4 passed in 2.69s
+  4 passed in 2.28s
 
 --- the full --checks gate, on yulon-fedora ---
   $ YULON_TEST_BOX=yulon-fedora bash /c/Users/perzi/run-tests-vm.sh --checks
-  3769 passed, 6 skipped, 7 warnings in 26.87s
+  3769 passed, 6 skipped, 1 warning in 18.08s
   --- mypy (this platform) ---   Success: no issues found in 94 source files
   --- mypy (as Windows) ---      Success: no issues found in 94 source files
   --- mypy (as macOS) ---        Success: no issues found in 94 source files
@@ -18,6 +22,6 @@ worktree, pylauncher/, on 2026-09-09, against the tree that is committed here.
   --- black ---                  196 files would be left unchanged.
   === --checks: ALL GREEN ===
 
-The pytest count above is the round-2 run's; round 3 changed no Python that the
-suite covers (the driver and the runner are gate evidence, not package code) and
-its own --checks ended on the same `=== --checks: ALL GREEN ===` line.
+The box was checked before the gate was started: load 0.37, no pytest, mypy,
+ruff or black process running, and `run-tests-vm.sh` gives each hand its own
+~/yulon-runs/<agent> directory, so T11/T12/T7 were not disturbed.

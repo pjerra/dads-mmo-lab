@@ -76,6 +76,15 @@ REALM_PORT=8085
 REALM_ROW_ID=${T3_REALM_ROW_ID:-1}
 RESTORE_FAILED_STATUS=90
 
+# `$REALM_ROW_ID` is interpolated unquoted into an UPDATE. It is a knob this
+# folder's own exercise sets, so it is checked here rather than trusted: a
+# non-numeric value would be SQL, and the check runs before the EXIT trap is
+# installed, so a bad one stops the script before anything on the box is touched.
+if ! [[ $REALM_ROW_ID =~ ^[0-9]+$ ]]; then
+  echo "T3_REALM_ROW_ID must be a whole number; got '$REALM_ROW_ID'" >&2
+  exit 64
+fi
+
 say() { ~/claude-say "$1" >/dev/null 2>&1; printf '%s %s\n' "$(date -Is)" "$1" >> /home/pk/claude-activity.log; }
 
 mysql_q() {  # mysql_q <statement>
@@ -216,13 +225,32 @@ restore_the_box() {
   # prevent it. Two changes: only lines written since this restart began count
   # (`--since`), and only the LAST announcement counts, because that is the one
   # the container is now serving.
+  #
+  # Round 4, both reviewers, the same defect again. `date -u +%Y-%m-%dT%H:%M:%S`
+  # has no `Z` and no offset, and Docker's documented rule for `--since` is that
+  # a zone-less stamp is read in the CLIENT'S LOCAL timezone. This box is +02:00,
+  # so the window opened TWO HOURS before the restart while the note line printed
+  # "UTC" -- the stale marker was still wide open, and an authserver that came
+  # back without announcing anything would have had the previous run's line
+  # picked up by `tail -1` and read as verification. One character (`Z`), and
+  # then a structural capture that proves the window is closed rather than
+  # asserting it: the same `--since` query, run BEFORE the restart, must count
+  # ZERO `Added realm` lines. That reading also covers the no-announcement case
+  # without staging a silent authserver -- an empty window reads `(none)` below
+  # and fails.
   note "--- ac-authserver ---"
-  local since announced
-  since=$(date -u +%Y-%m-%dT%H:%M:%S)
+  local since announced stale
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  stale=$(docker logs --since "$since" ac-authserver 2>&1 | grep -ac "Added realm")
+  note "  the window Docker will read is --since '$since' (Z, so UTC, not this box's +02:00)"
+  note "  'Added realm' lines already inside that window, BEFORE the restart: $stale (must be 0)"
+  if [ "$stale" != "0" ]; then
+    verified fail "the --since window is not empty before the restart ($stale lines): anything found after it could be stale"
+  fi
   if docker restart ac-authserver >> "$OUT/restore.log" 2>&1; then
     sleep 10
     announced=$(docker logs --since "$since" ac-authserver 2>&1 | grep -a "Added realm" | tail -1)
-    note "  the LAST 'Added realm' line written since $since UTC, when the restart began:"
+    note "  the LAST 'Added realm' line written since $since, when the restart began:"
     note "    ${announced:-(none)}"
     if [ -n "$announced" ] && printf '%s' "$announced" | grep -qF "at ${REALM_ADDRESS}:${REALM_PORT}"; then
       verified ok "ac-authserver restarted and now announces the realm at ${REALM_ADDRESS}:${REALM_PORT}"
@@ -264,10 +292,15 @@ restore_the_box() {
 
   # --- 6. the final reading -------------------------------------------------
   probe final >/dev/null 2>&1
-  if [ -s "$OUT/state-final.txt" ]; then
-    verified ok "state-final.txt written"
+  # Not `-s` alone: a probe that died after its first line is non-empty and says
+  # nothing. The three headings below are the ones a reader needs the file for.
+  if [ -s "$OUT/state-final.txt" ] \
+     && grep -q '^=== state-final ===' "$OUT/state-final.txt" \
+     && grep -q '^--- realmlist' "$OUT/state-final.txt" \
+     && grep -q "^--- the owner's things ---" "$OUT/state-final.txt"; then
+    verified ok "state-final.txt written, with its realmlist and owner's-things sections in it"
   else
-    verified fail "state-final.txt was not written, so there is no final reading of this box"
+    verified fail "state-final.txt is missing or truncated: no final reading of this box worth having"
   fi
 
   # --- the verdict ----------------------------------------------------------
