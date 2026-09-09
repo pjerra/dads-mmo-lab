@@ -452,11 +452,19 @@ class GuardedApplier(Applier):
         server_dir: Path,
         *,
         arming: Callable[[], Arming],
-        world_running: Callable[[], bool],
+        world_running: Callable[[], bool | None],
         settings_for: Callable[[Path], Settings] = read_settings,
         **kwargs: object,
     ) -> None:
-        super().__init__(server_dir, **kwargs)  # type: ignore[arg-type]
+        # The seam goes to the BASE as well as onto this object, and until T7 it
+        # did neither by accident. `Applier` keeps its own running-world seam
+        # private (`_world_running`) precisely so this public attribute could
+        # not wire that guard live on Tortoise alone; the cost of that choice is
+        # that a subclass swallowing the keyword leaves the base's guard at
+        # `None` — which is what shipped, and what T2's reviewer found. One
+        # callable, both guards, so this fork cannot end up with the updater
+        # guard armed and the direct-SQL guard asleep.
+        super().__init__(server_dir, world_running=world_running, **kwargs)  # type: ignore[arg-type]
         self.arming = arming
         self.world_running = world_running
         self.settings_for = settings_for
@@ -467,7 +475,13 @@ class GuardedApplier(Applier):
             manifest,
             settings=self.settings_for(self.server_dir),
             arming=self.arming(),
-            world_running=self.world_running(),
+            # `is True`, not truthiness: the seam widened to three-valued in T7
+            # for the base's guard, which fails CLOSED on "could not ask". THIS
+            # guard's scope is checklist 2504's own — *while the world is UP* —
+            # and an unreadable inspect used to arrive here as `False` through
+            # `container_state().settled`. It still does, deliberately: 2504's
+            # behaviour is unchanged by T7, and widening it is not this lane's.
+            world_running=self.world_running() is True,
         )
 
     def install(
@@ -521,7 +535,8 @@ def guarded_applier(
     *,
     sql: SqlRunner | None,
     arming: Callable[[], Arming],
-    world_running: Callable[[], bool],
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> GuardedApplier:
@@ -533,6 +548,7 @@ def guarded_applier(
         client_dir=client_dir,
         arming=arming,
         world_running=world_running,
+        start_database=start_database,
     )
 
 

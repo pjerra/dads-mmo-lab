@@ -99,7 +99,8 @@ def applier(
     *,
     sql: SqlRunner | None,
     arming: Callable[[], Arming],
-    world_running: Callable[[], bool],
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> GuardedApplier:
@@ -119,6 +120,14 @@ def applier(
     construction time would be guarding a fact about the past. `read_arming()`
     is the real one; a caller with no running install passes something cheap.
 
+    `world_running` answers TWO guards on this game and one everywhere else,
+    which is why it is three-valued here since T7. `GuardedApplier`'s own check
+    is checklist 2504's (would this restart re-enter the fork's auto-updater?)
+    and the base's is 8.7a's (is a live world holding these tables?). They read
+    the same fact and must not be able to disagree about it, so one callable
+    goes to both — the subclass used to swallow the keyword, leaving 8.7a's
+    guard at `None` on this game as on the other three.
+
     No `dbc=`: `server_dbc` copies DBC files out of a clone, and nothing in
     `manifests/wow-tortoise/` clones anything.
     """
@@ -127,6 +136,7 @@ def applier(
         sql=sql,
         arming=arming,
         world_running=world_running,
+        start_database=start_database,
         git=git,
         client_dir=client_dir,
     )
@@ -139,7 +149,8 @@ def apply_module(
     *,
     sql: SqlRunner | None,
     arming: Callable[[], Arming],
-    world_running: Callable[[], bool],
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the Tortoise server at `server_dir`, guard first.
@@ -154,5 +165,6 @@ def apply_module(
         sql=sql,
         arming=arming,
         world_running=world_running,
+        start_database=start_database,
         client_dir=client_dir,
     ).install(manifest, values)

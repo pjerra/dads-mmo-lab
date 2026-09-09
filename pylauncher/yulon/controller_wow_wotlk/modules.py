@@ -187,6 +187,8 @@ def refresh(cache_root: Path, kind: ManifestType, http: HttpGet = urllib_get) ->
 def applier(
     server_dir: Path,
     *,
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     sql: SqlRunner | None = None,
     client_dir: Path | None = None,
@@ -198,11 +200,36 @@ def applier(
     Defaults to running direct SQL through the WotLK DB container
     (`docker_ctl.SPEC.db`); pass `sql=None` explicitly via a caller that has no
     database to get every SQL step reported as skipped instead.
+
+    `world_running` is REQUIRED, and that is the whole of T7 on this function.
+    It is checklist 8.7a's guard (`apply.py`, `_refuse_direct_sql_into_a_running
+    _world`), and the seam defaults to absent on `Applier` itself so the engine
+    keeps its old behaviour for a caller that has no Docker to ask. Every caller
+    HERE has one, and for a day none of them passed it: the guard shipped
+    returning at its first line, and T2's press recorded that this tab would
+    have written 7 219 rows into a live world without a word. A required keyword
+    is why that cannot recur quietly — a new caller does not compile, rather
+    than silently opting out. `docker.world_running()` is the real one; a caller
+    with no install passes something cheap.
+
+    `start_database` is optional because absent means the behaviour this route
+    had before T7 — the one T2 measured ending in `container ... is not
+    running`. Callers that can reach Docker pass `docker.start_database`, which
+    is what makes the refusal's own *"Press Stop, then install again"* a thing
+    that succeeds.
     """
     runner: SqlRunner | None = sql
     if runner is None:
         runner = DockerSql(docker_ctl.SPEC.db, db_root_password, client=docker_ctl.DB_CLIENT)
-    return Applier(server_dir, git=git, sql=runner, client_dir=client_dir, dbc=dbc)
+    return Applier(
+        server_dir,
+        git=git,
+        sql=runner,
+        client_dir=client_dir,
+        dbc=dbc,
+        world_running=world_running,
+        start_database=start_database,
+    )
 
 
 def module_updates(
@@ -243,6 +270,8 @@ def apply_module(
     server_dir: Path,
     values: Mapping[str, str] | None = None,
     *,
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the WotLK server at `server_dir` (the roadmap 2.3 entry point).
@@ -250,8 +279,18 @@ def apply_module(
     Returns the `ApplyReport`; the caller decides about the rebuild/restart it
     names (call down / signal up — this function never touches Docker's
     lifecycle itself).
+
+    `world_running` is required for `applier()`'s reason and passed straight
+    through: an entry point that answered the guard's question on its caller's
+    behalf would be the one construction site with no seam, which is the defect
+    T7 closed.
     """
-    return applier(server_dir, client_dir=client_dir).install(manifest, values)
+    return applier(
+        server_dir,
+        world_running=world_running,
+        start_database=start_database,
+        client_dir=client_dir,
+    ).install(manifest, values)
 
 
 def apply_module_sql(

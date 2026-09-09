@@ -1617,7 +1617,7 @@ def start_database(
     timeout: float = _DB_HEALTHY_TIMEOUT_SECONDS,
     because: str = "nothing was run",
     wsl_distro: str | None = None,
-) -> None:
+) -> bool:
     """Start this install's database alone and wait for it to report healthy.
 
     Shared by `repair_import()` and by the native install engine's `start-db`
@@ -1638,12 +1638,19 @@ def start_database(
     `because` completes the sentence a timeout raises with, so a repair and an
     install each say what was not done.
 
+    Returns:
+        True if it had to start the container, False if it was already up.
+        Added for `apply.Applier`'s `start_database` seam (T7): that caller puts
+        a line in the user's report, and a report that claims a start on every
+        ordinary install is worse than one that says nothing. The two older
+        callers ignore it.
+
     Raises:
         DockerCommandError: compose would not start it, or it never became
             healthy inside `timeout`.
     """
     if spec.db in set(status(wsl_distro=wsl_distro)):
-        return
+        return False
     # Started rather than demanded, because Stop takes the database down with
     # everything else — a user who followed the repair refusals would otherwise
     # have no way back to a state that action accepts.
@@ -1663,6 +1670,7 @@ def start_database(
             f"{spec.db} did not report healthy within {timeout:.0f}s, so {because}. "
             f"`docker compose logs {spec.service_for(spec.db)}` in {server_dir} will say why."
         )
+    return True
 
 
 ALLOWED_MODULES_VAR = "AC_UPDATES_ALLOWED_MODULES"
@@ -2526,6 +2534,34 @@ def container_state(container: str, *, wsl_distro: str | None = None) -> Contain
     fields = [part.strip() for part in proc.stdout.strip().split("\t")]
     status, started, count = (fields + ["", "", ""])[:3]
     return ContainerState(status, started, int(count) if count.isdigit() else 0)
+
+
+def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+    """Is this install's worldserver up? THREE-valued, and `None` is not "no".
+
+    The seam `apply.Applier`'s running-world guard asks (`apply.py`,
+    `_refuse_direct_sql_into_a_running_world`), written once here rather than
+    four times in four games' factories, because the mapping below is the whole
+    of it and four copies would drift.
+
+    Why not `container_state(...).settled`, which the tree already had at
+    `controller_view.py`'s My Party group: `container_state()` returns an EMPTY
+    `ContainerState` when Docker will not answer, and `.settled` turns that into
+    `False`. Through this guard `False` is fail-OPEN — "not running" is the one
+    answer that lets SQL into a live world's tables — so an unreadable inspect
+    is `None` here, which the guard refuses on. T2's press wrote this mapping by
+    hand for exactly that reason and left it as a note for whoever wired the
+    seam (`8.7a-direct-sql-yulon-ubuntu2-2026-09-09/README.md`, last section).
+
+    `restarting` counts as running, for the reason
+    `controller_wow_tortoise.autoupdate`'s own guard counts it: a container in
+    restart backoff is on its way back up, and its next start is the one that
+    would read these tables.
+    """
+    status_text = container_state(container, wsl_distro=wsl_distro).status
+    if not status_text:
+        return None
+    return status_text in ("running", "restarting")
 
 
 def started_at(container: str, *, wsl_distro: str | None = None) -> str:

@@ -50,7 +50,7 @@ Three things this binding does NOT do, each for the reason 8.7b gives:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from yulon import resources
@@ -106,6 +106,8 @@ def applier(
     server_dir: Path,
     *,
     sql: SqlRunner | None,
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     git: Git | None = None,
     client_dir: Path | None = None,
 ) -> Applier:
@@ -124,8 +126,24 @@ def applier(
 
     No `dbc=`: `server_dbc` copies DBC files out of a clone, and nothing in
     `manifests/wow-vanilla/` clones anything.
+
+    `world_running` is REQUIRED for the same reason `sql` is, and it is
+    checklist 8.7a's guard (`apply.py`,
+    `_refuse_direct_sql_into_a_running_world`): a fact about THIS install that
+    only the caller holds, which a default here would have to re-derive. This
+    family is on that guard's path — `all-stackables` ships three direct
+    `world` steps on install here and two on remove. `start_database` is
+    optional; absent means the behaviour this route had before T7, which on a
+    stopped stack is `container ... is not running` (`bug-checklist §46`).
     """
-    return Applier(server_dir, git=git, sql=sql, client_dir=client_dir)
+    return Applier(
+        server_dir,
+        git=git,
+        sql=sql,
+        client_dir=client_dir,
+        world_running=world_running,
+        start_database=start_database,
+    )
 
 
 def apply_module(
@@ -134,6 +152,8 @@ def apply_module(
     values: Mapping[str, str] | None = None,
     *,
     sql: SqlRunner | None,
+    world_running: Callable[[], bool | None],
+    start_database: Callable[[], bool] | None = None,
     client_dir: Path | None = None,
 ) -> ApplyReport:
     """Install `manifest` into the Vanilla server at `server_dir`.
@@ -142,5 +162,14 @@ def apply_module(
     (call down / signal up — this function never touches Docker's lifecycle
     itself). Every manifest here declares `build.restart`, because mangosd reads
     `etc/*.conf` and loads the world database once, at startup.
+
+    `world_running` is required for `applier()`'s reason and passed straight
+    through, rather than answered here on the caller's behalf (T7).
     """
-    return applier(server_dir, sql=sql, client_dir=client_dir).install(manifest, values)
+    return applier(
+        server_dir,
+        sql=sql,
+        world_running=world_running,
+        start_database=start_database,
+        client_dir=client_dir,
+    ).install(manifest, values)

@@ -918,8 +918,31 @@ def _for_wotlk(
     )
     # One applier for the Modules tab, named here so the custom-module seam
     # below is built over the SAME object the shipped route installs with.
+    #
+    # 8.7a, and the two seams that make its guard a defence rather than a
+    # capability (T7). `world_running` is `docker.world_running()`, not My
+    # Party's `container_state(...).settled` below: that property answers
+    # `False` when Docker will not say, and through this guard `False` is
+    # fail-OPEN — the one answer that lets SQL into a live world's tables. Both
+    # are lambdas because the answer changes between the moment this tab is
+    # built and the moment somebody presses Install.
+    #
+    # `start_database` is what makes the refusal's own sentence — *"Press Stop,
+    # then install again"* — a thing that succeeds. The app's Stop takes the
+    # database down with the world, so before T7 the retry died on
+    # `container ... is not running` (T2's press, 2026-09-09). The world is
+    # never started here: only the database, alone, which is the state the
+    # guard permits.
     module_applier = (
-        wotlk_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+        wotlk_modules.applier(
+            server_dir,
+            sql=sql,
+            client_dir=client_dir,
+            world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+            start_database=lambda: docker.start_database(
+                spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+            ),
+        )
         if entry.has_manifests
         else None
     )
@@ -1191,8 +1214,21 @@ def _for_tbc(
         # WotLK sibling can default its own runner because that game's password
         # is a fixed catalog value; re-deriving one here is the closed bug
         # `_db_password()` describes.
+        # The two 8.7a seams are wired here for the reason they are on WotLK
+        # (T7), and this family needs them at least as much: `all-stackables`
+        # ships three direct `world` steps on install and two on remove here,
+        # and `bug-checklist §46` — no compliant way to install a SQL mod at
+        # all — was filed against CMaNGOS before it was measured elsewhere.
         applier=(
-            tbc_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+            tbc_modules.applier(
+                server_dir,
+                sql=sql,
+                client_dir=client_dir,
+                world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+                start_database=lambda: docker.start_database(
+                    spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+            )
             if entry.has_manifests
             else None
         ),
@@ -1342,8 +1378,18 @@ def _for_vanilla(
         # `cross-faction` is ten keys here, because mangos-classic has
         # `AllowTwoSide.Interaction.Trade` and mangos-tbc does not.
         store=vanilla_modules.store() if entry.has_manifests else None,
+        # The same two 8.7a seams as TBC and for the same reasons (T7), over
+        # this tree's own containers.
         applier=(
-            vanilla_modules.applier(server_dir, sql=sql, client_dir=client_dir)
+            vanilla_modules.applier(
+                server_dir,
+                sql=sql,
+                client_dir=client_dir,
+                world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+                start_database=lambda: docker.start_database(
+                    spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
+            )
             if entry.has_manifests
             else None
         ),
@@ -1466,13 +1512,20 @@ def _for_tortoise(
                     sql=sql,
                     wsl_distro=wsl_distro,
                 ),
-                # `status == "running"` and not `settled`: a container that is
-                # RESTARTING is on its way back up and its next start is exactly
-                # the one the guard is about.
-                world_running=lambda: docker.container_state(
-                    spec.world, wsl_distro=wsl_distro
-                ).status
-                in ("running", "restarting"),
+                # `docker.world_running()` since T7, which is this expression
+                # with one difference: an unreadable inspect is `None` rather
+                # than `False`. It answers TWO guards on this game — 2504's
+                # updater check on the subclass and 8.7a's direct-SQL check on
+                # the base — so they cannot disagree about the world. 2504's
+                # behaviour is unchanged: `GuardedApplier._guard()` narrows it
+                # back with `is True`, which is what `settled` used to give it.
+                # `status == "running"` alone was never enough either: a
+                # container that is RESTARTING is on its way back up and its
+                # next start is exactly the one the guard is about.
+                world_running=lambda: docker.world_running(spec.world, wsl_distro=wsl_distro),
+                start_database=lambda: docker.start_database(
+                    spec, server_dir, because="no SQL was run", wsl_distro=wsl_distro
+                ),
             )
             if entry.has_manifests
             else None

@@ -1025,6 +1025,7 @@ class Applier:
         no_local_commits: Callable[[Path, str | None], bool | None] | None = None,
         server_dir_claim: Callable[[Path], Ownership] | None = None,
         world_running: Callable[[], bool | None] | None = None,
+        start_database: Callable[[], bool] | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.git: Git = git if git is not None else RunnerGit()
@@ -1047,6 +1048,25 @@ class Applier:
         # page saying so. That subclass is nonetheless the one caller in the
         # tree that ALREADY holds the fact this guard needs.
         self._world_running = world_running
+        # "Put this install's database back, alone." The other half of the
+        # refusal above, and a seam for the same reason: the primitive is
+        # `docker.start_database()` and this module never touches Docker.
+        #
+        # It exists because the refusal's own instruction could not be followed.
+        # T2 pressed *"Press Stop, then install again"* through the app's own
+        # Stop on 2026-09-09 and the retry died on `container ... is not
+        # running`: `stop_staged()` takes the database down with the world, and
+        # `DockerSql` is a `docker exec` into a container that is no longer
+        # there. `docker.start_database()` put it back alone in 6.6 s with the
+        # world still down, which is exactly the state the guard permits. So the
+        # route was missing a caller, not a primitive
+        # (`8.7a-direct-sql-yulon-ubuntu2-2026-09-09/README.md`, *The dead end*).
+        #
+        # Returns whether it HAD to start it, so the report can say so only when
+        # something happened: a `done` line for a start that did not take place
+        # is `PendingSql`'s closed bug wearing a different hat. Absent means the
+        # behaviour every caller had before this landed, byte for byte.
+        self._start_database = start_database
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -1856,6 +1876,11 @@ class Applier:
         self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When, log: _Log
     ) -> None:
         self._refuse_direct_sql_into_a_running_world(manifest, when)
+        # Second, and never first: a press against a live world is refused above
+        # having started nothing. Starting containers under a world this guard
+        # is about to refuse would undo the guard's own advice on a stack the
+        # user had Stopped.
+        self._start_the_database_for_direct_sql(manifest, when, log)
         for step in manifest.sql:
             if step.when != when:
                 continue
@@ -1916,10 +1941,16 @@ class Applier:
           refused one does not run either.** Half a manifest is not an outcome
           anyone asked for, and the `auth` write survives the refusal being
           lifted (a second press re-runs it).
-        * **The seam absent means today's behaviour, byte for byte**
-          (`c-operators-risk.md:345`). No shipped caller passes `world_running`
-          yet, so this guard protects nobody until one does; that wiring is a
-          later lane's, and until then this is a capability, not a defence.
+        * **The seam absent means the behaviour every caller had before this
+          landed, byte for byte** (`c-operators-risk.md:345`). It shipped that
+          way: for one day no caller passed `world_running` at all, so
+          `_world_running` was `None` on all four games and this function
+          returned at its first line — a capability, not a defence. T2's press
+          had to attach the seam itself, and recorded that the Modules tab as it
+          then shipped would have written 7 219 rows into a live world without a
+          word. Every factory the app builds an `Applier` through passes it now
+          (T7), and `test_apply.py` enumerates them so the next one added is
+          caught rather than discovered.
 
         Fails closed on anything short of a clear "no": `None` and a seam that
         raises are both refusals, because *could not ask* is not *not running* —
@@ -1964,6 +1995,55 @@ class Applier:
             f"{steps}. Press Stop, then {when} again — the steps this run already took repeat, "
             f"and the SQL follows them."
         )
+
+    def _start_the_database_for_direct_sql(self, manifest: Manifest, when: When, log: _Log) -> None:
+        """Make *"Press Stop, then install again"* a thing that can be done.
+
+        The guard above tells a user to stop the server. The app's Stop is
+        `docker.stop_staged()`, which takes the whole compose project down —
+        database included — and every direct SQL step in this engine is a
+        `docker exec` into that container. So the instruction ended in
+        `Error response from daemon: container 3c922e8e... is not running`,
+        measured through the app's own controls (T2, `4-press-world-stopped.log`).
+        That is `bug-checklist §46` — *"there is no compliant way to install a
+        SQL mod at all"* — whose title scopes it to CMaNGOS and whose mechanism
+        is shared, so it was AzerothCore's too.
+
+        Three decisions:
+
+        * **The world is not started, ever.** Only the database, alone, which is
+          the "world down, database up" state §46 says the app had no way to
+          reach. Starting the world would put back the very thing the refusal
+          above exists to keep away from these tables.
+        * **Every `direct` step counts, not only the `WORLD_HELD_DBS` ones.**
+          The guard's set is about what a running worldserver holds in memory;
+          this is about whether there is a database process to talk to at all,
+          and an `auth`-only mod fails the same way on a stopped stack. The
+          `when` filter is kept, so a configure over a manifest whose SQL is all
+          install-time reaches for nothing.
+        * **A failure to start is a refusal, carrying the daemon's own
+          sentence.** `docker.start_database()` names the container, the timeout
+          and where the logs are; nothing here knows better, and a paraphrase
+          would send the operator looking in the wrong place. Nothing has run
+          when this raises, for the same reason the guard is a pre-pass.
+        """
+        if self._start_database is None or self.sql is None:
+            return
+        direct = [
+            step for step in manifest.sql if step.when == when and step.applied_by == "direct"
+        ]
+        if not direct:
+            return
+        try:
+            started = self._start_database()
+        except Exception as exc:  # noqa: BLE001 - any failure to start is one answer here
+            steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in direct)
+            raise ApplyError(
+                f"{manifest.id}: the database could not be started, so no SQL was run and no "
+                f"rows were written: {steps}. {exc}"
+            ) from exc
+        if started:
+            log.done.append("started the database alone; the world server was left stopped")
 
     def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:
         """Resolve a deferred step's glob so the count reported is a real one.

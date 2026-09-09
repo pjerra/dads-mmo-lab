@@ -619,3 +619,91 @@ def test_a_folder_and_a_completer_handed_to_the_guarded_applier_reach_the_engine
     with pytest.raises(autoupdate.AutoUpdateRefused):
         applier.install(manifest, folder=FolderSource(source, copier), complete=complete)
     assert copied == [(source, clone)], "the refusal must come before the seam is asked"
+
+
+# ------------------- one world reading, two guards, and neither may be asleep (T7)
+
+
+_WORLD_SQL_MOD: dict[str, object] = {
+    "schema_version": 1,
+    "id": "world-sql",
+    "name": "World SQL",
+    "type": "mod",
+    "game": GAME,
+    "build": {"rebuild": False, "restart": True},
+    "sql": [{"db": "world", "statement": "UPDATE item_template SET stackable = 200"}],
+}
+
+
+def test_the_subclass_hands_the_world_reading_to_the_engines_guard_as_well(
+    tmp_path: Path,
+) -> None:
+    """The defect T2's reviewer found, and the reason it was invisible.
+
+    `Applier` keeps its running-world seam PRIVATE (`_world_running`) precisely
+    so this subclass's public `world_running` -- which predates it and answers a
+    different guard -- could not wire 8.7a live on this game alone. The cost was
+    that `GuardedApplier.__init__` swallowed the keyword into its own attribute
+    and passed nothing down, so 8.7a's guard sat at `None` here exactly as on
+    the other three games, while 2504's guard beside it worked.
+
+    The updater is DISARMED and the item is otherwise installable, so 2504's
+    check permits and anything that refuses here is the engine's own guard.
+    Both guards read the seam once, which is what pins them to ONE reading: a
+    second, separately-wired reader would let this fork's two guards disagree
+    about whether the world is up.
+
+    Catches `world_running=world_running` dropped from the `super().__init__`
+    call -- the whole of the bug -- and a second seam wired in beside it.
+    """
+    server_dir = _server_dir_with_conf(tmp_path)
+    sql = _RecordingSql()
+    asked: list[int] = []
+
+    def world_running() -> bool:
+        asked.append(1)
+        return True
+
+    applier = tortoise_modules.applier(
+        server_dir, sql=sql, arming=lambda: _disarmed(), world_running=world_running
+    )
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(_WORLD_SQL_MOD))
+
+    assert "the world server is running" in str(caught.value)
+    assert sql.statements == [] and sql.files == []
+    assert len(asked) == 2, "one reading, asked once by each guard"
+
+
+def test_a_world_that_cannot_be_read_refuses_here_and_still_permits_the_updater_check(
+    tmp_path: Path,
+) -> None:
+    """`None` reaches this game too, and the two guards answer it differently ON PURPOSE.
+
+    8.7a fails CLOSED: *could not ask* is not *not running*, because `False` is
+    the answer that lets SQL into a live world's tables. Checklist 2504's scope
+    is *while the world is UP*, and an unreadable inspect used to arrive there
+    as `False` through `container_state(...).settled`; `_guard()` narrows the
+    widened seam back with `is True` so that behaviour is unchanged by T7.
+
+    Catches the narrowing dropped (2504 would start refusing installs on a host
+    whose Docker will not answer, which is not its clause) and the engine's
+    `None` branch softened to a permit.
+    """
+    server_dir = _server_dir_with_conf(tmp_path)
+    sql = _RecordingSql()
+    armed = autoupdate.Arming(
+        enabled=True, outstanding={"auth": (), "characters": (), "world": ("2026_a.sql",)}
+    )
+    applier = tortoise_modules.applier(
+        server_dir, sql=sql, arming=lambda: armed, world_running=lambda: None
+    )
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(_WORLD_SQL_MOD))
+
+    message = str(caught.value)
+    assert "could not tell whether the world server is running" in message
+    assert "auto-update" not in message.lower(), "2504 reads an unreadable world as down"
+    assert sql.statements == [] and sql.files == []

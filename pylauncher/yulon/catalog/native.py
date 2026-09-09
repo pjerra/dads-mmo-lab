@@ -1375,7 +1375,12 @@ class Seams:
     verify_import: Callable[..., docker.ImportState] = docker.verify_import
     container_exists: Callable[[str], bool] = docker.container_exists
     container_project: Callable[[str], str | None] = docker.container_project
-    start_db: Callable[[docker.ContainerSpec, Path], None] = docker.start_database
+    # `object` rather than `None`: `start_database()` has said since T7 whether
+    # it HAD to start the container, for `apply.Applier`'s report line. This
+    # stage ignores that -- it wants the database up, and it is up either way --
+    # and the annotation says "whatever it answers" rather than pinning a
+    # return this seam's own fakes do not have to produce.
+    start_db: Callable[[docker.ContainerSpec, Path], object] = docker.start_database
     start: Callable[[docker.ContainerSpec, Path], bool] = docker.start_staged
     recreate: Callable[[docker.ContainerSpec, Path], bool] = docker.recreate_staged
     """`start` with `--force-recreate`, and the rebuild's only reason to exist as a seam.
