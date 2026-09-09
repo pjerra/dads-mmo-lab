@@ -8,10 +8,10 @@ gets the same rule and the same first-line test.
 
 Three answers, not two. "May we overwrite this?" has a third one — *we could not tell* —
 and `composegen.is_ours()` folds it into "no", which the caller then reports as "that
-file was not written by Yu'lon. Point the install at an empty folder, or move that file
-aside." Said about a file nobody could open, that is an accusation the evidence does not
-support and a remedy that does not fix a permission problem. `_look()` keeps the three
-apart and reports what the OS actually said.
+file was not written by Yu'lon. Move that file aside and press again, or point a new
+install at an empty folder." Said about a file nobody could open, that is an accusation
+the evidence does not support and a remedy that does not fix a permission problem.
+`_look()` keeps the three apart and reports what the OS actually said.
 
 The marker constant, the first-line test and `fill()` all still come from `composegen`:
 one mechanism, one spelling. What this module adds is the third answer and a single
@@ -629,14 +629,14 @@ def write(server_dir: Path, dockerfile: str, dockerignore: str) -> tuple[Path, .
         verdict, existing, error = _look(path)
         if verdict is _Verdict.THEIRS:
             raise DockerfileError(
-                f"{path} was not written by Yu'lon, so it was not touched and nothing was "
-                "installed. Point the install at an empty folder, or move that file aside."
+                f"{path} was not written by Yu'lon, so it was not touched. Move that file "
+                "aside and press again, or point a new install at an empty folder."
             )
         if verdict is _Verdict.UNREADABLE:
             raise DockerfileError(
                 f"{path} could not be read ({error}), so whether Yu'lon wrote it is unknown "
-                "— that is not a pass. Nothing was touched and nothing was installed. Make "
-                "that file readable, or move it aside."
+                "— that is not a pass. Nothing was touched. Make that file readable, or "
+                "move it aside."
             )
         on_disk.append((path, text, existing))
     written: list[Path] = []
