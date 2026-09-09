@@ -1,0 +1,26 @@
+# T13 — `dml_uninvite` removes a bot only from the party of the master that asked
+
+**Status:** OPEN
+**Filed:** 2026-09-09 17:05 by the lead (Fable), from T5's round-3 Codex review
+**Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
+**File set (yours alone):** the bridge script `dml_uninvite.lua` where the app ships it (find it: `git grep -l dml_uninvite -- '*.lua'`; the deploy list in `pylauncher/yulon/party.py` names the five), `pylauncher/yulon/party.py` **only** at `uninvite_command()` and the seam sentence for a refusal (T5's round-3 `remove_all` and its tests are merged and must keep passing), `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-uninvite-contract-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not `controller_view.py`, not `pyplan/checklist.md`.
+**Box:** `yulon-ubuntu2` for the live half — only on the lead's word; the box is queued (T3's round 3, then T5's live half, then T7's).
+
+## The window (T5, Codex round 3; the Fable reviewer's note 4 names the same interval)
+
+`InstallParty.remove_all(master, confirmed)` re-reads the group table and refuses unless the fresh guid set equals what the person confirmed. Then it sends `dml_uninvite <player> <bot>` per bot by **name**. `dml_uninvite.lua` resolves the bot's name at execution and calls `RemoveFromGroup()` on whichever group the bot occupies **then**. A confirmed bot that leaves and joins another master's party between the seam's read and the whisper is removed from a group nobody confirmed. The interval is one SQL read to one whisper; the bot manager's own timers move bots on their own schedule, so the window is real and narrow, and no further read in Python narrows it to zero — only the server can check at the moment it acts.
+
+## What to build
+
+- **The Lua verifies the master at execution**: it already receives the player's name; before `RemoveFromGroup()` it checks the bot's current group is the group that player is in (or led by that player — read how the fork's playerbots resolve the master; `dml_addclass.lua` and `dml_whisper.lua` show the idioms this bridge uses) and answers with a sentence the seam can recognise when it is not (`… is not in <player>'s party now`). Keep the success reply the seam already parses (`party.py`'s `dismiss()` reads it — read that first).
+- **The seam recognises the new refusal** as `Dismissal(..., left=False, sentence)` naming the bot and the party it is in now, so `_mass_sentence` reports it beside the ones that went.
+- TDD on the Python side (the reply parsed into the right `Dismissal`; a mutation that treats the new sentence as success is caught). The Lua cannot be unit-tested here: its proof is the live half.
+- **Live half** (later): with two bots in your own character's party and a second character of your own in the world, move one bot into the second character's party by hand (the console can invite it, or `dml_addclass` as the second master) between the seam's read and the whisper is not stageable — so prove the contract directly: whisper `dml_uninvite <first> <bot>` for a bot that is in the **second** master's party and show it stays, with the refusal in the world log; then the honest case, and show it goes. Frames and the world's own log lines, the process alive at each capture; the owner's things untouched; realm row and authserver as every ticket before.
+
+## Definition of done
+
+Code half: `--checks` ALL GREEN (announce on `yulon-fedora` first); the parsing test fails first. Live half: the two whispers above with their log lines. One commit per half, `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch files under `<scratchpad>/T13/`.
+
+## Report format (final message)
+
+`## Report` — sha, gate last line, diff stat, the Lua check as written (quoted), the refusal sentence, the tests and their mutations, deviations, status DONE (code half).
