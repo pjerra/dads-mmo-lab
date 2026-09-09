@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** REWORK, live half (rejected by the lead 2026-09-09 13:42 CEST, live round 1) -- a cited session log is not in the commit; code half merged `e593d3d0`
+**Status:** ACCEPT, live half (lead's own read of round 2, 2026-09-09 13:52 CEST) -- merging; code half merged `e593d3d0`
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -134,3 +134,13 @@ Notes: the race is a supported inference (early fails x3, late holds x2), not a 
 1. The session capture for everything before 13:16 into the folder (the `ground`/`sql`/`send` outputs and console lines, password masked, `test_no_secrets_in_evidence.py` green first), or each uncaptured row marked "asserted, not captured" in the README's tables -- step 4 in particular: if its capture exists, it goes in; if not, the "did NOT take" sentence in `party.py` must rest on what IS captured (three early presses 42/42/55 rows 1; two late ones held) and say so.
 2. `README.md:162` -> line 28; `:107` -> 13:18:42; the Jagyl/55 press added to the table.
 No box access needed; do not touch ubuntu2 (T7 holds it). Add a commit; gate; report in the same format.
+
+## Report, live half round 2 (hand, 2026-09-09 13:52 CEST)
+
+- New commit `4f366740` on `2c097773`; gate ALL GREEN (3873); 3 files +169/-146; ubuntu2 not touched.
+- The missing evidence marked, not manufactured: the README carries a capture column (captured / asserted); every console reading that was never written down is marked asserted, the folder says the absence of a console capture is its biggest gap. The pid came from `pgrep -f worldserver` over ssh, not from `liveness()`. **Step 4 has no capture, so the app no longer stands on it**: `_level_note` dropped "did NOT take" and the timing claim; it now says "The server accepted the level and characters.level still reads {after}, not {level}. On this tree that row has been seen to stay unwritten for as long as this panel watched it, so take the level as not set until the row says otherwise." -- resting on `panel-8`, `panel-9` + `panel-transcript.log:61-130` (68 s), and the 42/37 readings; the docstring enumerates what it does not assert.
+- Citations: `client-agent.log:28`; 13:18:42; the Jagyl/55 press its own row (13:17:34); a fourth error found and fixed (the press time and 69 -> 68 s). The first dismiss-all round is captured after all (`panel-4/5/6` with their GNOME clocks).
+
+## Lead's read and merge (2026-09-09 13:52 CEST)
+
+Round 2 was evidence-only; under the budget rule the lead read the diff instead of spawning a reviewer: the `party.py` sentence rests on captured frames only and enumerates what it does not assert; the README's capture column marks every uncaptured row; the citations resolve. Merged; the 8.6 record on the checklist written by the lead in the same commit series.
