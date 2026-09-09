@@ -14,6 +14,7 @@ The gate that found them (7.6, `yulon-ubuntu`) is written up in
 from __future__ import annotations
 
 import re
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -489,3 +490,215 @@ def test_both_boot_patterns_are_read_as_regular_expressions_not_literal_text() -
         "read literally the fatal pattern misses the failure it exists for, and the install "
         "spends its whole ready budget before saying so"
     )
+
+
+# --- the fork's own `sql/character_updates/`, which nothing on this tree applies ------
+
+
+CHARACTER_UPDATES = "src/tortoise-wow/sql/character_updates/*.sql"
+"""The directory, spelled as the phase globs it.
+
+Listed read-only on `m910q` 2026-09-09 at
+`~/tortoise-server/src/tortoise-wow/sql/character_updates/`; it ships three files.
+"""
+
+THE_THREE_FILES = (
+    "20260708055500_ai_playerbot_random_bots_index.sql",
+    "20260731160000_guild_bank_money_unsigned.sql",
+    "20260812142512_character_inventory_copy.sql",
+)
+"""Every file in that directory on 2026-09-09, in the order the fork's own timestamps put
+them in. Named rather than globbed because the ORDER is what is being asserted."""
+
+
+def _sql_plan():
+    native = _native()
+    assert native.cmangos is not None
+    return native.cmangos.sql
+
+
+def _phase_names() -> list[str]:
+    return [phase.name for phase in _sql_plan().phases]
+
+
+def test_the_forks_own_character_updates_are_applied_into_the_characters_database() -> None:
+    """Nothing on this tree applies `sql/character_updates/`, and a world dies without it.
+
+    Two measurements, a week apart, of one missing phase:
+
+    * **A fresh install crash-loops immediately.** `yulon-arch`, 2026-09-08: the
+      world crash-looped on character migration `20260903211500` until these
+      files were applied into `tw_char` by hand
+      (`pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/README.md`).
+    * **An established install crash-loops on a date.** `m910q`, 2026-09-09
+      01:09Z: 903 characters, serving gates for weeks, dead on
+      `TRUNCATE character_inventory_copy` the first morning honor maintenance
+      fell due -- `saved_variables.nextHonorMaintenanceDay` 20705 was that day
+      (`pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1). That
+      table is created by `20260812142512_character_inventory_copy.sql` and by
+      nothing else under `sql/`. The fresh-install reading alone understates
+      this: every install that has never had these applied is one
+      honor-maintenance day from being unstartable, and the day is weekly.
+
+    **Two separate things on this tree apply SQL and neither reads this
+    directory.** `Database.AutoUpdate.Path` points the core's own updater at
+    `sql/database_updates/`, whose only children are `character` and `world`
+    (read on `m910q`, 2026-09-09) -- a different directory. The fork's own
+    `sql/setup_databases.sh` imports `create_databases.sql` and then
+    `database_updates/*.sql`, and that top level holds no `.sql` at all. So the
+    pinned-path test above is not a substitute for this one: both paths can be
+    right at the same time and this directory still be applied by nobody.
+
+    `into` is asserted because the phase name does not say it, and all three
+    files edit `tw_char` tables. The world half of the same family of problems
+    is the image template's `INSERT IGNORE` rewrite (`3a1ed6ee`), not this.
+    """
+    phases = {phase.name: phase for phase in _sql_plan().phases}
+    assert "character updates" in phases, (
+        "wow-tortoise has no phase for `sql/character_updates/`; a fresh install of this "
+        "fork does not come up, and an established one dies on its first honor-maintenance "
+        f"day. The plan's phases are {_phase_names()}"
+    )
+    phase = phases["character updates"]
+    assert phase.into == "tw_char", (
+        "all three files edit characters-database tables (`ai_playerbot_random_bots`, "
+        "`guild_bank_money`, `character_inventory`); a phase loading into "
+        f"{phase.into!r} applies them and leaves `tw_char` exactly as broken"
+    )
+    assert CHARACTER_UPDATES in (phase.files or ()), (
+        "the fork's directory is `sql/character_updates/`; `sql/database_updates/character/` "
+        "is the OTHER one, the one its own updater already reads. The phase globs "
+        f"{list(phase.files or ())}"
+    )
+    keys = _native().cmangos.conf.files["mangosd.conf"].keys  # type: ignore[union-attr]
+    updater = keys["Database.AutoUpdate.Path"].strip('"').rstrip("/")
+    assert not updater.endswith("character_updates"), (
+        "were the updater pointed here it would apply these itself; it is pointed at "
+        f"{updater!r}, which is the whole reason this phase exists"
+    )
+
+
+def test_the_character_updates_phase_runs_after_the_phases_that_make_its_tables() -> None:
+    """Order, read off the files' contents and not off their timestamps.
+
+    Each of the three ALTERs or copies a table something EARLIER creates, and
+    the two creators are two different phases (both read on `m910q`, 2026-09-09):
+
+    * `20260708055500_ai_playerbot_random_bots_index.sql` indexes
+      `ai_playerbot_random_bots`. `create_databases.sql` does not contain that
+      table; `modules/mod-playerbots/sql/characters/ai_playerbot_random_bots.sql`
+      does -- the `playerbots characters` phase.
+    * `20260731160000_guild_bank_money_unsigned.sql` and
+      `20260812142512_character_inventory_copy.sql` need `guild_bank_money` and
+      `character_inventory`, both `CREATE TABLE`s inside `create_databases.sql`
+      (its lines 1455 and 573) -- the `schemas` phase.
+
+    So it belongs after BOTH, and after the one whose file is named in the
+    evidence is not enough: placed after `schemas` alone, the index file fails
+    on a table that does not exist yet and `on_error: fail` stops the install.
+    """
+    order = _phase_names()
+    assert "character updates" in order, f"there is no such phase to order; the plan is {order}"
+    for earlier in ("schemas", "playerbots characters"):
+        assert earlier in order, f"the phase this order is measured against is gone: {earlier}"
+        assert order.index("character updates") > order.index(earlier), (
+            f"`character updates` runs before `{earlier}`, which creates a table it edits; "
+            f"the order is {order}"
+        )
+
+
+def test_the_three_files_are_applied_in_name_order_after_the_bots_own_table(
+    tmp_path: Path,
+) -> None:
+    """The order the import will really use, not the order the catalog was written in.
+
+    `sqlplan.expand()` is the seam that turns this plan into an ordered list of
+    runs, so the plan is expanded over a tree carrying the three real filenames
+    (dropped in reverse, so a listing that did not sort would be caught) and the
+    runs are read back. Two things are asserted about them and neither is
+    visible in the JSON: that the three arrive in their timestamp order, and
+    that the whole group arrives after the module file that creates
+    `ai_playerbot_random_bots`.
+
+    Every other directory the plan globs is created from the plan's own patterns
+    rather than from a list written here, so a phase added later cannot make
+    this test lie by failing its `fail` glob. The one file in this directory
+    that is not `.sql` is there because a phase that streamed a README at the
+    database would also pass an assertion about the three.
+    """
+    from yulon.catalog.families import sqlplan
+
+    entry = load_catalog().get(TORTOISE)
+    plan = _sql_plan()
+    schemas = {
+        name: name
+        for name in (
+            entry.databases.auth,
+            entry.databases.characters,
+            entry.databases.world,
+            *entry.databases.extra,
+        )
+    }
+    tokens = {
+        "DB_USER": "mangos",
+        "DB_PASSWORD": "not-a-real-password",
+        "WORLD_DB": entry.databases.world,
+        "CHAR_DB": entry.databases.characters,
+        "AUTH_DB": entry.databases.auth,
+        "LOGS_DB": entry.databases.extra[0],
+        "REALM_HOST": "127.0.0.1",
+        "WORLD_PORT": "8085",
+        "CLIENT_BUILD": str(entry.client.build),
+    }
+    for phase in plan.phases:
+        for pattern in phase.files or ():
+            if pattern == CHARACTER_UPDATES:
+                continue
+            directory = tmp_path / PurePosixPath(pattern).parent
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / PurePosixPath(pattern).name.replace("*", "aaa")).write_text("--\n")
+    bots = tmp_path / "src/tortoise-wow/modules/mod-playerbots/sql/characters"
+    bots.mkdir(parents=True, exist_ok=True)
+    (bots / "ai_playerbot_random_bots.sql").write_text("--\n")
+    updates = tmp_path / PurePosixPath(CHARACTER_UPDATES).parent
+    updates.mkdir(parents=True, exist_ok=True)
+    for name in reversed(THE_THREE_FILES):
+        (updates / name).write_text("--\n")
+    (updates / "README.md").write_text("not SQL\n")
+
+    runs = sqlplan.expand(plan, tmp_path, schemas, tokens)
+    applied = [run.rel for run in runs]
+    mine = [
+        run for run in runs if run.path is not None and run.path.parent.name == "character_updates"
+    ]
+    assert [run.path.name for run in mine] == list(THE_THREE_FILES), (  # type: ignore[union-attr]
+        "the fork names these by timestamp, so name order IS the order it wrote them in; "
+        f"the import would apply {[run.rel for run in mine]}"
+    )
+    assert {run.schema for run in mine} == {
+        entry.databases.characters
+    }, f"the files are streamed into {[run.schema for run in mine]}, not the characters db"
+    creator = "modules/mod-playerbots/sql/characters/ai_playerbot_random_bots.sql"
+    made = [index for index, rel in enumerate(applied) if rel.endswith(creator)]
+    assert made, f"the module file that creates the bots' table was not applied at all: {applied}"
+    assert applied.index(mine[0].rel) > made[0], (
+        "the first character update indexes `ai_playerbot_random_bots`, and the import "
+        f"reaches it before the file that creates that table; the order is {applied}"
+    )
+
+
+def test_the_phase_records_why_this_directory_is_the_apps_job() -> None:
+    """The per-tree fact travels with the phase, because the next reader will ask.
+
+    A phase that applies a directory the tree's own updater ignores looks
+    redundant next to `Database.AutoUpdate.Path`, and a reader who deletes it
+    gets a world that boots for a week. Both dates are here because they are two
+    different claims -- a fresh install and an established one -- and the
+    weekly one is the one that is easy to lose.
+    """
+    phases = {phase.name: phase for phase in _sql_plan().phases}
+    assert "character updates" in phases, f"there is no such phase; the plan is {_phase_names()}"
+    notes = " ".join(phases["character updates"].notes)
+    assert notes, "the phase carries no note saying why the app applies what the updater will not"
+    for fact in ("character_updates", "2026-09-08", "2026-09-09"):
+        assert fact in notes, f"the phase's notes do not mention {fact!r}: {notes!r}"
