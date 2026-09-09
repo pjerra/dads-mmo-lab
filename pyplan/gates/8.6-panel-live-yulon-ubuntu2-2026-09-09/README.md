@@ -71,3 +71,32 @@ client seat and locked him out of his own server for an hour, and that is now a 
   does not exist."* It does: `pylauncher/yulon/ui/widgets/party_panel.py`, wired at
   `controller_view.py::_build_my_party_group`. The historical page is left as it was written; this
   paragraph is the correction, and a tick citing that folder should cite this one beside it.
+* **`part-2-party.md:3` is wrong about the VM's clock (added 2026-09-09).** That page reads *"the VM's
+  clock is UTC"*. Measured read-only on the box by the lead at 10:34 local on 2026-09-09: `date`
+  answered `CEST`, `timedatectl` answered `Europe/Oslo (+0200)`, and `docker exec ac-worldserver date`
+  answered `UTC`. So the VM's shell runs **+0200** and the `ac-worldserver` container — the one
+  container that was asked — runs **UTC**; no other container's clock was measured. What that
+  settles is the `…Z` stamps on the **`yulon-ubuntu2`** pages that come from Docker itself:
+  `8.6-wotlk-yulon-ubuntu2-2026-09-09/part-2-party.md:26` (`worldserver running
+  started=2026-09-08T21:15:35Z`) and `part-2-bridge-absent.md:29` and `:33` (the same run, and
+  `2026-09-08T22:24:14Z` after the restart) are container readings, two hours behind the shell that
+  took them. It settles nothing about `8.6-wotlk-yulon-ubuntu-2026-09-08/`, whose `Z` stamps are the
+  gate script's own banners (`1-ground.txt:1`, `4-console.txt:1-2`, `README.md:3`) on the original
+  `yulon-ubuntu`, a box whose clock was never measured and which has been OffCritical since its host
+  disk left the bus on 2026-09-08.
+  `pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md:9` had already written the same offset
+  from the other side (*"22:56–23:02 UTC (00:56–01:02 VM local)"*), and the measurement itself is
+  recorded in `pyplan/tickets/T1-tick-8.6.md:125`. What it means for this folder: the bare
+  `[HH:MM:SS]` stamps in `panel-transitions.log`, `panel-transcript.log` and `panel-transcript-2.log`
+  carry no zone, and the panel ran on the VM's desktop, so they are VM-local +0200; `client-agent.log`
+  was written on the Hyper-V host, a third clock this paragraph did not measure (`part-2-party.md:3`
+  calls it PST), so those two files must not be read against each other without converting. The
+  historical page is left as it was written.
+* **No commit sha for the code that was pressed (added 2026-09-09).** The lane was cut off before it
+  wrote one down, and nothing in this folder names a tree. The nearest commit is **`daeae0a5`**
+  (*"The prior-art citations in the panel, read rather than remembered"*, 2026-09-09 03:38:23 +0200):
+  the last commit before the 06:00 press to touch either surface file, and nothing has touched them
+  since — `git log --oneline daeae0a5..528f219e -- pylauncher/yulon/ui/widgets/party_panel.py
+  pylauncher/yulon/ui/controller_view.py` prints nothing, across the 39 commits in that range. That is
+  a record of the nearest commit and **not** the sha of the press: what was checked out on the box at
+  06:00 was never written down, and this paragraph does not claim to know it.
