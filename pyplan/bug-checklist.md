@@ -3915,3 +3915,49 @@ good news in the entry.
   to be a literal. The seam that hid it took the `ReadySpec` and threw it away; `Recorder` keeps
   every spec now. Re-pressed on the fix: `REBUILD RETURNED CLEANLY in 63.4s`. Evidence:
   `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`.
+
+---
+
+### 47. Every module Yu'lon installs is silent, because its log channel is declared where the server does not read it — 2026-09-09, OPEN
+
+Found by hand on `yulon-ubuntu2` on 2026-09-09, installing the owner's own Lua script onto the
+WotLK server the closing run had just rebuilt with `mod-ale`.
+
+**What happened.** The engine was compiled in (`Addmod_aleScripts`, `ALE.ScriptPath` and
+`Initialize ALE Lua Engine` all present in the running binary), `mod_ale.conf` was activated with
+`ALE.Enabled = 1` and an absolute script path, and the world named the file in its own banner
+(`Using modules configuration: > mod_ale.conf`). Across three boots the engine printed **nothing**,
+and `logs/ALE.log` was never created. Every reading available said the module was dead.
+
+**It was not dead.** A throwaway Lua file dropped beside the owner's script wrote a row to
+`acore_world` at load instead of printing, and the row appeared. So the engine was running and
+loading scripts the whole time; only its words were missing.
+
+**Two causes, both in the conf the applier activates verbatim.**
+
+* `mod_ale.conf` declares `Logger.ALE=4,ALELog ALEConsole`. AzerothCore's log system reads logger
+  and appender declarations from the **main** config; a logger declared only in a module conf does
+  not exist, so `LOG_INFO("ALE", …)` falls back to the root logger — `Logger.root=2,Console Server`,
+  level 2, **errors only** — and every Info line from every module is dropped. Adding
+  `Logger.ALE=4,Console Server` to `worldserver.conf` made the same binary speak on the next boot:
+  `[ALE]: Executed 7 Lua scripts in 2 ms` and the script's own banner.
+* The module's own console appender, `Appender.ALEConsole=1,4,0,"0 9 0 3 5 0"`, is not accepted, so
+  even the file half (`Appender.ALELog=2,5,0,ALE.log,w`) never produced a file.
+
+**Why it matters beyond this module.** `Applier._conf()` copies `conf.template` and activates keys;
+it has no notion of a logger. 19 of the 21 shipped manifests carry a conf, and any of them that
+declares a logger is silent the same way — including for the person debugging it. The 8.7a fifth
+clause reads a module's configuration back from the *running server* precisely because the file is
+not proof; this is the same lesson one layer down: **a module that cannot talk cannot be gated by
+what it says.**
+
+**Not yet decided** (owner's, or the module lane's): whether the applier should hoist `Logger.*` and
+`Appender.*` lines out of a module conf into the world's own config when it activates one, or
+whether the manifest should declare the logger and the applier write it. Either way the guard is the
+same shape as the others here — install a module whose conf declares a logger, boot, and assert the
+server prints one line the module owns.
+
+**Evidence:** `~/wowserver/env/dist/etc/modules/mod_ale.conf.before-logger-fix` on `yulon-ubuntu2`
+(the bytes as the applier wrote them), the world's own log before and after, and the probe row in
+`acore_world.yulon_ale_probe`. Not a gate folder — this was found while doing the owner a favour,
+not while gating, and it is written here so the module lane can pick it up.
