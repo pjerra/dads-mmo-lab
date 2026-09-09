@@ -1,6 +1,6 @@
 # T12 — No account path defaults an unrecognised scheme to AzerothCore's columns
 
-**Status:** OPEN
+**Status:** DONE (hand reported 2026-09-09 12:50 CEST; awaiting review)
 **Filed:** 2026-09-09 17:00 by the lead (Fable), from T9's hand (finding 3) and its two reviewers
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/controller_wow_wotlk/accounts.py`, `pylauncher/tests/test_accounts.py`, and `pylauncher/yulon/ui/controller_view.py` **only** at the two `create_account` call sites that pass `scheme=entry.accounts.scheme or "azerothcore"` (T9's reviewer: near lines 886 and 996 on `yulon-phase8b`; verify) plus the test that pins them. Not the Tortoise binding, not `pyplan/checklist.md`.
@@ -27,3 +27,12 @@ Also from T9's reviewer: the `Known: azerothcore, mangos_sha, mangos_srp6` list 
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the three refusals quoted from their tests, the UI sentence, deviations, status DONE.
+
+## Report (hand, 2026-09-09 12:50 CEST)
+
+- Base `60f12b62` (ff-merged); one commit `eea840b6` on `worktree-agent-aa05571bfe9a4db6a`; gate ALL GREEN (yulon-fedora, 3845 passed); diff 4 files +314/-48 (`test_accounts.py` +134, `test_controller_view.py` +40, `controller_wow_wotlk/accounts.py` +170/-48ish, `ui/controller_view.py` +18/-).
+- The three refusals (all with `statements == []`): `'mangos_srp7' is not an account scheme this app knows how to write an account row for, so nothing was written. Known: azerothcore, mangos_sha, mangos_srp6.` / `... grant a GM level on, so nothing was written. ...` / `... read a GM level from, so nothing was read. ...`. `KNOWN_SCHEMES = ", ".join(get_args(Scheme))` reproduces T9's hand-typed list byte for byte; T9's test untouched.
+- UI sentence, via new `accounts.checked_scheme(declared, game)` raising `NotImplementedError` with the Tortoise binding's wording: `wow-example declares no account scheme, so this app does not know which columns its account table has. Nothing was written. Create the account at the worldserver console instead.`; both WotLK call sites pass `checked_scheme(entry.accounts.scheme, entry.id)`.
+- Mutations (all RED/GREEN, pycache purged): the `else` fall-through restored in `_insert_statement`, `_grant_gm`, `_gm_level`; `get_args(Scheme)[:2]`; `checked_scheme` returning `"azerothcore"` for `None`; each UI site reverted separately (one controller-view test pins both); the insert built after the id lookup (kills the `statements == []` clause).
+- Rust: `origin/rust-main` `crates/dml-wow/src/account_write.rs` is AzerothCore-only (`INSERT INTO account (username, salt, verifier)`), no scheme dispatch; nothing to carry over.
+- Deviations: `_account_row`'s dispatch extracted into module-private `_insert_statement()` called *before* the id lookup (what makes `statements == []` reachable; a salt/verifier derived even when the name is taken, commented); `checked_scheme()` lives in the shared writer so `controller_view.py` is touched only at the two sites -- the sentence now exists twice (Tortoise's own copy outside the set, identical today; a follow-up could collapse it); the one added controller-view test reads `services.channel_setup._create` (private; `InstallChannel` keeps its `create` seam with no accessor) and says so.
