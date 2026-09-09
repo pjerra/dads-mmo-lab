@@ -863,3 +863,68 @@ def test_the_reset_writes_the_columns_the_scheme_names() -> None:
     assert " v = " not in wrote_ac and " s = " not in wrote_ac
     for statement in (wrote_ac, wrote_mangos):
         assert "n3w-p@ssw0rd1234" not in statement, "the password reached a statement"
+
+
+def test_the_reset_writes_sha_pass_hash_on_a_mangos_sha_tree() -> None:
+    """The live failure of 2026-09-09, pinned.
+
+    `create_account`'s `_account_row` has known all three schemes since 8.2d;
+    this function knew two, and treated `mangos_sha` as AzerothCore. Tortoise's
+    catalog entry is `scheme = "mangos_sha"` and its binding passes it, so the
+    channel's Repair press -- the thing that runs when the app's own credential
+    is stale -- reached a table with no such column and died:
+
+        ERROR 1054 (42S22) at line 1: Unknown column 'salt' in 'SET'
+
+    (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`; the only
+    way to a working channel that night was to delete the app's account.)
+
+    The statement is asserted whole rather than by keyword, because what was
+    wrong before was not a missing word but the choice of columns.
+    """
+    sql = _Recorder()
+
+    accounts.reset_own_password(sql, "YULON_58C6FD1C", "n3w-p@ssw0rd1234", scheme="mangos_sha")
+
+    writes = [s for _, s in sql.statements if s.strip().upper().startswith("UPDATE")]
+    assert len(writes) == 1, writes
+    assert writes[0] == (
+        "UPDATE account SET sha_pass_hash = _utf8mb4 X'3634413446443635383438464635"
+        "3732343643443045383631363730314436363339454336343930'"
+        " WHERE username = _utf8mb4 X'59554C4F4E5F3538433646443143';"
+    )
+    # And that literal is the module's measured hash rule, not a second one: the
+    # hex above decodes to `mangos_password_hash`'s output, which the
+    # MANGOS_WRITTEN vectors pin to what the tortoise worldserver wrote itself.
+    assert (
+        accounts._text_literal(accounts.mangos_password_hash("YULON_58C6FD1C", "n3w-p@ssw0rd1234"))
+        in writes[0]
+    )
+    assert "salt" not in writes[0] and "verifier" not in writes[0], writes[0]
+    assert " v = " not in writes[0] and " s = " not in writes[0], writes[0]
+    assert "n3w-p@ssw0rd1234" not in writes[0], "the password reached a statement"
+
+
+def test_an_unknown_scheme_is_refused_by_name_instead_of_defaulting() -> None:
+    """A default that reaches for AzerothCore's columns is the whole bug.
+
+    Falling through to `salt`/`verifier` is what made a scheme this function did
+    not know look like a scheme it did. A fourth core added to `Scheme` and
+    forgotten here must now stop at this seam, naming itself, having written
+    nothing -- not write a row into whatever table happens to be in front of it.
+    """
+    sql = _Recorder()
+
+    with pytest.raises(accounts.AccountError) as caught:
+        accounts.reset_own_password(
+            sql,
+            "YULON_243C46E3",
+            "n3w-p@ssw0rd1234",
+            scheme="mangos_srp7",  # type: ignore[arg-type]
+        )
+
+    assert str(caught.value) == (
+        "'mangos_srp7' is not an account scheme this app knows how to re-password, so "
+        "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+    )
+    assert sql.statements == [], "it touched the database before refusing"
