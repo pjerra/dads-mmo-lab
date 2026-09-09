@@ -31,6 +31,30 @@ Interpreter `/home/pk/dads-mmo-lab/pylauncher/.venv/bin/python`, **Python 3.12.3
 **`yulon-ubuntu2`**, the replacement built on 2026-09-08 after the original box's host disk
 left the bus. The original `yulon-ubuntu` is OffCritical in Hyper-V and was not touched.
 
+**The folder is named for the day before the run, and its timestamps sit on more than one clock
+(added 2026-09-09).** `run.log:1` opens `=== 7.10 re-run sweep started 2026-09-09T00:34:39+02:00 ===`
+and `run.log:20` closes it at `00:45:19+02:00`: the run started thirty-four minutes after local
+midnight on the **9th**, inside a folder named `…-2026-09-08`. In UTC the whole run — and the staging
+commit that created the folder (`d8c08cb5`, 2026-09-09 00:13:31 +0200, which is 22:13:31Z on the 8th)
+— falls on **2026-09-08**. Whether that is why the name reads `09-08` is recorded nowhere, so this
+paragraph states the dates and does not give a reason. **Which clock each timestamp is on:**
+everything this lane wrote is VM-local `+0200` and says so — `run.log`'s two banner lines,
+`shots/shots.txt` (`2026-09-09T00:44:09+0200  server-tab-before-refresh.png …`), and the four state
+probes, which print both (`state-before.txt:2` — `taken (local): 2026-09-09T00:34:40+02:00   (UTC:
+2026-09-08T22:34:40+00:00)`; likewise `state-after-restore.txt:2` `00:44:06+02:00`,
+`state-after.txt:2` `00:45:18+02:00`, `final-state.txt:2` `00:51:35+02:00`). The bare clock times in
+this README's own prose are that same VM-local `+0200` — among them `00:03:26` (the 8.6 lane's
+realmlist write, in *"One thing `network_apply('lan')` did NOT prove here"*), `~00:26` and `00:31:32`
+(that lane's restart and its handover, in the **Target** bullets below), `00:34:40` (`state-before.txt`)
+and `00:44:06` (the ready wait killed). The one `Z` reading in this README is a container's:
+*"world and auth started `22:35:46Z`"* is Docker's own UTC timestamp, `final-state.txt:55-56`
+(`started=2026-09-08T22:35:46.516853149Z`) — the same instant the VM shell was calling `00:35:46` on
+the 9th. The VM's shell runs `Europe/Oslo (+0200)` and the `ac-worldserver` container — the one
+container asked — answered UTC, measured on the box on 2026-09-09 and recorded in
+`pyplan/gates/8.6-panel-live-yulon-ubuntu2-2026-09-09/README.md:74-94`, the bullet beginning
+*"`part-2-party.md:3` is wrong about the VM's clock"*. The checkpoint time `00:34:30` given later in
+this section was read on the Hyper-V **host**, a third clock this paragraph did not measure. **The folder is not renamed**: `pyplan/checklist.md` cites it by name.
+
 **Target.** The WotLK install at `/home/pk/wowserver`, `install_id 243c46e3`, all six stages
 completed — but **not the same install the 2026-09-05 run measured**, and the differences
 matter:
