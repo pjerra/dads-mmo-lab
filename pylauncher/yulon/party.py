@@ -55,6 +55,7 @@ module's `conf/mod_ale.conf.dist` nor its `ALEConfig.cpp`.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
@@ -62,7 +63,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from yulon import dbreads, platform, resources, runner
+from yulon import dbreads, platform, play, resources, runner
+from yulon.actions import Outcome
 from yulon.catalog.catalog import CatalogEntry
 from yulon.channel import Answer
 from yulon.log import get_logger
@@ -610,19 +612,62 @@ class BadRequest(ValueError):
     """
 
 
-BOT_CLASSES = (
-    "warrior",
-    "paladin",
-    "hunter",
-    "rogue",
-    "priest",
-    "shaman",
-    "mage",
-    "warlock",
-    "druid",
-    "dk",
-)
-"""The classes THIS tree's `addclass` accepts. See the note above for `dk`."""
+BOT_CLASS_IDS = {
+    "warrior": 1,
+    "paladin": 2,
+    "hunter": 3,
+    "rogue": 4,
+    "priest": 5,
+    "shaman": 7,
+    "mage": 8,
+    "warlock": 9,
+    "druid": 11,
+    "dk": 6,
+}
+"""Every class this tree's `addclass` takes, and the id the module gives it.
+
+Both halves come from the same forty lines: `mod-playerbots
+PlayerbotMgr.cpp:1093-1134`, read on `yulon-ubuntu2` on 2026-09-09. The ids are
+not decoration — the premade specs are keyed by class NUMBER
+(`AiPlayerbot.PremadeSpecName.<class>.<specno>`), so a spec picker has to turn
+the word a person chose into the module's own number, and there is exactly one
+place that mapping may live. See the note above for `dk`, which is 6 and which
+the bash launcher's list deliberately excluded."""
+
+BOT_CLASSES = tuple(BOT_CLASS_IDS)
+"""The classes THIS tree's `addclass` accepts, derived rather than written twice.
+
+A second tuple beside the mapping is a tuple that will one day offer a class the
+specs are not keyed by, which is a picker offering a class whose spec list is
+silently empty."""
+
+PLAYERBOTS_CONF = "env/dist/etc/modules/playerbots.conf"
+"""The module conf the premade spec names are read out of, `.dist` included.
+
+The prior art reads the deployed file and falls back to the shipped `.dist`
+(`rust-main:cli/src/50-party.sh:137-145`), and so does the server: on
+`yulon-ubuntu2` on 2026-09-09 there is a `playerbots.conf.dist` and no
+`playerbots.conf`, so a reader that looked only for the deployed name would
+offer no specs at all on the one install where My Party has ever worked."""
+
+SPEC_NAME_KEY = "AiPlayerbot.PremadeSpecName."
+
+WORLD_CONF = "env/dist/etc/worldserver.conf"
+MAX_LEVEL_KEY = "MaxPlayerLevel"
+"""Where this install's own level cap is, and the key that holds it.
+
+`MaxPlayerLevel = 80` on `yulon-ubuntu2` (`worldserver.conf:2128`, 2026-09-09).
+Eighty is nowhere in this app: it is one conf value on one install of one tree,
+and a constant would silently mis-bound the fork that ships 60 or 255."""
+
+SPEC_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
+"""What may go in the tail of `dml_whisper <master> <bot> talents spec <name>`.
+
+The prior art's charset (`50-party.sh:208-215`) and deliberately WIDER than the
+shipped names' lowercase-and-spaces: `playerbots.conf` is hand-editable, the
+picker offers whatever it says, and refusing `Arms PvE` here would refuse a name
+the module accepts. What it must never admit is a quote, a backslash, a newline
+or anything else the world server's parser would read as a second command."""
 
 MAX_NAME = 12
 """A WoW character name's own limit. `characters.name` is `varchar(12)`."""
@@ -700,6 +745,119 @@ def autogear_command(player: str, bot: str) -> str:
 def talents_command(player: str, bot: str) -> str:
     """`.../party.rs:246`. "Specced" is this whisper, not `addclass`."""
     return f"{_whisper(player, bot)} talents autopick"
+
+
+def valid_spec(spec: str) -> bool:
+    """A premade spec name that cannot break out of the whisper it goes into."""
+    return bool(SPEC_SHAPE.match(spec))
+
+
+def spec_command(player: str, bot: str, spec: str) -> str:
+    """`dml_whisper <master> <bot> talents spec <name>`
+    (`rust-main:crates/dml-wow/src/party.rs:253`, `cli/src/90-main.sh:3976`).
+
+    The whisper `talents autopick` REPLACES rather than joins. Measured in the
+    module (`ChangeTalentsAction.cpp:57-59` and `:146`, read on `yulon-ubuntu2`
+    2026-09-09): `autopick` runs `InitTalentsTree(true)` and a chosen spec runs
+    `InitTalentsBySpecNo`, so sending both leaves the bot with whichever went
+    last. `add_bot` sends one or the other and never the pair.
+    """
+    if not valid_spec(spec):
+        raise BadRequest(
+            f"{spec!r} is not a premade spec name: it goes into the tail of a command the world "
+            "server parses, so it may hold only letters, digits, spaces and . _ -"
+        )
+    return f"{_whisper(player, bot)} talents spec {spec}"
+
+
+def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
+    """Every premade spec this conf defines, per class id, in the module's order.
+
+    Two measured rules, both from `mod-playerbots` on `yulon-ubuntu2` 2026-09-09,
+    and neither of them obvious from the file alone:
+
+    * **The conf IS the accepted list.** `PlayerbotAIConfig.cpp:487-493` loads
+      `AiPlayerbot.PremadeSpecName.<class>.<specno>` and `SpecPick` compares the
+      whispered text to those values with `==`
+      (`ChangeTalentsAction.cpp:144`). A list kept by hand in this app could only
+      ever drift from it, and the drift is invisible: a name the module does not
+      have is answered `Spec <x> not found` in the GAME window
+      (`:157`, through `TellMasterNoFacing`), so nothing comes back over the
+      channel and a wrong spec looks exactly like a right one.
+    * **A gap ends the class.** `SpecPick` walks specno upwards from 0 and
+      **breaks** at the first empty name (`:138-142`), so a conf that defines
+      8.0, 8.1 and 8.3 has an unreachable 8.3 whatever it says. Only the
+      contiguous run from 0 is returned — offering the rest would be offering
+      names this server cannot be made to take.
+
+    Column 0 only, which is `read_conf`'s rule for `read_conf`'s reason: the
+    shipped file carries commented keys and a pattern that matched them would
+    read the file's prose as its settings.
+
+    **A value is taken verbatim to the end of the line, `#` included**, and
+    whether the core's own reader would drop a trailing comment is NOT measured
+    on this tree — so `… = arcane pve # the good one` is read here as the whole
+    string, which is very probably not what the module has. What that costs is
+    bounded, and it is bounded the safe way round: `#` is outside `SPEC_SHAPE`,
+    so `InstallParty.specs` filters such a name out and the picker never offers
+    it. The result of the unmeasured case is a spec missing from the list, not a
+    spec offered that the server would refuse in the game window where nothing
+    can hear it. Measuring `sConfigMgr`'s comment handling is what would let this
+    read the value the module actually holds.
+    """
+    seen: dict[int, dict[int, str]] = {}
+    for line in text.splitlines():
+        head, sep, tail = line.partition("=")
+        if not sep or head[:1] in ("#", " ", "\t"):
+            continue
+        key = head.strip()
+        if not key.startswith(SPEC_NAME_KEY):
+            continue
+        parts = key[len(SPEC_NAME_KEY) :].split(".")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            continue
+        value = tail.strip().strip('"')
+        if value:
+            seen.setdefault(int(parts[0]), {})[int(parts[1])] = value
+    out: dict[int, tuple[str, ...]] = {}
+    for klass, numbered in seen.items():
+        run: list[str] = []
+        number = 0
+        while number in numbered:
+            run.append(numbered[number])
+            number += 1
+        out[klass] = tuple(run)
+    return out
+
+
+def spec_names(server_dir: Path) -> dict[int, tuple[str, ...]]:
+    """`read_spec_names` over this install's own `playerbots.conf`."""
+    return read_spec_names(_conf_text(server_dir / PLAYERBOTS_CONF))
+
+
+def max_player_level(server_dir: Path) -> int | None:
+    """This install's own `MaxPlayerLevel`, or `None` for "nobody could read it".
+
+    `None` rather than the compiled default, and that is a deliberate refusal
+    rather than an omission: AzerothCore's built-in cap has not been measured on
+    this tree, and answering 80 for a conf that never sets the key would be this
+    app inventing a fact about somebody's fork — the same mistake `ALE.Enabled`'s
+    shipped comment makes about ITS compiled default. A cap nobody could read
+    means no level is offered, and the sentence says which key to set.
+    """
+    text = _conf_text(server_dir / WORLD_CONF)
+    value = _conf_value(text, MAX_LEVEL_KEY)
+    return int(value) if value is not None and value.isdigit() else None
+
+
+def _conf_text(path: Path) -> str:
+    """A conf file's text, falling back to the shipped `.dist` beside it."""
+    for candidate in (path, Path(f"{path}.dist")):
+        try:
+            return candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return ""
 
 
 def _whisper(player: str, bot: str) -> str:
@@ -795,6 +953,32 @@ class Addition:
     specced: bool
     sentence: str
     blocker: str = ""
+    spec: str = ""
+    """The premade spec asked for, or "" for "let the server pick".
+
+    `specced` is what happened to it, and it means the same thing either way: the
+    WHISPER was accepted. It is never "the talents are now this", because the
+    module answers a spec only in the game window and nothing this app can read
+    sees that answer."""
+    level: int | None = None
+    level_before: int | None = None
+    level_after: int | None = None
+    """The level asked for, and `characters.level` on either side of the press.
+
+    Both readings come from the group query this press already makes, so the
+    "after" is the database and not the level command's own `yes`. `before` is
+    what makes a chosen level provable: a bot the server already made at 60,
+    asked for 60, has proved nothing, and `_level_note` says so rather than
+    reporting a change that did not happen."""
+
+
+LevelSetter = Callable[[str, int], Outcome]
+"""How a level is set: `play.InstallPlay.set_level`, and never a second path.
+
+A bot is a character and 8.4a already owns that command — including the refusal,
+in the entry's own measured words, on the trees whose console has no route to a
+level. A seam here rather than an import at the call site for the same reason
+`engine` is one: the tests for these sentences must not be tests of a console."""
 
 
 def add_bot(
@@ -805,6 +989,11 @@ def add_bot(
     send: Callable[[str], Answer],
     members: Callable[[], tuple[Member, ...]],
     gender: str = "",
+    spec: str = "",
+    specs: tuple[str, ...] = (),
+    level: int | None = None,
+    max_level: int | None = None,
+    set_level: LevelSetter | None = None,
     tries: int = POLL_TRIES,
     pause: float = POLL_SLEEP,
     sleep: Callable[[float], None] = time.sleep,
@@ -822,11 +1011,35 @@ def add_bot(
     first one in its own words and this returns without touching the channel.
     That is the whole difference from 2026-08-20, when a control pressed
     happily into a bridge that was not there and reported success.
+
+    **A spec and a level are checked before the join, not after it.** Both
+    refusals are `blocker`s — nothing at all was sent — because the alternative
+    is a bot standing in the party that the press then refuses to finish. The
+    order once the bot IS there is level, then spec, then gear, and each step is
+    a measurement rather than a preference: `SpecPick` applies the premade build
+    through `PlayerbotFactory factory(bot, bot->GetLevel())`
+    (`ChangeTalentsAction.cpp:146-149`), so a spec chosen before the level is a
+    level-1 build on a level-60 bot; and `autogear` follows the spec because gear
+    must match the new talents (`90-main.sh:3975-3977`, whose own comment says
+    so).
     """
     stop = blocker(facts)
     if stop is not None:
         return Addition(False, False, None, False, False, stop, blocker=stop)
     command = add_command(player, klass, gender=gender)
+    if spec:
+        refusal = _spec_refusal(spec, klass, specs)
+        if refusal:
+            return Addition(False, False, None, False, False, refusal, blocker=refusal, spec=spec)
+    if level is not None:
+        if set_level is None:
+            raise BadRequest(
+                "a level was asked for with no way to set one. A level goes through the "
+                "Characters tab's own seam and this call was handed none."
+            )
+        refusal = _level_refusal(level, max_level)
+        if refusal:
+            return Addition(False, False, None, False, False, refusal, blocker=refusal, level=level)
     before = {member.guid for member in members()}
     answer = send(command)
     if answer.outcome != "yes":
@@ -857,19 +1070,106 @@ def add_bot(
             f"the server accepted the command and no bot joined the party within {window:g} "
             "seconds. It may still arrive; nothing here says it will.",
         )
-    geared = send(autogear_command(player, joined.name)).outcome == "yes"
-    specced = send(talents_command(player, joined.name)).outcome == "yes"
+    level_before = joined.level
+    level_after: int | None = level_before
+    level_problem = ""
+    if level is not None and set_level is not None:
+        outcome = set_level(joined.name, level)
+        if not outcome.done:
+            level_problem = (outcome.problem or outcome.text).strip()
+        after = next((row for row in members() if row.guid == joined.guid), None)
+        level_after = None if after is None else after.level
+    if spec:
+        # One or the other, never both: see `spec_command`'s docstring for the
+        # measurement. The gear follows, because it must match the new talents.
+        specced = send(spec_command(player, joined.name, spec)).outcome == "yes"
+        geared = send(autogear_command(player, joined.name)).outcome == "yes"
+    else:
+        # Byte-identical to the pair that was proved live on 2026-09-09. The
+        # prior art keeps its own no-spec branch unchanged for the same reason
+        # (`90-main.sh:3973`): a reorder nobody measured is a change to a
+        # working path.
+        geared = send(autogear_command(player, joined.name)).outcome == "yes"
+        specced = send(talents_command(player, joined.name)).outcome == "yes"
     return Addition(
         True,
         True,
         joined.name,
         geared,
         specced,
-        f"{joined.name} joined the party" + _finish(geared, specced),
+        f"{joined.name} joined the party"
+        + _finish(geared, specced, spec)
+        + _level_note(level, level_before, level_after, level_problem),
+        spec=spec,
+        level=level,
+        level_before=level_before,
+        level_after=level_after,
     )
 
 
-def _finish(geared: bool, specced: bool) -> str:
+def _spec_refusal(spec: str, klass: str, specs: tuple[str, ...]) -> str:
+    """Why this spec was not sent, or "" for one this server has.
+
+    Refused HERE rather than by the server, because the server does not refuse
+    it anywhere this app can hear: `Spec <x> not found` goes to the master's
+    chat window (`ChangeTalentsAction.cpp:157`) and the channel sees a command
+    that ran. An unchecked spec is a bot that is silently not specced under a
+    sentence saying it is.
+    """
+    if not valid_spec(spec):
+        return (
+            f"{spec!r} is not a premade spec name — it may hold only letters, digits, spaces "
+            "and . _ - because it goes into a command the world server parses. Nothing was sent."
+        )
+    if not specs:
+        return (
+            f"this install's {PLAYERBOTS_CONF} lists no premade specs for {klass}, so there is "
+            "no spec to ask for and nothing was sent. The module answers an unknown spec only "
+            "in the game window, so a spec sent on a guess would look exactly like one that "
+            "worked."
+        )
+    if spec not in specs:
+        return (
+            f"{spec!r} is not one of the premade specs this server has for {klass}: "
+            f"{', '.join(specs)}. Nothing was sent."
+        )
+    return ""
+
+
+def _level_refusal(level: int, max_level: int | None) -> str:
+    """Why this level was not sent, or "" for one inside this server's own range."""
+    if max_level is None:
+        return (
+            f"this server's own top level could not be read: {MAX_LEVEL_KEY} is not set in "
+            f"{WORLD_CONF}, so there is nothing to bound a level by and nothing was sent."
+        )
+    if not 1 <= level <= max_level:
+        return (
+            f"level {level} is outside 1 to {max_level}, which is this server's own "
+            f"{MAX_LEVEL_KEY}. Nothing was sent."
+        )
+    return ""
+
+
+def _finish(geared: bool, specced: bool, spec: str = "") -> str:
+    if spec:
+        caveat = (
+            " The module answers a spec only in the game window, so that is the whisper being "
+            "accepted and not the talents changing."
+        )
+        if specced and geared:
+            return f", geared, and asked for the {spec} spec.{caveat}"
+        if specced:
+            return (
+                f", and asked for the {spec} spec. The autogear whisper was refused, so it is "
+                f"not geared.{caveat}"
+            )
+        if geared:
+            return (
+                f", geared. The {spec} spec whisper was refused, so its talents are whatever "
+                "the server picked."
+            )
+        return f". Neither the {spec} spec whisper nor the autogear whisper was accepted."
     if geared and specced:
         return ", geared and specced."
     if geared:
@@ -879,6 +1179,35 @@ def _finish(geared: bool, specced: bool) -> str:
     return ". Neither the autogear nor the talents whisper was accepted."
 
 
+def _level_note(level: int | None, before: int | None, after: int | None, problem: str) -> str:
+    """What the chosen level did, read out of `characters.level` on both sides.
+
+    The "already" arm is the gate rule in the app's own voice: a step whose
+    assertion was true before its action has proved nothing, and a bot the server
+    happened to make at the level that was asked for is exactly that step.
+    """
+    if level is None:
+        return ""
+    if problem:
+        return f" The level was not set: {problem}"
+    if before == level:
+        return (
+            f" characters.level already read {level} before the press, so nothing about the "
+            "level changed and this says nothing about whether it would have."
+        )
+    if after is None:
+        return (
+            " The level was sent and this bot is no longer in the group table, so no level "
+            "could be read back."
+        )
+    if after != level:
+        return (
+            f" The level command was accepted and characters.level still reads {after}, "
+            f"not {level}."
+        )
+    return f" characters.level read {before} before the press and {after} after."
+
+
 @dataclass(frozen=True)
 class Dismissal:
     """What one press of "dismiss" did. `removed` is read back, not assumed."""
@@ -886,6 +1215,11 @@ class Dismissal:
     removed: bool
     logged_out: bool
     sentence: str
+    bot: str = ""
+    """Which bot this is about, so a list of them needs no parallel list of names.
+
+    Defaulted rather than positional so the field could be added without moving
+    the three that were already there."""
 
 
 def dismiss(
@@ -910,7 +1244,7 @@ def dismiss(
     answer = send(uninvite_command(bot))
     if answer.outcome != "yes":
         said = (answer.text or answer.reason).strip()
-        return Dismissal(False, False, f"the server did not uninvite {bot}: {said}")
+        return Dismissal(False, False, f"the server did not uninvite {bot}: {said}", bot=bot)
     logged_out = send(logout_command(player, bot)).outcome == "yes"
     for attempt in range(tries):
         if attempt:
@@ -920,6 +1254,7 @@ def dismiss(
                 True,
                 logged_out,
                 f"{bot} left the party" + ("." if logged_out else ", and is still logged in."),
+                bot=bot,
             )
     window = tries * pause
     return Dismissal(
@@ -927,7 +1262,92 @@ def dismiss(
         logged_out,
         f"the server accepted the uninvite and {bot} is still in the group table "
         f"{window:g} seconds later.",
+        bot=bot,
     )
+
+
+@dataclass(frozen=True)
+class MassDismissal:
+    """What one press of "dismiss all" did, per bot rather than as a count.
+
+    `dismissals` is every attempt in the order it was made, each carrying its own
+    `removed` and its own sentence, because a count is a report nobody can check
+    against the party frame in front of them — and because one bot that refuses
+    must not hide the ones that went. `blocker` means the channel was never
+    touched, which is this module's word for it everywhere else.
+    """
+
+    attempted: int
+    dismissals: tuple[Dismissal, ...]
+    sentence: str
+    blocker: str = ""
+
+
+def dismiss_all(
+    *,
+    player: str,
+    bots: tuple[str, ...],
+    send: Callable[[str], Answer],
+    members: Callable[[], tuple[Member, ...]],
+    tries: int = POLL_TRIES,
+    pause: float = POLL_SLEEP,
+    sleep: Callable[[float], None] = time.sleep,
+) -> MassDismissal:
+    """`dismiss` per bot, and every one of them attempted.
+
+    The prior art's own review finding, in both directions: one unreachable bot
+    must not strand the rest of the party (`90-main.sh:4076`), and an attempt is
+    not a dismissal (`:4079-4083` — SOAP down with the database up used to report
+    "dismissed: N" while every bot was still in the group). Here the second half
+    is free, because `dismiss` reads the group table back rather than trusting
+    the uninvite's `yes`.
+
+    It costs what that readback costs: a bot whose row does not clear polls for
+    the full window before it is reported as still there.
+    """
+    if not bots:
+        stop = (
+            f"{player}'s party has no bots in it, so there is nothing to dismiss and nothing "
+            "was sent."
+        )
+        return MassDismissal(0, (), stop, blocker=stop)
+    done = tuple(
+        dismiss(
+            player=player,
+            bot=bot,
+            send=send,
+            members=members,
+            tries=tries,
+            pause=pause,
+            sleep=sleep,
+        )
+        for bot in bots
+    )
+    return MassDismissal(len(done), done, _mass_sentence(done))
+
+
+def _mass_sentence(done: tuple[Dismissal, ...]) -> str:
+    gone = [one.bot for one in done if one.removed]
+    stayed = [one for one in done if not one.removed]
+    if not stayed:
+        return f"{bots_word(len(done))} left the party: {', '.join(gone)}."
+    head = (
+        f"{len(gone)} of {bots_word(len(done))} left the party: {', '.join(gone)}. "
+        if gone
+        else f"None of {bots_word(len(done))} left the party. "
+    )
+    # Every refusal in its own words. Summarising them ("2 failed") is how one
+    # bot that is simply logged out reads the same as a channel that is down.
+    return head + "Still here — " + "; ".join(f"{one.bot}: {one.sentence}" for one in stayed)
+
+
+def bots_word(count: int) -> str:
+    """ "1 bot" or "N bots", in one place.
+
+    Public because the panel says the same thing on its armed button, and the
+    live gate found "1 bots" in this feature's own summary line once already
+    (`test_one_bot_is_a_bot_and_not_one_bots`)."""
+    return "1 bot" if count == 1 else f"{count} bots"
 
 
 # -- the tab's seam --------------------------------------------------------
@@ -987,6 +1407,7 @@ class InstallParty:
         world_running: Callable[[], bool],
         wsl_distro: str | None = None,
         engine: Callable[[], BinaryRead] | None = None,
+        level_setter: LevelSetter | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -999,6 +1420,19 @@ class InstallParty:
         # `docker exec`, and the tests for every sentence this object says must
         # not be tests that need a container. The default is the real reader.
         self._engine = engine or (lambda: read_engine_in_binary(container, wsl_distro=wsl_distro))
+        # 8.6/T5. The level goes through the Characters tab's own seam, built
+        # here over the same four things it would be built over in the factory —
+        # a bot is a character, and a second `character level` would be a second
+        # place to fix the day a fork renames it. It is also the half that
+        # already refuses the trees with no such command, in the entry's own
+        # measured words (`play._no_set_level`), which is a sentence this module
+        # would otherwise have to write about somebody else's server.
+        self.level_setter: LevelSetter = (
+            level_setter
+            or play.InstallPlay(
+                entry, server_dir, sql=sql, channel_for_saved=channel_for_saved
+            ).set_level
+        )
 
     @staticmethod
     def for_entry_is_possible(entry: CatalogEntry) -> bool:
@@ -1106,7 +1540,35 @@ class InstallParty:
 
     # -- writes --------------------------------------------------------------
 
-    def add(self, master: str, klass: str, *, gender: str = "") -> Addition:
+    def specs(self, klass: str) -> tuple[str, ...]:
+        """The premade specs this install lists for `klass`, in the module's order.
+
+        Filtered by `valid_spec`, which the conf's own values are NOT guaranteed
+        to pass: the file is hand-editable and raw-writable from the Modules
+        editor. The prior art offered every conf name verbatim and then had a
+        validator refuse some of them (`50-party.sh:208-215`'s own note); a
+        picker that cannot offer a name this app would refuse to send is the
+        version of that fix with nothing left to disagree about.
+        """
+        number = BOT_CLASS_IDS.get(klass.strip().lower())
+        if number is None:
+            return ()
+        listed = spec_names(self.server_dir).get(number, ())
+        return tuple(name for name in listed if valid_spec(name))
+
+    def max_level(self) -> int | None:
+        """This install's own `MaxPlayerLevel`, or `None` for "could not be read"."""
+        return max_player_level(self.server_dir)
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> Addition:
         """Add one bot of `klass` to `master`'s party, over the channel."""
         facts = self.facts()
         stop = blocker(facts)
@@ -1122,6 +1584,49 @@ class InstallParty:
             player=master,
             klass=klass,
             gender=gender,
+            spec=spec,
+            specs=self.specs(klass),
+            level=level,
+            max_level=self.max_level(),
+            set_level=self.level_setter,
+            send=send,
+            members=lambda: _rows_only(self.members(master)),
+        )
+
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> MassDismissal:
+        """Send `confirmed` away — and nothing else, whatever the party holds now.
+
+        `confirmed` is the guids a person agreed to, and it is required rather
+        than optional because it is the whole point of the method. Round 2's
+        must-fix: a caller that checks its own screen and then asks for "the
+        party" has guarded the wrong side of the door — the two presses of a
+        confirmation are seconds apart, a bot can join in between, and the
+        screen has nothing to say about it. So this re-reads the group table and
+        refuses unless the fresh set is EXACTLY the confirmed one, in both
+        directions: a party that gained a bot is not the party that was agreed
+        to, and neither is one that lost one. A subset that "obviously" still
+        works is how a confirmation quietly becomes a suggestion.
+
+        Guids and not names, for the reason the group read selects them: a name
+        is what a display shows, and `group_member` keys on the guid.
+
+        The list still comes from the table rather than from the caller — the
+        bot manager logs bots in and out on a timer, and acting on a list read
+        minutes ago is 8.4d's finding again. What the caller supplies is what it
+        is allowed to act on, not what is there.
+        """
+        send = self._send_or_none()
+        if send is None:
+            return MassDismissal(0, (), _no_channel(), blocker=_no_channel())
+        rows = self.members(master)
+        if isinstance(rows, str):
+            return MassDismissal(0, (), rows, blocker=rows)
+        if {row.guid for row in rows} != set(confirmed):
+            moved = _not_the_confirmed_party(master, rows, confirmed)
+            return MassDismissal(0, (), moved, blocker=moved)
+        return dismiss_all(
+            player=master,
+            bots=tuple(row.name for row in rows),
             send=send,
             members=lambda: _rows_only(self.members(master)),
         )
@@ -1160,6 +1665,24 @@ def _not_online(name: str) -> str:
     return (
         f"{name} is not logged in. A bot is added to a live session — the server resolves the "
         "master by name in the world, so log the character in and press again."
+    )
+
+
+def _not_the_confirmed_party(
+    master: str, rows: tuple[Member, ...], confirmed: tuple[int, ...]
+) -> str:
+    """Why nothing was dismissed, naming the party as it is NOW.
+
+    As it is now rather than as the difference between the two: a person who has
+    just been refused wants to know what to confirm next, and "one more bot than
+    you agreed to" is a sentence they cannot check against the party frame in
+    front of them.
+    """
+    holds = ", ".join(row.name for row in rows) if rows else "no bots at all"
+    return (
+        f"{master}'s party is not the one that was confirmed: {bots_word(len(confirmed))} were "
+        f"agreed to and the group table now holds {holds}. Nothing was sent — show the party "
+        "again and confirm what is there now."
     )
 
 

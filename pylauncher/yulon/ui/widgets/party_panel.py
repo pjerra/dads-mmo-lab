@@ -30,11 +30,15 @@ Left out deliberately, each with the seam gap that decides it:
   that tells a person what to do -- and the prior art's own note is that a deploy
   button is how this feature last reported success for a no-op
   (`rust-main:crates/dml-wow/src/bridge.rs:56-70`).
-* **No spec, no level, no "dismiss all", no presets.** `add()` takes a class and
-  a gender; there is no spec whisper in `party.py` at all
-  (the prior art's is `party.rs:253` `spec_whisper_cmd`), the level is 8.4a's
-  Characters tab and a different seam, and dismiss-all is a loop the seam does
-  not have (`Playerbots.svelte:204-220`, behind a two-step confirm there).
+* **No presets.** `party.py` has no preset store and the prior art's is a
+  directory of files under `~/.dml` (`90-main.sh:4152-4230`), which is a feature
+  rather than a control.
+
+The spec, the level and "dismiss all" were the other three entries in that list
+until T5 (2026-09-09), and each is now the seam's own method rather than a
+second route: `specs()` reads this install's `playerbots.conf`, the level goes
+through 8.4a's `set_level`, and `remove_all()` is `remove` per bot with each one
+named.
 
 One thing the prior art does that this panel copies exactly: a bot that has not
 arrived within the poll window is reported as NOT joined, with its cause
@@ -63,6 +67,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -105,9 +110,23 @@ class PartySeam(Protocol):
 
     def state(self, master: str) -> party.PartyState: ...
 
-    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition: ...
+    def specs(self, klass: str) -> tuple[str, ...]: ...
+
+    def max_level(self) -> int | None: ...
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> party.Addition: ...
 
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
+
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
 
 
 DISMISS_NOTHING = "Dismiss"
@@ -129,6 +148,83 @@ press with an empty box is a press a person can take back, and it costs a
 database read and a `docker exec` to be told so."""
 
 NO_BOT_CHOSEN = "Choose a bot in the party list first. Nothing was sent."
+
+SPEC_AUTO = "let the server pick"
+"""The first row of the spec picker, and the behaviour every add has had so far.
+
+It carries `""` as its data, which is `party.add_bot`'s own word for "send
+`talents autopick`". A picker whose only rows were real specs would be a control
+with no way back to what the button did yesterday."""
+
+LEVEL_AS_MADE = "leave it as the server made it"
+"""The bottom of the level box, shown instead of the number 0.
+
+A spin box has to hold some value and "no level was chosen" has to be one of
+them, so the range starts below level 1 and wears these words there
+(`QSpinBox.setSpecialValueText`). The alternative -- starting at 1 -- sends
+level 1 for a box nobody touched, which resets every bot it is used on."""
+
+NO_LEVEL_HERE = (
+    f"No level can be chosen here: this server's own {party.MAX_LEVEL_KEY} could not be read out "
+    f"of {party.WORLD_CONF}, so there is nothing to bound the box by. Setting that key and "
+    "pressing Show this character's party again offers it."
+)
+"""The Characters tab's rule for a control this install cannot have (8.4d): not a
+disabled box with no explanation, and not an empty space, but the sentence naming
+what to fix. The key and the file are `party`'s own constants so this line cannot
+name a path the reader does not read."""
+
+DISMISS_ALL_IDLE = "Dismiss every bot…"
+"""One button, two labels, and the armed one carries the count.
+
+The tab's own gesture (`controller_view.REMOVE_IDLE`/`REMOVE_ARMED`) rather than
+a second kind of confirmation: a user who has learned that pressing once only
+arms is not surprised here. A modal would be the other option and it is the wrong
+one twice over -- this panel's answers arrive from a worker thread, and the
+prior art's own dismiss-all is a two-step in the page
+(`Playerbots.svelte:204-220`)."""
+
+NO_BOTS_TO_DISMISS = (
+    "This character's party has no bots in it, so there is nothing to dismiss. Nothing was sent."
+)
+"""Refused here, and it never arms.
+
+The same reason the empty character box is refused here: it costs a database read
+and a `docker exec` to be told what the list on screen already says -- and arming
+a button over an empty party is asking somebody to confirm nothing."""
+
+DISMISS_ALL_CANCELLED = "Dismiss every bot was cancelled. Nothing was sent."
+"""Said when a read stands an armed dismiss-all down.
+
+It has to be SAID: a read of its own clears the report line, so without this an
+armed press followed by Show this character's party would leave a disarmed button
+and nothing anywhere saying the press had been dropped."""
+
+PRESS_SHOW_FIRST = (
+    "Press Show this character's party first: the party below was read for another character, "
+    "so there is nothing confirmed to dismiss here. Nothing was sent."
+)
+"""The refusal for arming over somebody else's rows.
+
+Round 2's second finding: Show as Pakka, retype the box as Anmi without pressing
+Show, and the arm used to take `("Anmi", Pakka's rows)` -- a sentence naming
+Pakka's bots over a press addressed to Anmi's party. Nothing had been armed, so
+nothing stood down; what was missing was the rows remembering who they were drawn
+for."""
+
+DISMISS_ALL_MOVED = (
+    "Dismiss every bot was not sent: the character or the party is not the one that was "
+    "confirmed. Nothing was sent -- press it again to confirm what is on screen now."
+)
+"""The subject moved between the two presses, so the confirmation is void.
+
+Round 1's finding, from both reviewers, and it is the whole reason an arm carries
+a subject rather than a flag: armed on Pakka's two bots, a person who then types
+another name into the character box and presses again used to send
+`remove_all("Anmi")` -- a party that had never been shown, counted, or named in
+the sentence they agreed to. The second press now requires the SAME normalised
+master and the SAME bots the first press named, and anything else stands the arm
+down with this line instead of firing."""
 
 WORKING = "Working -- the server is being asked. This can take a few seconds."
 """Shown while a press is in flight, and the buttons are disabled under it.
@@ -167,11 +263,37 @@ class PartyPanel(QWidget):
         self._jobs = jobs
         self._busy = False
         self._clear_report = False
+        self._after_read = ""
+        # What an armed "dismiss every bot" is ABOUT: the normalised master and
+        # the bots the arming sentence named, snapshotted at the first press.
+        # `None` is disarmed. A bare flag was round 1's defect -- it armed on one
+        # party and fired on whatever the box said later.
+        self._confirmed: tuple[str, tuple[int, ...]] | None = None
+        # The rows the last successful read drew, and the character they were
+        # drawn FOR. `Member`s rather than the strings on screen, because what a
+        # confirmation is about is guids -- a name is what a display shows, and
+        # `group_member` keys on the guid.
+        self._drawn: tuple[party.Member, ...] = ()
+        self._drawn_for = ""
+        # Why the last arm was stood down, said on the NEXT press and then
+        # forgotten. Empty for the ways a person cancels ON PURPOSE (the read,
+        # or moving on to another button), which need no explanation and no
+        # third press; set only where the subject changed underneath them, so
+        # that press explains itself and leaves the button idle rather than
+        # quietly starting a new confirmation about a different party.
+        self._stood_down = ""
+        # Which spec request the picker is currently showing. Bumped per
+        # request, checked at completion: an answer older than the newest
+        # request is about a class the box no longer shows.
+        self._spec_generation = 0
 
         self.character = QLineEdit(self)
         self.character.setPlaceholderText("the character you are playing, logged in")
         self.character.setMaxLength(party.MAX_NAME)
         self.character.returnPressed.connect(self.refresh_party)
+        # Typing is not pressing, but it changes what a confirmed dismissal
+        # would be about, so it stands one down. Every edit, not just Enter.
+        self.character.textChanged.connect(self._character_edited)
         self.refresh_button = QPushButton("Show this character's party", self)
         self.refresh_button.clicked.connect(self.refresh_party)
 
@@ -183,6 +305,14 @@ class PartyPanel(QWidget):
         # tree's own measurement -- `dk` is in it because THIS tree's addclass
         # takes it, which the bash launcher's list deliberately did not.
         self.klass.addItems(party.BOT_CLASSES)
+        self.spec = QComboBox(self)
+        self.level = QSpinBox(self)
+        self.level_absent = QLabel("", self)
+        self.level_absent.setWordWrap(True)
+        # Connected AFTER `spec` exists and after the class list was filled:
+        # `addItems` moves the current index, and a handler wired before either
+        # would read a spec box that has not been built yet.
+        self.klass.currentTextChanged.connect(self._class_chosen)
         self.add_button = QPushButton("Add a bot", self)
         self.add_button.clicked.connect(self.add_bot)
 
@@ -190,6 +320,8 @@ class PartyPanel(QWidget):
         self.member_list.currentRowChanged.connect(self._member_chosen)
         self.dismiss_button = QPushButton(DISMISS_NOTHING, self)
         self.dismiss_button.clicked.connect(self.dismiss_bot)
+        self.dismiss_all_button = QPushButton(DISMISS_ALL_IDLE, self)
+        self.dismiss_all_button.clicked.connect(self.dismiss_all)
 
         self.check_list = QListWidget(self)
         self.summary = QLabel("", self)
@@ -206,25 +338,123 @@ class PartyPanel(QWidget):
         pick = QHBoxLayout()
         pick.addWidget(QLabel("Add a", self))
         pick.addWidget(self.klass)
+        pick.addWidget(QLabel("specced", self))
+        pick.addWidget(self.spec)
+        pick.addWidget(QLabel("at level", self))
+        pick.addWidget(self.level)
         pick.addWidget(self.add_button)
         box = QVBoxLayout(self)
         box.addLayout(who)
         box.addLayout(pick)
+        box.addWidget(self.level_absent)
         box.addWidget(QLabel("In the party now", self))
         box.addWidget(self.summary)
         box.addWidget(self.member_list)
         box.addWidget(self.dismiss_button)
+        box.addWidget(self.dismiss_all_button)
         box.addWidget(QLabel("What My Party needs", self))
         box.addWidget(self.check_list)
         box.addWidget(self.report)
         self._member_chosen(-1)
+        # Both are per-install readings and both are read again on every
+        # "Show this character's party": a game installed, a conf edited or a
+        # module deployed while this tab is open changes both answers, and this
+        # module's own rule is that facts are re-read per press rather than
+        # cached at start-up.
+        self._load_level_bound()
+        self._load_specs()
 
     # -- reads ---------------------------------------------------------------
 
     @Slot()
     def refresh_party(self) -> None:
-        """Read this character's party, off the GUI thread. A press of its own."""
+        """Read this character's party, off the GUI thread. A press of its own.
+
+        It is also the way out of an armed "dismiss every bot", which is what
+        the tab's own armed paragraph tells people ("Press Refresh to cancel").
+
+        The busy check is here as well as in `_master()` because this press
+        starts three jobs and only one of them goes through that: a refresh
+        while an add is polling would otherwise re-read the spec list and the
+        level bound under it, which is work nobody asked for and a spec picker
+        rebuilt mid-press.
+        """
+        if self._busy:
+            return
+        self._after_read = DISMISS_ALL_CANCELLED if self._stand_down("") else ""
+        self._load_level_bound()
+        self._load_specs()
         self._read(note=WORKING)
+
+    def _load_specs(self) -> None:
+        """Re-ask the seam which specs this install has for the chosen class.
+
+        The answer carries the request that asked for it. Round 1's finding
+        (Codex): each class change starts an independent read, the completions
+        arrive in whatever order the runner finishes them, and a slower mage read
+        landing after a druid read filled the DRUID picker with mage specs — so
+        the next Add would send a spec `_spec_refusal` refuses, or worse, one
+        this tree's module answers "not found" to in the game window where
+        nothing can hear it.
+        """
+        self._spec_generation += 1
+        asked = self._spec_generation
+        klass = self.klass.currentText()
+        self._read_alongside(lambda: (asked, klass, self._seam.specs(klass)), self._specs_read)
+
+    @Slot(object)
+    def _specs_read(self, result: object) -> None:
+        """Fill the picker, keeping the chosen spec if the new class has it too.
+
+        A completion older than the newest request is DROPPED rather than drawn:
+        the generation is the panel's own counter, so "older" means "another
+        request has been made since", which is exactly when this answer is about
+        a class the box no longer shows.
+
+        `_done()` is deliberately NOT called here: this is a read that rides
+        along beside a press rather than one, and re-arming the buttons under an
+        add that is still polling would let a second one start.
+        """
+        generation, klass, offered = cast("tuple[int, str, tuple[str, ...]]", result)
+        if generation != self._spec_generation:
+            logger.info(f"dropped a stale spec reading for {klass}: {len(offered)} names")
+            return
+        wanted = self.spec.currentData()
+        self.spec.clear()
+        self.spec.addItem(SPEC_AUTO, "")
+        for name in offered:
+            self.spec.addItem(name, name)
+        if wanted:
+            found = self.spec.findData(wanted)
+            self.spec.setCurrentIndex(max(found, 0))
+
+    def _load_level_bound(self) -> None:
+        self._read_alongside(self._seam.max_level, self._level_bound_read)
+
+    @Slot(object)
+    def _level_bound_read(self, result: object) -> None:
+        """Bound the box by this server's own top level, or offer no box at all.
+
+        80 is nowhere in this panel. A cap that could not be read is not a cap of
+        80 — the sentence names the key to set, and the box stays out of reach
+        until it is, because a level sent against a bound nobody knows is a
+        number this app made up.
+        """
+        top = cast("int | None", result)
+        self.level.setSpecialValueText(LEVEL_AS_MADE)
+        if top is None:
+            self.level.setRange(0, 0)
+            self.level.setEnabled(False)
+            self.level_absent.setText(NO_LEVEL_HERE)
+            self.level_absent.setVisible(True)
+            return
+        self.level.setRange(0, top)
+        # Not `True`: this reading rides along beside a press, and a press locks
+        # every picker (`_arm`). Re-enabling here would hand the level box back
+        # under an add that is still polling (round 2, optional).
+        self.level.setEnabled(not self._busy)
+        self.level_absent.setText("")
+        self.level_absent.setVisible(False)
 
     def _read(self, *, note: str | None) -> None:
         """Read the group. `note` is `None` for the re-read that FOLLOWS a press.
@@ -244,7 +474,17 @@ class PartyPanel(QWidget):
         # that looks like it is still asking.
         self._clear_report = note is not None
         self._start(note)
-        self._run(lambda: self._seam.state(master), self._state_read)
+        # The master travels WITH the answer. The rows a person confirms have to
+        # be attributable to a character, and reading `self.character` again in
+        # the slot would attribute them to whatever the box says by then --
+        # which is round 2's second finding with the check moved rather than
+        # fixed.
+        self._run(lambda: (master, self._seam.state(master)), self._state_read)
+
+    @Slot(str)
+    def _class_chosen(self, _klass: str) -> None:
+        """A different class has a different spec list, so the picker is re-read."""
+        self._load_specs()
 
     @Slot(object)
     def _state_read(self, result: object) -> None:
@@ -259,11 +499,21 @@ class PartyPanel(QWidget):
         the line below, rather than read field by field through `getattr`. Every
         view slot in this app is written the same way.
         """
-        state = cast(party.PartyState, result)
+        master, state = cast("tuple[str, party.PartyState]", result)
         self._done()
         if self._clear_report:
-            self.report.setText("")
+            # Empty for an ordinary read, and the cancellation notice for the
+            # one that stood an armed dismiss-all down: that press left nothing
+            # else anywhere to say it had been dropped.
+            self.report.setText(self._after_read)
+            self._after_read = ""
         self.member_list.clear()
+        # The rows and the character they belong to go together, always: a list
+        # that outlives the name it was read for is what let an arm take
+        # ("Anmi", Pakka's bots). Cleared here and set only where rows are
+        # actually drawn, so a refused read leaves nothing to confirm.
+        self._drawn = ()
+        self._drawn_for = ""
         self._member_chosen(-1)
         self.check_list.clear()
         for check in state.checks:
@@ -274,6 +524,8 @@ class PartyPanel(QWidget):
             self.summary.setText(state.blocker or state.problem)
             return
         members = state.members
+        self._drawn = members
+        self._drawn_for = master
         for member in members:
             self.member_list.addItem(self._row(member))
         self.summary.setText(
@@ -298,14 +550,23 @@ class PartyPanel(QWidget):
 
     @Slot()
     def add_bot(self) -> None:
-        """Add one bot of the chosen class to this character's party."""
+        """Add one bot of the chosen class, spec and level to this character's party.
+
+        The spec and the level are both optional and both say so in their own
+        control: `SPEC_AUTO` carries `""`, which is the `talents autopick`
+        whisper this button has always sent, and the level box's bottom step
+        carries `LEVEL_AS_MADE`, which sends no level at all.
+        """
         master = self._master()
         if master is None:
             return
+        self._stand_down("")
         klass = self.klass.currentText()
+        spec = cast("str | None", self.spec.currentData()) or ""
+        level = self.level.value() or None
         self._start(WORKING)
         self._run(
-            lambda: self._seam.add(master, klass),
+            lambda: self._seam.add(master, klass, spec=spec, level=level),
             self._added,
         )
 
@@ -325,6 +586,115 @@ class PartyPanel(QWidget):
         self.party_changed.emit()
 
     @Slot()
+    def dismiss_all(self) -> None:
+        """Arm on the first press, send every bot away on the second — the SAME one.
+
+        The arm carries its subject: the normalised master and the bots this
+        panel named in the sentence a person agreed to. The second press
+        recomputes both and fires only where they still match; anything else
+        stands the arm down with `DISMISS_ALL_MOVED` and sends nothing. Round
+        1's finding is the reason, and it is not theoretical -- armed on Pakka's
+        two bots, typing another name and pressing again used to dismiss the
+        party of a character who had never been on screen.
+
+        The names are the list the seam last read, and the seam reads the group
+        table again for itself when it fires: it is that reading, not this one,
+        that decides who is actually sent away. This one decides what was
+        CONFIRMED, which is a different question and the only one a person can
+        answer.
+
+        The confirmed guids travel WITH the second press, and the seam re-reads
+        the group table and refuses unless it is still exactly that set. Round
+        2's must-fix, and the panel's own check is not what makes it safe: this
+        one compares what is DRAWN, and a bot that joined between the two
+        presses changes nothing on screen. Only the end that can read the party
+        can enforce what was agreed to.
+
+        No wall-clock expiry, deliberately. The hazard an expiry addresses is an
+        arm that goes stale while nobody is looking, and staleness that matters
+        is now caught where it happens: the seam's re-read refuses a party that
+        moved, whether it moved in one second or ten minutes. A clock would be a
+        seam this widget has no other use for, and it would refuse presses that
+        are still perfectly good.
+        """
+        master = self._master()
+        if master is None:
+            return
+        if self._stood_down:
+            # The subject moved since the confirmation. Say so and stay idle:
+            # re-arming here would start a NEW confirmation about a different
+            # party off a press that was meant for the old one.
+            said, self._stood_down = self._stood_down, ""
+            self.report.setText(said)
+            return
+        # `_drawn` and not `member_list.count()`: one source of truth for what a
+        # confirmation is about. Counting the widget and confirming the reading
+        # is two answers to one question, and it made the clearing in
+        # `_state_read` unfalsifiable -- a stale `_drawn` behind an empty list
+        # was covered by the count rather than by the thing that keeps it true.
+        if not self._drawn:
+            self._stand_down("")
+            self.report.setText(NO_BOTS_TO_DISMISS)
+            return
+        if self._drawn_for != master:
+            # Rows read for somebody else. Nothing was armed, so nothing stood
+            # down, and without this the arm would take this character's name
+            # and that character's bots.
+            self._stand_down("")
+            self.report.setText(PRESS_SHOW_FIRST)
+            return
+        subject = (master, tuple(member.guid for member in self._drawn))
+        if self._confirmed is None:
+            self._confirmed = subject
+            count = len(self._drawn)
+            self.dismiss_all_button.setText(f"Press again to dismiss {party.bots_word(count)}")
+            self.report.setText(
+                f"This uninvites {party.bots_word(count)} from {master}'s party -- "
+                f"{', '.join(member.name for member in self._drawn)} -- and whispers each one to "
+                "log out. Press Show this character's party to cancel."
+            )
+            return
+        # No second comparison of `subject` against `self._confirmed` here, and
+        # its absence is deliberate rather than an omission: `_drawn` is written
+        # only by `_state_read`, every path that reaches `_state_read` stands
+        # the arm down first, and a master that changed is refused two lines
+        # above. A branch on it could not be reached, and an unreachable guard
+        # is one that looks like protection while the real hole -- a party that
+        # moved on the SERVER, invisible here -- stays open. That one is the
+        # seam's, which re-reads and refuses.
+        confirmed = self._confirmed[1]
+        self._stand_down("")
+        self._start(WORKING)
+        self._run(lambda: self._seam.remove_all(master, confirmed), self._dismissed_all)
+
+    @Slot(str)
+    def _character_edited(self, _text: str) -> None:
+        """A different name in the box is a different party, so any arm goes."""
+        if self._stand_down(DISMISS_ALL_MOVED):
+            self.report.setText(DISMISS_ALL_MOVED)
+
+    @Slot(object)
+    def _dismissed_all(self, result: object) -> None:
+        """One sentence naming every bot, then the group table read back."""
+        self._done()
+        self.report.setText(cast(party.MassDismissal, result).sentence)
+        self._read(note=None)
+        self.party_changed.emit()
+
+    def _stand_down(self, reason: str) -> bool:
+        """Drop any armed dismiss-all, and say whether there was one.
+
+        `reason` is what the NEXT press will say before it refuses to fire —
+        empty where the person cancelled on purpose (a read, or another button),
+        because that needs no explanation and no third press.
+        """
+        was_armed = self._confirmed is not None
+        self._confirmed = None
+        self._stood_down = reason if was_armed else ""
+        self.dismiss_all_button.setText(DISMISS_ALL_IDLE)
+        return was_armed
+
+    @Slot()
     def dismiss_bot(self) -> None:
         """Send the chosen bot away."""
         master = self._master()
@@ -334,6 +704,10 @@ class PartyPanel(QWidget):
         if bot is None:
             self.report.setText(NO_BOT_CHOSEN)
             return
+        # Silently, unlike the read's cancellation: this press has an answer of
+        # its own and a cancellation notice over it would throw away the only
+        # sentence saying what happened to the bot.
+        self._stand_down("")
         self._start(WORKING)
         self._run(
             lambda: self._seam.remove(master, bot),
@@ -349,11 +723,29 @@ class PartyPanel(QWidget):
 
     @Slot(object)
     def _failed(self, exc: object) -> None:
-        """A seam that raised. One sentence, and the panel stays usable."""
+        """A PRESS whose seam raised. One sentence, and the panel stays usable."""
         self._done()
         logger.warning(f"My Party could not ask the server: {type(exc).__name__}: {exc}")
         self.report.setText(f"My Party could not ask the server: {exc}")
         self.party_changed.emit()
+
+    @Slot(object)
+    def _side_failed(self, exc: object) -> None:
+        """A side READING whose seam raised — the spec list, or the level bound.
+
+        It must NOT call `_done()`. Those two reads ride along beside a press
+        rather than being one, and `_done()` re-arms every button: a `specs()`
+        that raised while an add was still polling would unlock the buttons
+        under it and let a second add start, which is the thing `WORKING` and
+        `_busy` exist to prevent. Round 1 flagged it (not blocking) and it is a
+        slot rather than a comment because that is what makes it impossible.
+
+        The report line is left alone while a press owns it, for the same
+        reason: the press's own sentence is the one a person is waiting for.
+        """
+        logger.warning(f"My Party could not read this install: {type(exc).__name__}: {exc}")
+        if not self._busy:
+            self.report.setText(f"My Party could not read this install: {exc}")
 
     # -- the small print -----------------------------------------------------
 
@@ -386,6 +778,12 @@ class PartyPanel(QWidget):
     def _run(self, work: Callable[[], object], on_done: Callable[[object], None]) -> None:
         self._jobs(work, on_done, self._failed)
 
+    def _read_alongside(
+        self, work: Callable[[], object], on_done: Callable[[object], None]
+    ) -> None:
+        """A reading that is not a press: it fails without unlocking the panel."""
+        self._jobs(work, on_done, self._side_failed)
+
     def _start(self, note: str | None) -> None:
         self._busy = True
         if note is not None:
@@ -397,6 +795,20 @@ class PartyPanel(QWidget):
         self._arm(True)
 
     def _arm(self, on: bool) -> None:
+        """Every control a press would change the meaning of, locked while it runs.
+
+        The three pickers as well as the buttons (round 1, not blocking): the
+        class box changing mid-press re-reads the spec list under an add that
+        has already sent its class, and a level or spec chosen while the server
+        is being asked is one the answer on screen will not be about. The level
+        box also obeys its own bound -- re-enabling it here on an install whose
+        `MaxPlayerLevel` could not be read would offer a control
+        `_level_bound_read` had just withheld.
+        """
         self.refresh_button.setEnabled(on)
         self.add_button.setEnabled(on)
         self.dismiss_button.setEnabled(on and self.member_list.currentItem() is not None)
+        self.dismiss_all_button.setEnabled(on)
+        self.klass.setEnabled(on)
+        self.spec.setEnabled(on)
+        self.level.setEnabled(on and self.level.maximum() > 0)
