@@ -4185,17 +4185,43 @@ class _StubParty:
     """
 
     def __init__(self) -> None:
-        self.added: list[tuple[str, str]] = []
+        self.added: list[tuple[str, str, str, int | None]] = []
+        self.dismissed_all: list[str] = []
+        self.members: tuple[party.Member, ...] = ()
 
     def state(self, master: str) -> party.PartyState:
-        return party.PartyState(True, "", (party.Precondition("bridge_answered", True, ""),))
+        return party.PartyState(
+            True, "", (party.Precondition("bridge_answered", True, ""),), members=self.members
+        )
 
-    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition:
-        self.added.append((master, klass))
+    def specs(self, klass: str) -> tuple[str, ...]:
+        return ("fire pve",) if klass == "mage" else ()
+
+    def max_level(self) -> int | None:
+        return 80
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> party.Addition:
+        self.added.append((master, klass, spec, level))
         return party.Addition(True, True, "Jilsur", True, True, "Jilsur joined the party.")
 
     def remove(self, master: str, bot: str) -> party.Dismissal:
-        return party.Dismissal(True, True, f"{bot} left the party.")
+        return party.Dismissal(True, True, f"{bot} left the party.", bot=bot)
+
+    def remove_all(self, master: str) -> party.MassDismissal:
+        self.dismissed_all.append(master)
+        return party.MassDismissal(
+            1,
+            (party.Dismissal(True, True, "Jilsur left the party.", bot="Jilsur"),),
+            "1 bot left the party: Jilsur.",
+        )
 
 
 def _with_party(ps: _Ps, tmp_path: Path, seam: _StubParty) -> ControllerServices:
@@ -4226,13 +4252,49 @@ def test_my_party_is_on_the_bots_tab_and_a_press_reaches_the_seam(
     view.party_panel.klass.setCurrentText("mage")
     view.party_panel.add_bot()
 
-    assert seam.added == [("Pakka", "mage")]
+    assert seam.added == [("Pakka", "mage", "", None)]
     # The seam's own sentence, read back off the panel. Without this the test
     # passes on a press that RAISED: `run_inline` routes any exception to the
     # panel's report, and the stub has already recorded the call by then. It
     # passed exactly that way once — `party` was not imported in this file, so
     # the stub's own return value was a `NameError` and nothing said so.
     assert view.party_panel.report.text() == "Jilsur joined the party."
+
+
+def test_the_spec_the_level_and_dismiss_all_reach_the_tabs_own_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T5's three controls, through the object `ControllerServices.my_party` holds.
+
+    The panel's own behaviour is `test_party_panel.py`'s subject; what this is
+    about is that all three really are wired to the tab's seam and not to
+    something the panel made for itself — the spec list and the level bound are
+    readings of an INSTALL, and a panel that produced either on its own would be
+    a widget that had gone looking for a server folder.
+    """
+    seam = _StubParty()
+    seam.members = (party.Member("Jilsur", 948, 8, 1),)
+    view = ControllerView(
+        WOTLK, _with_party(ps, tmp_path, seam), status_poll_ms=0, job_runner=run_inline
+    )
+    assert view.party_panel is not None
+    view.party_panel.character.setText("Pakka")
+    view.party_panel.klass.setCurrentText("mage")
+    view.party_panel.spec.setCurrentText("fire pve")
+    view.party_panel.level.setValue(60)
+
+    view.party_panel.add_bot()
+
+    assert seam.added == [("Pakka", "mage", "fire pve", 60)], "the spec picker read the seam's list"
+    assert view.party_panel.level.maximum() == 80, "the bound is the seam's, not this panel's"
+    view.party_panel.refresh_party()
+    view.party_panel.dismiss_all()
+    assert seam.dismissed_all == [], "the ground: the first press only arms"
+
+    view.party_panel.dismiss_all()
+
+    assert seam.dismissed_all == ["Pakka"]
+    assert view.party_panel.report.text() == "1 bot left the party: Jilsur."
 
 
 def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(

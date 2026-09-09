@@ -21,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from yulon import dbreads, party, resources
+from yulon import dbreads, party, play, resources
+from yulon.actions import Outcome
 from yulon.catalog.catalog import load_catalog
 from yulon.channel import Answer
 
@@ -781,3 +782,615 @@ def test_a_row_that_is_still_there_is_not_reported_as_dismissed() -> None:
     )
     assert result.removed is False
     assert "still" in result.sentence
+
+
+# -- 8.6, T5: the chosen spec ----------------------------------------------
+#
+# Every fact in this section was measured on `yulon-ubuntu2` on 2026-09-09 by
+# READING this tree's own `mod-playerbots` checkout and its shipped
+# `playerbots.conf.dist`. None of it is the bash launcher's list: that list is a
+# static mirror of a 2026-07-19 reading of a DIFFERENT tree, and two of its
+# claims are false here (it has no `prot pve` for paladin, and it drops class 6
+# entirely -- this conf has seven death-knight specs and this tree's `addclass`
+# takes `dk`).
+
+SPEC_CONF = """
+# a comment
+AiPlayerbot.PremadeSpecName.1.0 = arms pve
+AiPlayerbot.PremadeSpecName.1.1 = fury pve
+AiPlayerbot.PremadeSpecName.8.0 = arcane pve
+AiPlayerbot.PremadeSpecName.8.1 = fire pve
+AiPlayerbot.PremadeSpecLink.8.1.80 = 0-53-18
+#AiPlayerbot.PremadeSpecName.8.2 = frost pve
+AiPlayerbot.PremadeSpecName.6.0 = blood pve
+"""
+"""A conf shaped like the real one, with the three things that decide the answer:
+a commented key (which is not a setting), a `PremadeSpecLink` sibling (which is
+not a name), and a class the prior art's list dropped."""
+
+
+def test_the_premade_specs_are_read_from_this_installs_own_conf() -> None:
+    """The accepted names are the conf's, per class, and never a list in here.
+
+    Measured (`mod-playerbots/src/PlayerbotAIConfig.cpp:487-493`, read on
+    `yulon-ubuntu2` 2026-09-09): the module loads
+    `AiPlayerbot.PremadeSpecName.<class>.<specno>` and `SpecPick` compares the
+    whispered text to those values with `==`
+    (`src/Ai/Base/Actions/ChangeTalentsAction.cpp:144`). So the conf IS the
+    accepted list, and a hand-kept list here could only ever drift from it.
+    """
+    names = party.read_spec_names(SPEC_CONF)
+    assert names[1] == ("arms pve", "fury pve")
+    assert names[8] == ("arcane pve", "fire pve")
+
+
+def test_a_death_knight_spec_is_read_here_although_the_prior_arts_list_drops_them() -> None:
+    """Class 6 is a per-tree fact, and this tree has it both ways: `BOT_CLASSES`
+    takes `dk` and the conf lists its specs. `_party_spec_names` skips class 6
+    (`rust-main:cli/src/50-party.sh:157`), which here would offer a death knight
+    no spec at all."""
+    assert party.read_spec_names(SPEC_CONF)[6] == ("blood pve",)
+
+
+def test_a_spec_number_the_conf_skips_hides_every_spec_after_it() -> None:
+    """MEASURED, and not a guess about tidiness: `SpecPick` walks specno upwards
+    and **breaks** at the first empty name
+    (`ChangeTalentsAction.cpp:138-142`, `yulon-ubuntu2` 2026-09-09). So a gap at
+    8.2 makes 8.3 unreachable no matter what the conf says about it -- offering
+    it would be offering a name the module answers "not found" to, in the game
+    window where nothing this app can read will see it."""
+    conf = SPEC_CONF + "AiPlayerbot.PremadeSpecName.8.3 = frostfire pve\n"
+    assert party.read_spec_names(conf)[8] == ("arcane pve", "fire pve")
+
+
+def test_a_class_the_conf_says_nothing_about_has_no_specs_rather_than_a_default() -> None:
+    assert party.read_spec_names(SPEC_CONF).get(11, ()) == ()
+
+
+def test_the_class_ids_are_the_modules_own_and_the_class_list_is_derived_from_them() -> None:
+    """One table, so the picker's class and the conf's class cannot disagree.
+
+    `PlayerbotMgr.cpp:1093-1134` (`yulon-ubuntu2` 2026-09-09) is where `addclass`
+    turns the word into the id: shaman is 7, druid is 11, dk is 6, and there is
+    no 10. `BOT_CLASSES` is derived from this mapping rather than written beside
+    it, because a second list is a list that will one day be missing a class the
+    specs are keyed by."""
+    assert party.BOT_CLASS_IDS["shaman"] == 7
+    assert party.BOT_CLASS_IDS["druid"] == 11
+    assert party.BOT_CLASS_IDS["dk"] == 6
+    assert tuple(party.BOT_CLASS_IDS) == party.BOT_CLASSES
+
+
+def test_the_spec_whisper_is_the_prior_arts_command() -> None:
+    """`dml_whisper <master> <bot> talents spec <name>`
+    (`rust-main:crates/dml-wow/src/party.rs:253`, `cli/src/90-main.sh:3976`).
+    The same Lua is on the other side of the wire, so a second spelling would be
+    a second protocol."""
+    assert (
+        party.spec_command("Pakka", "Bottom", "frost pve")
+        == "dml_whisper Pakka Bottom talents spec frost pve"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", " arms pve", "arms pve; .server shutdown 1", 'arms "pve"', "arms\npve", "arms\\pve"],
+)
+def test_a_spec_that_could_break_out_of_the_whisper_never_reaches_the_channel(bad: str) -> None:
+    """The tail of a command the world server parses, so the check is a boundary.
+
+    The charset is the prior art's (`50-party.sh:208-215`) and it is WIDER than
+    the shipped names' lowercase-and-spaces on purpose: `playerbots.conf` is
+    hand-editable and the picker offers whatever it says, so refusing
+    `Arms PvE` here would refuse a name the module accepts. What it must never
+    admit is a quote, a backslash, a newline or a shell separator."""
+    with pytest.raises(party.BadRequest):
+        party.spec_command("Pakka", "Bottom", bad)
+
+
+def test_a_spec_this_server_does_not_list_is_refused_before_anything_is_sent() -> None:
+    """The whole reason the app validates at all: a name the module does not have
+    is answered `Spec <x> not found` IN THE GAME WINDOW
+    (`ChangeTalentsAction.cpp:157`), by `TellMasterNoFacing`. Nothing comes back
+    over the channel, so a wrong spec sent is a bot that is silently not specced
+    and an app that reported success."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="warglaive pvp",
+        specs=("arcane pve", "fire pve"),
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert result.added is False
+    assert result.blocker == result.sentence
+    assert "warglaive pvp" in result.sentence
+    assert "arcane pve" in result.sentence
+
+
+def test_a_spec_asked_for_where_this_install_lists_none_says_so_rather_than_an_empty_list() -> None:
+    """A conf that was never deployed lists nothing, and "choose one of: " with
+    nothing after it is a refusal that tells a person to do the impossible."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="fire pve",
+        specs=(),
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert "playerbots.conf" in result.sentence
+
+
+def test_the_chosen_spec_is_whispered_after_the_join_and_the_gear_follows_it() -> None:
+    """Three orderings, and each is a measured reason rather than a preference.
+
+    * The spec is whispered AFTER the join, because it is addressed to the bot by
+      name and there is no name until the group table has one.
+    * `autogear` follows the spec, because gear must match the new talents
+      (`90-main.sh:3975-3977`, whose own comment says so).
+    * `talents autopick` is NOT sent, because it is the thing the chosen spec
+      replaces -- `InitTalentsTree(true)` after `InitTalentsBySpecNo` would pick
+      the talents again and the chosen spec would be gone
+      (`ChangeTalentsAction.cpp:57-59` and `:146`).
+    """
+    fresh = party.Member(name="Newbot", guid=777, klass=8, level=1)
+    reads = iter([(), (fresh,), (fresh,)])
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="fire pve",
+        specs=("arcane pve", "fire pve"),
+        send=chan.send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert result.spec == "fire pve"
+    assert result.specced is True
+    assert "dml_whisper Pakka Newbot talents autopick" not in chan.sent
+    assert chan.sent.index("dml_whisper Pakka Newbot talents spec fire pve") < chan.sent.index(
+        "dml_whisper Pakka Newbot autogear"
+    )
+    assert "fire pve" in result.sentence
+
+
+def test_the_sentence_never_claims_the_talents_took() -> None:
+    """The module answers a spec only in the game window, so `spec_sent` is the
+    whisper being accepted and nothing more. A sentence saying the bot IS fire
+    pve would be this app asserting something it cannot read -- the readback is
+    the bot's talent table, and that is the live half's job."""
+    fresh = party.Member(name="Newbot", guid=777, klass=8, level=1)
+    reads = iter([(), (fresh,), (fresh,)])
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="fire pve",
+        specs=("fire pve",),
+        send=_Chan().send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert "in the game window" in result.sentence
+
+
+def test_no_spec_leaves_the_finishing_pair_exactly_as_it_was() -> None:
+    """The prior art's rule for its own spec branch: "No --spec keeps this branch
+    byte-identical to before" (`90-main.sh:3973`). This tree's gear-then-autopick
+    pair was proved live on 2026-09-09 and a reorder nobody measured is a change
+    to a working path."""
+    fresh = party.Member(name="Newbot", guid=777, klass=8, level=1)
+    reads = iter([(), (fresh,)])
+    chan = _Chan()
+    party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        send=chan.send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert chan.sent == [
+        "dml_addclass Pakka mage",
+        "dml_whisper Pakka Newbot autogear",
+        "dml_whisper Pakka Newbot talents autopick",
+    ]
+
+
+# -- 8.6, T5: the chosen level ----------------------------------------------
+#
+# The level is 8.4a's seam and a bot is a character, so this sends
+# `play.InstallPlay.set_level` and never a second level path. What is measured
+# per install is the BOUND: `MaxPlayerLevel = 80` in
+# `env/dist/etc/worldserver.conf` on `yulon-ubuntu2`, 2026-09-09. Eighty is not
+# written into this app anywhere -- it is a conf value on one install of one
+# tree, and the fork that ships 255 or 60 would be silently mis-bounded by a
+# constant.
+
+
+class _Level:
+    """A stand-in for the Characters tab's `set_level`, recorded into one log.
+
+    One shared log with the channel, because the ORDER between them is the thing
+    two of these tests are about and two separate lists cannot show it.
+    """
+
+    def __init__(self, log: list[str], outcome: Outcome | None = None) -> None:
+        self.log = log
+        self.outcome = outcome or Outcome(True, "level changed")
+        self.asked: list[tuple[str, int]] = []
+
+    def __call__(self, character: str, level: int) -> Outcome:
+        self.asked.append((character, level))
+        self.log.append(f"set_level {character} {level}")
+        return self.outcome
+
+
+class _LoggedChan(_Chan):
+    """`_Chan` writing into a shared log as well as its own list."""
+
+    def __init__(self, log: list[str], answers: dict[str, Answer] | None = None) -> None:
+        super().__init__(answers)
+        self.log = log
+
+    def send(self, command: str) -> Answer:
+        self.log.append(command)
+        return super().send(command)
+
+
+def test_the_maximum_level_is_read_from_this_servers_own_worldserver_conf(tmp_path: Path) -> None:
+    """Measured on `yulon-ubuntu2` 2026-09-09: `MaxPlayerLevel = 80`, at
+    `env/dist/etc/worldserver.conf:2128`. Read rather than assumed, and read with
+    the same column-0 rule `read_conf` uses -- the shipped `.dist` carries
+    commented keys, and a pattern that matched them would read the file's prose
+    as its settings."""
+    server = tmp_path / "wowserver"
+    (server / "env" / "dist" / "etc").mkdir(parents=True)
+    (server / party.WORLD_CONF).write_text(
+        "#MaxPlayerLevel = 255\nStartPlayerLevel = 1\nMaxPlayerLevel = 80\n"
+    )
+    assert party.max_player_level(server) == 80
+
+
+def test_a_maximum_level_that_could_not_be_read_is_none_and_not_a_guess(tmp_path: Path) -> None:
+    """A conf that is not there has said nothing about the level cap. `None` is a
+    third answer here for the same reason it is one in `ConfRead`: a default of
+    80 would be this app inventing a fact about somebody's fork."""
+    assert party.max_player_level(tmp_path / "nowhere") is None
+
+
+def test_a_level_above_this_servers_own_maximum_is_refused_before_anything_is_sent() -> None:
+    """The bound is the server's, so the refusal names the server's number."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=90,
+        max_level=80,
+        set_level=_Level([]),
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert result.added is False
+    assert result.blocker == result.sentence
+    assert "80" in result.sentence
+
+
+def test_a_level_asked_for_where_the_maximum_could_not_be_read_is_refused() -> None:
+    """Not bounded by a guess and not sent unbounded: the app says it could not
+    read the cap, which is the thing a person can fix."""
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=None,
+        set_level=_Level([]),
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert "MaxPlayerLevel" in result.sentence
+
+
+def test_a_level_below_one_is_refused_before_anything_is_sent() -> None:
+    chan = _Chan()
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=0,
+        max_level=80,
+        set_level=_Level([]),
+        send=chan.send,
+        members=lambda: (),
+    )
+    assert chan.sent == []
+    assert result.blocker == result.sentence
+
+
+def test_the_level_is_set_on_the_bot_and_read_back_out_of_the_group_table() -> None:
+    """`characters.level` after the press, which is what the design asks for
+    (`pyplan/phase8-designs/b-users-surface.md:422`) -- not the number the button
+    sent, and not the level command's own `yes`. The group read already carries
+    it (`Member.level` IS `characters.level`), so the readback costs one more
+    read of a query this press already makes."""
+    log: list[str] = []
+    joined_low = party.Member("Newbot", 777, 8, 1)
+    joined_high = party.Member("Newbot", 777, 8, 60)
+    reads = iter([(), (joined_low,), (joined_high,)])
+    level = _Level(log)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)]
+    assert (result.level, result.level_before, result.level_after) == (60, 1, 60)
+    assert "characters.level read 1 before the press and 60 after" in result.sentence
+
+
+def test_a_bot_already_at_the_chosen_level_is_told_so_rather_than_counted_as_a_change() -> None:
+    """The gate rule in the app's own voice: a step whose assertion was already
+    true before its action has proved nothing. A bot the server made at 60, asked
+    for 60, reads back 60 -- and reporting that as "now at level 60" is the
+    sentence that would let the live gate certify a level it never changed."""
+    log: list[str] = []
+    already = party.Member("Newbot", 777, 8, 60)
+    reads = iter([(), (already,), (already,)])
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=_Level(log),
+        send=_LoggedChan(log).send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert (result.level_before, result.level_after) == (60, 60)
+    assert "already" in result.sentence
+
+
+def test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set() -> None:
+    """The command accepted and `characters.level` unchanged is a third state, and
+    it is the one a console that answered `yes` to nothing looks like."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    reads = iter([(), (low,), (low,)])
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=_Level(log),
+        send=_LoggedChan(log).send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert (result.level_before, result.level_after) == (1, 1)
+    assert "still" in result.sentence
+
+
+def test_a_refused_level_does_not_stop_the_spec_or_the_gear() -> None:
+    """One refusal must not hide the others, and it must not cancel them either:
+    the level is the Characters tab's console command and the spec is a whisper
+    through the bridge, so a tree with no `character level` still gets its spec."""
+    log: list[str] = []
+    joined = party.Member("Newbot", 777, 8, 1)
+    reads = iter([(), (joined,), (joined,)])
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="fire pve",
+        specs=("fire pve",),
+        level=60,
+        max_level=80,
+        set_level=_Level(log, Outcome(False, problem="There is no such subcommand")),
+        send=_LoggedChan(log).send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert "There is no such subcommand" in result.sentence
+    assert "dml_whisper Pakka Newbot talents spec fire pve" in log
+    assert "dml_whisper Pakka Newbot autogear" in log
+    assert result.specced is True
+
+
+def test_the_level_is_set_before_the_spec_is_whispered() -> None:
+    """MEASURED, and the reason the order is not a preference: `SpecPick` applies
+    the premade build through `PlayerbotFactory factory(bot, bot->GetLevel())`
+    (`ChangeTalentsAction.cpp:146-149`, `yulon-ubuntu2` 2026-09-09). A spec
+    applied at level 1 and then levelled to 60 is a bot with a level-1 build."""
+    log: list[str] = []
+    joined = party.Member("Newbot", 777, 8, 1)
+    reads = iter([(), (joined,), (joined,)])
+    party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        spec="fire pve",
+        specs=("fire pve",),
+        level=60,
+        max_level=80,
+        set_level=_Level(log),
+        send=_LoggedChan(log).send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert log.index("set_level Newbot 60") < log.index(
+        "dml_whisper Pakka Newbot talents spec fire pve"
+    )
+
+
+def test_a_level_with_no_route_to_set_it_raises_rather_than_reporting_a_send() -> None:
+    """A caller asking for a level with no setter is a mistake in this app and not
+    a refusal to show a user, so it is raised the way a bad class name is."""
+    with pytest.raises(party.BadRequest):
+        party.add_bot(
+            facts=_facts(),
+            player="Pakka",
+            klass="mage",
+            level=60,
+            max_level=80,
+            send=_Chan().send,
+            members=lambda: (),
+        )
+
+
+# -- 8.6, T5: dismiss all ---------------------------------------------------
+
+
+def test_dismiss_all_sends_every_bot_away_and_names_each_one() -> None:
+    """Each dismissal reported by name. A count alone ("3 bots dismissed") is a
+    sentence nobody can check against the party frame in front of them."""
+    chan = _Chan()
+    result = party.dismiss_all(
+        player="Pakka",
+        bots=("Anmi", "Jilsur"),
+        send=chan.send,
+        members=lambda: (),
+        sleep=lambda _s: None,
+    )
+    assert result.attempted == 2
+    assert [d.bot for d in result.dismissals] == ["Anmi", "Jilsur"]
+    assert all(d.removed for d in result.dismissals)
+    assert "Anmi" in result.sentence
+    assert "Jilsur" in result.sentence
+    assert chan.sent == [
+        "dml_uninvite Anmi",
+        "dml_whisper Pakka Anmi logout",
+        "dml_uninvite Jilsur",
+        "dml_whisper Pakka Jilsur logout",
+    ]
+
+
+def test_one_bot_that_will_not_leave_does_not_hide_the_others() -> None:
+    """The prior art's own review finding, in the other direction: "one
+    unreachable bot must not strand the rest of the party"
+    (`90-main.sh:4076`). And the bot that stayed is named with the reason it
+    stayed, rather than subtracted from a count."""
+
+    class _Half(_Chan):
+        def send(self, command: str) -> Answer:
+            self.sent.append(command)
+            if command == "dml_uninvite Anmi":
+                return Answer("no", "Command 'dml_uninvite' does not exist")
+            return Answer("yes", "ok")
+
+    chan = _Half()
+    result = party.dismiss_all(
+        player="Pakka",
+        bots=("Anmi", "Jilsur"),
+        send=chan.send,
+        # Neither row is in this reading, so the only thing that decides Anmi is
+        # the refusal to its uninvite.
+        members=lambda: (),
+        sleep=lambda _s: None,
+    )
+    assert [d.removed for d in result.dismissals] == [False, True]
+    assert "Anmi" in result.sentence
+    assert "does not exist" in result.sentence
+    assert "Jilsur" in result.sentence
+    assert "dml_uninvite Jilsur" in chan.sent, "the refusal must not stop the next bot"
+
+
+def test_dismiss_all_with_no_bots_sends_nothing_and_says_so() -> None:
+    """Nothing to dismiss is a refusal with a `blocker`, which is this module's
+    word for "the channel was never touched"."""
+    chan = _Chan()
+    result = party.dismiss_all(
+        player="Pakka", bots=(), send=chan.send, members=lambda: (), sleep=lambda _s: None
+    )
+    assert chan.sent == []
+    assert result.attempted == 0
+    assert result.blocker == result.sentence
+    assert result.dismissals == ()
+
+
+def test_the_seam_reads_the_party_before_dismissing_all_of_it(tmp_path: Path) -> None:
+    """The list comes from the group table at the moment of the press, not from
+    whatever the panel last drew: the bot manager logs bots in and out on a timer
+    and a list read minutes ago is 8.4d's finding all over again."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Anmi\t949\t8\t1\n", "1001\n", "")
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka")
+    assert result.attempted == 1
+    assert [d.bot for d in result.dismissals] == ["Anmi"]
+    assert "dml_uninvite Anmi" in chan.sent
+
+
+def test_the_seam_dismisses_nothing_where_the_party_could_not_be_read(tmp_path: Path) -> None:
+    """A read that failed is not an empty party: reporting "no bots to dismiss"
+    for a group table nobody could read is the same lie `_rows_only` exists to
+    keep out of the poll."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("")  # the online lookup finds nobody
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka")
+    assert result.attempted == 0
+    assert "logged in" in result.sentence
+    assert chan.sent == []
+
+
+# -- 8.6, T5: what the seam offers the panel --------------------------------
+
+
+def test_the_seam_offers_the_specs_this_install_lists_for_the_chosen_class(tmp_path: Path) -> None:
+    """Class name in, this install's names out. The mapping is the module's own
+    (`BOT_CLASS_IDS`) so the picker cannot ask for a class the conf is not keyed
+    by."""
+    server = _ready_install(tmp_path)
+    (server / party.PLAYERBOTS_CONF).write_text(SPEC_CONF)
+    seam = _install(server, _Sql(), None)
+    assert seam.specs("mage") == ("arcane pve", "fire pve")
+    assert seam.specs("dk") == ("blood pve",)
+    assert seam.specs("druid") == ()
+
+
+def test_the_shipped_dist_conf_is_read_where_no_conf_was_deployed(tmp_path: Path) -> None:
+    """`playerbots.conf.dist` is what an install that never had its module conf
+    written has, and it is what the server itself falls back to. Measured on
+    `yulon-ubuntu2` 2026-09-09: that box has the `.dist` and no `playerbots.conf`
+    -- so a reader that only looked for the deployed name would offer no specs at
+    all on the one install where My Party has ever worked."""
+    server = _ready_install(tmp_path)
+    (server / (party.PLAYERBOTS_CONF + ".dist")).write_text(SPEC_CONF)
+    assert _install(server, _Sql(), None).specs("mage") == ("arcane pve", "fire pve")
+
+
+def test_the_seam_reads_this_installs_maximum_level(tmp_path: Path) -> None:
+    server = _ready_install(tmp_path)
+    (server / party.WORLD_CONF).write_text("MaxPlayerLevel = 60\n")
+    assert _install(server, _Sql(), None).max_level() == 60
+
+
+def test_the_seam_sets_a_level_through_the_characters_tab_and_not_a_second_path(
+    tmp_path: Path,
+) -> None:
+    """8.4a's seam, reused. Two level paths would be two spellings of
+    `character level` and two places to fix the day a fork renames it -- and the
+    Characters tab's is the one that already refuses the trees with no such
+    command, in the entry's own measured words."""
+    seam = _install(_ready_install(tmp_path), _Sql(), None)
+    assert seam.level_setter.__self__.__class__ is play.InstallPlay  # type: ignore[attr-defined]
+    assert seam.level_setter.__name__ == "set_level"  # type: ignore[attr-defined]
