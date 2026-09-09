@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from yulon import runner
@@ -143,9 +143,23 @@ class _StreamWorker(QObject):
         the "stopped before it started" one — and an exit that emitted
         `finished` without this call would leave the thread running for exactly
         that reason.
+
+        **OUR thread, never the GUI one.** `run()` is called directly, on the
+        calling thread, by anything that drives a worker without moving it —
+        which is exactly how the "stopped before it started" ordering is proved,
+        because `QThread::started` is delivered on the new thread and the GUI
+        thread cannot hold it back. Without the guard below that call quits the
+        MAIN event loop, and nothing looks wrong until the next nested loop:
+        `QInputDialog.getText()` then returns `ok=False` having shown no dialog
+        at all, so a question the installer is blocked on reads as "the user
+        dismissed it". Measured 2026-09-09 — one unit test in this file left the
+        main loop quit and `tests/test_prompt.py`'s real-dialog test read `None`
+        where a `y` had been typed; green apart, red together, on the GitHub
+        runner and again outside pytest on yulon-fedora.
         """
         thread = self.thread()
-        if thread is not None:
+        app = QCoreApplication.instance()
+        if thread is not None and (app is None or thread is not app.thread()):
             thread.quit()
 
     def request_stop(self) -> None:

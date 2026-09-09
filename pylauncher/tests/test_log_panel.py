@@ -869,3 +869,39 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
         "HANG_BOUND_MS",
         "JOB_PACE",
     }
+
+
+def test_a_worker_run_on_the_gui_thread_never_quits_the_gui_thread(qapp: object) -> None:
+    """`_quit_own_thread()` must not end the event loop of the thread the app lives on.
+
+    Measured on yulon-fedora, 2026-09-09, after CI went red on a test in another
+    file. `_StreamWorker.run()` ends by calling `self.thread().quit()`. A worker
+    created and run ON THE GUI THREAD -- which is what
+    `test_a_worker_told_to_stop_before_it_runs_never_starts_its_source` does,
+    deliberately, because the ordering it proves cannot be produced through the
+    public surface -- therefore tells the MAIN event loop to quit. Nothing
+    visible happens at once. The next nested loop returns immediately instead of
+    running: `QInputDialog.getText()` came back `ok=False` with no dialog ever
+    shown, so `tests/test_prompt.py::test_the_docker_group_question_reaches_a_real_dialog_unmasked`
+    read `None` where a user had typed `y`. Bisected to that one pair; green
+    alone, red together, on the GitHub runner and reproduced here outside pytest.
+
+    The product invariant is in the method's own name: it ends OUR thread's
+    loop. The GUI thread's loop is not ours, whoever calls `run()`.
+
+    Mutation this catches: dropping the guard. `exec()` below then returns
+    without the timer ever firing, and `ticked` is empty.
+    """
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    worker = _StreamWorker(lambda: iter(()))
+    worker.request_stop()
+    worker.run()  # ends with _quit_own_thread(); this worker's thread IS the GUI thread
+
+    ticked: list[int] = []
+    loop = QEventLoop()
+    QTimer.singleShot(0, lambda: (ticked.append(1), loop.quit()))
+    QTimer.singleShot(HANG_BOUND_MS, loop.quit)
+    loop.exec()
+
+    assert ticked == [1], "the GUI thread's event loop had been told to quit"
