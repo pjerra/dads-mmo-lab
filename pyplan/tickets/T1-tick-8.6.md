@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** REWORK (rejected by the lead 2026-09-09 10:05, round 2)
+**Status:** DONE, round 3 (hand reported 10:14; awaiting review 3)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -87,3 +87,11 @@ The two verdicts together:
 3. Small and true: "the folder records no sha" beside `daeae0a5`; `README.md:191-195`; the three presses on 2026-09-08.
 
 Amend the single commit, re-run the gate, report.
+
+## Report, round 3 (hand, 2026-09-09 10:14)
+
+- sha `3a020861` (amended, one commit, base `e2912690`); gate `=== --checks: ALL GREEN ===`, 3769 passed; diff `pyplan/checklist.md | 24 ++++++++++++++++--------` (`:2470`, `:2508`, `:2509`)
+- Tick withheld: `:2508` is `- [ ] 8.6`, definition of done untouched; record retitled "Pressed 2026-09-09 -- the route, and the surface for CLASS; the box stays open"; a "Still owed" sentence names chosen spec, chosen level with readback, dismiss all, cites `party_panel.py:33`, `b-users-surface.md:422` and T5 (`7ab2caa0`), and says the definition is not weakened to meet what was pressed.
+- The 2026-08-20 cause: now records that the note offered a different cause (`hypeer.md:619-623`, relative `ALE.ScriptPath`) and measured none; the cause was measured 2026-09-08 on `yulon-ubuntu`, the original, and `8.6-wotlk-yulon-ubuntu-2026-09-08/` is cited directly (`README.md:24-25`, `:40-52`).
+- Small three done: "records no sha" beside `daeae0a5`; `README.md:191-195`; "three times, all on 2026-09-08 (+0200)".
+- Deviations: T5's path is on origin only until the lead merges; reviewer line numbers replaced by resolving ones (unchanged); `:2470` one past-tensed sentence (unchanged); correction 6 (8.2e) still on no ticket -- **lead's, flagged a third time**; with 8.6 unticked `test_docs_pins` no longer scans the three `8.6-*` folders, so this gate is weaker evidence about them than round 1's.
