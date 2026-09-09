@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** DONE (hand reported 2026-09-09 09:02; awaiting review)
+**Status:** REWORK (rejected by the lead 2026-09-09 09:20, round 1)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -49,3 +49,17 @@ Sha, the gate's last line, the diff stat, and **deviations flagged** — anythin
 - [high] `pyplan/checklist.md:2500` still says "This route has never been recorded working" and "that rebuild is the owner's and is not automatic"; the appended Gated clause and the exit review refute both. A ticked line that contradicts its own evidence misrepresents the product the moment the box is checked; a later paragraph does not correct false prose on the line itself.
 - Must-fix: rewrite both sentences on `:2500` in the exit review's dated formulation (failures 2026-08-20 and 2026-09-08 for a measured reason; answered 2026-09-09 once the engine was compiled in; the app's Rebuild control is user-initiated and was pressed live, while the manifest's rebuild flag is still not applied automatically). Re-run the docs-pin checks.
 - Fable reviewer's verdict pending; the rejection body will carry both.
+
+## Review 2 (cold Fable reviewer, 2026-09-09 09:18) — REWORK
+
+Independently the same finding: the additions are sound and every citation resolves (shas, folders, filenames, the 06:05:53/06:05:55 timestamps, 16 + 3 = 19 tests); the two present-tense sentences left on `:2500` are false on the day of the tick, and the spec's "keep the whole existing sentence" contradicted its own item 4 and the exit review it cites. The spec was wrong, not the hand. Notes: correction 1 (`:2470`) is the same fact in the same file and no other ticket owns it; the "five scripts loaded" claim cites files that show a directory listing, the log lines are in `rebuild-live-…/README.md:189-195` and `9-clause5-server-debug.txt`; "19 tests over `8820984c` and `daeae0a5`" reads as if both added tests; test paths spelled `tests/…` against the line's `pylauncher/…` convention.
+
+## Rejection (lead, round 1) — must-fixes, all in `pyplan/checklist.md`
+
+1. `:2500` — rewrite the bold "This route has never been recorded working …" as the dated record (exit review correction 3): failed 2026-08-20 and 2026-09-08 for a measured reason (the engine was not in the image); answered 2026-09-09 once it was compiled in. Keep the "a negative answer is a legitimate outcome" stance, in the past tense.
+2. `:2500` — apply correction 4: the applier still does not act on the manifest's rebuild flag; the app's own Rebuild control exists (`controller_view.py:1587`, `:4220-4221`) and was pressed live 2026-09-08/09; what remains the owner's is the decision to press it. Dated.
+3. `:2470` — apply correction 1 (the WotLK box is `yulon-ubuntu2`; `yulon-ubuntu` OffCritical since 2026-09-08), so the file does not name a dead box on one line and call it dead on another. The lead widens the ticket's items to include it.
+4. `:2500` — the "worldserver's own log naming all five deployed bridge scripts as loaded" parenthesis: cite `rebuild-live-yulon-ubuntu2-2026-09-09/README.md:189-195` (or `9-clause5-server-debug.txt`) for the `loaded` lines; the files named now show the listing on disk.
+5. Optional, not blocking: "19 tests over …" → say all nineteen landed in `8820984c`; spell the test paths `pylauncher/tests/…`.
+
+Amend the single commit (the lead reads "one commit" as one at merge), re-run the gate, report again.
