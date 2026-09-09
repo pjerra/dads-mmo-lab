@@ -453,6 +453,18 @@ class SqlPhase(_Strict):
     into_each: dict[str, str] | None = None
     files: tuple[str, ...] = ()
     statements: tuple[str, ...] = ()
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Per-tree facts about THIS phase: what it applies, and what already applies (or "
+            "fails to apply) the same files on this tree. For a phase whose reason is visible "
+            "only on a running server -- `wow-tortoise`'s `character updates` exists because "
+            "the fork's own updater is pointed at a different directory, which is invisible "
+            "from the JSON -- this is where the measurement lives, beside the value it "
+            "explains, rather than in a docstring written per FIELD while the fact is per "
+            "field per GAME. Not `description`: that is the game blurb a user reads."
+        ),
+    )
     gzip: bool = False
     sort: Literal["natural", "name"] = "natural"
     on_error: Literal["fail", "warn"] = Field(

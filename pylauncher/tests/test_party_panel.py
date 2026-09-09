@@ -15,7 +15,17 @@ from __future__ import annotations
 
 from yulon import party
 from yulon.ui.widgets.job import run_inline
-from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.party_panel import (
+    DISMISS_ALL_CANCELLED,
+    DISMISS_ALL_IDLE,
+    DISMISS_ALL_MOVED,
+    LEVEL_AS_MADE,
+    NO_BOTS_TO_DISMISS,
+    PRESS_SHOW_FIRST,
+    SPEC_AUTO,
+    WORKING,
+    PartyPanel,
+)
 
 READY_CHECKS = (
     party.Precondition("server_installed", True, ""),
@@ -38,27 +48,71 @@ class _StubParty:
         state: party.PartyState | None = None,
         addition: party.Addition | None = None,
         dismissal: party.Dismissal | None = None,
+        mass: party.MassDismissal | None = None,
+        specs: dict[str, tuple[str, ...]] | None = None,
+        max_level: int | None = 80,
     ) -> None:
         self.state_result = state or party.PartyState(True, "", READY_CHECKS)
         self.addition = addition or party.Addition(
             True, True, "Jilsur", True, True, "Jilsur joined the party, geared and specced."
         )
         self.dismissal = dismissal or party.Dismissal(True, True, "Jilsur left the party.")
+        self.mass = mass or party.MassDismissal(0, (), "nothing to do")
+        self.spec_lists = {} if specs is None else specs
+        self.top_level = max_level
         self.asked: list[str] = []
-        self.added: list[tuple[str, str]] = []
+        self.added: list[tuple[str, str, str, int | None]] = []
         self.removed: list[tuple[str, str]] = []
+        self.dismissed_all: list[tuple[str, tuple[int, ...]]] = []
+        self.dismissed: list[str] = []
 
     def state(self, master: str) -> party.PartyState:
         self.asked.append(master)
         return self.state_result
 
-    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition:
-        self.added.append((master, klass))
+    def specs(self, klass: str) -> tuple[str, ...]:
+        return self.spec_lists.get(klass, ())
+
+    def max_level(self) -> int | None:
+        return self.top_level
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> party.Addition:
+        self.added.append((master, klass, spec, level))
         return self.addition
 
     def remove(self, master: str, bot: str) -> party.Dismissal:
         self.removed.append((master, bot))
         return self.dismissal
+
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal:
+        """The real seam's contract, honoured rather than recorded.
+
+        A stub that took the guids and dismissed regardless would let every test
+        below pass over a panel that sent the wrong ones: what the confirmation
+        buys is that the SEAM re-reads and refuses, so the stub re-reads its own
+        `state_result` and refuses too. The real refusal's wording is
+        `test_party.py`'s subject; what is proved here is that the panel passes
+        the identities it confirmed and shows what came back.
+        """
+        self.dismissed_all.append((master, confirmed))
+        rows = self.state_result.members
+        if {row.guid for row in rows} != set(confirmed):
+            moved = "the party is not the one that was confirmed. Nothing was sent."
+            return party.MassDismissal(0, (), moved, blocker=moved)
+        self.dismissed.extend(row.name for row in rows)
+        # The party is empty afterwards, because that is what dismissing every
+        # bot does. Poking `state_result` by hand in a test instead would let
+        # the confirmation check see a party the dismissal never happened to.
+        self.state_result = party.PartyState(True, "", READY_CHECKS)
+        return self.mass
 
 
 def _member(name: str = "Jilsur", guid: int = 948) -> party.Member:
@@ -210,7 +264,7 @@ def test_the_press_sends_the_chosen_class_and_the_servers_own_sentence_survives_
 
     panel.add_bot()
 
-    assert stub.added == [("Pakka", "mage")]
+    assert stub.added == [("Pakka", "mage", "", None)]
     assert panel.report.text() == "Jilsur joined the party, geared and specced."
     assert any("Jilsur" in row for row in _rows(panel)), "the group was re-read, not assumed"
 
@@ -318,6 +372,11 @@ def test_a_second_press_is_refused_while_one_is_in_flight(qapp: object) -> None:
     stub = _StubParty()
     panel = PartyPanel(stub, jobs=never_finishes)  # type: ignore[arg-type]
     panel.character.setText("Pakka")
+    # The two reads the panel starts with -- this install's spec list and its
+    # top level -- are jobs too, and this one's runner never finishes any of
+    # them. What is being counted here is presses, so the constructor's reads
+    # are dropped rather than left to make the assertion below say 3.
+    held.clear()
 
     panel.add_bot()
     assert panel.add_button.isEnabled() is False, "the ground: the button is locked while it runs"
@@ -359,3 +418,465 @@ def test_a_press_that_reached_the_server_says_so_and_a_local_refusal_does_not(
     panel.add_bot()
 
     assert heard == [1]
+
+
+# -- 8.6, T5: the chosen spec, the chosen level, dismiss all ----------------
+
+
+def _offered(panel: PartyPanel) -> list[str]:
+    return [panel.spec.itemText(i) for i in range(panel.spec.count())]
+
+
+def test_the_specs_offered_are_the_ones_this_install_lists_for_the_chosen_class(
+    qapp: object,
+) -> None:
+    """The picker is the conf's list for the class in the box beside it.
+
+    Two reasons it is filtered by class rather than showing all of them: the
+    module compares the whispered name against `premadeSpecName[<the BOT's
+    class>]` only (`ChangeTalentsAction.cpp:144`), so a mage offered `arms pve`
+    is a mage offered a name that can only fail; and the failure is invisible —
+    `Spec <x> not found` goes to the game window and never to this app.
+    """
+    stub = _StubParty(specs={"mage": ("arcane pve", "fire pve"), "druid": ("balance pve",)})
+    panel = _panel(stub)
+
+    panel.klass.setCurrentText("mage")
+
+    assert _offered(panel) == [SPEC_AUTO, "arcane pve", "fire pve"]
+    panel.klass.setCurrentText("druid")
+    assert _offered(panel) == [SPEC_AUTO, "balance pve"]
+
+
+def test_a_class_this_install_lists_no_specs_for_still_offers_the_servers_own_pick(
+    qapp: object,
+) -> None:
+    """An empty picker would be a control a person cannot use and cannot explain.
+    Autopick is what `add()` has always done and it is still there."""
+    panel = _panel(_StubParty(specs={}))
+
+    assert _offered(panel) == [SPEC_AUTO]
+
+
+def test_the_chosen_spec_is_what_the_press_carries_and_the_servers_own_pick_carries_nothing(
+    qapp: object,
+) -> None:
+    """`spec=""` is the seam's word for "let the server pick", which is the
+    `talents autopick` whisper `add_bot` has always sent."""
+    stub = _StubParty(specs={"mage": ("arcane pve", "fire pve")})
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.klass.setCurrentText("mage")
+
+    panel.add_bot()
+    assert stub.added[-1] == ("Pakka", "mage", "", None), "the ground: nothing chosen"
+
+    panel.spec.setCurrentText("fire pve")
+    panel.add_bot()
+
+    assert stub.added[-1] == ("Pakka", "mage", "fire pve", None)
+
+
+def test_the_level_box_is_bounded_by_this_servers_own_maximum(qapp: object) -> None:
+    """80 is not in this panel. The bound is `MaxPlayerLevel` off the install
+    (measured 80 on `yulon-ubuntu2` 2026-09-09) and a fork that ships 60 bounds
+    the same box at 60."""
+    panel = _panel(_StubParty(max_level=60))
+
+    assert panel.level.maximum() == 60
+    assert panel.level.isEnabled() is True
+
+
+def test_a_server_whose_maximum_could_not_be_read_offers_no_level_and_says_why(
+    qapp: object,
+) -> None:
+    """The Characters tab's rule for a control this tree cannot have (8.4d): not a
+    disabled button with no explanation and not an empty space, but the sentence
+    naming what to fix. Here the fix is a conf key, so the sentence names it."""
+    panel = _panel(_StubParty(max_level=None))
+
+    assert panel.level.isEnabled() is False
+    assert party.MAX_LEVEL_KEY in panel.level_absent.text()
+    assert panel.level_absent.isVisibleTo(panel) is True
+
+
+def test_a_level_left_alone_sends_no_level_at_all(qapp: object) -> None:
+    """The box has to have a value and "no level" has to be one of them, so the
+    bottom of the range is not level 1 -- it is the words "leave it alone".
+    Sending level 1 for a box nobody touched would reset every bot to 1."""
+    stub = _StubParty(max_level=80)
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    assert panel.level.value() == 0
+    assert panel.level.text() == LEVEL_AS_MADE
+
+    panel.add_bot()
+    assert stub.added[-1][3] is None
+
+    panel.level.setValue(60)
+    panel.add_bot()
+
+    assert stub.added[-1][3] == 60
+
+
+def test_dismiss_all_arms_first_and_names_the_count_it_would_send_away(qapp: object) -> None:
+    """The tab's own two-press gesture (`controller_view.REMOVE_ARMED`), for the
+    same reason: a teardown should not be one click away. The armed label carries
+    the count, so what the second press does is on the button itself."""
+    stub = _StubParty(
+        state=party.PartyState(True, "", READY_CHECKS, members=(_member(), _member("Anmi", 949)))
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == [], "the first press arms and sends nothing"
+    assert "2 bots" in panel.dismiss_all_button.text()
+    assert "Pakka" in panel.report.text()
+
+
+def test_the_second_press_sends_it_and_the_group_is_read_back(qapp: object) -> None:
+    """The rows go because the group table no longer has them, never because the
+    panel dropped them: `remove_all` reports per bot and the list is re-read."""
+    stub = _StubParty(
+        state=party.PartyState(True, "", READY_CHECKS, members=(_member(), _member("Anmi", 949))),
+        mass=party.MassDismissal(
+            2,
+            (
+                party.Dismissal(True, True, "Anmi left the party.", bot="Anmi"),
+                party.Dismissal(True, True, "Jilsur left the party.", bot="Jilsur"),
+            ),
+            "2 bots left the party: Anmi, Jilsur.",
+        ),
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    panel.dismiss_all()
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == [("Pakka", (948, 949))]
+    assert panel.report.text() == "2 bots left the party: Anmi, Jilsur."
+    assert _rows(panel) == []
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE, "it disarms once it has fired"
+
+
+def test_dismiss_all_with_no_bots_in_the_list_sends_nothing_and_never_arms(qapp: object) -> None:
+    """Refused here rather than at the seam, for the same reason an empty
+    character box is: it costs a database read and a `docker exec` to be told
+    what the panel can already see, and arming a button over an empty party is
+    asking somebody to confirm nothing."""
+    stub = _StubParty()
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+
+    panel.dismiss_all()
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == []
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+    assert "nothing to dismiss" in panel.report.text()
+
+
+def test_showing_the_party_stands_an_armed_dismiss_all_down_and_says_so(qapp: object) -> None:
+    """The idle button's own escape route, and the tab's (`REMOVE_ARMED`'s
+    paragraph says "Press Refresh to cancel"). It has to SAY it happened: a read
+    clears the report line, so an armed press followed by a refresh would
+    otherwise leave a disarmed button and no record of the cancellation."""
+    stub = _StubParty(state=party.PartyState(True, "", READY_CHECKS, members=(_member(),)))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    panel.dismiss_all()
+    assert "1 bot" in panel.dismiss_all_button.text(), "the ground: it is armed"
+
+    panel.refresh_party()
+
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+    assert panel.report.text() == DISMISS_ALL_CANCELLED
+    assert stub.dismissed_all == []
+
+
+def test_an_add_stands_an_armed_dismiss_all_down_and_its_own_report_wins(qapp: object) -> None:
+    """Any other action means the user moved on from this one
+    (`controller_view._disarm_actions`), and the action they DID take owns the
+    report line -- a cancellation notice over an add's own sentence would throw
+    away the only thing saying whether the bot arrived."""
+    stub = _StubParty(state=party.PartyState(True, "", READY_CHECKS, members=(_member(),)))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    panel.dismiss_all()
+
+    panel.add_bot()
+
+    assert stub.dismissed_all == []
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+    assert panel.report.text() == "Jilsur joined the party, geared and specced."
+
+
+# -- round 2: what an arm is ABOUT, and reads that land out of order --------
+
+
+def _deferred() -> tuple[list[tuple[object, object, object]], object]:
+    """A runner that queues jobs so a test can finish them in any order it likes."""
+    pending: list[tuple[object, object, object]] = []
+
+    def defer(work: object, on_done: object, on_error: object) -> None:
+        pending.append((work, on_done, on_error))
+
+    return pending, defer
+
+
+def _armed_panel(stub: _StubParty) -> PartyPanel:
+    """A panel showing Pakka's two bots, with dismiss-all armed on them."""
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    panel.dismiss_all()
+    assert "2 bots" in panel.dismiss_all_button.text(), "the ground: armed on the two on screen"
+    return panel
+
+
+def _two_bots() -> party.PartyState:
+    return party.PartyState(True, "", READY_CHECKS, members=(_member(), _member("Anmi", 949)))
+
+
+def test_an_armed_dismiss_all_is_bound_to_the_character_it_named(qapp: object) -> None:
+    """Round 1, both reviewers, and the sharpest edge on this panel.
+
+    Armed on Pakka's two bots, a person who then types another name into the box
+    and presses again used to send `remove_all("Anmi")` -- against a party that
+    had never been drawn, counted, or named in the sentence they agreed to. Only
+    Enter disarmed, and typing a name is not pressing Enter.
+    """
+    stub = _StubParty(state=_two_bots())
+    panel = _armed_panel(stub)
+
+    panel.character.setText("Anmi")
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE, "typing stands the arm down"
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == []
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+    assert panel.report.text() == DISMISS_ALL_MOVED
+
+
+def test_the_arming_sentence_names_the_bots_the_second_press_would_send_away(
+    qapp: object,
+) -> None:
+    """What was confirmed has to be readable, or the identity check guards a
+    promise nobody was shown."""
+    panel = _armed_panel(_StubParty(state=_two_bots()))
+
+    assert "Jilsur" in panel.report.text()
+    assert "Anmi" in panel.report.text()
+    assert "Pakka" in panel.report.text()
+
+
+def test_the_same_character_and_the_same_bots_still_fire_on_the_second_press(
+    qapp: object,
+) -> None:
+    """The control for the two tests above: an unchanged subject is not a moved
+    one, and the check must not have made the button unpressable."""
+    stub = _StubParty(state=_two_bots())
+    panel = _armed_panel(stub)
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == [("Pakka", (948, 949))]
+
+
+def test_a_spec_reading_that_lands_after_a_newer_one_is_dropped(qapp: object) -> None:
+    """Round 1 (Codex): each class change starts an independent read.
+
+    With two in flight the runner decides which finishes first, and a slower
+    MAGE read landing after a DRUID read used to fill the druid picker with mage
+    specs -- so the next Add would send a spec for the wrong class, which this
+    tree's module answers `Spec <x> not found` to in the game window, where
+    nothing this app can read will ever see it.
+    """
+    pending, defer = _deferred()
+    stub = _StubParty(specs={"mage": ("fire pve",), "druid": ("balance pve",)})
+    panel = PartyPanel(stub, jobs=defer)  # type: ignore[arg-type]
+    pending.clear()  # the two readings the constructor starts
+
+    panel.klass.setCurrentText("mage")
+    panel.klass.setCurrentText("druid")
+    assert len(pending) == 2, "the ground: two spec readings are in flight"
+    for work, on_done, _fail in reversed(pending):  # druid first, then the slower mage
+        on_done(work())  # type: ignore[operator]
+
+    assert _offered(panel) == [SPEC_AUTO, "balance pve"]
+
+
+def test_a_reading_that_raises_beside_a_press_does_not_unlock_the_press(qapp: object) -> None:
+    """`specs()` and `max_level()` ride along beside a press; their failures must
+    not re-arm the buttons under one.
+
+    Round 1 flagged it as not blocking, and the cost if it happened is the one
+    `_busy` exists to prevent: two adds in flight poll each other's bots, because
+    `party.add_bot` decides a bot arrived by finding a guid that was not in ITS
+    own before-reading.
+    """
+    pending, defer = _deferred()
+
+    class _BadSpecs(_StubParty):
+        def specs(self, klass: str) -> tuple[str, ...]:
+            raise RuntimeError("no playerbots.conf here")
+
+    stub = _BadSpecs()
+    panel = PartyPanel(stub, jobs=defer)  # type: ignore[arg-type]
+    pending.clear()
+    panel.character.setText("Pakka")
+    panel.add_bot()
+    assert panel.add_button.isEnabled() is False, "the ground: a press is in flight"
+
+    panel.klass.setCurrentText("mage")
+    work, _done, on_error = pending[-1]
+    try:
+        work()  # type: ignore[operator]
+    except RuntimeError as exc:
+        on_error(exc)  # type: ignore[operator]
+
+    assert panel.add_button.isEnabled() is False
+    assert panel.report.text() == WORKING, "the press's own line is what a person is waiting for"
+
+
+def test_the_pickers_are_locked_while_a_press_is_in_flight(qapp: object) -> None:
+    """A class changed mid-press re-reads the spec list under an add that has
+    already sent its class, and a spec or level chosen while the server is being
+    asked is one the answer on screen will not be about."""
+    pending, defer = _deferred()
+    panel = PartyPanel(_StubParty(), jobs=defer)  # type: ignore[arg-type]
+    panel.character.setText("Pakka")
+    assert panel.klass.isEnabled() is True, "the ground: they are usable when nothing is running"
+
+    panel.add_bot()
+
+    assert (panel.klass.isEnabled(), panel.spec.isEnabled(), panel.level.isEnabled()) == (
+        False,
+        False,
+        False,
+    )
+
+
+# -- round 3: the set that was confirmed is the set that is sent away -------
+
+
+def test_a_party_that_moved_on_the_server_is_not_dismissed_unconfirmed(qapp: object) -> None:
+    """Round 2 (Codex): the on-screen check guarded the wrong side of the door.
+
+    The second press compared the DRAWN rows to the confirmed ones and then
+    called a seam that read the party fresh and dismissed whatever it found. A
+    bot that joined between the two presses -- a party filling up while somebody
+    reads the sentence -- passed the on-screen check, because nothing on screen
+    had changed, and went away unconfirmed. What binds the two halves is that
+    the confirmed identities travel WITH the press: the seam re-reads, refuses
+    unless the party is exactly the set that was agreed to, and dismisses only
+    that snapshot.
+
+    The identities are guids from the group read and not names parsed back out
+    of the rows: a name is what a display shows, and a guid is what the group
+    table has.
+    """
+    stub = _StubParty(state=_two_bots())
+    panel = _armed_panel(stub)
+    # The party moves on the SERVER. Nothing on screen changes, and nothing
+    # re-reads it -- which is exactly the window the arm sits in.
+    stub.state_result = party.PartyState(
+        True, "", READY_CHECKS, members=(_member(), _member("Anmi", 949), _member("Kobo", 950))
+    )
+
+    panel.dismiss_all()
+
+    assert stub.dismissed == [], "nothing may be sent away"
+    assert stub.dismissed_all == [("Pakka", (948, 949))], "the guids confirmed went with the press"
+    assert "confirmed" in panel.report.text()
+
+
+def test_the_press_carries_the_guids_that_were_confirmed_and_not_the_names_on_screen(
+    qapp: object,
+) -> None:
+    """The control for the test above: an unchanged party still fires, and what
+    it fires with is the group table's own identities."""
+    stub = _StubParty(state=_two_bots())
+    panel = _armed_panel(stub)
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == [("Pakka", (948, 949))]
+    assert stub.dismissed == ["Jilsur", "Anmi"]
+
+
+def test_a_party_drawn_for_another_character_cannot_be_armed(qapp: object) -> None:
+    """Round 2 (Fable): a stale list under a new name armed happily.
+
+    Show as Pakka, retype the box as Anmi without pressing Show, press Dismiss
+    every bot: nothing was armed, so nothing stood down, and the arm took
+    ("Anmi", Pakka's rows) -- a sentence naming Pakka's bots over a press
+    addressed to Anmi's party. The rows now remember which character they were
+    drawn for, and an arm is refused until the two agree.
+    """
+    stub = _StubParty(state=_two_bots())
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+
+    panel.character.setText("Anmi")
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == []
+    assert panel.dismiss_all_button.text() == DISMISS_ALL_IDLE
+    assert panel.report.text() == PRESS_SHOW_FIRST
+
+
+def test_a_refused_read_leaves_no_party_to_arm_on(qapp: object) -> None:
+    """The rows AND the name they were drawn for go together when a read fails.
+
+    Otherwise a blocker clears the list and leaves `Pakka` behind it, and the
+    next press arms on an empty confirmation -- which the seam would read as
+    "confirm that this party is empty" and act on.
+    """
+    stub = _StubParty(state=_two_bots())
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.refresh_party()
+    assert _rows(panel) != [], "the ground: a party was on screen"
+    stub.state_result = party.PartyState(False, "the world server is not running", READY_CHECKS)
+    panel.refresh_party()
+
+    panel.dismiss_all()
+
+    assert stub.dismissed_all == []
+    assert panel.report.text() == NO_BOTS_TO_DISMISS
+
+
+def test_a_level_bound_that_lands_during_a_press_does_not_hand_the_box_back(qapp: object) -> None:
+    """The level reading the panel starts at birth can finish under the first press.
+
+    A mutation survived here in round 3 and this test is why it does not any
+    more: every earlier test either had no press in flight or never let that
+    reading complete, so `setEnabled(True)` in the completion was never executed
+    while it mattered. It matters because the reading and the press are
+    independent -- the panel is built, somebody presses Add straight away, and
+    the conf read lands a moment later on top of a locked panel.
+    """
+    pending, defer = _deferred()
+    panel = PartyPanel(_StubParty(max_level=80), jobs=defer)  # type: ignore[arg-type]
+    level_read = pending[0]  # `_load_level_bound` runs first in __init__
+    panel.character.setText("Pakka")
+
+    panel.add_bot()
+    assert panel.level.isEnabled() is False, "the ground: the press locked it"
+    work, on_done, _fail = level_read
+    on_done(work())  # type: ignore[operator]
+
+    assert panel.level.isEnabled() is False
+    assert panel.level.maximum() == 80, "the bound still arrived; only the control stayed locked"

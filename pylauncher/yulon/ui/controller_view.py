@@ -132,19 +132,42 @@ class BotBrowser(Protocol):
 
 
 class MyPartySeam(Protocol):
-    """What the My Party control needs (8.6). One read and two presses.
+    """What the My Party control needs (8.6). Three reads and three presses.
 
     `state()` carries the group AND the reason there is none, in one object,
     because they are one question: the empty list a broken bridge produces is
     the same empty list a working party with no bots in it produces, and the
     2026-08-20 failure is exactly that pair being told apart wrongly.
+
+    It grew by three in T5 (2026-09-09) and every one of them is here rather than
+    in the panel because it is a reading OF AN INSTALL: `specs()` is this
+    server's `playerbots.conf`, `max_level()` is its `worldserver.conf`, and
+    `remove_all()` is the group table read at the moment of the press, against
+    the guids a person confirmed. A panel that read any of them itself would be
+    a widget that knows where a server folder is -- and a `remove_all` that took
+    only a name would be a confirmation the panel checks and the server ignores,
+    which is what round 2 rejected.
     """
 
     def state(self, master: str) -> party.PartyState: ...
 
-    def add(self, master: str, klass: str, *, gender: str = "") -> party.Addition: ...
+    def specs(self, klass: str) -> tuple[str, ...]: ...
+
+    def max_level(self) -> int | None: ...
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> party.Addition: ...
 
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
+
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
 
 
 class Uninstall(Protocol):
