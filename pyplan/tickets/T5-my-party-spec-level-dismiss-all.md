@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** ACCEPT, live half (lead's own read of round 2, 2026-09-09 13:52 CEST) -- merging; code half merged `e593d3d0`
+**Status:** CLOSED -- live half merged `f508e710`, suite green behind it, 2026-09-09 13:55 CEST; code half `e593d3d0`; hand retired, worktree removed; T16 carries the level finding
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
