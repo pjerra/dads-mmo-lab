@@ -1,6 +1,6 @@
 # T13 — `dml_uninvite` removes a bot only from the party of the master that asked
 
-**Status:** OPEN
+**Status:** DONE, code half (Sonnet hand reported 2026-09-09 14:23 CEST; awaiting one cold Opus review); live half queued for the box
 **Filed:** 2026-09-09 17:05 by the lead (Fable), from T5's round-3 Codex review
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** the bridge script `dml_uninvite.lua` where the app ships it (find it: `git grep -l dml_uninvite -- '*.lua'`; the deploy list in `pylauncher/yulon/party.py` names the five), `pylauncher/yulon/party.py` **only** at `uninvite_command()` and the seam sentence for a refusal (T5's round-3 `remove_all` and its tests are merged and must keep passing), `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-uninvite-contract-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not `controller_view.py`, not `pyplan/checklist.md`.
@@ -24,3 +24,11 @@ Code half: `--checks` ALL GREEN (announce on `yulon-fedora` first); the parsing 
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the Lua check as written (quoted), the refusal sentence, the tests and their mutations, deviations, status DONE (code half).
+
+## Report, code half (hand, 2026-09-09 14:23 CEST)
+
+- Base `75127959` (ff, contains `f7881372`); one commit `b9531de9`; gate ALL GREEN (3897); 3 files +151/-16 (`pylauncher/lua/party/dml_uninvite.lua` +58, `test_party.py` +60, `party.py` +49).
+- **The Lua check**: `local g = b:GetGroup(); if g == nil or g:GetLeaderGUID() ~= p:GetGUID() then` -> `"<bot> is not in <player>'s party now"` sent through `handler:SendSysMessage()` (so it reaches the SOAP `<result>`) and printed, `return false`. Master resolution reasoned from the Eluna Group API the bridge already uses (no pinned playerbots/mod-ale source on the laptop). **The wire grammar became `dml_uninvite <playerName> <botName>`** (was `dml_uninvite <botName>` -- the ticket's "it already receives the player's name" was wrong; `origin/rust-main`'s `cli/lua/party/dml_uninvite.lua` is byte-identical to the old script, no master check there either).
+- Python: `party.py`'s `_uninvite_moved_marker(player, bot)` builds and recognises the exact string inside `dismiss()`; on a match `Dismissal(removed=False, logged_out=False, sentence="{bot} was not removed: ...", bot=bot)` with no logout whisper and no poll. The hook returns `false` regardless, so `answer.outcome` is always `"yes"` and the refusal is legible only in `answer.text` (the same reasoning `read_probe` uses).
+- Tests: the parsing test RED first; mutation `if False and moved in answer.text:` caught (the logout whisper sent); a bad-master-name refusal test; five wire-string assertions updated to the two-arg form; T5's `remove_all` tests untouched and green.
+- Deviations: trailer `Co-Authored-By: Claude Sonnet 5` (the hand is Sonnet, as briefed); the wire format widened, not added to; five laptop-only failures.
