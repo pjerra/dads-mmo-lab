@@ -735,9 +735,33 @@ def add_command(player: str, klass: str, *, gender: str = "") -> str:
     return f"dml_addclass {player} {klass.strip().lower()}{tail}"
 
 
-def uninvite_command(bot: str) -> str:
-    """`dml_uninvite <bot>` (`rust-main:.../party.rs:184`)."""
-    return f"dml_uninvite {_check_name(bot, BOT)}"
+def uninvite_command(player: str, bot: str) -> str:
+    """`dml_uninvite <player> <bot>`.
+
+    T13 (T5's round-3 Codex review): wider than `rust-main:.../party.rs:184`'s
+    `dml_uninvite <bot>` — that tree's own bridge script never checked who it
+    removed a bot FROM, and the window that costs is real: `remove_all`
+    re-reads the group table and refuses unless the fresh guid set is exactly
+    what was confirmed, but the interval between that read and this whisper
+    landing is one the bot manager's own timers can still move a bot across,
+    into a party nobody confirmed. `player` travels here now so
+    `dml_uninvite.lua` can check it at the moment it acts — the only place
+    left that can still see the group when the whisper lands.
+    """
+    return f"dml_uninvite {_check_name(player, MASTER)} {_check_name(bot, BOT)}"
+
+
+def _uninvite_moved_marker(player: str, bot: str) -> str:
+    """The exact words `dml_uninvite.lua` answers with when it refuses because
+    `bot` is not in `player`'s party at the moment it acts (T13).
+
+    Read out of `answer.text`, not `answer.outcome`: this bridge's hook never
+    sets the core's error flag, on a refusal any more than on a success, so
+    `SoapChannel` reports "yes" either way — the same reason `read_probe`
+    reads `PROBE_TOKEN` out of a reply that is also always "yes" on its own
+    transport layer, rather than trusting the flag.
+    """
+    return f"{bot} is not in {player}'s party now"
 
 
 def logout_command(player: str, bot: str) -> str:
@@ -1284,11 +1308,28 @@ def dismiss(
     and a bot that stays logged in is standing in the world, not in the group.
 
     `removed` is the group table read AFTER, never the uninvite's own `yes`.
+
+    **T13.** `dml_uninvite.lua` now checks `bot`'s group against `player` at
+    the moment it acts, and refuses in words this reads back
+    (`_uninvite_moved_marker`) rather than the core's error flag — the flag
+    never trips either way, so `answer.outcome` alone cannot tell a refusal
+    from a success here. Recognised, nothing more is sent: a bot the bridge
+    just said is in someone else's party gets neither a logout whisper naming
+    the wrong master nor a poll of a group it was never confirmed against.
     """
-    answer = send(uninvite_command(bot))
+    answer = send(uninvite_command(player, bot))
     if answer.outcome != "yes":
         said = (answer.text or answer.reason).strip()
         return Dismissal(False, False, f"the server did not uninvite {bot}: {said}", bot=bot)
+    moved = _uninvite_moved_marker(player, bot)
+    if moved in answer.text:
+        return Dismissal(
+            False,
+            False,
+            f"{bot} was not removed: the group table moved it into a different party before "
+            f"the uninvite reached the server, so nothing else was sent. {moved}.",
+            bot=bot,
+        )
     logged_out = send(logout_command(player, bot)).outcome == "yes"
     for attempt in range(tries):
         if attempt:
