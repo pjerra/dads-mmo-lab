@@ -73,7 +73,7 @@ from typing import ClassVar, cast
 
 from yulon import dbsecret, docker, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch
+from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch, SqlPlan
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
@@ -1147,6 +1147,11 @@ class CmangosInstaller(StagedInstaller):
         that could not be run at all, therefore raises with no marker written,
         and the next press imports again.
 
+        On an install the table called finished, the one thing that still
+        happens is `_rerun_on_marked()` — the phases the plan declares
+        re-runnable, and only those. Everything from `db = ...` down is the
+        ordinary import and is not reached there.
+
         The mapping is `_secret_tokens()` and not `_public_tokens()`: a phase
         statement may legitimately carry `{{DB_PASSWORD}}` — the shipped
         Tortoise plan's `CREATE USER ... IDENTIFIED BY` does — and none of what
@@ -1160,6 +1165,7 @@ class CmangosInstaller(StagedInstaller):
         if seen is not None and (
             seen.state == "imported" or (seen.state == "populated" and seen.complete)
         ):
+            yield from self._rerun_on_marked(ctx, plan)
             return
         db = self._native().db
         container = self.entry.container_spec().db
@@ -1272,6 +1278,107 @@ class CmangosInstaller(StagedInstaller):
                 f"({type(exc).__name__}: {exc})."
             ) from exc
         yield "The databases are imported and marked complete."
+
+    def _rerun_on_marked(self, ctx: StageContext, plan: SqlPlan) -> Iterator[str]:
+        """The phases a plan declares re-runnable, applied to an install already read as finished.
+
+        The marker rule (phase7-decisions, "Probe") says a finished import is
+        never re-run: a plan whose hash moved must not `DROP realmd` on a server
+        with accounts on it. The cost of that rule is that a phase ADDED to a
+        plan reaches fresh installs only, and on 2026-09-09 the m910q's Tortoise
+        world stopped starting for want of a table one such phase's files create
+        — honor maintenance fell due for the first time and truncates
+        `character_inventory_copy` (`pyplan/gates/7.9-rerun-m910q-2026-09-09`,
+        finding 1). Nothing in the app could put those files on that install.
+
+        So the exception is declared per PHASE and by the phase itself, beside
+        the `notes` that argue its files are idempotent, rather than by a rule
+        about plan hashes: `rerun_on_marked` is a promise about ONE phase's
+        files, and the phase and its promise cannot drift apart while they are
+        the same object. Every phase without it is skipped here exactly as
+        before, which is what keeps the probe's table true.
+
+        **No marker is written and no `verify` rule is re-asked**, and both
+        follow from what this is not: a marker row says this PLAN finished, and
+        one written after two of its seven phases would tell every later press
+        something it can never take back. The rules describe a whole world; a
+        world that was imported before this phase existed is not being
+        re-checked by it. The row already there goes on reading `imported`.
+
+        What IS asked is `assert_update_level`, for the flagged phases' own
+        runs: a `warn` phase and a broken world print the same transcript
+        (2026-09-03), and with no verify rule re-asked on this route that check
+        is the only question anything asks about what actually landed.
+
+        Phase 0 is not reached from here on purpose. `create_schemas()` writes
+        `CREATE USER ... IDENTIFIED BY` and its grants, and this route runs
+        against a server somebody is playing on.
+        """
+        phases = tuple(phase for phase in plan.phases if phase.rerun_on_marked)
+        if not phases:
+            return
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        try:
+            runs = sqlplan.expand(
+                plan.model_copy(update={"phases": phases}),
+                ctx.server_dir,
+                self._schemas(),
+                self._secret_tokens(ctx),
+            )
+        except InstallerError:
+            # The same ordering as the ordinary import's: every refusal
+            # `expand()` raises is already the sentence a user reads, and
+            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
+            # this one would wrap one finished sentence inside another.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The phases this install re-runs on every press could not be prepared: {exc}"
+            ) from exc
+        if not runs:
+            return
+        named = ", ".join(phase.name for phase in phases)
+        yield (
+            f"These databases are imported already, but {len(runs)} SQL step(s) of {named} are "
+            "applied to every install, however old. This is what puts a file added to the "
+            "install plan since onto a server that already exists."
+        )
+        yield from self._stream(
+            lambda sink: sqlplan.apply(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+                sink=sink,
+                cancel=ctx.cancel,
+            ),
+            cancel=ctx.cancel,
+        )
+        self._check_cancel(ctx.cancel)
+        try:
+            failing = sqlplan.check_update_levels(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"{named} ran over these databases but they could not be checked "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+        if failing:
+            raise InstallerError(
+                f"{named} ran over these databases and they are not at the level it leaves "
+                f"behind: {', '.join(failing)}."
+            )
+        yield f"{named}: applied. The import marker is unchanged."
 
     def _gate(self, ctx: StageContext) -> ImportGate:
         """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.
