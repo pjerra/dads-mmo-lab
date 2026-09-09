@@ -347,9 +347,9 @@ def test_the_thread_can_be_joined_without_an_event_loop(qapp: object) -> None:
     """
     panel = LogPanel()
     panel.run(lambda: iter(["one", "two"]))
-    assert panel.wait(HANG_BOUND_MS) is True, (
-        "the join timed out with nothing pumping the main thread"
-    )
+    assert (
+        panel.wait(HANG_BOUND_MS) is True
+    ), "the join timed out with nothing pumping the main thread"
     assert panel.running is False
 
 
@@ -396,9 +396,9 @@ def test_the_worker_is_destroyed_on_the_gui_thread_not_its_own(qapp: object) -> 
     pump_until(lambda: bool(destroyed_on), "the first worker was destroyed")
 
     assert destroyed_on, "the first worker was never destroyed"
-    assert destroyed_on[0] == threading.get_ident(), (
-        "the worker was destroyed on a thread other than the GUI thread"
-    )
+    assert (
+        destroyed_on[0] == threading.get_ident()
+    ), "the worker was destroyed on a thread other than the GUI thread"
 
 
 def test_a_finished_job_leaves_a_live_worker_not_a_dangling_wrapper(qapp: object) -> None:
@@ -757,9 +757,9 @@ def test_the_panel_follows_the_bottom_while_it_is_already_at_the_bottom(qapp: ob
     process_events(5)
     bar = panel._text.verticalScrollBar()
     assert bar.maximum() > 0, "the panel never filled; this test proves nothing about scrolling"
-    assert bar.value() >= bar.maximum() - 4, (
-        f"the panel stopped following: at {bar.value()} of {bar.maximum()}"
-    )
+    assert (
+        bar.value() >= bar.maximum() - 4
+    ), f"the panel stopped following: at {bar.value()} of {bar.maximum()}"
 
 
 def test_scrolling_up_holds_the_view_still_and_scrolling_back_resumes(qapp: object) -> None:

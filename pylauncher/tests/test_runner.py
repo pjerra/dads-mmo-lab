@@ -500,6 +500,31 @@ def test_end_streams_started_on_leaves_a_stream_another_thread_started_alone() -
         blocked.close()
 
 
+def test_a_finished_stream_on_this_thread_is_not_counted_as_something_to_end() -> None:
+    """A THREAD IDENT IS REUSED, and the count has to survive that.
+
+    Found by the checks gate on `yulon-fedora` 2026-09-09, where the whole file
+    runs in one process: the test above read `assert 2 == 1`. The registry outlives
+    the threads in it -- an entry stays while its generator does -- so an earlier
+    test's finished stream was still registered, the OS had handed its dead
+    thread's ident to the new worker, and `started_on == ident` was true of both.
+
+    Reproduced here without needing the recycling: this stream ran to completion
+    ON THIS THREAD, so its entry is attributed to the caller's own ident, which is
+    exactly the shape the gate produced. Asking the child settles it.
+
+    Mutation this catches: filtering on `child.proc is not None` (the count is 1,
+    and the panel's Stop is reported as having ended a job that had already ended).
+    """
+    finished = stream(_python_cmd("print('done')"))
+    assert list(finished) == ["done"]
+    child = runner._LIVE_STREAMS[finished]
+    assert child.started_on == threading.get_ident(), "this stream ran here"
+    assert child.proc is not None and child.proc.poll() is not None, "its child has exited"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 0
+
+
 # The same abandonment as `_ABANDON_AND_EXIT`, in the app's shape: the frame is
 # being RUN by a worker thread when the process exits, not held suspended.
 _WORKER_RUNS_STREAM_AND_EXIT = """
@@ -689,9 +714,9 @@ def test_stream_registers_at_the_call_and_starts_no_process_until_the_first_next
     try:
         assert started == [], started
         assert generator in runner._LIVE_STREAMS, "the exit hook cannot see this generator"
-        assert runner._LIVE_STREAMS[generator].proc is None, (
-            "a child was recorded for a generator nobody has started"
-        )
+        assert (
+            runner._LIVE_STREAMS[generator].proc is None
+        ), "a child was recorded for a generator nobody has started"
         with pytest.raises(AssertionError, match="before the first next"):
             next(generator)
         assert started == [["a-command-that-is-never-run"]], started

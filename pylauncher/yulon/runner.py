@@ -161,6 +161,28 @@ def _close_abandoned_streams() -> None:
 atexit.register(_close_abandoned_streams)
 
 
+def _still_running(proc: subprocess.Popen[str] | None) -> bool:
+    """True for a child that has been started and has not exited.
+
+    **A THREAD IDENT IS REUSED, and this is what stops that mattering.** The
+    registry outlives the threads in it: an entry stays while its generator does,
+    and a generator whose child has long exited is still referenced by whatever
+    holds it. The OS then hands the same ident to the next thread, so
+    `started_on == ident` can be true of a stream some earlier, unrelated thread
+    started. Measured on `yulon-fedora` 2026-09-09 in the checks gate, where the
+    suite runs the whole file in one process:
+    `test_end_streams_started_on_ends_the_child_a_worker_thread_is_blocked_reading`
+    read `assert 2 == 1` — a second, already-finished stream from an earlier test
+    in this file had been attributed to the new worker.
+
+    Asking the child settles it without needing to know which thread is alive: a
+    child that has exited is nothing to end, and one that is running is the job
+    the caller means. `poll()` is a non-blocking `waitpid`, safe to call while
+    another thread is inside `readline()` on the same child.
+    """
+    return proc is not None and proc.poll() is None
+
+
 def end_streams_started_on(ident: int) -> int:
     """End the child of every live `stream()` that thread `ident` started. Returns how many.
 
@@ -218,11 +240,11 @@ def end_streams_started_on(ident: int) -> int:
         children = [
             child
             for child in _LIVE_STREAMS.values()
-            if child.started_on == ident and child.proc is not None
+            if child.started_on == ident and _still_running(child.proc)
         ]
     for child in children:
         proc = child.proc
-        assert proc is not None  # filtered above; narrows for the type checker
+        assert proc is not None  # `_still_running` filtered these; narrows for the type checker
         threading.Thread(
             target=_end_child, args=(proc,), daemon=True, name=f"yulon-end-stream-{proc.pid}"
         ).start()
