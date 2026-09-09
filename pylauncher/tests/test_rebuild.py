@@ -655,6 +655,65 @@ def test_the_rollback_sentence_says_the_database_is_not_part_of_what_was_put_bac
     assert "database" in said and "NOT put back" in said, said
 
 
+def test_the_failed_name_is_let_go_once_the_containers_holding_it_are_replaced(
+    tmp_path: Path,
+) -> None:
+    """A `-failed` name docker refused is let go once the restore's own recreate frees it.
+
+    **Measured on `yulon-ubuntu2`, 2026-09-09, on the first live press of the
+    restore arm** (`pyplan/gates/rollback-restore-yulon-ubuntu2-2026-09-09/`).
+    `_let_go(named)` ran while the containers made from the new build were
+    still there, so the daemon refused two of the four removals by name:
+
+        could not remove image ...ac-wotlk-worldserver:native-243c46e3-failed:
+        conflict: unable to delete ... (must be forced) - container
+        31769acad1c4 is using its referenced image 7c1ecf94b44e
+
+    and nothing ever asked again. The press ended with 840 MB of a build known
+    to be broken sitting on the daemon under a name `FAILED_TAG_SUFFIX`
+    documents as transient -- and it is not the unlucky half: it is exactly the
+    long-running services, whose containers are what the restore is about to
+    replace, so on this shape it happens every time.
+
+    The double could not see it, which is why the unit side passed while the
+    daemon refused: `Recorder.remove_image` is "always allowed here". The seam
+    here is a `remove_image` that refuses the way this daemon does, and the
+    assertion is on the LAST attempt rather than on any attempt -- one made
+    while the blocker is still in place proves nothing about the name being
+    gone.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    failed = tuple(ref + native.FAILED_TAG_SUFFIX for ref in _refs(server_dir))
+
+    def remove_image(ref: str) -> str:
+        rec.calls.append(f"rmi:{ref}")
+        # The broken containers exist until the restore's own recreate replaces
+        # them, which is the second `recreate` of the run.
+        if ref in failed and rec.calls.count("recreate") < 2:
+            return (
+                f"Error response from daemon: conflict: unable to delete {ref} (must be "
+                f"forced) - container 31769acad1c4 is using its referenced image"
+            )
+        return ""
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, remove_image=remove_image, wait_ready=_answers(False, True)).rebuild(
+                InstallOptions(server_dir=server_dir)
+            )
+        )
+    assert "put back and is running again" in str(raised.value), raised.value
+    last_recreate = max(i for i, c in enumerate(rec.calls) if c == "recreate")
+    for name in failed:
+        tries = [i for i, c in enumerate(rec.calls) if c == f"rmi:{name}"]
+        assert tries, f"{name} was never let go at all: {rec.calls}"
+        assert max(tries) > last_recreate, (
+            f"{name} was only ever let go while the container holding it was still there, "
+            f"so the refusal stands and the name is left on the daemon for ever: {rec.calls}"
+        )
+
+
 def test_the_confirmation_says_what_the_rollback_does_not_cover(tmp_path: Path) -> None:
     text = rebuild_confirmation(ENTRY, tmp_path / "wow")
     assert "database" in text.lower(), text

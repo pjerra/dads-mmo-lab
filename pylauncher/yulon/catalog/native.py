@@ -192,6 +192,17 @@ it were one thing. Giving the new build its own name BEFORE any tag moves is
 what makes a failure part-way undoable: the refs already moved are moved back
 onto this name, and "the tags still name the new build" is then true of all of
 them. Removed once the restore has settled either way.
+
+**Letting it go takes two attempts, and that is measured rather than defensive.**
+The first runs the moment the tags are back, while the containers made FROM the
+new build are still there, and docker refuses to remove a name whose image a
+container references -- so on `yulon-ubuntu2`, 2026-09-09, exactly the two
+long-running services came back `conflict: unable to delete ... (must be forced)
+- container 31769acad1c4 is using its referenced image` while the two one-shots
+(whose containers were not recreated at all) were removed and their images
+deleted. Half a broken build kept for ever under a name documented as transient
+is not a state anybody chose, so `_restore_rollback` asks again after its own
+recreate, which is the thing that frees them.
 """
 
 REBUILD_OPENING_NOTE = (
@@ -2051,6 +2062,19 @@ class StagedInstaller:
         )
         try:
             yield from self.stage_recreate(ctx)
+            # The `-failed` names again, and the second attempt is the one that
+            # can work. The first ran while the containers made FROM the new
+            # build were still there, and docker refuses to remove a name whose
+            # image a container references -- measured on yulon-ubuntu2 on the
+            # first live restore (2026-09-09): two of the four removals came
+            # back `conflict: unable to delete ... container 31769acad1c4 is
+            # using its referenced image`, and nothing asked again, so a broken
+            # build stayed on the daemon for ever under a name this module
+            # documents as transient. The recreate above is exactly what frees
+            # them. Both calls are kept because the failure paths ABOVE this
+            # one never reach a recreate, and a name docker already let go is a
+            # no-op here (`remove_image` treats "no such image" as done).
+            self._let_go(named)
             yield from self.wait_for_ready(ctx, self._native().ready)
         except InstallerError as second:
             return (
