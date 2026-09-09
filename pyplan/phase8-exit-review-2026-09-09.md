@@ -588,3 +588,11 @@ this whole round exists to prevent.
 * **The four lane branches were not merged into this worktree.** Their content was read with
   `git show yulon-phase8b:<path>`, which is why every clause above says which branch its evidence
   is on.
+
+---
+
+## Errata (lead, 2026-09-09 10:35)
+
+* **Correction 3 carried a wrong date.** It says the bridge "answered on 2026-09-09". The folder it rests on says otherwise: `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/7-ping.log` is `DML-BRIDGE-READY` against a world started `2026-09-08T20:39:08Z`, and `8-ping-after-press2.log` against `2026-09-08T21:15:35Z` — 22:42 and 23:18 on **2026-09-08** in +0200. The folder is dated 09-09 because it was written after midnight. Found by the cold reviewer on ticket T1's third round, after two hands and one lead had copied the sentence forward. A folder's name is not a timestamp.
+* **Correction 3 also said the cause was measured "both times".** The 2026-08-20 attempt's only record (`pyplan/phase8-reads/hypeer.md:619-623`) attributes it to a relative `ALE.ScriptPath` and measured nothing; the engine's absence was measured once, on 2026-09-08 (`8.6-wotlk-yulon-ubuntu-2026-09-08/README.md:40-52`).
+* **Correction 4's line numbers** (`controller_view.py:1587`, `:4220-4221`) did not resolve on the tree they were written against; the control is `REBUILD_BUTTON_LABEL` at `:1648`, the button at `:4320-4321`.
