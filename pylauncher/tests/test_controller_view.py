@@ -2701,6 +2701,46 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
     assert seen.get("scheme") == "mangos_sha", seen
 
 
+def test_an_entry_with_no_scheme_is_refused_by_both_create_sites_not_defaulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both wotlk `create_account` call sites passed `entry.accounts.scheme or "azerothcore"`.
+
+    The Accounts tab and the channel's own account are the two seams that create
+    a row from this wiring, and both defaulted an entry that declares no scheme
+    to AzerothCore's columns — the guess `controller_wow_tortoise.accounts`
+    refuses by name, made silently one package over. The tab already disables its
+    button for such an entry; this is the layer underneath it, which is what the
+    channel presses through.
+
+    The channel's seam is read off the object as `_create` because that is the
+    only handle on it: `InstallChannel` takes it as a constructor argument and
+    keeps it. It is one of the two call sites this test exists for, so testing
+    only the tab's would leave half the fix unpinned.
+    """
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    services = ControllerServices.for_wotlk(unmeasured, tmp_path, None)
+    reached: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.wotlk_accounts,
+        "create_account",
+        lambda *args, **kwargs: reached.append(kwargs),
+    )
+
+    for create in (
+        lambda: services.create_account("bob", "hunter2", 0),
+        lambda: services.channel_setup._create("YULON_AB", "hunter2", 0),
+    ):
+        with pytest.raises(NotImplementedError) as caught:
+            create()
+        assert "declares no account scheme" in str(caught.value), str(caught.value)
+        assert "worldserver console" in str(caught.value), str(caught.value)
+
+    assert reached == [], "the writer was reached with a guessed scheme"
+
+
 def test_for_wotlk_takes_its_import_gate_from_install_wiring(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
