@@ -358,6 +358,43 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
       unsure, and the unsure ones are the ones who most need to be able to
       decline.
 
+    * *what the compile is compiled FROM*, for the games whose build recipe
+      this app owns. Until 2026-09-09 a rebuild compiled the `Dockerfile`
+      rendered on the day the server was installed, so a fix shipped in a later
+      version of the app could not reach it — measured on m910q that night,
+      where the Tortoise upgrade needed that render run by hand first
+      (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`). It is written again
+      now, and this says so before the press rather than in the log, because
+      "the same compile as last time" and "the same compile with this version's
+      fixes" are different answers to the question being asked. BOTH files are
+      named: `_write_dockerfile()` renders `Dockerfile` and `.dockerignore`
+      through one `dockerfile.write()`, so a clause that named the first and
+      added "nothing else in the folder is rewritten" was wrong about the
+      second (Fable, round 1). And what it costs to stop is stated with it,
+      because `native._put_recipe_back()` is what makes that true rather than
+      the sentence.
+
+      **What protects an edit is the marker, not the edit.** This said "if you
+      have edited either of those two files yourself the rebuild stops", which
+      is false of every edit that leaves the first line alone: `_look()`
+      (`dockerfile.py`) answers `OURS` on `composegen.GENERATED_MARKER` and
+      nothing else, and `write()` then replaces the whole file. Corrected in
+      round 2 to say what the check does — the line at the top is what the app
+      recognises, a file that still carries it is replaced whatever is under
+      it, and a file that does not stops the press. The behaviour half is
+      pinned by `test_a_rebuild_hands_the_compiler_the_current_template_not_the_render_on_disk`,
+      which edits both files below the marker and requires them replaced.
+
+    That clause is conditional on `install.native.dockerfile_dir`, whose own
+    description carries the rule: `None` means the checkout ships its own
+    Dockerfile, this app never wrote one, and `rebuild_stages()` gives that
+    family no re-render to promise. `native.rebuild_stages()` decides the same
+    thing from the family's stage tuple, and
+    `test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_it`
+    holds the two derivations equal across every shipped entry — a sentence
+    promising WotLK users something nothing does would be this ticket's own
+    defect repeated in the confirmation.
+
     It names the folder: two installs of the same game get identical container
     names and near-identical tabs, and "which one is this about" is not a
     question to leave to the tab title.
@@ -367,12 +404,26 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
     that has to be tested, and this one has assertions on it in
     `test_rebuild.py` that a Qt-less environment still runs.
     """
+    native_block = entry.install.native
+    recipe = (
+        "Before it compiles, the build recipe in that folder — the Dockerfile and the "
+        ".dockerignore this app wrote when it installed the server — is written again from "
+        "the templates this version of the app ships, so a fix made to them since you "
+        "installed is in what gets compiled. Yu'lon knows those two files by the line it "
+        "writes at the top of each: while that line is there the file is replaced, including "
+        "anything you changed underneath it, and a file that no longer starts with it stops "
+        "the rebuild instead of being overwritten. If you stop the rebuild or it fails "
+        "before your server is replaced, both are put back as they were.\n\n"
+        if native_block is not None and native_block.dockerfile_dir is not None
+        else ""
+    )
     return (
         f"Rebuild {entry.name} in {server_dir}?\n\n"
         f"This compiles the server again from the source and modules in that folder. It is "
         f"the same compile an install does, and this project has timed it at "
         f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
         f"predict it better than that range does.\n\n"
+        f"{recipe}"
         f"Your server will be STOPPED and its containers replaced once the compile finishes, "
         f"and it will be down until it reports ready. Your characters, accounts and databases "
         f"are not touched.\n\n"

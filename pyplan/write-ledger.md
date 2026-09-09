@@ -135,6 +135,8 @@ descriptions are written by hand.
 | `catalog/families/extract.py::write_evidence::unlink` | the temp evidence file after a failure | install time |
 | `catalog/families/extract.py::write_evidence::write_text` | the extraction evidence file, to a temp name | install time |
 | `catalog/families/patch.py::apply::write_bytes` | a patched file in the clone | install time |
+| `catalog/native.py::_put_recipe_back::write_bytes` | **new (T8)** the `Dockerfile` and `.dockerignore` PUT BACK exactly as this press found them, when a rebuild is stopped or fails before the containers are replaced. It writes no new content: the only bytes it can write are the bytes it read out of those two files before the first stage ran, so its whole effect is undoing `dockerfile.write()`'s row above | **yes** — the world is running throughout this window, and that is the point of the row: nothing reads these two files except `docker build`, so putting them back changes nothing the server is using |
+| `catalog/native.py::_put_recipe_back::unlink` | **new (T8)** one of those two files removed, in the one case where the ground had no such file and the re-render created it. Same undo, same window | **yes** — as above |
 | `catalog/native.py::write_state::os.replace` | that record renamed into place | install time |
 | `catalog/native.py::write_state::unlink` | the temp record after a failure | install time |
 | `catalog/native.py::write_state::write_text` | the install's own stage record, to a temp name | install time |
