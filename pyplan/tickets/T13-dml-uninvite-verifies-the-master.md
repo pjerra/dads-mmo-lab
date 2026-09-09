@@ -1,8 +1,8 @@
 # T13 — `dml_uninvite` removes a bot only from the party of the master that asked
 
-**Status:** DONE, code half (Sonnet hand reported 2026-09-09 14:23 CEST; awaiting one cold Opus review); live half queued for the box
+**Status:** REWORK, code half (rejected by the lead 2026-09-09 14:28 CEST, round 1 of 2) -- the leader test is not membership, and a silent branch reads as success; live half queued for the box
 **Filed:** 2026-09-09 17:05 by the lead (Fable), from T5's round-3 Codex review
-**Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
+**Hand:** Sonnet (budget rule 2026-09-09; the trailer says Sonnet), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** the bridge script `dml_uninvite.lua` where the app ships it (find it: `git grep -l dml_uninvite -- '*.lua'`; the deploy list in `pylauncher/yulon/party.py` names the five), `pylauncher/yulon/party.py` **only** at `uninvite_command()` and the seam sentence for a refusal (T5's round-3 `remove_all` and its tests are merged and must keep passing), `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-uninvite-contract-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not `controller_view.py`, not `pyplan/checklist.md`.
 **Box:** `yulon-ubuntu2` for the live half — only on the lead's word; the box is queued (T3's round 3, then T5's live half, then T7's).
 
@@ -19,7 +19,7 @@
 
 ## Definition of done
 
-Code half: `--checks` ALL GREEN (announce on `yulon-fedora` first); the parsing test fails first. Live half: the two whispers above with their log lines. One commit per half, `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch files under `<scratchpad>/T13/`.
+Code half: `--checks` ALL GREEN (announce on `yulon-fedora` first); the parsing test fails first. Live half: the two whispers above with their log lines. One commit per half, `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch files under `<scratchpad>/T13/`.
 
 ## Report format (final message)
 
@@ -32,3 +32,19 @@ Code half: `--checks` ALL GREEN (announce on `yulon-fedora` first); the parsing 
 - Python: `party.py`'s `_uninvite_moved_marker(player, bot)` builds and recognises the exact string inside `dismiss()`; on a match `Dismissal(removed=False, logged_out=False, sentence="{bot} was not removed: ...", bot=bot)` with no logout whisper and no poll. The hook returns `false` regardless, so `answer.outcome` is always `"yes"` and the refusal is legible only in `answer.text` (the same reasoning `read_probe` uses).
 - Tests: the parsing test RED first; mutation `if False and moved in answer.text:` caught (the logout whisper sent); a bad-master-name refusal test; five wire-string assertions updated to the two-arg form; T5's `remove_all` tests untouched and green.
 - Deviations: trailer `Co-Authored-By: Claude Sonnet 5` (the hand is Sonnet, as briefed); the wire format widened, not added to; five laptop-only failures.
+
+## Review, code half (cold Opus reviewer, 2026-09-09 14:28 CEST) -- REWORK, three
+
+The wire change, the seam and the marker-not-outcome reasoning are right; `handler` on the SOAP path is proved (hook 42 pushes `(player, text, handler)`, `dml_bridge_ping.lua:36-38`); the grammar fails closed in both directions (old Lua + two args -> `LANG_CMD_INVALID` -> `outcome == "no"`); the only sender is `party.py:1320`; marker exactness safe (`_check_name` runs first). Must-fix:
+
+1. **`dml_uninvite.lua:66`: the leader test contradicts the feature's own definition of "<player>'s party".** `g:GetLeaderGUID() ~= p:GetGUID()` asks whether the player *leads*; the Python half asks *membership* (`group_rows_sql`, `party.py:931-959`: the bot members of the group the master is IN, no leadership clause). A master grouped with another human -- the multi-master world this ticket is premised on -- or any leader hand-off: the panel lists and confirms the bots, the Lua refuses every one with a false sentence, and `dismiss()` escalates it to an invented cause. Use membership (`g:IsMember(p:GetGUID())`, name checked against the fork's ALE on the box) or match `group_rows_sql` exactly; soften the Python sentence to what the server reported.
+2. **`dml_uninvite.lua:55-63`: the player-not-found branches are silent refusals the seam reads as success.** `print()` + `return false` -> empty `<result>` -> `outcome == "yes"`, no marker -> `dismiss()` whispers logout and polls; `InstallParty.remove` (`:1720-1727`) has no online check, `members()` returns the not-online string, `_rows_only` makes it `()`, and the press reports "Newbot left the party" while the bot is still there -- a new false success, the failure T13 was filed to delete. Every non-removing branch answers over `handler` in words `dismiss()` treats as a refusal.
+3. **Nothing pins the two halves of the protocol**: the sentence template and the wire grammar each exist twice (Lua and `party.py`) with no test binding them; `test_party.py:300` already does this for the probe command. Add a pin over `resources.lua_dir()/"party"/"dml_uninvite.lua"` for the grammar pattern and the format string.
+Notes: `GetLeaderGUID() ~= GetGUID()` on userdata without `__eq` would refuse always -- the live half's honest case is load-bearing, the negative capture alone is not enough; the live half must redeploy the five scripts and restart the world first; the new test's mutation is caught by one assertion only.
+
+## Rejection (lead, round 1)
+
+1. Membership, not leadership (must-fix 1), with the Python sentence bounded to the server's words.
+2. Every non-removing branch (player not found, bot not found, no group, not a member) replies over `handler` with a sentence the seam recognises as a refusal, each its own `Dismissal(removed=False, ...)` wording or the one marker with the reason -- your choice, say which; a test per branch that the logout whisper is not sent.
+3. The Lua/Python pin test (must-fix 3).
+Round 2 is the last under the owner's cap; the lead closes what remains by hand. Add a commit; gate; report in the same format.
