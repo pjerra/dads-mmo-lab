@@ -142,9 +142,11 @@ class MyPartySeam(Protocol):
     It grew by three in T5 (2026-09-09) and every one of them is here rather than
     in the panel because it is a reading OF AN INSTALL: `specs()` is this
     server's `playerbots.conf`, `max_level()` is its `worldserver.conf`, and
-    `remove_all()` is the group table read at the moment of the press. A panel
-    that read any of them itself would be a widget that knows where a server
-    folder is.
+    `remove_all()` is the group table read at the moment of the press, against
+    the guids a person confirmed. A panel that read any of them itself would be
+    a widget that knows where a server folder is -- and a `remove_all` that took
+    only a name would be a confirmation the panel checks and the server ignores,
+    which is what round 2 rejected.
     """
 
     def state(self, master: str) -> party.PartyState: ...
@@ -165,7 +167,7 @@ class MyPartySeam(Protocol):
 
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
 
-    def remove_all(self, master: str) -> party.MassDismissal: ...
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
 
 
 class Uninstall(Protocol):

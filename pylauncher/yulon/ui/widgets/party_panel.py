@@ -126,7 +126,7 @@ class PartySeam(Protocol):
 
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
 
-    def remove_all(self, master: str) -> party.MassDismissal: ...
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
 
 
 DISMISS_NOTHING = "Dismiss"
@@ -200,6 +200,18 @@ It has to be SAID: a read of its own clears the report line, so without this an
 armed press followed by Show this character's party would leave a disarmed button
 and nothing anywhere saying the press had been dropped."""
 
+PRESS_SHOW_FIRST = (
+    "Press Show this character's party first: the party below was read for another character, "
+    "so there is nothing confirmed to dismiss here. Nothing was sent."
+)
+"""The refusal for arming over somebody else's rows.
+
+Round 2's second finding: Show as Pakka, retype the box as Anmi without pressing
+Show, and the arm used to take `("Anmi", Pakka's rows)` -- a sentence naming
+Pakka's bots over a press addressed to Anmi's party. Nothing had been armed, so
+nothing stood down; what was missing was the rows remembering who they were drawn
+for."""
+
 DISMISS_ALL_MOVED = (
     "Dismiss every bot was not sent: the character or the party is not the one that was "
     "confirmed. Nothing was sent -- press it again to confirm what is on screen now."
@@ -256,7 +268,13 @@ class PartyPanel(QWidget):
         # the bots the arming sentence named, snapshotted at the first press.
         # `None` is disarmed. A bare flag was round 1's defect -- it armed on one
         # party and fired on whatever the box said later.
-        self._confirmed: tuple[str, tuple[str, ...]] | None = None
+        self._confirmed: tuple[str, tuple[int, ...]] | None = None
+        # The rows the last successful read drew, and the character they were
+        # drawn FOR. `Member`s rather than the strings on screen, because what a
+        # confirmation is about is guids -- a name is what a display shows, and
+        # `group_member` keys on the guid.
+        self._drawn: tuple[party.Member, ...] = ()
+        self._drawn_for = ""
         # Why the last arm was stood down, said on the NEXT press and then
         # forgotten. Empty for the ways a person cancels ON PURPOSE (the read,
         # or moving on to another button), which need no explanation and no
@@ -431,7 +449,10 @@ class PartyPanel(QWidget):
             self.level_absent.setVisible(True)
             return
         self.level.setRange(0, top)
-        self.level.setEnabled(True)
+        # Not `True`: this reading rides along beside a press, and a press locks
+        # every picker (`_arm`). Re-enabling here would hand the level box back
+        # under an add that is still polling (round 2, optional).
+        self.level.setEnabled(not self._busy)
         self.level_absent.setText("")
         self.level_absent.setVisible(False)
 
@@ -453,7 +474,12 @@ class PartyPanel(QWidget):
         # that looks like it is still asking.
         self._clear_report = note is not None
         self._start(note)
-        self._run(lambda: self._seam.state(master), self._state_read)
+        # The master travels WITH the answer. The rows a person confirms have to
+        # be attributable to a character, and reading `self.character` again in
+        # the slot would attribute them to whatever the box says by then --
+        # which is round 2's second finding with the check moved rather than
+        # fixed.
+        self._run(lambda: (master, self._seam.state(master)), self._state_read)
 
     @Slot(str)
     def _class_chosen(self, _klass: str) -> None:
@@ -473,7 +499,7 @@ class PartyPanel(QWidget):
         the line below, rather than read field by field through `getattr`. Every
         view slot in this app is written the same way.
         """
-        state = cast(party.PartyState, result)
+        master, state = cast("tuple[str, party.PartyState]", result)
         self._done()
         if self._clear_report:
             # Empty for an ordinary read, and the cancellation notice for the
@@ -482,6 +508,12 @@ class PartyPanel(QWidget):
             self.report.setText(self._after_read)
             self._after_read = ""
         self.member_list.clear()
+        # The rows and the character they belong to go together, always: a list
+        # that outlives the name it was read for is what let an arm take
+        # ("Anmi", Pakka's bots). Cleared here and set only where rows are
+        # actually drawn, so a refused read leaves nothing to confirm.
+        self._drawn = ()
+        self._drawn_for = ""
         self._member_chosen(-1)
         self.check_list.clear()
         for check in state.checks:
@@ -492,6 +524,8 @@ class PartyPanel(QWidget):
             self.summary.setText(state.blocker or state.problem)
             return
         members = state.members
+        self._drawn = members
+        self._drawn_for = master
         for member in members:
             self.member_list.addItem(self._row(member))
         self.summary.setText(
@@ -569,11 +603,19 @@ class PartyPanel(QWidget):
         CONFIRMED, which is a different question and the only one a person can
         answer.
 
+        The confirmed guids travel WITH the second press, and the seam re-reads
+        the group table and refuses unless it is still exactly that set. Round
+        2's must-fix, and the panel's own check is not what makes it safe: this
+        one compares what is DRAWN, and a bot that joined between the two
+        presses changes nothing on screen. Only the end that can read the party
+        can enforce what was agreed to.
+
         No wall-clock expiry, deliberately. The hazard an expiry addresses is an
-        arm that goes stale while nobody is looking, and the two identities are
-        what "stale" means here -- a clock would be a seam this widget has no
-        other use for, and an arm that outlives nothing is still an arm on
-        exactly the party named on the button and drawn in the list beneath it.
+        arm that goes stale while nobody is looking, and staleness that matters
+        is now caught where it happens: the seam's re-read refuses a party that
+        moved, whether it moved in one second or ten minutes. A clock would be a
+        seam this widget has no other use for, and it would refuse presses that
+        are still perfectly good.
         """
         master = self._master()
         if master is None:
@@ -585,41 +627,45 @@ class PartyPanel(QWidget):
             said, self._stood_down = self._stood_down, ""
             self.report.setText(said)
             return
-        count = self.member_list.count()
-        if count == 0:
+        # `_drawn` and not `member_list.count()`: one source of truth for what a
+        # confirmation is about. Counting the widget and confirming the reading
+        # is two answers to one question, and it made the clearing in
+        # `_state_read` unfalsifiable -- a stale `_drawn` behind an empty list
+        # was covered by the count rather than by the thing that keeps it true.
+        if not self._drawn:
             self._stand_down("")
             self.report.setText(NO_BOTS_TO_DISMISS)
             return
-        subject = (master, self._shown_bots())
+        if self._drawn_for != master:
+            # Rows read for somebody else. Nothing was armed, so nothing stood
+            # down, and without this the arm would take this character's name
+            # and that character's bots.
+            self._stand_down("")
+            self.report.setText(PRESS_SHOW_FIRST)
+            return
+        subject = (master, tuple(member.guid for member in self._drawn))
         if self._confirmed is None:
             self._confirmed = subject
+            count = len(self._drawn)
             self.dismiss_all_button.setText(f"Press again to dismiss {party.bots_word(count)}")
             self.report.setText(
                 f"This uninvites {party.bots_word(count)} from {master}'s party -- "
-                f"{', '.join(subject[1])} -- and whispers each one to log out. Press Show this "
-                "character's party to cancel."
+                f"{', '.join(member.name for member in self._drawn)} -- and whispers each one to "
+                "log out. Press Show this character's party to cancel."
             )
             return
-        if self._confirmed != subject:
-            self._stand_down("")
-            self.report.setText(DISMISS_ALL_MOVED)
-            return
+        # No second comparison of `subject` against `self._confirmed` here, and
+        # its absence is deliberate rather than an omission: `_drawn` is written
+        # only by `_state_read`, every path that reaches `_state_read` stands
+        # the arm down first, and a master that changed is refused two lines
+        # above. A branch on it could not be reached, and an unreachable guard
+        # is one that looks like protection while the real hole -- a party that
+        # moved on the SERVER, invisible here -- stays open. That one is the
+        # seam's, which re-reads and refuses.
+        confirmed = self._confirmed[1]
         self._stand_down("")
         self._start(WORKING)
-        self._run(lambda: self._seam.remove_all(master), self._dismissed_all)
-
-    def _shown_bots(self) -> tuple[str, ...]:
-        """The bots this panel is showing, by name, in the order they are drawn.
-
-        Read off the rows rather than kept in a list of its own, for
-        `_chosen_bot`'s reason: a parallel list is a list that can drift out of
-        step with what somebody is looking at, and what is on screen is exactly
-        what the confirmation is about.
-        """
-        return tuple(
-            self.member_list.item(row).text().split(" — ")[0]
-            for row in range(self.member_list.count())
-        )
+        self._run(lambda: self._seam.remove_all(master, confirmed), self._dismissed_all)
 
     @Slot(str)
     def _character_edited(self, _text: str) -> None:

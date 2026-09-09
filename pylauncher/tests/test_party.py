@@ -1336,10 +1336,14 @@ def test_dismiss_all_with_no_bots_sends_nothing_and_says_so() -> None:
 def test_the_seam_reads_the_party_before_dismissing_all_of_it(tmp_path: Path) -> None:
     """The list comes from the group table at the moment of the press, not from
     whatever the panel last drew: the bot manager logs bots in and out on a timer
-    and a list read minutes ago is 8.4d's finding all over again."""
+    and a list read minutes ago is 8.4d's finding all over again.
+
+    The caller supplies what it is ALLOWED to dismiss, and the table supplies who
+    that is — the guid confirmed is matched against the fresh read, and the name
+    that goes into `dml_uninvite` comes from the row, never from the caller."""
     chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
     sql = _Sql("1001\n", "Anmi\t949\t8\t1\n", "1001\n", "")
-    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka")
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka", (949,))
     assert result.attempted == 1
     assert [d.bot for d in result.dismissals] == ["Anmi"]
     assert "dml_uninvite Anmi" in chan.sent
@@ -1351,7 +1355,7 @@ def test_the_seam_dismisses_nothing_where_the_party_could_not_be_read(tmp_path: 
     keep out of the poll."""
     chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
     sql = _Sql("")  # the online lookup finds nobody
-    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka")
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka", (949,))
     assert result.attempted == 0
     assert "logged in" in result.sentence
     assert chan.sent == []
@@ -1412,8 +1416,8 @@ def test_the_seam_hands_the_specs_the_bound_and_the_level_setter_to_the_press(
     of them (`specs=()`, `max_level=None`, `set_level=None`) left every test
     green while the panel's own press refused every spec, refused every level,
     or raised. This is the one press that goes the whole way: two conf files on
-    disk, the group table read four times, and the level setter injected so the
-    console is not.
+    disk, the group table read three times -- the ground, the poll, the level
+    readback -- and the level setter injected so the console is not.
     """
     server = _ready_install(tmp_path)
     (server / party.PLAYERBOTS_CONF).write_text(SPEC_CONF)
@@ -1440,3 +1444,39 @@ def test_the_seam_hands_the_specs_the_bound_and_the_level_setter_to_the_press(
     assert "dml_whisper Pakka Newbot talents spec fire pve" in chan.sent
     assert "dml_whisper Pakka Newbot talents autopick" not in chan.sent
     assert (result.spec, result.level_before, result.level_after) == ("fire pve", 1, 60)
+
+
+def test_the_seam_refuses_a_party_that_is_not_the_one_that_was_confirmed(tmp_path: Path) -> None:
+    """Round 2's must-fix, at the end that can actually enforce it.
+
+    A panel comparing its own rows guards the wrong side of the door: between
+    the two presses the group table can gain a bot nobody agreed to send away,
+    and the panel would see nothing change. So the confirmed identities travel
+    with the press and the SEAM re-reads: the fresh set must match exactly, or
+    nothing is sent and the sentence says the party is not the one confirmed.
+    Guids rather than names because a guid is what the group table has -- two
+    bots can be renamed, and `characters.name` is not what `group_member` keys.
+    """
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Anmi\t949\t8\t1\nKobo\t950\t8\t1\n")
+
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka", (949,))
+
+    assert result.attempted == 0
+    assert result.dismissals == ()
+    assert result.blocker == result.sentence
+    assert "confirmed" in result.sentence
+    assert chan.sent == [], "not one uninvite may go out"
+
+
+def test_the_seam_refuses_a_party_that_lost_a_bot_since_it_was_confirmed(tmp_path: Path) -> None:
+    """Both directions, because a set that shrank is not the set agreed to either
+    -- and a subset that "obviously" still works is how a confirmation quietly
+    becomes a suggestion."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Anmi\t949\t8\t1\n")
+
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka", (949, 950))
+
+    assert result.attempted == 0
+    assert chan.sent == []

@@ -1593,15 +1593,27 @@ class InstallParty:
             members=lambda: _rows_only(self.members(master)),
         )
 
-    def remove_all(self, master: str) -> MassDismissal:
-        """Send every bot in `master`'s party away, one at a time and each named.
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> MassDismissal:
+        """Send `confirmed` away — and nothing else, whatever the party holds now.
 
-        The list is the group table at the moment of the press and never what a
-        panel last drew: the bot manager logs bots in and out on a timer, and
-        acting on a list read minutes ago is 8.4d's finding again. A read that
-        could NOT be done is reported as such rather than as an empty party —
-        "no bots to dismiss" over an unreadable group table is the same lie
-        `_rows_only` keeps out of the poll.
+        `confirmed` is the guids a person agreed to, and it is required rather
+        than optional because it is the whole point of the method. Round 2's
+        must-fix: a caller that checks its own screen and then asks for "the
+        party" has guarded the wrong side of the door — the two presses of a
+        confirmation are seconds apart, a bot can join in between, and the
+        screen has nothing to say about it. So this re-reads the group table and
+        refuses unless the fresh set is EXACTLY the confirmed one, in both
+        directions: a party that gained a bot is not the party that was agreed
+        to, and neither is one that lost one. A subset that "obviously" still
+        works is how a confirmation quietly becomes a suggestion.
+
+        Guids and not names, for the reason the group read selects them: a name
+        is what a display shows, and `group_member` keys on the guid.
+
+        The list still comes from the table rather than from the caller — the
+        bot manager logs bots in and out on a timer, and acting on a list read
+        minutes ago is 8.4d's finding again. What the caller supplies is what it
+        is allowed to act on, not what is there.
         """
         send = self._send_or_none()
         if send is None:
@@ -1609,6 +1621,9 @@ class InstallParty:
         rows = self.members(master)
         if isinstance(rows, str):
             return MassDismissal(0, (), rows, blocker=rows)
+        if {row.guid for row in rows} != set(confirmed):
+            moved = _not_the_confirmed_party(master, rows, confirmed)
+            return MassDismissal(0, (), moved, blocker=moved)
         return dismiss_all(
             player=master,
             bots=tuple(row.name for row in rows),
@@ -1650,6 +1665,24 @@ def _not_online(name: str) -> str:
     return (
         f"{name} is not logged in. A bot is added to a live session — the server resolves the "
         "master by name in the world, so log the character in and press again."
+    )
+
+
+def _not_the_confirmed_party(
+    master: str, rows: tuple[Member, ...], confirmed: tuple[int, ...]
+) -> str:
+    """Why nothing was dismissed, naming the party as it is NOW.
+
+    As it is now rather than as the difference between the two: a person who has
+    just been refused wants to know what to confirm next, and "one more bot than
+    you agreed to" is a sentence they cannot check against the party frame in
+    front of them.
+    """
+    holds = ", ".join(row.name for row in rows) if rows else "no bots at all"
+    return (
+        f"{master}'s party is not the one that was confirmed: {bots_word(len(confirmed))} were "
+        f"agreed to and the group table now holds {holds}. Nothing was sent — show the party "
+        "again and confirm what is there now."
     )
 
 

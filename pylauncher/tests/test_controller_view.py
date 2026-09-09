@@ -4186,7 +4186,7 @@ class _StubParty:
 
     def __init__(self) -> None:
         self.added: list[tuple[str, str, str, int | None]] = []
-        self.dismissed_all: list[str] = []
+        self.dismissed_all: list[tuple[str, tuple[int, ...]]] = []
         self.members: tuple[party.Member, ...] = ()
 
     def state(self, master: str) -> party.PartyState:
@@ -4215,8 +4215,8 @@ class _StubParty:
     def remove(self, master: str, bot: str) -> party.Dismissal:
         return party.Dismissal(True, True, f"{bot} left the party.", bot=bot)
 
-    def remove_all(self, master: str) -> party.MassDismissal:
-        self.dismissed_all.append(master)
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal:
+        self.dismissed_all.append((master, confirmed))
         return party.MassDismissal(
             1,
             (party.Dismissal(True, True, "Jilsur left the party.", bot="Jilsur"),),
@@ -4293,7 +4293,7 @@ def test_the_spec_the_level_and_dismiss_all_reach_the_tabs_own_seam(
 
     view.party_panel.dismiss_all()
 
-    assert seam.dismissed_all == ["Pakka"]
+    assert seam.dismissed_all == [("Pakka", (948,))], "the confirmed guid reached the tab's seam"
     assert view.party_panel.report.text() == "1 bot left the party: Jilsur."
 
 
