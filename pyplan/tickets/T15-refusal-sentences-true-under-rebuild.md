@@ -1,6 +1,6 @@
 # T15 — The two Dockerfile refusals give advice that is true under Rebuild as well as Install
 
-**Status:** ACCEPT on the lead's own read (2026-09-09 14:24 CEST, 60-line wording diff, budget rule) -- merging
+**Status:** CLOSED -- merged `b375b2d7`, suite green behind it, 2026-09-09 14:26 CEST; hand retired, worktree removed
 **Filed:** 2026-09-09 12:55 CEST by the lead (Fable), from T8's reviewers (round 1 Fable note, round 2/3 item 4)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/families/dockerfile.py` **only** at the two refusal sentences in `write()`'s verdict handling (`_Verdict.THEIRS` near :630-634, `_Verdict.UNREADABLE` near :635-640 on `yulon-phase8b` at `67eb7d70`; verify), the module docstring at `:11` that repeats the THEIRS sentence, and the test file that pins those sentences (find it: `git grep -n "Point the install at an empty folder" -- pylauncher/tests`). Nothing else.
