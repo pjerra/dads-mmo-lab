@@ -95,3 +95,7 @@ Amend the single commit, re-run the gate, report.
 - The 2026-08-20 cause: now records that the note offered a different cause (`hypeer.md:619-623`, relative `ALE.ScriptPath`) and measured none; the cause was measured 2026-09-08 on `yulon-ubuntu`, the original, and `8.6-wotlk-yulon-ubuntu-2026-09-08/` is cited directly (`README.md:24-25`, `:40-52`).
 - Small three done: "records no sha" beside `daeae0a5`; `README.md:191-195`; "three times, all on 2026-09-08 (+0200)".
 - Deviations: T5's path is on origin only until the lead merges; reviewer line numbers replaced by resolving ones (unchanged); `:2470` one past-tensed sentence (unchanged); correction 6 (8.2e) still on no ticket -- **lead's, flagged a third time**; with 8.6 unticked `test_docs_pins` no longer scans the three `8.6-*` folders, so this gate is weaker evidence about them than round 1's.
+
+## Review 5 (Codex adversarial, round 3, 2026-09-09 10:24) — ACCEPT
+
+8.6 genuinely unticked with its definition of done intact; the record withholds completion for chosen spec, chosen level with `characters.level` readback and dismiss-all under T5; the 2026-08-20 / 2026-09-08 correction is supported by the cited lines; the remaining citations resolve. No material findings. Fable round-3 verdict pending; merge follows both.
