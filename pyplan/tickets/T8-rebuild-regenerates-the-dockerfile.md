@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** DONE, round 2 (hand reported 2026-09-09 17:48; awaiting review)
+**Status:** REWORK (rejected by the lead 2026-09-09 12:25 CEST, round 2) -- an unreadable ground file is deleted and called restored
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -65,4 +65,20 @@ Amend or add a commit (say which); gate; report.
 ## Review, round 2 (Codex adversarial, 2026-09-09 17:58) -- ACCEPT
 
 Traced the amended four-file diff read-only, with attention to exception ordering, byte and state restoration, and whether the tests discriminate the regressions: "No material findings."
-Fable verdict pending.
+
+## Review, round 2 (cold Fable reviewer, 2026-09-09 12:22 CEST) -- REWORK, two
+
+The mechanism holds: the ground is read at `native.py:1938` before the opening note, the cancel check, the wrapper refusal and `_keep_rollback`; every pre-`recreate` exit reaches `_put_recipe_back` before any rollback branch; bytes end to end; the state record truthful; the cancel test really enters the `_restore_rollback` arm; ledger rows right; the lazy import the same shape as `installer.py:607,855`. Must-fix:
+
+1. **`native.py:2240-2243` + `2277-2281`: an unreadable ground file is deleted and reported as "put back exactly as it was".** `_recipe_ground()` maps every `OSError` to `None` ("there was no file"), `PermissionError` included. An unreadable `Dockerfile` -> ground `None` -> `write-dockerfile` refuses `UNREADABLE` ("Nothing was touched") -> `rebuild()` except, `touched` False -> `_put_recipe_back()`: `was is None`, path exists -> `unlink()` -> "put back exactly as it was". The user's file is gone and the sentence lies; on Windows the `unlink` raises `PermissionError`, not `InstallerError`, so `_let_go` is skipped and the rollback tags stay. Fix: `FileNotFoundError` -> absent (unlink on restore); any other `OSError` -> a third value, never unlinked, never written; a test with an unreadable ground asserting the file survives.
+2. **`installer.py:400-401`**: "If you have edited either of those two files yourself the rebuild stops and says so instead of replacing it" is false for any edit that keeps the first-line marker -- `_look()` (`dockerfile.py:564`) answers `OURS` on the marker alone and `write()` overwrites the rest. Say what is true: a file that no longer starts with the line Yu'lon put at the top stops the rebuild; one that still carries it is replaced.
+
+Notes: an `OSError` from `write_bytes` inside the restore propagates past `_let_go`/`_restore_rollback` (tags left) -- a `try`/`except OSError` yielding a sentence would be cheap; `test_a_dockerfile_the_user_owns...:276`'s `"put back" not in str(raised.value)` can never fail (the sentence is yielded, not raised); the tests that pass at the parent are guards against round 1, the right target; for the lead, `dockerfile.py:631-634` and `:636-640` are the refusals reachable from Rebuild with install-shaped advice ("Point the install at an empty folder"; "nothing was installed"), `:617-621` is the rendered-text check and unreachable from disk.
+
+## Rejection (lead, round 2) -- Fable (Codex accepted)
+
+1. **Three-valued ground** (Fable 1): `FileNotFoundError` -> absent; any other `OSError` -> leave-alone (no unlink, no write, a sentence naming the file if the restore reaches it); a test with an unreadable ground file asserting it survives and the sentence does not claim "exactly as it was".
+2. **The clause says what the marker check does** (Fable 2): `installer.py:400-401` reworded to the first-line marker; keep "both are put back as they were".
+3. Cheap: wrap the restore's `write_bytes`/`unlink` in `try`/`except OSError` that yields a sentence and falls through to the tag handling; make the `:276` assertion look at the yielded lines or drop it.
+4. For the lead: the two refusal sentences at `dockerfile.py:631-640`, not `:617-621` -- keep your suggested replacement in mind, the lead files it.
+Amend or add (say which); gate; report.
