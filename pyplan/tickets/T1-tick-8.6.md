@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** DONE, round 2 (hand reported 09:31; awaiting review 2)
+**Status:** REWORK (rejected by the lead 2026-09-09 10:05, round 2)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -74,3 +74,16 @@ Amend the single commit (the lead reads "one commit" as one at merge), re-run th
 
 - [high] The five round-1 edits were applied, but the tick certifies an incomplete surface. `:2500`'s own definition of done says *add a bot by class, spec and level … kick, and dismiss all*; the design (`pyplan/phase8-designs/b-users-surface.md:422`) requires chosen class/spec/level; the shipped panel says the opposite at `party_panel.py:33` ("No spec, no level, no 'dismiss all'") and `InstallParty.add()` takes class and gender only. The evidence exercised one mage at the server-chosen level with automatic talents, so it cannot prove chosen spec, chosen level, or dismiss-all.
 - Must-fix: remove the tick, or an explicit owner rescope. Fable reviewer's round-2 verdict pending; the lead's decision follows both.
+
+## Review 4 (cold Fable reviewer, round 2, 2026-09-09 10:02) — REWORK, one clause
+
+All five must-fixes done and verified (four trees, `Get-VM` on the host, every file and line). One sentence claims a measurement never made: *"with a measured cause both times: the Lua engine was not in the image"* is unsupported for 2026-08-20 -- that attempt's only record (`pyplan/phase8-reads/hypeer.md:619-623`) attributes it to a relative `ALE.ScriptPath` and nobody read that image's binary; the cause was measured on 2026-09-08 (`8.6-wotlk-yulon-ubuntu-2026-09-08/README.md:24-25`, `:40-52`). Notes: the reviewer's own round-1 line numbers were wrong and the hand's right; the panel-live folder records no sha and the line should say so; `README.md:191-195` not `:189-195`; the three presses were all on 2026-09-08 (+0200); lines drifted (8.6 `:2508`, 8.7a `:2509`, exit `:2516`); 8.2e's false clause is at `:2495`, the lead's.
+
+## Rejection (lead, round 2)
+
+The two verdicts together:
+1. **Withhold the tick** (Codex). `:2508` stays `- [ ] 8.6`. Keep every correction and the Gated record, retitled so the line is true: *Pressed 2026-09-09 …* proves the route (bridge answering) and the surface **for class**; *still owed*: a chosen spec, a chosen level with `characters.level` read back, and dismiss-all -- filed as `pyplan/tickets/T5-my-party-spec-level-dismiss-all.md`, and the box ticks when T5 lands. The definition-of-done text on the line is not to be weakened.
+2. **The "measured cause both times" clause** (Fable): the cause was measured on 2026-09-08 only (cite `8.6-wotlk-yulon-ubuntu-2026-09-08/README.md:40-52` by name, and say that second machine was `yulon-ubuntu`, the original, on the morning its disk died); 2026-08-20's note offered a different cause (`phase8-reads/hypeer.md:619-623`, a relative `ALE.ScriptPath`) and measured none.
+3. Small and true: "the folder records no sha" beside `daeae0a5`; `README.md:191-195`; the three presses on 2026-09-08.
+
+Amend the single commit, re-run the gate, report.
