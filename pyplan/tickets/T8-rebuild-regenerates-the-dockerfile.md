@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** DONE, round 3 (hand reported 2026-09-09 14:45 CEST; awaiting review)
+**Status:** DONE, round 3 (hand reported 2026-09-09 12:38 CEST; awaiting review)
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -83,7 +83,7 @@ Notes: an `OSError` from `write_bytes` inside the restore propagates past `_let_
 4. For the lead: the two refusal sentences at `dockerfile.py:631-640`, not `:617-621` -- keep your suggested replacement in mind, the lead files it.
 Amend or add (say which); gate; report.
 
-## Report, round 3 (hand, 2026-09-09 14:45 CEST)
+## Report, round 3 (hand, 2026-09-09 12:38 CEST)
 
 - The single commit amended again: `b6178611` on base `583a61ce`; gate ALL GREEN (yulon-fedora, 3780 passed; waited for another hand's gate rather than switch boxes); diff vs base 4 files +871/-33; `test_rebuild.py` 47 tests (36 at the parent).
 - **Three-valued ground**: `bytes`, `None` (`FileNotFoundError` only -> the re-render created it, the restore unlinks it), `UNREADABLE_RECIPE` (any other `OSError` -> never unlinked, never written, logged when read); a module singleton whose docstring cites `_keep_rollback`'s own fail-closed rule; tested with `isinstance` (mypy's `bytes | _UnreadableRecipe` on `write_bytes` proves the branch load-bearing). The restore then yields a sentence naming the path ("Part of the build recipe was left as it is now: `<path>` could not be read when this rebuild started ...") and never says "put back exactly as it was". Test uses a directory in place of the file (no skip, both platforms; `_look()` sees `UNREADABLE`); asserts `_recipe_ground()`'s answer directly and end to end (directory survives, no false line, the path named, `rmi:` calls happened). Mutation: the two `except` arms collapsed -> only this test red; honest limit stated (the deletion itself needs a regular unreadable file, which Windows cannot create).
