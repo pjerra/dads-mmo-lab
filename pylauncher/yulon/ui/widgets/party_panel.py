@@ -21,8 +21,9 @@ Left out deliberately, each with the seam gap that decides it:
 
 * **No character picker.** The seam reads one name's guid (`party.InstallParty.online_guid`)
   and has no "who is online" listing; the prior art's picker is fed by a separate
-  CLI call (`Playerbots.svelte:74` `wowPartyOnline()`). So the character is typed,
-  and a name that is not in the world comes back as the seam's own sentence.
+  CLI call (`Playerbots.svelte:75` `wowPartyOnline()`, offered as a `<select>` at
+  `:390-398`). So the character is typed, and a name that is not in the world
+  comes back as the seam's own sentence.
 * **No "Enable My Party" / bridge deploy button.** `party.deploy()` exists and
   `InstallParty` does not expose it, so there is nothing to press through this
   seam. The panel shows WHICH precondition is unmet instead, which is the half
@@ -31,8 +32,14 @@ Left out deliberately, each with the seam gap that decides it:
   (`rust-main:crates/dml-wow/src/bridge.rs:56-70`).
 * **No spec, no level, no "dismiss all", no presets.** `add()` takes a class and
   a gender; there is no spec whisper in `party.py` at all
-  (the prior art's is `party.rs:253`), the level is 8.4a's Characters tab and a
-  different seam, and dismiss-all is a loop the seam does not have.
+  (the prior art's is `party.rs:253` `spec_whisper_cmd`), the level is 8.4a's
+  Characters tab and a different seam, and dismiss-all is a loop the seam does
+  not have (`Playerbots.svelte:204-220`, behind a two-step confirm there).
+
+One thing the prior art does that this panel copies exactly: a bot that has not
+arrived within the poll window is reported as NOT joined, with its cause
+(`Playerbots.svelte:167`, the `SPAWNING_NOTE` branch of `add()`). Here that
+sentence is `party.Addition`'s own and the panel only shows it.
 
 ## Two rules from `job.py` that this panel is bound by
 
