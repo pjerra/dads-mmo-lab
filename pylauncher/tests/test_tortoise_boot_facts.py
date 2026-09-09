@@ -702,3 +702,40 @@ def test_the_phase_records_why_this_directory_is_the_apps_job() -> None:
     assert notes, "the phase carries no note saying why the app applies what the updater will not"
     for fact in ("character_updates", "2026-09-08", "2026-09-09"):
         assert fact in notes, f"the phase's notes do not mention {fact!r}: {notes!r}"
+
+
+def test_this_is_the_only_phase_in_the_catalog_that_runs_on_an_install_already_imported() -> None:
+    """`rerun_on_marked` is an exception to the marker rule, and exceptions are enumerated.
+
+    The rule it excepts is the probe's (`pyplan/phase7-decisions.md`, "Probe"):
+    a finished import is never re-run, because an app upgrade must not `DROP
+    realmd` on a server with accounts on it. A phase carrying this flag is
+    applied to that server on every install press instead, so the flag is only
+    ever as safe as the files it names are idempotent -- which is a fact about
+    somebody else's SQL, read by hand, and not something any test here can
+    check.
+
+    Enumerated over the WHOLE catalog rather than asserted of this phase,
+    because the failure this guards against is the flag appearing somewhere
+    else: a phase whose files drop or truncate would run again on a live world,
+    and a test that only asked "is Tortoise's phase flagged" would say nothing
+    about it. Adding a second one is deliberate work -- it means editing this
+    list and writing down why those files can be applied twice.
+
+    The three files behind the one entry below were read on 2026-09-09:
+    `ADD INDEX IF NOT EXISTS`, `MODIFY money INT(10) UNSIGNED` (an absolute
+    column type, so a second run is a no-op) and `CREATE TABLE IF NOT EXISTS
+    ... LIKE`.
+    """
+    flagged = {
+        (entry.id, phase.name)
+        for entry in load_catalog().games
+        if entry.install.native is not None and entry.install.native.cmangos is not None
+        for phase in entry.install.native.cmangos.sql.phases
+        if phase.rerun_on_marked
+    }
+    assert flagged == {(TORTOISE, "character updates")}, (
+        "`rerun_on_marked` applies a phase to an install the marker rule says is finished -- "
+        "somebody's server, mid-play. It is set on exactly one phase, whose three files were "
+        f"read for idempotence by hand; this catalog flags {sorted(flagged)}"
+    )
