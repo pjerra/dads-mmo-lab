@@ -423,6 +423,28 @@ def reset_own_password(
     than refusing. That rule is right, and it is why this is a separate seam
     with a narrower target: the `WHERE` names one account and the guard above
     makes sure it is ours.
+
+    A new password takes effect at the account's NEXT login; the account's
+    `rank` would not. Measured on a live tortoise server 2026-09-09
+    (`pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/`, `rank-cache-test3.log`):
+    this tree reads `account.rank` at worldserver startup, so an account granted
+    rank 4 while the world runs is still refused by SOAP until a restart. Two
+    columns on one table, two different rules -- a repair that rotates the
+    password is complete on its own, and one that also had to raise a level
+    would not be.
+
+    Raises:
+        AccountError: the name is not this app's own, the password is one the
+            server would refuse, or `scheme` is not one this function knows.
+            **There is no default scheme here.** Until 2026-09-09 anything that
+            was not `mangos_srp6` was written as AzerothCore, and a default that
+            reaches for another core's columns is not a fallback -- it is a
+            statement that cannot run. Tortoise (`mangos_sha`) is the tree that
+            proved it: the Repair press died with `ERROR 1054 Unknown column
+            'salt' in 'SET'`
+            (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`),
+            and the only way to a working channel that night was to delete the
+            app's account and make it again.
     """
     if not name.startswith(APP_ACCOUNT_PREFIX) or name != name.upper():
         raise AccountError(
@@ -440,9 +462,25 @@ def reset_own_password(
     if scheme == "mangos_srp6":
         s_hex, v_hex = mangos_srp6_credentials(name, password)
         columns = f"v = {_text_literal(v_hex)}, s = {_text_literal(s_hex)}"
-    else:
+    elif scheme == "mangos_sha":
+        # The one column this core's credential is, and the same value
+        # `_account_row()` writes into it -- `SHA1(UPPER(name):UPPER(password))`
+        # through the same `fold()`, which is why a password rotated here and
+        # one set at creation are indistinguishable to the auth server. `v`/`s`
+        # stay NULL; that core derives them on first login, and writing them
+        # here would hand it a pair it did not choose.
+        columns = f"sha_pass_hash = {_text_literal(mangos_password_hash(name, password))}"
+    elif scheme == "azerothcore":
         salt, verifier = registration_data(name, password)
         columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
+    else:
+        # Named, not defaulted. See this function's `Raises:` block: the branch
+        # this replaces wrote AzerothCore's columns for every scheme it did not
+        # recognise, which is how `mangos_sha` reached `Unknown column 'salt'`.
+        raise AccountError(
+            f"{scheme!r} is not an account scheme this app knows how to re-password, so "
+            "nothing was written. Known: azerothcore, mangos_sha, mangos_srp6."
+        )
     sql.run_statement(
         _ACCOUNTS_DB,
         f"UPDATE account SET {columns} WHERE username = {_text_literal(name)};",

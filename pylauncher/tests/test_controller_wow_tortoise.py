@@ -201,6 +201,32 @@ def test_the_gm_grant_writes_this_cores_column_and_never_account_access() -> Non
     assert "gmlevel" not in sql.written()
 
 
+def test_the_reset_writes_this_cores_one_column_and_never_azerothcores() -> None:
+    """Repair, on the tree where it died.
+
+    This binding passed `scheme()` from the day it was written; the shared
+    writer accepted it, branched on `mangos_srp6` alone, and treated every other
+    scheme as AzerothCore. So the Repair press on the m910q's Tortoise install
+    reached a table with no such column
+    (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`):
+
+        ERROR 1054 (42S22) at line 1: Unknown column 'salt' in 'SET'
+
+    The credential on this core is one `sha_pass_hash`, the same value
+    `create_account()` above writes.
+    """
+    sql = _FakeSql()
+
+    accounts.reset_own_password(sql, "YULON_58C6FD1C", "n3w-p@ssw0rd1234")
+
+    written = sql.writes()
+    assert "UPDATE account SET sha_pass_hash = " in written, written
+    # The columns of the other two schemes this app knows: neither exists here.
+    assert "salt" not in written and "verifier" not in written, written
+    assert " v = " not in written and " s = " not in written, written
+    assert "n3w-p@ssw0rd1234" not in written, "the password reached a statement"
+
+
 def test_the_statements_reach_this_cores_auth_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """`DockerSql` puts the schema in argv. Built without this game's map it
     names AzerothCore's, and every statement dies with `Unknown database`."""
