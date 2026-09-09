@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** REWORK, code half (rejected by the lead 2026-09-09 14:40, round 2); live half queued for the box
+**Status:** DONE, code half round 3 (hand reported 2026-09-09 15:38; awaiting review 3); live half queued for the box
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -91,3 +91,14 @@ Both reviewers saw the same window; they weigh it differently. The lead takes th
 2. **Refuse to arm unless the rows were drawn for this master** (Fable note 1): remember the master in `_state_read`; a press with a different name in the box says "Press Show this character's party first". Test it.
 3. Optional: note 4 (`setEnabled(not self._busy)` in `_level_bound_read`); note 6 (the docstring's count).
 A third commit is fine; say which. Gate, report.
+
+## Report, code half round 3 (hand, 2026-09-09 15:38)
+
+- A third commit `b8e93fc1` on `de6b1e77` + `387f43f9`; gate ALL GREEN 3832; round-3 delta 6 files +316/-79.
+- 1: `InstallParty.remove_all(master, confirmed: tuple[int, ...])` -- `confirmed` required, guids from the group read; the seam re-reads and refuses unless the fresh set matches exactly in both directions (a party that gained or lost a bot is not the one agreed to); the refusal names the party as it is now; the name that reaches `dml_uninvite` comes from the fresh row. The panel snapshots guids at arm time; both Protocols updated. RED recorded first: `TypeError: remove_all() takes 2 positional arguments but 3 were given` and the panel's `assert [] == [('Pakka', (948, 949))]`; eight tests failed before the fix.
+- 2: `_state_read` receives `(master, state)` -- the master travels with the answer -- and records `_drawn` + `_drawn_for`, cleared together on a refused read; arming over rows drawn for another character is refused with `PRESS_SHOW_FIRST`; two tests.
+- 3: both optional items done.
+- Deleted as unreachable: the panel's `_confirmed != subject` branch (every path to `_drawn` stands the arm down first; a changed master is refused above it); its round-2 mutation retired. Removed: the test that mutated `member_list` directly, replaced by `test_a_party_that_moved_on_the_server_is_not_dismissed_unconfirmed` plus two seam tests.
+- Mutations: 16 from rounds 1-2 re-run against round-3 code, all caught (the runner rebuilt under `<scratchpad>/T5/` after the collision); round 3: 5 of 6 caught, the sixth an **equivalent mutant** (the arm's snapshot vs a value recomputed at the second press -- indistinguishable because `_drawn` cannot change while an arm stands; the snapshot stays because it records what a person was shown). Two survivors were weaknesses in the tests fixed in the code (one source of truth for "nothing drawn"; the level-bound read completing under a press now exercised).
+- Recount against `7ab2caa0`: 58 new test functions net (35 + 22 + 1), 63 collected cases; gate 3818 -> 3826 -> 3832.
+- Live half still owes: the async `characters.level` lag, level-then-spec, the in-game "Spec not found", the talent readback, dismiss-all with two bots.
