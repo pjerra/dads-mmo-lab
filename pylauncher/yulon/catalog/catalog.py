@@ -474,6 +474,22 @@ class SqlPhase(_Strict):
             "`2>/dev/null`, made visible."
         ),
     )
+    rerun_on_marked: bool = Field(
+        default=False,
+        description=(
+            "Apply this phase to an install the import probe already reads as finished -- a "
+            "marker row of any hash (`imported`), or `populated` with every schema complete -- "
+            "so a phase added to a plan after somebody installed still reaches their "
+            "databases. The marker rule (phase7-decisions, 'Probe') is otherwise unchanged: "
+            "every phase without this flag is skipped there, and this route writes no marker "
+            "and re-asks no `verify` rule, because it is not the whole import those describe. "
+            "Only for a phase whose files are idempotent on their own terms -- it runs on "
+            "every install press, for the life of the install. `wow-tortoise`'s `character "
+            "updates` is the case that produced it: an install made before that phase existed "
+            "is one honor-maintenance day from a restart loop the app has no button to fix "
+            "(`pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1)."
+        ),
+    )
     assert_update_level: bool = Field(
         default=False,
         description=(

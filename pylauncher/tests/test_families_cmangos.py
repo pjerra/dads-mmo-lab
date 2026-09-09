@@ -4388,6 +4388,196 @@ def test_the_import_leaves_a_populated_database_that_is_complete_alone(
     assert rec.sql_calls == []
 
 
+# -- the phases a plan re-runs on an install that is already finished (T11) ----
+
+
+POPULATED_AND_COMPLETE = docker.ImportState(
+    "populated", "every schema has tables and rows", complete=True
+)
+"""The other answer `_import` treats as finished, and it is not `imported`.
+
+The spine returns for both without importing, so a re-run route that recognised
+only the marker would leave an install imported by the shell scripts — which has
+no marker row at all and reads `populated` — exactly as exposed as before.
+"""
+
+MARKED_ONLY = "SELECT 'only the phases the marker rule covers'"
+"""The statement of an ordinary phase: applied to a fresh install, never again."""
+
+EVERY_PRESS = "SELECT 'a phase declared rerun_on_marked'"
+"""The statement of the flagged phase: applied on every press, finished or not."""
+
+
+def rerun_plan() -> SqlPlan:
+    """The shipped plan with two statement phases, one of them `rerun_on_marked`.
+
+    Statements and no files, so nothing has to be laid on disk and each phase is
+    identifiable by the exact text the client was handed. The PAIR is the point:
+    every assertion below is about which of the two moved, and a plan with only
+    the flagged phase in it could not tell "the flag was honoured" from "the
+    whole plan ran again".
+    """
+    return SQL.model_copy(
+        update={
+            "phases": (
+                SqlPhase(name="world base", into=ENTRY.databases.world, statements=(MARKED_ONLY,)),
+                SqlPhase(
+                    name="character updates",
+                    into=ENTRY.databases.characters,
+                    statements=(EVERY_PRESS,),
+                    rerun_on_marked=True,
+                ),
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize("finished", [IMPORTED_OLDER_PLAN, POPULATED_AND_COMPLETE])
+def test_a_phase_declared_rerunnable_reaches_an_install_the_probe_reads_as_finished(
+    tmp_path: Path, finished: docker.ImportState
+) -> None:
+    """The route T10's fix had no way to travel.
+
+    `MarkerGate.probe()` reads a marker row as `imported` whatever its hash, so
+    a phase added to the plan afterwards reached fresh installs only — and the
+    m910q's Tortoise world stopped starting one morning for want of a table one
+    of those files creates (`7.9-rerun-m910q-2026-09-09`, finding 1). The phase
+    now says of itself that it may run there, and this is that sentence being
+    honoured.
+
+    Over BOTH answers the family treats as finished, because they are one branch
+    in `_import` and an install made by the shell scripts carries no marker.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(finished)
+    said = list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    assert EVERY_PRESS in rec.sql_calls, rec.sql_calls
+    assert any("character updates" in line for line in said), said
+
+
+def test_the_phases_a_finished_install_may_not_re_run_are_still_left_alone(
+    tmp_path: Path,
+) -> None:
+    """The marker rule, unchanged for everything that did not ask for this.
+
+    The same run as above: the flagged phase moved, and nothing else did. Phase
+    0 is the expensive half of that promise — `create_schemas()` writes `CREATE
+    USER ... IDENTIFIED BY` and its grants, and re-running it against somebody's
+    server is a password change nobody asked for — so it is asserted off the
+    SCRIPTS, where that text is, and not off the first lines in `sql_calls`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls
+    assert not [s for s in rec.sql_scripts if "CREATE DATABASE" in s or "IDENTIFIED BY" in s]
+
+
+def test_a_re_run_over_a_finished_install_writes_no_marker_and_re_asks_no_verify_rule(
+    tmp_path: Path,
+) -> None:
+    """It is not the import those two describe, and it must not claim to be.
+
+    A marker row records that THIS plan finished; one written after two of its
+    seven phases would tell the next press a lie it can never take back. The
+    verify rules are the same argument from the other end — they are about a
+    whole world, and a world that was already imported is not being re-checked
+    here. Nothing is lost by leaving both alone: the row that is already there
+    reads `imported` on the next press, exactly as it does now.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], rec.sql_scripts
+    asked = {rule.query for rule in SQL.verify}
+    assert not [s for s in rec.sql_calls if s in asked], rec.sql_calls
+
+
+def test_a_fresh_install_applies_a_rerunnable_phase_once_and_not_twice(
+    tmp_path: Path,
+) -> None:
+    """`absent` runs the plan; the flagged phase is IN that plan and is not a second copy.
+
+    The cheap way to write this feature is to apply the flagged phases before or
+    after the ordinary import unconditionally, and every assertion above still
+    passes when it is written that way. A file applied twice is harmless only
+    while it is idempotent, which is a promise about the sources rather than
+    about this code, and the transcript would say the same thing twice.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    assert rec.sql_calls.count(EVERY_PRESS) == 1, rec.sql_calls
+    assert rec.sql_calls.count(MARKED_ONLY) == 1, rec.sql_calls
+
+
+def test_a_re_run_that_the_database_refuses_stops_the_install_before_the_world_starts(
+    tmp_path: Path,
+) -> None:
+    """A `fail` phase is `fail` on this route too, and the stage is before `up`.
+
+    The temptation is to soften it — the install is finished, this is only an
+    upgrade, why break it — and softening it recreates the exact silence this
+    phase exists to end: the character SQL does not land, the log says the
+    databases are already imported, and the world crash-loops on the first
+    morning honor maintenance falls due.
+
+    The sentence is `sqlplan.apply()`'s own, naming the run that the client
+    rejected — the same one the ordinary import raises, because it is the same
+    call over the same runs.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    rec.failing_sql = EVERY_PRESS
+    with pytest.raises(InstallerError, match="Nothing after it was applied"):
+        list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+
+
+def test_a_rerunnable_phase_is_still_asked_whether_its_update_level_landed(
+    tmp_path: Path,
+) -> None:
+    """`assert_update_level` means the same thing wherever the phase runs.
+
+    The check exists because a `warn` phase and a broken world print the same
+    transcript (2026-09-03), and that is no less true on an install this route
+    touches — more so, since no verify rule is re-asked here and this is then
+    the only question anything asks about what actually landed. A phase carrying
+    both flags whose chain did not land is a refusal, not a line in the log.
+
+    Files rather than statements because the model refuses the level flag on a
+    `statements` phase: the column it looks for is built from the last FILE the
+    phase applied.
+    """
+    server_dir = tmp_path / "srv"
+    updates = server_dir / "updates"
+    updates.mkdir(parents=True)
+    for n in (1, 2):
+        (updates / f"{n:04d}_step.sql").write_text(f"-- {n:04d}_step.sql\n", encoding="utf-8")
+    plan = SQL.model_copy(
+        update={
+            "phases": (
+                SqlPhase(
+                    name="character updates",
+                    into=ENTRY.databases.characters,
+                    files=("updates/*.sql",),
+                    sort="name",
+                    assert_update_level=True,
+                    rerun_on_marked=True,
+                ),
+            )
+        }
+    )
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    rec.column_answer = "0\n"
+    with pytest.raises(InstallerError, match="required_0002_step"):
+        list(engine_with_sql(plan, rec)._import(context(server_dir)))
+
+
 def test_the_import_clears_a_half_written_database_before_it_runs(
     tmp_path: Path,
 ) -> None:
