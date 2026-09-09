@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** DONE, code half round 2 (hand reported 2026-09-09 13:58; awaiting review 2); live half queued for the box
+**Status:** REWORK, code half (rejected by the lead 2026-09-09 14:40, round 2); live half queued for the box
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -79,3 +79,15 @@ Notes: the seams are the same ones (spec whisper replaces autopick and gear foll
 
 - [high] `party_panel.py:588-609`: the second press builds its subject from `member_list` -- the last DISPLAYED reading -- and then calls `remove_all(master)`, which does its own fresh read and dismisses whatever is in the party NOW. A bot that joined after arming, with no refresh, passes the stale comparison and is dismissed unconfirmed. The added party-change test edits the widget's rows rather than the seam's state, so it cannot expose this. Must-fix: make confirmation and execution one bound operation -- pass the confirmed identities (GUIDs, not parsed names) into the seam; it reads fresh and refuses unless the current set matches exactly, then dismisses only that snapshot; a test that arms, changes `_StubParty.state_result` with the rows untouched, presses, and proves no dismissal -- and that fails on the current code first.
 Fable round-2 verdict pending; the rejection body carries both.
+
+## Review 4, code half round 2 (cold Fable reviewer, 2026-09-09 14:35) -- ACCEPT, seven notes
+
+The arm verified: snapshot of (master, shown bots), equality on the second press, `textChanged` stands down, the moved stand-down remembered so the next press says so and does not re-arm; the three tests each pin a distinct branch. The spec race: generation and class carried, the reversed-completion test genuine. The seam test fails on all three hand-off mutations (traced: `specs=()` -> refusal sentence; `max_level=None` -> refusal; `set_level=None` -> BadRequest). Threads: nothing new. Notes: (1) a stale list under a new name can still be armed -- Show as Pakka, retype Anmi without Show, press: the sentence names Pakka's bots over Anmi's party (the action is right, the sentence wrong); guard: remember the master the rows were drawn for and refuse to arm unless it matches; (2) the bots-changed test is screen-level -- a server-side change between arm and fire is not seen by the panel; the cost is bounded because the seam's fresh read is bots-only; (4) `_level_bound_read` can re-enable the level box under a press (cosmetic); (6) a docstring says four group reads, the script holds three; (7) the live half's list.
+
+## Rejection (lead, round 2) -- Codex's must-fix, with Fable's cheap guard
+
+Both reviewers saw the same window; they weigh it differently. The lead takes the stricter reading, because "dismiss every bot" is a destructive press and the sentence it shows must be the set it sends away.
+1. **Bind confirmation and execution in the seam** (Codex, `party_panel.py:588-609`): pass the confirmed identities (GUIDs from the group read, not parsed display names) into a seam call that reads the party fresh and refuses unless the current set matches exactly, then dismisses only that snapshot. Test: arm, change `_StubParty.state_result` with the rows untouched, press -> no dismissal and the moved sentence; and that test fails on the current code first (say the message).
+2. **Refuse to arm unless the rows were drawn for this master** (Fable note 1): remember the master in `_state_read`; a press with a different name in the box says "Press Show this character's party first". Test it.
+3. Optional: note 4 (`setEnabled(not self._busy)` in `_level_bound_read`); note 6 (the docstring's count).
+A third commit is fine; say which. Gate, report.
