@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** ACCEPT (Fable 2026-09-09 12:42 CEST; Codex accepted round 2, its round-3 pass owed) -- merging after the T11 gate
+**Status:** ACCEPT (Fable 2026-09-09 12:42 CEST; Codex accepted round 2, its round-3 pass owed) -- merged `67eb7d70` 2026-09-09 12:43 CEST, suite running behind it
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
