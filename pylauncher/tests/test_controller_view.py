@@ -27,6 +27,7 @@ from yulon import (
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
 from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
@@ -5439,3 +5440,216 @@ def test_the_wotlk_modules_tab_refuses_when_it_cannot_tell_whether_the_world_run
 
     assert "could not tell whether the world server is running" in str(raised.value)
     assert sent == []
+
+
+# ------------------------------------ the pending-database-updates button (T14)
+#
+# T11 built the route that applies a phase declared `rerun_on_marked` to an
+# install the probe already reads as finished, and its reviewer then found the
+# route had no way in from the app: the catalog tile greys to "Installed" once
+# the folder is known, and `rebuild_stages()` excludes `import` on purpose. The
+# tests below are about the button that closes that — who is offered it, and the
+# refusal that has to arrive through the shipped wiring rather than through a
+# seam a test attached.
+
+
+def _updates_services(
+    ps: _Ps, tmp_path: Path, lines: Sequence[str] = ("--- import", "applied")
+) -> tuple[ControllerServices, list[object], list[str]]:
+    """Services whose updates route records the confirmation it gave and the press it took."""
+    started: list[object] = []
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+
+    def confirmation() -> str:
+        asked.append("confirmation")
+        return "apply three files?"
+
+    def press(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.updates = native.UpdateRoute(confirmation=confirmation, press=press)
+    return services, started, asked
+
+
+def test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase(
+    tmp_path: Path,
+) -> None:
+    """The enabling rule at the wiring, over every game the app can manage.
+
+    Read off the catalog by `native.update_phases()`, so this is the same
+    question `test_database_updates.py` asks of the data, asked here of what
+    `for_entry()` actually hands a tab. Tortoise is the one entry whose plan
+    carries such a phase today; the other three get `None` and a dead control,
+    which is the rule the rebuild seam already follows — a control that is
+    visibly unavailable beats one that is pressed and then explains itself.
+
+    Catches the route wired for every entry (three games would then offer a
+    press that applies nothing and reports success), and the reader hard-coded
+    to an id.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").updates is not None
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+        entry = load_catalog().get(game)
+        assert ControllerServices.for_entry(entry, tmp_path / game).updates is None, game
+
+
+def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_updates_button(
+    tmp_path: Path,
+) -> None:
+    """The same refusal `rebuild_for_app()` exists for, taken as a greying rather than a sentence.
+
+    `native.Seams` addresses the local daemon and erases `wsl_distro`, so a
+    press against a server living inside a distro would ask THIS Docker about a
+    container it has never heard of. That answer is `None` and the guard refuses
+    on it, which is safe but says the wrong thing; withholding the control says
+    the true one.
+
+    Catches the `wsl_distro` test dropped from the wiring.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
+    assert inside.updates is None
+
+
+def test_a_tab_with_no_updates_route_has_a_dead_button_that_is_harmless_to_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.updates is None` greys it, and pressing it anyway does nothing.
+
+    Catches the button enabled unconditionally, and `apply_database_updates()`
+    reaching for a route it was never given.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert not view.updates_button.isEnabled()
+    assert view.apply_database_updates() is False
+
+
+def test_declining_the_updates_confirmation_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is real: the question is asked, and No means nothing ran.
+
+    `is ... Yes` and not `is not ... No`, because Escape and the window's close
+    button both answer `NoButton` — and this press writes DDL into a database
+    with somebody's characters in it.
+
+    Catches the confirmation skipped, and the verdict read as `is not No`.
+    """
+    seen: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        seen.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, asked = _updates_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.updates_button.isEnabled()
+    assert view.apply_database_updates() is False
+    assert seen == ["apply three files?"], seen
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    assert started == [], "declined, and the press ran anyway"
+    assert view.rebuild_log.running is False
+
+
+def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone that predates the directory these phases name refuses at `expand()`.
+
+    That refusal arrives while the dialog is being COMPOSED — the file list is
+    expanded from the folder, so there is no list to offer — and it must not
+    become a traceback, an empty dialog, or a press. T11's reviewer, note 4.
+
+    Catches the confirmation call left outside a `try`, and a refusal that
+    yields an empty file list instead of raising.
+    """
+    asked: list[str] = []
+
+    def question(*a: object, **k: object) -> object:
+        asked.append("asked")
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, _ = _updates_services(ps, tmp_path)
+    route = services.updates
+    assert route is not None
+
+    def refuse() -> str:
+        raise InstallerError("found no file matching src/x/*.sql under /srv")
+
+    services.updates = native.UpdateRoute(confirmation=refuse, press=route.press)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    assert view.apply_database_updates() is False
+    assert started == [], "refused, and the press ran anyway"
+    assert asked == [], "the user was asked to confirm a press that could not be described"
+    assert failures and "found no file matching" in failures[0], failures
+
+
+def test_the_tortoise_updates_button_refuses_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal on the route `for_entry()` really builds, with nothing attached by hand.
+
+    `docker.world_running` is patched — the function the engine's own seam
+    resolves on the call — so the refusal has to travel the whole shipped path
+    to arrive: the tab's wiring, `install_wiring.installer_for_app()`, and
+    `update_databases()`'s guard. T11's reviewer (note 3) recorded that this
+    route writes DDL into `tw_char` and that nothing stopped the world; this is
+    that, refused before the database is even started.
+
+    Catches the guard deleted, the seam bound to `container_state(...).settled`
+    (which answers `False` here and would let the press through), and a wiring
+    that hands the engine a `world_running` bound at import.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.updates is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.updates.press(None))
+
+    assert "world server is running" in str(raised.value)
+    assert "Press Stop" in str(raised.value)
+    assert asked == [tortoise.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_tortoise_updates_button_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` is not "no", on the button.
+
+    An unreadable inspect and a missing container both answer `None`, and
+    through this guard `False` would be fail-OPEN. Nothing reaches the daemon:
+    `conftest`'s guard fails any test whose argv gets to the docker CLI, so a
+    press that got past this refusal would be red here for a second reason.
+
+    Catches the `None` branch folded into the `False` one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.updates is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.updates.press(None))
+
+    assert "could not tell whether" in str(raised.value)

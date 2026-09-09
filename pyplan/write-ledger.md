@@ -86,6 +86,32 @@ route is one, and `all-stackables` alone ships three on install and two on
 remove for TBC, Tortoise and Vanilla. Measured by loading every manifest through
 `parse_manifest`, not by grepping for the string.
 
+**A second button reached the character database on 2026-09-09, and this walk
+cannot see it.** T14 wired the Modules tab's *"Apply pending database
+updates…"* to `native.StagedInstaller.update_databases()`, which streams the
+install plan's `rerun_on_marked` phases into the databases through
+`sqlplan.apply()` — and that goes out on `Seams.exec_stdin`, a `docker exec`
+with the SQL on stdin. **No row below covers it**: the callee list is
+`run_statement`/`run_file` plus the `Path`/`os`/`shutil` calls, and this write
+is an argv handed to a subprocess, the third shape the audit above found itself
+blind to. So the walk answers "no new write" for a press that writes DDL into a
+database with somebody's characters in it, and the honest place to record that
+is here rather than in a row the test would then call stale. **The whole import
+path has the same hole** — it is not new with this button, only newly reachable
+from one.
+
+What is true of the press: it refuses unless `docker.world_running()` answers an
+explicit `False`, before the database is started and again after (a Start
+pressed during the health wait would otherwise put a live world behind the
+statements); it refuses unless the databases already read as a finished import,
+which is what keeps it out of the two arms of `stage_import()`'s table that
+would import everything (`absent`) or `DROP DATABASE` over every schema the plan
+names (`partial`) — the ordinary import is unreachable on this route rather than
+guarded on it; and it writes no completion marker and re-asks no `verify` rule.
+In this column it reads **no — the press refuses while the world is running,
+twice asked**. Closing the walk's blindness means teaching it `exec_stdin`, which
+is bigger than this ticket and is named rather than done.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 

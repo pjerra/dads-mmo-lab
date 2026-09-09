@@ -85,6 +85,8 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    import_reads_as_finished,
+    rerunnable_phases,
     secret_token_name,
     stop_abandoned_worker,
 )
@@ -1152,6 +1154,19 @@ class CmangosInstaller(StagedInstaller):
         re-runnable, and only those. Everything from `db = ...` down is the
         ordinary import and is not reached there.
 
+        **`ctx.updates_only` is read before `stage_import()` is called, and that
+        ordering is the whole of the updates button's safety argument.** That
+        press consents to a named list of files. `stage_import()`'s table would
+        answer it with a full multi-hour import and a completion marker on
+        `absent`, and with `gate.reset()` — `DROP DATABASE IF EXISTS` over every
+        schema the plan names — on `partial`, which it reaches even with
+        `service=None` because the `if service is None: return` sits AFTER that
+        block. Any check placed after that call would be a second probe, and a
+        second probe is a second question: the answer can differ between the two
+        and the destructive arm would still be reachable on the first. So the
+        route branches here, ahead of the table, and the ordinary import is
+        unreachable on it rather than guarded on it (cold review of T14, round 1).
+
         The mapping is `_secret_tokens()` and not `_public_tokens()`: a phase
         statement may legitimately carry `{{DB_PASSWORD}}` — the shipped
         Tortoise plan's `CREATE USER ... IDENTIFIED BY` does — and none of what
@@ -1160,11 +1175,12 @@ class CmangosInstaller(StagedInstaller):
         """
         plan = self._data().sql
         gate = _Remembering(self._gate(ctx))
+        if ctx.updates_only:
+            yield from self._only_the_rerunnable_phases(ctx, plan, gate)
+            return
         yield from self.stage_import(ctx, gate, None)
         seen = gate.last
-        if seen is not None and (
-            seen.state == "imported" or (seen.state == "populated" and seen.complete)
-        ):
+        if seen is not None and import_reads_as_finished(seen):
             yield from self._rerun_on_marked(ctx, plan)
             return
         db = self._native().db
@@ -1279,6 +1295,39 @@ class CmangosInstaller(StagedInstaller):
             ) from exc
         yield "The databases are imported and marked complete."
 
+    def _only_the_rerunnable_phases(
+        self, ctx: StageContext, plan: SqlPlan, gate: _Remembering
+    ) -> Iterator[str]:
+        """The updates press's whole import stage: one probe, a precondition, the flagged phases.
+
+        `stage_import()` is deliberately not called. Its table is written for a
+        press that consented to an INSTALL, and two of its arms would answer a
+        press that consented to a named list of files with something else
+        entirely — see `_import`'s own paragraph on the ordering.
+
+        ONE probe, through the same `_Remembering` gate the ordinary route uses,
+        so `_rerun_on_marked()`'s own reading of "already imported" and this
+        precondition are the same answer to the same question rather than two
+        answers a live database could give differently.
+
+        The refusal names the state and its detail and says what to do instead.
+        It does not offer to import: an install that stopped at or after `import`
+        is resumed by pressing Install, which is a different consent with a
+        different dialog and — unlike this tuple — carries the `db-password`
+        stage that persists the app user's password.
+        """
+        seen = gate.probe()
+        if not import_reads_as_finished(seen):
+            raise InstallerError(
+                f"{self.entry.name}'s databases do not read as a finished import "
+                f"({seen.state}: {seen.detail}), so these files do not belong to them yet. "
+                f"Nothing was applied, nothing was imported and nothing was cleared. Install "
+                f"this server, or press Install again to resume the install that stopped, and "
+                f"these files go in as part of it."
+            )
+        yield f"These databases read as {seen.state}; nothing else in the install plan is re-run."
+        yield from self._rerun_on_marked(ctx, plan)
+
     def _rerun_on_marked(self, ctx: StageContext, plan: SqlPlan) -> Iterator[str]:
         """The phases a plan declares re-runnable, applied to an install already read as finished.
 
@@ -1314,29 +1363,13 @@ class CmangosInstaller(StagedInstaller):
         `CREATE USER ... IDENTIFIED BY` and its grants, and this route runs
         against a server somebody is playing on.
         """
-        phases = tuple(phase for phase in plan.phases if phase.rerun_on_marked)
+        phases = rerunnable_phases(plan)
         if not phases:
             return
         db = self._native().db
         container = self.entry.container_spec().db
         password = ctx.secrets.db_password
-        try:
-            runs = sqlplan.expand(
-                plan.model_copy(update={"phases": phases}),
-                ctx.server_dir,
-                self._schemas(),
-                self._secret_tokens(ctx),
-            )
-        except InstallerError:
-            # The same ordering as the ordinary import's: every refusal
-            # `expand()` raises is already the sentence a user reads, and
-            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
-            # this one would wrap one finished sentence inside another.
-            raise
-        except (RuntimeError, OSError) as exc:
-            raise InstallerError(
-                f"The phases this install re-runs on every press could not be prepared: {exc}"
-            ) from exc
+        runs = self._rerunnable_runs(plan, ctx)
         if not runs:
             return
         named = ", ".join(phase.name for phase in phases)
@@ -1379,6 +1412,46 @@ class CmangosInstaller(StagedInstaller):
                 f"behind: {', '.join(failing)}."
             )
         yield f"{named}: applied. The import marker is unchanged."
+
+    def _rerunnable_runs(self, plan: SqlPlan, ctx: StageContext) -> tuple[sqlplan.PhaseRun, ...]:
+        """Every file and statement the flagged phases would apply, in the order they apply.
+
+        One expansion, two callers: the press's own (`_rerun_on_marked`) and the
+        confirmation's (`update_files`). Written twice, the dialog could offer a
+        file list the run then did not stream — which is the shape of promise
+        this project has already been bitten by once, in `rebuild_confirmation`
+        claiming "nothing else in the folder is rewritten" about a stage that
+        writes two files.
+        """
+        try:
+            return sqlplan.expand(
+                plan.model_copy(update={"phases": rerunnable_phases(plan)}),
+                ctx.server_dir,
+                self._schemas(),
+                self._secret_tokens(ctx),
+            )
+        except InstallerError:
+            # The same ordering as the ordinary import's: every refusal
+            # `expand()` raises is already the sentence a user reads, and
+            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
+            # this one would wrap one finished sentence inside another.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The phases this install re-runs on every press could not be prepared: {exc}"
+            ) from exc
+
+    def update_files(self, ctx: StageContext) -> tuple[str, ...]:
+        """The confirmation's file list, expanded from the folder this install lives in.
+
+        Named as the run's own log names each step — `PhaseRun.rel`, the path
+        relative to the server dir — so a user reading the dialog and a user
+        reading the transcript afterwards are reading the same strings.
+        """
+        plan = self._data().sql
+        if not rerunnable_phases(plan):
+            return ()
+        return tuple(run.rel for run in self._rerunnable_runs(plan, ctx))
 
     def _gate(self, ctx: StageContext) -> ImportGate:
         """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.
