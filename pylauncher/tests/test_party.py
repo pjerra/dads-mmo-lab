@@ -1193,7 +1193,13 @@ def test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set
         sleep=lambda _s: None,
     )
     assert (result.level_before, result.level_after) == (1, 1)
-    assert "still" in result.sentence
+    assert "still reads 1, not 60" in result.sentence
+    # MEASURED live on `yulon-ubuntu2` 2026-09-09: the console answered
+    # `You changed level of <bot> to 42.` and the row stayed 1 THROUGH a forced
+    # `.saveall`, so this is not a write waiting for a save -- the level did not
+    # take, because it was sent while playerbots was still building the bot. The
+    # sentence must say that and must not explain it away.
+    assert "did NOT take" in result.sentence
 
 
 def test_a_refused_level_does_not_stop_the_spec_or_the_gear() -> None:
@@ -1376,15 +1382,35 @@ def test_the_seam_offers_the_specs_this_install_lists_for_the_chosen_class(tmp_p
     assert seam.specs("druid") == ()
 
 
-def test_the_shipped_dist_conf_is_read_where_no_conf_was_deployed(tmp_path: Path) -> None:
-    """`playerbots.conf.dist` is what an install that never had its module conf
-    written has, and it is what the server itself falls back to. Measured on
-    `yulon-ubuntu2` 2026-09-09: that box has the `.dist` and no `playerbots.conf`
-    -- so a reader that only looked for the deployed name would offer no specs at
-    all on the one install where My Party has ever worked."""
+def test_a_shipped_dist_conf_is_not_a_deployed_one_and_offers_no_specs(tmp_path: Path) -> None:
+    """The inverse of what this file asserted until the live gate ran it.
+
+    It used to read the `.dist` when no conf was deployed, on the prior art's
+    example and on a claim written here that nobody had checked -- that the
+    server falls back to it too. **Measured on `yulon-ubuntu2`, 2026-09-09**: that
+    box has a `.dist` and no `playerbots.conf`, and the module answered
+    `talents spec list` with `Total 0 specs found`. Every one of the 63 names
+    this app had offered came back `Spec <name> not found`, in the game window,
+    where nothing here can hear it.
+
+    So an install with only a `.dist` has NO premade specs, the picker offers
+    only the server's own pick, and asking for one is refused by the app in its
+    own words."""
     server = _ready_install(tmp_path)
     (server / (party.PLAYERBOTS_CONF + ".dist")).write_text(SPEC_CONF)
-    assert _install(server, _Sql(), None).specs("mage") == ("arcane pve", "fire pve")
+    assert _install(server, _Sql(), None).specs("mage") == ()
+
+
+def test_a_deployed_conf_beside_a_dist_is_the_one_that_is_read(tmp_path: Path) -> None:
+    """The control: the deployed file wins, and its contents are what is offered.
+
+    Written with the two files DISAGREEING, because agreeing files cannot tell a
+    reader that prefers the wrong one from a reader that prefers the right one.
+    """
+    server = _ready_install(tmp_path)
+    (server / (party.PLAYERBOTS_CONF + ".dist")).write_text(SPEC_CONF)
+    (server / party.PLAYERBOTS_CONF).write_text("AiPlayerbot.PremadeSpecName.8.0 = deployed only\n")
+    assert _install(server, _Sql(), None).specs("mage") == ("deployed only",)
 
 
 def test_the_seam_reads_this_installs_maximum_level(tmp_path: Path) -> None:
