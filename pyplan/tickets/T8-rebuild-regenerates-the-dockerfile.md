@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** DONE, round 3 (hand reported 2026-09-09 12:38 CEST; awaiting review)
+**Status:** ACCEPT (Fable 2026-09-09 12:42 CEST; Codex accepted round 2, its round-3 pass owed) -- merging after the T11 gate
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -91,3 +91,8 @@ Amend or add (say which); gate; report.
 - **The restore cannot take the rollback with it**: every filesystem call in `_put_recipe_back` inside `try`/`except OSError` appending a sentence; the state write wrapped and logged; the `:276` assertion replaced by one on the yielded lines. Test drives `_put_recipe_back()` directly against a path that is now a directory (unreachable through a press). Mutation: the `try`/`except` deleted -> only this test red.
 - For the lead, reading confirmed: `dockerfile.py:630-634` (THEIRS: "Point the install at an empty folder, or move that file aside") and `:635-640` (UNREADABLE: "Nothing was touched and nothing was installed"); `:617-621` is the rendered text's own marker, unreachable from disk; suggested "Move that file aside and press again, or point a new install at an empty folder." and dropping "and nothing was installed".
 - Deviations: an `OSError` in the restore is now reported, not raised (beyond the two must-fixes, on the reviewer's note); rollback contract untouched (twelve tests unchanged); black reformatted once.
+
+## Review, round 3 (cold Fable reviewer, 2026-09-09 12:42 CEST) -- ACCEPT
+
+Substantive round; nothing left for a round 4. `_recipe_ground` (`native.py:2274-2283`) three-valued; `_put_recipe_back` (`:2314-2366`) never touches an unreadable file, guards `unlink` with `exists`, keeps every call inside the per-file `try`, so a first-file failure still attempts the second; the state write wrapped; flow reaches `_let_go`/`_restore_rollback` unchanged; the `isinstance` narrowing claim correct. The clause at `installer.py:409-416` true against `_look` (`startswith(GENERATED_MARKER)`) and `write()`. The directory stand-in faithful for both readers; each test red at round 2 for the reason claimed and red under its mutation. Item 4 confirmed: `dockerfile.py:630-634` and `:635-640` reachable from Rebuild via `native.py:1883`; the suggested sentence true on both paths. Four files, ledger right, trailer clean.
+Notes: the "nothing was removed" sentence is loose for a `write_bytes` that failed mid-write ("may be partly written" truer); "put back exactly as it was" suppressed for the whole press when any file is left, the right call; the user-owns lines assertion is a guard, not RED-first, as asked; "is replaced" loose for an already-current file, same as the accepted "is written again".
