@@ -44,6 +44,7 @@ refusal**.
 | the new build was tagged `-failed` rather than deleted | **PASS**, and its whole life is 0.49 s | `events-press1.log`, `3-…png` |
 | the images under the running stack are the ones from the ground, the same ids | **PASS** | `5-after-press1.log`, `11-after-press2.log`, `5-…png`, `6-…png` |
 | the world is up and the bridge answers again | **PASS** | `5-after-press1.log` (`DML-BRIDGE-READY`), `14-box-back.log` |
+| the box was left running, reachable and unchanged | **PASS** | `16-box-back-final.log`, `8-the-box-put-back.png` |
 | the app's own sentence names what was put back and what was not | **PASS**, with one thing it does not name — see *§5* | `press1-message.txt`, `4-…png`, `7-…png` |
 | **the `-failed` name is let go once the restore has settled** | **FAILED on press 1**, fixed test-first, **PASS on press 2** | `press1.log`, `press2.log`, `6-…png`, `15-what-was-left.log` |
 
@@ -358,13 +359,18 @@ and → 30.31 GB over press 2 (a cached rebuild costs almost nothing); the guest
 
 ## Left on the box
 
+`16-box-back-final.log` / `8-the-box-put-back.png`, 02:37:11Z, `ac-worldserver running pid=278886
+restarts=0`:
+
 * The stack **UP**, on the images the ground recorded: `ac-worldserver` `running id=cd68db8cd6b7
   pid=278886 restarts=0 image=cad2566406d2`, `ac-authserver` on `1024b0a2fb43`, `ac-database`
   healthy. `mod-ale` compiled in, the five bridge scripts loaded, `dml_bridge_ping` answering.
 * `~/wowserver` **as it was**: `git status --porcelain` on `src/` is empty again, the owner's
   `LootPet2.lua` and `LootPet.lua.bak-20260909-002427` untouched, `worldserver.conf` still carrying
   `SOAP.Enabled = 1` and `Logger.ALE=4,Console Server`, the realm row still
-  `100.99.204.5:8085`, the mail table still 163 rows across the same 100 receivers.
+  `100.99.204.5:8085` — read from the auth server's own current run, `Added realm "Yulon ubuntu2"
+  at 100.99.204.5:8085.` — and the mail table still 163 rows across the same 100 receivers. The
+  world's current run printed its own `ready...` banner.
 * **No `-rollback` and no `-failed` tags**, and no image on the daemon that was not there at 01:59Z.
 * The checkpoint `before-rollback-restore-test-2026-09-09`, untouched. It predates the whole night,
   so restoring it would undo this and everything the 2026-09-08 lane did. Host `U:`: **30.31 GB**
