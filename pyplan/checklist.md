@@ -2329,6 +2329,7 @@
     more than one network path can hand out the wrong one — worth an explicit choice rather than
     a detection, whenever networking is revisited.
 - [x] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
+    **Re-run on `yulon-ubuntu2` 2026-09-08/09 (Phase 8 exit pass):** 52 of 53 on the 09-08 press (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/`), the one failing clause (35, the plan compared to itself) corrected and watched failing, then 33 of 33 with the box-restoring trap verifying every step it restores (`pyplan/gates/7.10-clause35-ubuntu2-2026-09-09/`, four review rounds, merged `b0e4458a`). The box is not the one the 09-05 line above names; see the box note under 8.x below.
   - **Ticked 2026-09-05 on the re-run against the MERGED engine, `yulon-ubuntu`:
     `pyplan/gates/7.10-ubuntu-2026-09-05-rerun/README.md`. 88 checks, 88 OK, 0 FAIL, seven
     drivers, at `cfb4c04f367536375abf6382694a1f800c468b8a` on Python 3.12.3 / PySide6 6.11.2.**
