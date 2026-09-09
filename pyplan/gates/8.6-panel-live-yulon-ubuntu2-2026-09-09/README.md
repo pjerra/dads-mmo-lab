@@ -80,8 +80,8 @@ client seat and locked him out of his own server for an hour, and that is now a 
   `8.6-wotlk-yulon-ubuntu2-2026-09-09/part-2-party.md:26` (`worldserver running
   started=2026-09-08T21:15:35Z`) and `part-2-bridge-absent.md:29` and `:33` (the same run, and
   `2026-09-08T22:24:14Z` after the restart) are container readings, two hours behind the shell that
-  took them. It settles nothing about `8.6-wotlk-yulon-ubuntu-2026-09-08/`, whose `Z` stamps are the
-  gate script's own banners (`1-ground.txt:1`, `4-console.txt:1-2`, `README.md:3`) on the original
+  took them. It settles nothing about `8.6-wotlk-yulon-ubuntu-2026-09-08/`, whose `Z` stamps are
+  script-emitted or README-authored, not container readings (`1-ground.txt:1`, `4-console.txt:1-2`, `README.md:3`) on the original
   `yulon-ubuntu`, a box whose clock was never measured and which has been OffCritical since its host
   disk left the bus on 2026-09-08.
   `pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md:9` had already written the same offset

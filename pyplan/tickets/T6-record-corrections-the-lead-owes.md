@@ -1,6 +1,6 @@
 # T6 — Four record corrections the lead owes, each found by a reviewer on another ticket
 
-**Status:** DONE, round 2 (hand reported 12:48; awaiting review 2)
+**Status:** ACCEPTED and MERGED (lead, 2026-09-09 13:15) -- merge `9e959102`, lead's close beside it, suite green behind it
 **Filed:** 2026-09-09 11:10 by the lead (Fable), from T1's eight reviews
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha — expected `d70642c6` or later)
 **File set (yours alone):** `pyplan/checklist.md` (line 2495 only), `pyplan/gates/8.6-panel-live-yulon-ubuntu2-2026-09-09/README.md`, `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`. No other file; no other line of the checklist.
@@ -70,3 +70,11 @@ Amend the single commit, re-run the gate, report.
 ## Review 3 (Codex adversarial, round 2, 2026-09-09 13:05) -- REWORK, one classification
 
 The universals, the :9 pointer, the stable clock-bullet citation, the checklist scope and the 8.2e tick are all corrected. One replacement sentence overclaims: panel-live README.md:83-86 calls the 2026-09-08 folder's Z stamps "the gate script's own banners", but README.md:3 there is authored prose and 4-console.txt:2 is a marker line, not a banner. Say "script-emitted and README-authored Z stamps on an unmeasured box", or restrict the phrase to the banner lines and classify the others separately. Fable round-2 verdict pending; if it is line-level too, the owner's rule (close by hand after two consecutive wording-only rounds) applies and the lead makes the edit at merge.
+
+## Review 4 (cold Fable reviewer, round 2, 2026-09-09 13:08) -- ACCEPT
+
+All five items verified on the committed tree, every citation resolved (the range 74-94 holds exactly the clock bullet; `:9`; the three Docker `started=` stamps; the 09-08 folder's Z lines), the self-caught "OffCritical" change confirmed in five other records, the checklist a pure append on 2495 with 8.2e still ticked. Notes: `T1-tick-8.6.md:125` still carried the universal the hand narrowed (the lead's file -- fixed at the merge); "gate script's own banners" read as fair for the marker line.
+
+## Closed by hand (lead, 2026-09-09 13:15)
+
+Fable ACCEPT, Codex REWORK on one phrase; two consecutive wording-only rounds is the owner's close-by-hand rule. Merged `256c52a6` (`9e959102`); the phrase made exact with Codex's wording ("script-emitted or README-authored, not container readings"); the same universal narrowed on T1's ticket. Suite behind the merge green. Hand retired, worktree removed, branch deleted.
