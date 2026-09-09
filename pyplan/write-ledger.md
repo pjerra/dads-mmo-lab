@@ -50,6 +50,42 @@ A row reading "**yes, and unguarded**" is a write that predates that answer and
 is named here rather than quietly grandfathered; 8.7 is where the applier's
 guard lands.
 
+**The applier's guard landed on 2026-09-09**, and the two `_run_sql` rows below
+now say something narrower than "guarded", because that is what is true. Three
+things a reader has to carry away from them:
+
+* **The guard is a capability, not yet a defence.** `Applier` takes a
+  `world_running` seam and `_refuse_direct_sql_into_a_running_world()` refuses
+  the whole action — before the first statement, so the *no rows written* half
+  of `checklist.md:2501` is true of the action and not merely of the step that
+  tripped it. But **no shipped caller passes the seam yet**: the four
+  `controller_<acronym>/modules.py` appliers are built without it, and with the
+  seam absent the behaviour is byte for byte what it was
+  (`phase8-designs/c-operators-risk.md:345` requires exactly that). Until a
+  caller wires it, every row below still reads "yes" in practice.
+* **`db-import` is a different route with a different guard.** Those steps write
+  nothing here; they are resolved into `ApplyReport.pending_sql` and applied by
+  `docker.apply_module_sql()`, which has had the running-world refusal all along
+  (`docker.py:2029-2036`). That guard could not be reused — it needs a
+  `ContainerSpec`, a compose project and Docker, and `apply.py` touches none of
+  them — so there are two enforcement points for one rule, and the applier's
+  sentence deliberately echoes Docker's so a user meets one rule and not two.
+* **`acore_ale` is not covered, and no page says whether it should be.**
+  `apply.WORLD_HELD_DBS` is `{characters, world, playerbots}`: the union of what
+  owner answer 7, `checklist.md:2501` and `c-operators-risk.md:90` name. The ALE
+  schema lives inside the worldserver process, so the reason the other three are
+  guarded plausibly reaches it, and one shipped step targets it
+  (`manifests/wow-wotlk/ale/paragon.json`, install-time). **Owner question:**
+  does answer 7 extend to `acore_ale`? Left running rather than decided here.
+
+One correction to the record while these rows were rewritten: the count of
+direct SQL steps across the shipped manifests is **44**, in 30 files across all
+four games — not the one `mod-arac.json` step an 8.7a brief named. `applied_by`
+defaults to `"direct"` (`manifest.py:136`), so every `sql` step that names no
+route is one, and `all-stackables` alone ships three on install and two on
+remove for TBC, Tortoise and Vanilla. Measured by loading every manifest through
+`parse_manifest`, not by grepping for the string.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 
@@ -64,8 +100,8 @@ descriptions are written by hand.
 | `apply.py::_deploy::shutil.copytree` | a deployed module directory into the server dir | yes |
 | `apply.py::_rm::shutil.rmtree` | a directory a manifest's `rm` step names | yes |
 | `apply.py::_rm::unlink` | a file a manifest's `rm` step names | yes |
-| `apply.py::_run_sql::run_file` | a module manifest's `.sql` file, into the database its step names | **yes, and unguarded** — as above; a crash leaves it half applied |
-| `apply.py::_run_sql::run_statement` | a module manifest's inline SQL, into the database its step names | **yes, and unguarded** — owner answer 7 makes this 8.7's guard |
+| `apply.py::_run_sql::run_file` | a module manifest's `.sql` file, into the database its step names | **guardable since 8.7a, and unguarded for every caller shipped today** — `_refuse_direct_sql_into_a_running_world()` refuses the action when a `world_running` seam says the world is up (or cannot say) and any of the action's direct steps names `characters`, `world` or `playerbots`; no caller passes that seam yet, so in the app as it ships this is still **yes**. `auth` and `acore_ale` are outside the guard. A crash still leaves a multi-file step half applied — the refusal prevents starting, not tearing |
+| `apply.py::_run_sql::run_statement` | a module manifest's inline SQL, into the database its step names | **as the row above** — the refusal is a pre-pass over the action's steps, so an inline statement that is FIRST never reaches the runner either; this is the site 8.7a's clause is written about, and `all-stackables` sends three of these to `world` on one install |
 | `apply.py::_set_conf_key::write_text` | one key in a server conf file, byte-preserving elsewhere | yes — the file changes now, the value arrives at the next world start |
 | `apply.py::install::touch` | the marker that records a module as installed | yes |
 | `apply.py::remove::shutil.rmtree` | the clone of a module being removed | yes |

@@ -71,6 +71,28 @@ DB_NAMES: dict[Db, str] = {
     "ale": "acore_ale",
 }
 
+WORLD_HELD_DBS: frozenset[Db] = frozenset({"characters", "world", "playerbots"})
+"""The databases a running worldserver holds in memory and writes back over.
+
+The set `_refuse_direct_sql_into_a_running_world()` refuses into, enumerated
+once so the guard and any reader of it cannot disagree. It is the union of what
+the pages name, and no more: owner answer 7 says `characters` and `world`
+(`phase8-parity-decisions.md:44`), `checklist.md:2501` says *the character or
+world database*, and `phase8-designs/c-operators-risk.md:90` adds `playerbots`.
+
+`auth` is deliberately outside it. Its writes are account rows, which the
+worldserver does not cache and write back, and every page that names this rule
+names it as a database the guard does not cover.
+
+**`ale` is outside it because no page names it, not because a page allows it.**
+It is the ALE Lua engine's own schema, which lives inside the worldserver
+process, so the reason the other three are here plausibly applies to it too;
+one shipped step targets it (`manifests/wow-wotlk/ale/paragon.json`,
+`sql/0[2-9]_*.sql`, install-time). Owner answer 7, checklist 8.7a and the two
+design pages are all silent on it, so it is left running rather than quietly
+decided for here — an owner question, recorded in `pyplan/write-ledger.md`.
+"""
+
 _CLIENT_PROBE_TIMEOUT_SECONDS = 30.0
 """Bounded, because this runs before any SQL and a wedged daemon must not turn
 one statement into an indefinite wait — but not tightly. 10s was the first
@@ -1002,10 +1024,29 @@ class Applier:
         unmodified: Callable[[Path, str], bool | None] | None = None,
         no_local_commits: Callable[[Path, str | None], bool | None] | None = None,
         server_dir_claim: Callable[[Path], Ownership] | None = None,
+        world_running: Callable[[], bool | None] | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.git: Git = git if git is not None else RunnerGit()
         self.sql = sql
+        # "Is this install's worldserver up?" — a seam, because the answer lives
+        # in Docker and this module does not touch Docker (module docstring,
+        # style-guide §3/§5). Three-valued for the reason every other reader
+        # here is: `None` is "could not ask", which is not "no". Default absent,
+        # and absent means the behaviour every caller has today — no guard —
+        # which is `phase8-designs/c-operators-risk.md:345`'s own requirement
+        # and the reason wiring it is a separate, later change.
+        #
+        # PRIVATE, and named the way `party.py:996` names the same seam, because
+        # a public `self.world_running` here would collide with
+        # `controller_wow_tortoise.autoupdate.GuardedApplier`, which already
+        # carries one (`autoupdate.py:461`) for its own updater guard and
+        # assigns it AFTER `super().__init__`. Sharing the name would have wired
+        # this guard live on Tortoise alone, by accident, with a `bool` seam
+        # where this one is `bool | None` — one game guarded, three not, and no
+        # page saying so. That subclass is nonetheless the one caller in the
+        # tree that ALREADY holds the fact this guard needs.
+        self._world_running = world_running
         self.client_dir = client_dir
         self.dbc = dbc
         # Whose checkout is already at the clone path? Asked through the SAME
@@ -1814,6 +1855,7 @@ class Applier:
     def _sql(
         self, manifest: Manifest, clone: Path, vals: Mapping[str, str], when: When, log: _Log
     ) -> None:
+        self._refuse_direct_sql_into_a_running_world(manifest, when)
         for step in manifest.sql:
             if step.when != when:
                 continue
@@ -1824,6 +1866,104 @@ class Applier:
                 log.skipped.append(f"sql → {step.db}: no SQL runner configured")
                 continue
             self._run_sql(step, clone, vals, log)
+
+    def _refuse_direct_sql_into_a_running_world(self, manifest: Manifest, when: When) -> None:
+        """Checklist 8.7a's guard: no direct SQL into a live world's databases.
+
+        Owner answer 7 (`phase8-parity-decisions.md:44`) is the rule — *no
+        direct writes to `characters`/`world` while running; reads are fine* —
+        and until this function existed the applier had **no** running-world
+        guard on this route at all. Only the `db-import` route was ever pressed
+        live (`8.7a-wotlk-yulon-ubuntu-2026-09-08/11-cycle2-up.log`), and that
+        route's guard is not here: it is `docker.apply_module_sql()`
+        (`docker.py:2029-2036`), which refuses when `spec.world`/`spec.auth` are
+        in `_running().ours`. **That guard could not be reused.** It needs a
+        `ContainerSpec`, a compose project name and Docker itself, and this
+        module's whole contract is that it never touches Docker (module
+        docstring, style-guide §3/§5): the applier is called down into and
+        signals up. So this is a second ENFORCEMENT POINT for one rule, not a
+        second rule — the fact is asked through a seam so the caller can hand
+        both routes the same answer, and the sentence deliberately echoes
+        `docker.py`'s ("holds ... in memory and saves them back over whatever it
+        finds. Press Stop") so a user meets one rule and not two.
+
+        Four decisions, each of which could have gone the other way:
+
+        * **A pre-pass over the action's steps, not a check inside the loop.**
+          `all-stackables` sends three statements to `world` on install; a guard
+          consulted per statement can let the first through and refuse the
+          second, which is a half-applied mod and a worse bug than no guard.
+          Nothing has run when this raises, so *no rows written* is true of the
+          whole action and not merely of the step that tripped it.
+        * **It raises rather than reporting `skipped`.** `phase8-designs/
+          c-operators-risk.md` says both — `:90` "refused", `:345` "skipped with
+          the step named" — and `checklist.md:2501`, which is the definition of
+          done this box ticks on, says *refused ... with the step named and no
+          rows written, and applies once the server is stopped*. A `skipped`
+          line inside a press that otherwise succeeds is not a refusal: the
+          module would end up marked installed with its SQL never applied, which
+          is the very defect 8.7a's third clause is about. `ApplyError` is this
+          engine's one refusal vocabulary and every caller of `install()`
+          already handles it. It also has to be a raise for `remove()`, whose
+          SQL is the module's *undo* and whose next statements delete the clone
+          holding it — a skip there loses that file forever, and `remove()`'s
+          own comment already puts its refusals before the SQL for this reason.
+          What the message must NOT claim is that nothing happened: by the time
+          `_sql()` runs, `install()` has cloned, deployed and patched. It says
+          what is true — no SQL, no rows — and that a second press repeats the
+          steps already taken.
+        * **`auth` is never a reason to refuse, but an `auth` step alongside a
+          refused one does not run either.** Half a manifest is not an outcome
+          anyone asked for, and the `auth` write survives the refusal being
+          lifted (a second press re-runs it).
+        * **The seam absent means today's behaviour, byte for byte**
+          (`c-operators-risk.md:345`). No shipped caller passes `world_running`
+          yet, so this guard protects nobody until one does; that wiring is a
+          later lane's, and until then this is a capability, not a defence.
+
+        Fails closed on anything short of a clear "no": `None` and a seam that
+        raises are both refusals, because *could not ask* is not *not running* —
+        the same three-valued discipline `docker._running()` uses for a project
+        it cannot read.
+        """
+        if self._world_running is None:
+            return  # no seam: the behaviour every existing caller has today
+        at_risk = [
+            step
+            for step in manifest.sql
+            if step.when == when and step.applied_by == "direct" and step.db in WORLD_HELD_DBS
+        ]
+        # No runner means this run writes nothing whatever and `_sql()` already
+        # says so per step. Refusing here would be a refusal about a write that
+        # was never going to happen, and it would replace that message.
+        if not at_risk or self.sql is None:
+            return
+        why = ""
+        try:
+            running: bool | None = self._world_running()
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether the world is running: {exc}")
+            running, why = None, f"{type(exc).__name__}: {exc}"
+        if running is False:
+            return
+        # Named as the manifest spells them, and unrendered for `_pending_sql`'s
+        # reason: `_render()` raises for a value this run has not got, and a
+        # refusal that dies while composing its own sentence names nothing.
+        steps = ", ".join(f"sql {step.path or 'inline'} → {step.db}" for step in at_risk)
+        dbs = ", ".join(sorted({step.db for step in at_risk}))
+        if running is None:
+            raise ApplyError(
+                f"{manifest.id}: could not tell whether the world server is running "
+                f"({why or 'the seam gave no answer'}), and a running one holds {dbs} in memory "
+                f"and writes back over whatever it finds there. No SQL was run and no rows were "
+                f"written: {steps}. Stop the server, then {when} again."
+            )
+        raise ApplyError(
+            f"{manifest.id}: the world server is running, and it holds {dbs} in memory and writes "
+            f"back over whatever it finds there. No SQL was run and no rows were written: "
+            f"{steps}. Press Stop, then {when} again — the steps this run already took repeat, "
+            f"and the SQL follows them."
+        )
 
     def _pending_sql(self, step: SqlStep, clone: Path) -> PendingSql:
         """Resolve a deferred step's glob so the count reported is a real one.
