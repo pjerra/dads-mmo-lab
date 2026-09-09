@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** DONE, round 4 (hand reported 10:42; awaiting review 4)
+**Status:** ACCEPTED and MERGED (lead, 2026-09-09 11:05) -- merge `65db5139`, lead's close `ab574594`, suite green behind it
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -123,3 +123,13 @@ The exit review's correction 3 carried the wrong date; the lead notes it for the
 Dates match the cited logs; the 2026-09-08/09 heading spans the rebuild/bridge evening and the client/panel morning accurately; `:2508`'s definition of done byte-identical to `e2912690`. No material findings. Fable round-4 verdict pending; merge follows both.
 
 Lead's note for the merge: the clock disagreement the hand flagged is settled read-only on the box (10:34 local) -- the VM runs Europe/Oslo (+0200) and every container runs UTC, so `part-2-party.md:3` is wrong about the shell and right about all the `…Z` timestamps the lines cite.
+
+## Review 8 (cold Fable reviewer, round 4, 2026-09-09 10:58) — REWORK, one invented cause
+
+All dates now consistent with every log cited; the spanning heading true; the placement sentence checked against three folders; the definition of done byte-identical. One clause added this round gave a reason the repository refutes: "named for 2026-09-09 because it was written after midnight" -- the folder, its README and both ping logs landed in `89453f9b` at 23:30 +0200 on 2026-09-08. Notes: the Jilsur press was late evening on the 8th local (between the 21:15:35Z start and the 22:24:14Z restart), not "the 9th morning" as the hand's report said -- the line never dates it; the spanning sibling is 8.4c at `:2502`, not 8.5c; `7.10-rerun-ubuntu2-2026-09-08/run.log:1` opens on 09-09 inside a folder named 09-08 (lead's).
+
+## Closed by hand (lead, round 5, 2026-09-09 11:03)
+
+The "after midnight" cause was the lead's own guess, written into the round-3 rejection and copied forward by the hand. Under the owner's rule (close by hand after two consecutive wording-only rounds) the lead merged the hand's commit `2a09a69b` (`65db5139`) and replaced the clause with the fact (`ab574594`: named 09-09 though committed 23:30 +0200 on the 8th, `89453f9b`). Suite behind the merge: `=== --checks: ALL GREEN ===`, 3769 passed. Hand retired, worktree removed, branch deleted.
+
+Still the lead's, carried out of this ticket: 8.2e's false clause at `:2495` (correction 6); `part-2-party.md:3`'s "VM clock is UTC" (the VM is +0200, the containers UTC); the panel-live folder records no sha; `7.10-rerun-ubuntu2-2026-09-08/run.log:1`'s date inside a 09-08 folder.
