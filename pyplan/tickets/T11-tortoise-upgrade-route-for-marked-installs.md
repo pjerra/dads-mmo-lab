@@ -1,6 +1,6 @@
 # T11 — A Tortoise install that already carries an import marker gets the character updates too
 
-**Status:** DONE pending one decision (hand reported 2026-09-09 13:35 CEST); the lead arms the flag -- back with the hand
+**Status:** DONE (hand reported 2026-09-09 14:05 CEST, two commits; awaiting review)
 **Filed:** 2026-09-09 17:00 by the lead (Fable), from T10's Codex review (its [high]) and the Fable reviewer's note 2
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/families/cmangos.py` (the `_import` path and `MarkerGate`, or a new stage beside them), `pylauncher/yulon/catalog/catalog.py` only if a phase needs a "re-run on an established install" attribute, `pylauncher/tests/test_composegen.py` and the file where `MarkerGate.probe`'s table is pinned (name it). Not `catalog.json`'s phase list (T10 landed it), not the UI, not `pyplan/checklist.md`.
@@ -38,3 +38,9 @@ Either way: TDD, the failing test first (a marked install; today `_import` appli
 ## Lead's decision (2026-09-09 13:40 CEST)
 
 Arm it. The ticket's "not `catalog.json`'s phase list" meant do not add or reorder phases; the one key inside the phase T10 landed is the point of the ticket. File set widened to that key; the hand adds a second commit.
+
+## Report, second commit (hand, 2026-09-09 14:05 CEST)
+
+- `d90eae50` on top of `c5e7d78c`: `"rerun_on_marked": true` beside `"on_error": "fail"` on `wow-tortoise`'s `character updates` phase, one sentence appended to note 4 (the flag rests on the 2026-09-09 reading of the three files and nothing else); nothing else in `catalog.json`. Gate ALL GREEN (3847 passed). Both commits 5 files +353/-2 (`test_tortoise_boot_facts.py` +37 new).
+- `test_this_is_the_only_phase_in_the_catalog_that_runs_on_an_install_already_imported` enumerates the catalog: `{(entry.id, phase.name) ... if phase.rerun_on_marked} == {("wow-tortoise", "character updates")}`; two mutations (the key deleted; the key moved to `realm row`) each red alone; the docstring says what makes a phase eligible.
+- For Tortoise concretely: every install press now streams `character_updates/*.sql` into `tw_char` in name order, on a 903-character install as on a fresh one.
