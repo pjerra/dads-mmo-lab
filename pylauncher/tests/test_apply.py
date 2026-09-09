@@ -10,6 +10,8 @@ every step that could not run appears in `ApplyReport.skipped`.
 
 from __future__ import annotations
 
+import ast
+import json
 from pathlib import Path
 from typing import Any
 
@@ -2983,3 +2985,594 @@ def test_remove_time_sql_is_refused_and_the_clone_survives_to_be_undone(tmp_path
     assert "then remove again" in str(raised.value)
     assert sql.files == []
     assert down.is_file()  # the undo is still on disk to be run once the world is down
+
+
+# ------------------------------- the seam, wired, and the way back from Stop (T7)
+#
+# T2 pressed the guard above against a real running worldserver and it held
+# (`pyplan/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`). It also found the
+# two things this section is about, and neither is a defect in the guard:
+#
+# 1. Nothing shipped passed `world_running`, so `_world_running` was `None` on
+#    all four games and the guard returned at its first line. The press wired
+#    the seam by hand; today's Modules tab would have written 7 219 rows into a
+#    live world without a word.
+# 2. The refusal ends *"Press Stop, then install again"*, and that instruction
+#    could not be followed: the app's Stop takes the database down with the
+#    world, and the direct SQL step then died on `container ... is not running`.
+#    `docker.start_database()` put the database back alone in 6.6 s, so the
+#    route was missing a CALLER, not a primitive.
+
+
+class _StartDb:
+    """A `start_database` seam that records its presses and can refuse."""
+
+    def __init__(self, started: bool = True, boom: Exception | None = None) -> None:
+        self.started = started
+        self.boom = boom
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        if self.boom is not None:
+            raise self.boom
+        return self.started
+
+
+def test_the_stopped_world_path_starts_the_database_and_says_so(tmp_path: Path) -> None:
+    """The dead end T2 measured, closed: Stop, then install, and it succeeds.
+
+    With the world down the guard permits, and the database is down too because
+    the app's Stop took the whole project with it. The seam starts it alone --
+    the world stays stopped, which is the state the guard is about -- and the
+    report says so, because a run that started a container and did not mention
+    it leaves the operator's install in a state they did not ask for.
+
+    Catches the `start_database` call deleted from `_sql()` (T2's
+    `container ... is not running` comes straight back), and the report line
+    dropped, which would leave a started database unaccounted for.
+    """
+    sql = _FakeSql()
+    start = _StartDb(started=True)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_a_database_that_is_already_up_puts_no_line_in_the_report(tmp_path: Path) -> None:
+    """`start_database()` no-ops on a running database, and so must the sentence.
+
+    Catches the report line appended unconditionally, which would claim a start
+    on every ordinary install -- the shape of `PendingSql`'s closed bug, a
+    `done` entry for something that did not happen.
+    """
+    sql = _FakeSql()
+    start = _StartDb(started=False)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert not [line for line in report.done if "database" in line]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_a_database_that_will_not_start_refuses_with_the_daemons_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """No database, no SQL -- and the reason is the one Docker gave, not a paraphrase.
+
+    `docker.start_database()` raises `DockerCommandError` with the container's
+    name, the timeout and where the logs are; that sentence is the only thing
+    in the room that knows why, so it is carried whole.
+
+    Catches the seam's exception swallowed and the SQL run anyway (statements
+    sent at a database that is not there, half-applied), and the refusal
+    reworded into something that names no steps.
+    """
+    sql = _FakeSql()
+    start = _StartDb(boom=RuntimeError("ac-database did not report healthy within 120s"))
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the database could not be started, so no SQL was run and no rows were "
+        "written: sql inline → world, sql up.sql → world. "
+        "ac-database did not report healthy within 120s"
+    )
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_database_is_not_started_for_an_action_with_no_direct_sql(tmp_path: Path) -> None:
+    """Starting a container costs a Docker call and a running database.
+
+    `all-stackables` has install-time and remove-time SQL and none at configure
+    time, so a configure must not reach for the database at all.
+
+    Catches the `when` filter dropped, which would start a database for every
+    press of every button on the Modules tab.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql(),
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    applier.configure(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+def test_a_live_world_is_refused_before_any_database_is_started(tmp_path: Path) -> None:
+    """The order is the whole of it: refuse first, start second.
+
+    Swap them and a press against a live world starts containers before saying
+    no -- and on a stack the user has Stopped, the guard's own advice would be
+    undone by the guard's own run.
+
+    Catches the two calls transposed in `_sql()`.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql(),
+        world_running=lambda: True,
+        start_database=start,
+    )
+
+    with pytest.raises(ApplyError):
+        applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+def test_without_the_start_seam_the_route_behaves_exactly_as_before(tmp_path: Path) -> None:
+    """Absent means today's behaviour, byte for byte -- the rule the guard follows too.
+
+    Catches the seam made mandatory, which would break every caller that has no
+    Docker to offer (`apply_module()` on a folder, the tests above).
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert not [line for line in report.done if "database" in line]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_no_runner_means_no_database_is_started_either(tmp_path: Path) -> None:
+    """A run that writes nothing has nothing to start a database for.
+
+    Catches the `self.sql is None` early return dropped, which would start a
+    database for an install whose every SQL step is reported as skipped.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path, git=_stackables_git(), world_running=lambda: False, start_database=start
+    )
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+# ------------------------------------------- every applier the app builds (T7)
+
+
+def _seam_source(value: ast.expr, name: str) -> str:
+    """What a seam keyword is bound to, reduced to one of three answers.
+
+    `"passthrough"` -- a bare name IDENTICAL to the keyword, which is how every
+    factory and `apply_module()` hands the caller's own seam on. The name has to
+    match: `world_running=some_other_reading` is a different fact under the
+    right label, and reading any `ast.Name` as a pass-through (round 1 did) let
+    that through the audit unseen.
+    `"docker.<name>"` -- a lambda over the `docker` function of that name, which
+    is the shipped wiring; anything else comes back as `"other"` and fails the
+    audit by name.
+    """
+    if isinstance(value, ast.Name):
+        return "passthrough" if value.id == name else "other"
+    if isinstance(value, ast.Lambda) and isinstance(value.body, ast.Call):
+        called = value.body.func
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            return f"{called.value.id}.{called.attr}"
+    return "other"
+
+
+def _applier_call_sites() -> list[tuple[str, int, set[str | None]]]:
+    """Every call in `yulon/` that builds an `Applier` or asks a factory for one.
+
+    An AST walk rather than a grep, because the same construction is spelled
+    four ways in this tree -- `Applier(`, `GuardedApplier(`, a bare `applier(`
+    inside a game's own `apply_module()`, and `wotlk_modules.applier(` from the
+    view -- and a text search that knew about three of them would report a clean
+    audit over the fourth (`pyplan` records this as *audit by argv, not by
+    string*).
+
+    WHAT IT ENUMERATES: every `ast.Call` in `yulon/**.py` whose callee name ends
+    in `Applier` or `applier`, wherever it is written.
+
+    WHAT IT CANNOT SEE, said plainly rather than left to be discovered -- round
+    1 of this ticket claimed the count made the walk exhaustive, and it does
+    not. A construction reached under any other name is invisible to it:
+    `Build = Applier` then `Build(...)`; `functools.partial(Applier, ...)`;
+    `cls(...)` inside a classmethod; a factory held in a variable or a dict and
+    called through it. None of those changes the count, because the walk never
+    counted them in the first place.
+
+    THE REAL BACKSTOP is not this test: `world_running` is a REQUIRED
+    keyword-only parameter on all four factories, so a caller that omits it
+    fails at the call and under mypy, whatever it is spelled. This walk is the
+    second line -- it catches a direct `Applier(...)` that bypasses the
+    factories, and (with `_seam_bindings` below) a site whose seam is present
+    and reads the wrong thing.
+    """
+    root = Path(__file__).resolve().parents[1] / "yulon"
+    sites: list[tuple[str, int, set[str | None]]] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if not name.endswith(("Applier", "applier")):
+                continue
+            sites.append(
+                (path.relative_to(root).as_posix(), node.lineno, {k.arg for k in node.keywords})
+            )
+    return sites
+
+
+def _seam_bindings(seam: str) -> list[tuple[str, str]]:
+    """`(file:line, what the seam is bound to)` for every site that passes `seam`."""
+    root = Path(__file__).resolve().parents[1] / "yulon"
+    found: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if not name.endswith(("Applier", "applier")):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == seam:
+                    where = f"{path.relative_to(root).as_posix()}:{node.lineno}"
+                    found.append((where, _seam_source(keyword.value, seam)))
+    return found
+
+
+def test_no_applier_the_app_builds_is_left_without_the_world_running_seam() -> None:
+    """The one thing between 8.7a's second clause and a defence (T2's finding 1).
+
+    Every one of these sites passed nothing until T7, so `Applier._world_running`
+    was `None` in the shipped app and the guard returned at its first line for
+    all four games.
+
+    Catches a construction site added without the seam where this walk can see
+    it -- a new game's factory, a second applier on a tab -- and, through the
+    count, a site added in a spelling it CAN follow but nobody thought to check.
+    A site spelled some other way is not caught here at all; `_applier_call_sites`
+    says which shapes those are, and the required keyword on all four factories
+    is what stops them.
+    """
+    sites = _applier_call_sites()
+    where = [f"{f}:{n}" for f, n, _ in sites]
+
+    assert [f"{f}:{n}" for f, n, kw in sites if "world_running" not in kw] == []
+    assert [f"{f}:{n}" for f, n, kw in sites if "start_database" not in kw] == []
+    assert len(sites) == 13, where
+
+
+def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> None:
+    """A seam that is PRESENT and answers `False` for "could not ask" is worse than none.
+
+    `container_state(...).settled` is `False` when Docker will not answer, and
+    through this guard `False` is fail-OPEN: it is the one answer that lets SQL
+    into a live world's tables. My Party's group next door in the view reads
+    exactly that property, correctly for its own question, and T2's press left a
+    written warning that a wiring which copied it verbatim would pass every
+    audit that only looked for the keyword. This is that audit not stopping at
+    the keyword.
+
+    Two bindings are permitted and no third: the enclosing function's own
+    parameter (every factory hands the caller's seam on) and a lambda over
+    `docker.world_running()` / `docker.start_database()`, which are the
+    functions that own the mapping and the primitive.
+
+    Catches a site rewired to `docker.container_state(...).settled`, to
+    `status == "running"` alone, or to a constant -- none of which the test
+    above can see, because all of them spell the keyword correctly.
+    """
+    assert {source for _, source in _seam_bindings("world_running")} == {
+        "passthrough",
+        "docker.world_running",
+    }
+    assert {source for _, source in _seam_bindings("start_database")} == {
+        "passthrough",
+        "docker.start_database",
+    }
+    # Four games, four real readings, and all of them in the one file that knows
+    # this install's container spec and WSL distro. By file rather than by line:
+    # a line number here would go stale on the next edit above it and be
+    # "corrected" by whoever hit it, which is how an audit stops auditing.
+    real = [w for w, s in _seam_bindings("world_running") if s == "docker.world_running"]
+    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 4, real
+
+
+def test_the_audit_reads_a_differently_named_pass_through_as_a_stranger() -> None:
+    """The audit's own unit test, because round 1's version could not tell them apart.
+
+    `_seam_source` accepted ANY bare name as a pass-through, so
+    `world_running=some_other_reading` -- a different fact wearing the right
+    label -- read as clean. No site in the tree spells it that way today, which
+    is exactly why the tightening needs a test of its own rather than a mutation
+    of the shipping code: there is nothing live for such a mutation to break.
+
+    Catches `value.id == name` loosened back to `isinstance(value, ast.Name)`.
+    """
+    call = ast.parse("f(world_running=world_running, start_database=something_else)").body[0]
+    assert isinstance(call, ast.Expr) and isinstance(call.value, ast.Call)
+    same, different = call.value.keywords
+    assert _seam_source(same.value, "world_running") == "passthrough"
+    assert _seam_source(different.value, "start_database") == "other"
+
+
+def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
+    """How much is on this path, counted rather than asserted (T2's correction).
+
+    The brief for the press called `mod-arac` *the only shipped manifest with a
+    direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
+    (`manifest.py:136`), so every step that names no route is one: 43 steps
+    across 18 manifests in all four games. `mod-arac` is the only `module`-type
+    one, which is the narrower true statement.
+
+    The 44th direct step in the tree is `wow-wotlk/ale/paragon.json`'s, into
+    `ale` -- outside `WORLD_HELD_DBS`, which is what makes the two numbers
+    differ and why this counts the set the guard names rather than every direct
+    step.
+
+    Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
+    `db-import`: either would empty this guard's blast radius without a word,
+    and both would leave every other test above green.
+    """
+    root = Path(__file__).resolve().parents[1] / "manifests"
+    steps, files, games = 0, set(), set()
+    for path in sorted(root.glob("*/*/*.json")):
+        manifest = parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+        at_risk = [
+            step
+            for step in manifest.sql
+            if step.applied_by == "direct" and step.db in apply_module.WORLD_HELD_DBS
+        ]
+        if at_risk:
+            steps += len(at_risk)
+            files.add(path)
+            games.add(path.parent.parent.name)
+
+    assert (steps, len(files), sorted(games)) == (
+        43,
+        18,
+        ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
+    )
+
+
+# ------------------- the window the database start opens (T7, round 2)
+#
+# Codex's must-fix. The first reading of `world_running` is taken, then
+# `start_database()` may block for up to 120 s waiting for the database to
+# report healthy (`docker._DB_HEALTHY_TIMEOUT_SECONDS`), and only then is the
+# first statement sent. The Server tab's Start is a button the same user can
+# press inside that window, and `compose up` in another terminal needs no
+# button at all. A world that came up there is holding these tables when the
+# writes land -- and the report would have said it was left stopped.
+
+
+class _WorldThatComesUp:
+    """A `world_running` seam that answers one way, then another.
+
+    The first answer is the ground the press is permitted on; the second is
+    what the world did while the database was being waited for.
+    """
+
+    def __init__(self, then: bool | None) -> None:
+        self.answers: list[bool | None] = [False, then]
+        self.asked = 0
+
+    def __call__(self) -> bool | None:
+        answer = self.answers[min(self.asked, len(self.answers) - 1)]
+        self.asked += 1
+        return answer
+
+
+def test_a_world_started_while_the_database_came_up_is_refused_before_the_first_statement(
+    tmp_path: Path,
+) -> None:
+    """The race, closed: the reading the SQL runs on is taken after the wait, not before.
+
+    Catches the second `_refuse_direct_sql_into_a_running_world()` call dropped
+    from `_sql()`, which is the whole fix; and the guard asked again but its
+    answer ignored. Both leave every other test in this file green, because
+    every one of them holds the world still.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=True)
+    start = _StartDb(started=True)
+    applier = Applier(
+        tmp_path, git=_stackables_git(), sql=sql, world_running=seam, start_database=start
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the world server is running, and it holds world in memory and writes "
+        "back over whatever it finds there. No SQL was run and no rows were written: "
+        "sql inline → world, sql up.sql → world. Press Stop, then install again — the steps "
+        "this run already took repeat, and the SQL follows them."
+    )
+    assert sql.statements == [] and sql.files == []
+    assert seam.asked == 2, "once for the permission, once for the reading the SQL runs on"
+    assert start.calls == 1, "the database was started, and that is why the window existed"
+
+
+def test_a_world_that_stops_answering_while_the_database_came_up_is_refused_too(
+    tmp_path: Path,
+) -> None:
+    """`None` after the wait is a refusal, for the reason it is one before it.
+
+    *Could not ask* is not *not running*, and a Docker that stopped answering
+    mid-press is the case where a guard most wants to be closed: the daemon may
+    be busy starting the very world this refusal is about.
+
+    Catches the second reading narrowed to `if running is True` -- which would
+    let an unreadable Docker through on exactly the press that waited two
+    minutes for it.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=None)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=seam,
+        start_database=_StartDb(started=True),
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert "sql inline → world, sql up.sql → world" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+    assert seam.asked == 2
+
+
+def test_a_world_that_stayed_down_is_asked_twice_and_the_sql_runs(tmp_path: Path) -> None:
+    """The ordinary stopped-world press, and the price of the second reading.
+
+    Two `docker inspect`s per install that has direct world SQL, not one. Worth
+    saying out loud: the second is only taken when the start seam was actually
+    consulted, so a caller with no Docker to offer still pays for exactly one.
+
+    Catches the second reading turned into a refusal on `False` (every stopped
+    install would refuse), and the whole re-check made unconditional, which
+    would ask twice on the no-seam path this engine promises to leave alone.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=False)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=seam,
+        start_database=_StartDb(started=True),
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert seam.asked == 2
+    assert sql.files == [("world", "up.sql")]
+    assert "started the database alone; the world server was left stopped" in report.done
+
+
+def test_without_a_start_seam_the_world_is_read_exactly_once(tmp_path: Path) -> None:
+    """No start, no window, no second Docker call.
+
+    Catches the re-check hoisted out of the `if`, which would double the cost of
+    every press on every caller that has no database to start.
+    """
+    seam = _Seam(False)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=seam)
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert seam.asked == 1
+
+
+# ------------------- WotLK, the game the press was run on (T7, round 2)
+
+
+def test_the_wotlk_factory_hands_the_seam_to_the_guard(tmp_path: Path) -> None:
+    """The arrival test for the one game T2 actually pressed.
+
+    `wotlk_modules.applier()` is the only one of the four that can build its own
+    `DockerSql` (this game's database password is a fixed catalog value), so a
+    test that omitted `sql=` would reach the real Docker CLI rather than the
+    guard. The runner here is a fake for that reason, not for the guard's.
+
+    Catches `world_running` accepted by that factory and dropped on the way to
+    `Applier(...)` -- the defect T7 exists to close, on the game whose live
+    press recorded it.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    sql = _FakeSql()
+    applier = wotlk_modules.applier(
+        tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert "the world server is running" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path) -> None:
+    """The other seam, through the same factory: Stop, then install, and it applies.
+
+    Catches `start_database` accepted by the WotLK factory and dropped, which
+    would leave the game T2 measured with the guard armed and its own
+    instruction still unfollowable.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    sql = _FakeSql()
+    start = _StartDb(started=True)
+    applier = wotlk_modules.applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert sql.files == [("world", "up.sql")]

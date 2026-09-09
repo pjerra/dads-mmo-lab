@@ -1603,7 +1603,10 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
     # 2. That folder, and nothing else, is what the tab's applier is rooted at.
     assert entry.has_manifests is True, "the tab builds no Applier without this"
     git = _RealCloneThenStop()
-    applier = wotlk_modules.applier(adopted_dir, git=git)
+    # `world_running` is required since T7 and answered `False` here: this test
+    # is about where a clone lands, and a world that could not be asked about
+    # would refuse the SQL step before the clone path was ever exercised.
+    applier = wotlk_modules.applier(adopted_dir, git=git, world_running=lambda: False)
     assert applier.server_dir == adopted_dir
 
     manifest = next(m for m in wotlk_modules.store().load_all("module") if m.source is not None)

@@ -5859,3 +5859,69 @@ def test_running_census_is_the_same_answer_the_teardown_path_refuses_on(
     census = docker.running_census(SPEC, PROJECT)
     assert census.ours == (SPEC.world,)
     assert census.strangers == () and census.unreadable == ()
+
+
+# ------------------------------- the seam the direct-SQL guard asks (T7)
+
+
+def test_world_running_is_three_valued_and_an_unreadable_inspect_is_not_a_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` is "could not ask", and it must not arrive as "not running".
+
+    `apply.Applier`'s running-world guard fails CLOSED, so `False` from here is
+    the one answer that lets SQL into a live world's tables. An unreadable
+    `docker inspect` gives an empty `ContainerState`, whose `.settled` is
+    `False` -- which is why this function exists instead of that property.
+
+    Catches the body rewritten as `container_state(...).settled`, the exact
+    reuse T2's press warned about: every assertion but the last would still
+    pass, and a host whose Docker would not answer would be told its world was
+    down and allowed to write.
+    """
+    answers = {
+        "running": True,
+        "restarting": True,
+        "exited": False,
+        "created": False,
+        "paused": False,
+    }
+    for status_text, expected in answers.items():
+        monkeypatch.setattr(
+            docker,
+            "container_state",
+            lambda c, wsl_distro=None, s=status_text: docker.ContainerState(s, "T", 0),
+        )
+        assert docker.world_running("ac-worldserver") is expected, status_text
+
+    monkeypatch.setattr(
+        docker, "container_state", lambda c, wsl_distro=None: docker.ContainerState()
+    )
+    assert docker.world_running("ac-worldserver") is None
+
+
+def test_start_database_says_whether_it_had_to_start_the_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The return value the report line hangs on (T7).
+
+    `apply.Applier` puts *"started the database alone"* in the user's report,
+    and only when something was started: a database that was already up is the
+    ordinary case on every install done with the stack running.
+
+    Catches the early return changed to `True` (a report claiming a start on
+    every press) and the tail changed to `False` (T2's dead end reappearing
+    silently, with the database started and nothing saying so).
+    """
+    monkeypatch.setattr(docker, "status", lambda wsl_distro=None: [SPEC.db])
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        docker, "_run", lambda cmd, cwd=None, wsl_distro=None: ran.append(cmd) or _completed()
+    )
+    assert docker.start_database(SPEC, tmp_path) is False
+    assert ran == []
+
+    monkeypatch.setattr(docker, "status", lambda wsl_distro=None: [])
+    monkeypatch.setattr(docker, "wait_db_healthy", lambda db, timeout=0.0, wsl_distro=None: True)
+    assert docker.start_database(SPEC, tmp_path) is True
+    assert ran == [["compose", "up", "-d", "--no-deps", SPEC.compose_services()[0]]]

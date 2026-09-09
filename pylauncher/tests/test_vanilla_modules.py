@@ -40,12 +40,12 @@ from pathlib import Path
 
 import pytest
 
-from yulon.apply import Applier
+from yulon.apply import Applier, ApplyError
 from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_tbc import modules as tbc_modules
 from yulon.controller_wow_vanilla import modules as vanilla_modules
 from yulon.controller_wow_wotlk import modules as wotlk_modules
-from yulon.manifest import Db, Manifest
+from yulon.manifest import Db, Manifest, parse_manifest
 from yulon.manifest_store import FAMILY_FILES
 
 ENTRY = load_catalog().get("wow-vanilla")
@@ -366,3 +366,68 @@ def test_the_fetcher_knows_where_to_refresh_each_family_from(kind: str) -> None:
     files = vanilla_modules.store().relative_files(kind)  # type: ignore[arg-type]
     assert files[0].startswith(f"{GAME}/")
     assert all(f.startswith(f"{GAME}/") for f in files)
+
+
+# ---------------------------- the running-world guard, through this game's factory (T7)
+
+
+_WORLD_SQL_MOD: dict[str, object] = {
+    "schema_version": 1,
+    "id": "world-sql",
+    "name": "World SQL",
+    "type": "mod",
+    "game": GAME,
+    "build": {"rebuild": False, "restart": True},
+    "sql": [{"db": "world", "statement": "UPDATE item_template SET stackable = 200"}],
+}
+
+
+def test_this_games_applier_refuses_direct_world_sql_while_the_world_runs(tmp_path: Path) -> None:
+    """The seam is not merely accepted by the factory -- it arrives at the guard.
+
+    `applier()` grew a required `world_running` in T7 because for one day no
+    caller passed one and `Applier._world_running` was `None` on all four games:
+    checklist 8.7a's guard returned at its first line, and the Modules tab would
+    have written into a live world without a word (T2's press,
+    `pyplan/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`).
+
+    Catches the keyword accepted and then dropped on the way to `Applier(...)`,
+    which neither a signature check nor the type checker would see.
+    """
+    sql = _RecordingSql()
+    applier = vanilla_modules.applier(tmp_path, sql=sql, world_running=lambda: True)
+
+    with pytest.raises(ApplyError) as caught:
+        applier.install(parse_manifest(_WORLD_SQL_MOD))
+
+    assert "the world server is running" in str(caught.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_this_games_applier_starts_the_database_once_the_world_is_stopped(tmp_path: Path) -> None:
+    """The other half of T7, through the same factory: Stop, then install, and it works.
+
+    This game's Stop takes the database down with the world, so a direct SQL
+    step on a stopped stack used to die on `container ... is not running`
+    (`bug-checklist §46`, filed against this family). The seam puts
+    the database back alone; the world is not started.
+
+    Catches `start_database` accepted by the factory and dropped, which would
+    leave this game with the guard armed and no way to obey it.
+    """
+    sql = _RecordingSql()
+    started: list[int] = []
+
+    def start_db() -> bool:
+        started.append(1)
+        return True
+
+    applier = vanilla_modules.applier(
+        tmp_path, sql=sql, world_running=lambda: False, start_database=start_db
+    )
+
+    report = applier.install(parse_manifest(_WORLD_SQL_MOD))
+
+    assert started == [1]
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert sql.statements == [("world", "UPDATE item_template SET stackable = 200")]
