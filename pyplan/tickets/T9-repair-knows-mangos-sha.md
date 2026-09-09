@@ -1,6 +1,6 @@
 # T9 — Repair cannot repair a Tortoise install: the shared password reset does not know `mangos_sha`
 
-**Status:** DONE (hand reported 2026-09-09 14:25; awaiting review)
+**Status:** ACCEPTED and MERGED (lead, 2026-09-09 14:55); suite green behind it
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/controller_wow_wotlk/accounts.py` (`reset_own_password` and whatever it shares with `_account_row`), `pylauncher/yulon/controller_wow_tortoise/accounts.py` only if the binding must pass something new, `pylauncher/tests/test_accounts.py`, `pylauncher/tests/test_controller_wow_tortoise.py`. Not the UI, not `channel_setup.py`, not `pyplan/checklist.md`.
@@ -36,3 +36,11 @@
 ## Review 1 (Codex adversarial, 2026-09-09 14:45) -- ACCEPT
 
 Reset and creation share `mangos_password_hash`; the live mixed-case vector discriminates the folding rule; unknown schemes are rejected before any SQL; the four mutations are covered; the AzerothCore and `mangos_srp6` branches unchanged. On the hand's finding: the remaining fall-throughs are not live for validated catalog data, because the catalog schema restricts `accounts.scheme` to the three handled values. Fable verdict pending; merge follows both.
+
+## Review 2 (cold Fable reviewer, 2026-09-09 14:50) -- ACCEPT, eight notes
+
+Branch identity verified (same `mangos_password_hash`, same `fold`, same `_text_literal`, the name reaching the hash in the same form on both paths); the asserted hex decoded independently to SHA1(`YULON_58C6FD1C:N3W-P@SSW0RD1234`); the unknown-scheme raise sits before the seam and `azerothcore` is an explicit branch; the four mutations traced by reading; zero removed test lines. Notes: (1) the `Raises:` text "There is no default scheme here" overstates -- the keyword default stays (four tests and the WotLK caller rely on it); what is gone is the fall-through -- **made exact by the lead at the merge**; (2) the "Known: …" list is hand-typed and the test pins it verbatim, so a fourth `Scheme` value would leave it stale unnoticed (`typing.get_args(Scheme)`) -- follow-up; (3) the "only the whole-statement assertion catches the swap" claim is imprecise, both catch it; (4)-(7) small print; (8) **`ui/controller_view.py:886` and `:996` pass `scheme=entry.accounts.scheme or "azerothcore"` to `create_account` -- the same default-to-AzerothCore shape on the UI side for an entry whose scheme is None** -- lead's follow-up, with the three fall-throughs (unreachable for validated catalog data per both reviewers; a code change adding a fourth `Scheme` value would reach them).
+
+## Closed (lead, 2026-09-09 14:55)
+
+Both ACCEPT. Merged `edc7a486`; one docstring phrase made exact at the merge; suite green behind it. Hand retired. Follow-ups filed by the lead: the three fall-throughs plus the UI's `or "azerothcore"` and the hand-typed Known list, as one low-priority ticket.
