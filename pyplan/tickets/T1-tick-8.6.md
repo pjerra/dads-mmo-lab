@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** REWORK (rejected by the lead 2026-09-09 10:33, round 3)
+**Status:** DONE, round 4 (hand reported 10:42; awaiting review 4)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -110,3 +110,10 @@ Everything asked is present and the definition of done is byte-identical to the 
 2. `:2470` — "rebuilt on 2026-09-09 with `mod-ale` compiled in" → "rebuilt the same night with `mod-ale` compiled in" (`8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md:6-8` says it that way).
 3. Optional: `README.md:24-26`; say which folder the bare filenames sit in.
 The exit review's correction 3 carried the wrong date; the lead notes it for the review's own errata.
+
+## Report, round 4 (hand, 2026-09-09 10:42)
+
+- sha `2a09a69b` (amended, one commit, base `e2912690`); gate ALL GREEN, 3769 passed; diff `pyplan/checklist.md | 24 ++++++++++++++++--------`
+- `:2508` "answered the same evening, 2026-09-08" with the folder-name trap stated on the line (ping logs against worlds started 20:39:08Z and 21:15:35Z); `:2471` "rebuilt the same night"; `README.md:24-26`; a sentence saying which folder each bare filename sits in.
+- Deviation of the hand's own: the record's heading is now "Pressed 2026-09-08/09" (rebuild and bridge on the 8th evening, client party frame and panel press on the 9th morning; sibling 8.5c spans dates the same way).
+- Flagged: a clock disagreement inside the evidence -- `part-2-party.md:3` says the VM clock is UTC, `8.7a-…ubuntu2-…/README.md:8` gives a two-hour offset (lead's); correction 6 (8.2e) fourth flag (lead's); T5's path resolves on origin only; docs-pin guard narrower while unticked.
