@@ -3393,7 +3393,7 @@ def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
 # ------------------- the window the database start opens (T7, round 2)
 #
 # Codex's must-fix. The first reading of `world_running` is taken, then
-# `start_database()` may block for up to 120 s waiting for the database to
+# `start_database()` may block for up to 180 s waiting for the database to
 # report healthy (`docker._DB_HEALTHY_TIMEOUT_SECONDS`), and only then is the
 # first statement sent. The Server tab's Start is a button the same user can
 # press inside that window, and `compose up` in another terminal needs no

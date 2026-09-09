@@ -1883,7 +1883,9 @@ class Applier:
         if self._start_the_database_for_direct_sql(manifest, when, log):
             # THIRD, and the reason the guard is asked twice for one press.
             # `start_database()` waits for the database to report healthy, up to
-            # 120 s (`docker._DB_HEALTHY_TIMEOUT_SECONDS`). The first reading is
+            # 180 s (`docker._DB_HEALTHY_TIMEOUT_SECONDS = 180.0`, read on the
+            # tree 2026-09-09; these comments said 120 s until then). The first
+            # reading is
             # that old by the time the first statement would be sent, and the
             # Server tab's Start is a button the same user can press in the
             # meantime — as is a `compose up` in another terminal. A world
@@ -2048,8 +2050,9 @@ class Applier:
         Returns whether the start seam was CONSULTED — not whether it started
         anything. `_sql()` re-reads the running-world guard on a true answer,
         because consulting it is what opens the window: the call can block for
-        up to two minutes waiting on health, and the world can come up inside
-        it. `False` here means nothing was asked of Docker and no time passed,
+        up to three minutes waiting on health (`_DB_HEALTHY_TIMEOUT_SECONDS`),
+        and the world can come up inside it. `False` here means nothing was
+        asked of Docker and no time passed,
         so the first reading is still the current one.
         """
         if self._start_database is None or self.sql is None:
