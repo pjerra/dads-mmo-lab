@@ -61,3 +61,8 @@ Amend or add a commit (say which); gate; report.
 - Tests and their mutations: fails-puts-both-back (restore call deleted; files restored but not the record -- only this one; only `DOCKERFILE` as ground), stop-between-compile-and-recreate (the `_restore_rollback` arm), restore-stays-quiet, tuple-missing-the-stage (the `if wrappers:` block deleted -- only this one), confirmation extended (`.dockerignore` named, "Nothing else" absent, "put back" present). `_stale()` stales both files. The twelve rollback tests untouched and green; 45 tests in `test_rebuild.py` (was 36).
 - For the lead (item 4, not made): `families/dockerfile.py:617-621` the `_Verdict.THEIRS` refusal ends "Point the install at an empty folder, or move that file aside." -- wrong under a rebuild; suggested "Move that file aside and press again, or point a new install at an empty folder."
 - Deviations: `pyplan/write-ledger.md` gained two rows (`_put_recipe_back::write_bytes`, `::unlink`; the ledger test went red on the restore); `native.py` imports `families.dockerfile` inside `_recipe_ground()` to break the same cycle `installer.py:599,847` breaks the same way; black reformatted `test_rebuild.py` once.
+
+## Review, round 2 (Codex adversarial, 2026-09-09 17:58) -- ACCEPT
+
+Traced the amended four-file diff read-only, with attention to exception ordering, byte and state restoration, and whether the tests discriminate the regressions: "No material findings."
+Fable verdict pending.
