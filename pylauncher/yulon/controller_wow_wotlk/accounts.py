@@ -436,7 +436,9 @@ def reset_own_password(
     Raises:
         AccountError: the name is not this app's own, the password is one the
             server would refuse, or `scheme` is not one this function knows.
-            **There is no fall-through scheme here: the keyword default stays AzerothCore for its own callers, and an unrecognised scheme is refused, not defaulted.** Until 2026-09-09 anything that
+            **There is no fall-through scheme here.** The keyword default stays AzerothCore
+            for its own callers; an unrecognised scheme is refused, not defaulted.
+            Until 2026-09-09 anything that
             was not `mangos_srp6` was written as AzerothCore, and a default that
             reaches for another core's columns is not a fallback -- it is a
             statement that cannot run. Tortoise (`mangos_sha`) is the tree that
