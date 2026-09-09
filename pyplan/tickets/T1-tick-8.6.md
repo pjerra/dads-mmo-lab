@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** DONE, round 3 (hand reported 10:14; awaiting review 3)
+**Status:** REWORK (rejected by the lead 2026-09-09 10:33, round 3)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -99,3 +99,14 @@ Amend the single commit, re-run the gate, report.
 ## Review 5 (Codex adversarial, round 3, 2026-09-09 10:24) — ACCEPT
 
 8.6 genuinely unticked with its definition of done intact; the record withholds completion for chosen spec, chosen level with `characters.level` readback and dismiss-all under T5; the 2026-08-20 / 2026-09-08 correction is supported by the cited lines; the remaining citations resolve. No material findings. Fable round-3 verdict pending; merge follows both.
+
+## Review 6 (cold Fable reviewer, round 3, 2026-09-09 10:31) — REWORK, one fact in two places
+
+Everything asked is present and the definition of done is byte-identical to the parent. One date is wrong twice, refuted by the folder the line cites: the bridge answered on **2026-09-08** (`rebuild-live-…/7-ping.log` against a world started `2026-09-08T20:39:08Z`; `8-ping-after-press2.log` against `21:15:35Z`; 22:42 and 23:18 +0200), so `:2508` "It answered on 2026-09-09" and `:2470` "rebuilt on 2026-09-09" are both false. The wording came from the exit review's correction 3 (`phase8-exit-review-2026-09-09.md:344-345`) and the lead's round-1 item; the logs contradict both. Notes: the Jilsur press folder is dated 09-09 while every timestamp inside is 09-08 UTC (the lead's, not this ticket's); `README.md:24-26` would be exact; the bare filenames on 2508 belong to `rebuild-live-…/` while `part-1/2` belong to `8.6-wotlk-…/`; "the box that no longer exists" -- the registration exists, the disk is gone.
+
+## Rejection (lead, round 3)
+
+1. `:2508` — "It answered on 2026-09-09" → "It answered the same evening, 2026-09-08, once a rebuild compiled the engine in" (or drop the date; the "all on 2026-09-08 (+0200)" clause carries it).
+2. `:2470` — "rebuilt on 2026-09-09 with `mod-ale` compiled in" → "rebuilt the same night with `mod-ale` compiled in" (`8.7a-wotlk-yulon-ubuntu2-2026-09-09/README.md:6-8` says it that way).
+3. Optional: `README.md:24-26`; say which folder the bare filenames sit in.
+The exit review's correction 3 carried the wrong date; the lead notes it for the review's own errata.
