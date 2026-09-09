@@ -1,6 +1,6 @@
 # T8 — A Rebuild that recompiles the Dockerfile on disk can never carry a template fix to an existing install
 
-**Status:** REWORK (rejected by the lead 2026-09-09 16:50, round 1)
+**Status:** DONE, round 2 (hand reported 2026-09-09 17:48; awaiting review)
 **Filed:** 2026-09-09 12:40 by the lead (Fable), from T4's live upgrade
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/native.py` (`rebuild_stages()` and what it feeds), `pylauncher/tests/test_rebuild.py`, `pylauncher/yulon/catalog/installer.py` only for `rebuild_confirmation`'s sentence, and `pyplan/write-ledger.md` if a write site moves. Not `install_wiring.py` (T7 holds it), not the UI, not `pyplan/checklist.md`.
@@ -51,3 +51,13 @@ The mechanism verified in full (the family's own stage first, only with `dockerf
 3. A test for the `if wrappers: raise` branch.
 4. Optional: the install-shaped refusal sentence under a rebuild is outside your set; describe the one-line change for the lead.
 Amend or add a commit (say which); gate; report.
+
+## Report, round 2 (hand, 2026-09-09 17:48)
+
+- The single commit amended: `1e15d652` on base `583a61ce`, not pushed; gate ALL GREEN (yulon-fedora, 3778 passed); diff vs base: `test_rebuild.py` +404/-2, `native.py` +266/-31, `installer.py` +39, `write-ledger.md` +2.
+- **Must-fix 1, restoring not narrowing**: `rebuild()` reads both recipe files byte-for-byte before the first stage (`_recipe_ground()`, only for families that render one) and `_put_recipe_back()` puts them back on every failure and cancel where `not touched` -- first in the `except`, outside the three rollback branches. Bytes, never `read_text`/`write_text` (a text round-trip would fabricate a CRLF ground on Windows). The state record goes back with the files (`completed` reset, `last_error` kept). A restore that moved nothing says nothing. Narrowing rejected in the docstring in one line.
+- **Must-fix 2**: `DOCKERFILE_STAGE`'s docstring leads with the two files; both sentences name the pair as "the build recipe"; "Nothing else in the folder is rewritten" is gone; the confirmation paragraph quoted in the report ends "... if you stop the rebuild or it fails before your server is replaced, both are put back as they were."
+- **Must-fix 3**: a test overrides `rebuild_stages()` to drop `recreate` and asserts the sentence, no `tag:` call, nothing compiled.
+- Tests and their mutations: fails-puts-both-back (restore call deleted; files restored but not the record -- only this one; only `DOCKERFILE` as ground), stop-between-compile-and-recreate (the `_restore_rollback` arm), restore-stays-quiet, tuple-missing-the-stage (the `if wrappers:` block deleted -- only this one), confirmation extended (`.dockerignore` named, "Nothing else" absent, "put back" present). `_stale()` stales both files. The twelve rollback tests untouched and green; 45 tests in `test_rebuild.py` (was 36).
+- For the lead (item 4, not made): `families/dockerfile.py:617-621` the `_Verdict.THEIRS` refusal ends "Point the install at an empty folder, or move that file aside." -- wrong under a rebuild; suggested "Move that file aside and press again, or point a new install at an empty folder."
+- Deviations: `pyplan/write-ledger.md` gained two rows (`_put_recipe_back::write_bytes`, `::unlink`; the ledger test went red on the restore); `native.py` imports `families.dockerfile` inside `_recipe_ground()` to break the same cycle `installer.py:599,847` breaks the same way; black reformatted `test_rebuild.py` once.
