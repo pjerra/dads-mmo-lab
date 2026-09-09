@@ -1,6 +1,6 @@
 # T12 — No account path defaults an unrecognised scheme to AzerothCore's columns
 
-**Status:** DONE (hand reported 2026-09-09 12:50 CEST; awaiting review)
+**Status:** ACCEPT (Fable 2026-09-09 13:12 CEST; Codex owed until 15:04) -- merging
 **Filed:** 2026-09-09 17:00 by the lead (Fable), from T9's hand (finding 3) and its two reviewers
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/controller_wow_wotlk/accounts.py`, `pylauncher/tests/test_accounts.py`, and `pylauncher/yulon/ui/controller_view.py` **only** at the two `create_account` call sites that pass `scheme=entry.accounts.scheme or "azerothcore"` (T9's reviewer: near lines 886 and 996 on `yulon-phase8b`; verify) plus the test that pins them. Not the Tortoise binding, not `pyplan/checklist.md`.
@@ -36,3 +36,8 @@ Also from T9's reviewer: the `Known: azerothcore, mangos_sha, mangos_srp6` list 
 - Mutations (all RED/GREEN, pycache purged): the `else` fall-through restored in `_insert_statement`, `_grant_gm`, `_gm_level`; `get_args(Scheme)[:2]`; `checked_scheme` returning `"azerothcore"` for `None`; each UI site reverted separately (one controller-view test pins both); the insert built after the id lookup (kills the `statements == []` clause).
 - Rust: `origin/rust-main` `crates/dml-wow/src/account_write.rs` is AzerothCore-only (`INSERT INTO account (username, salt, verifier)`), no scheme dispatch; nothing to carry over.
 - Deviations: `_account_row`'s dispatch extracted into module-private `_insert_statement()` called *before* the id lookup (what makes `statements == []` reachable; a salt/verifier derived even when the name is taken, commented); `checked_scheme()` lives in the shared writer so `controller_view.py` is touched only at the two sites -- the sentence now exists twice (Tortoise's own copy outside the set, identical today; a follow-up could collapse it); the one added controller-view test reads `services.channel_setup._create` (private; `InstallChannel` keeps its `create` seam with no accessor) and says so.
+
+## Review (cold Fable reviewer, 2026-09-09 13:12 CEST) -- ACCEPT
+
+No `else` remains in the module; `_gm_level` refuses before its SELECT; the ordering change is safe (validated input first, pure derivation, no exception type changed, the three INSERT texts byte-identical); `get_args` keeps declaration order so T9's pinned string holds; the UI sentence is literally the Tortoise one and `entry.id` matches `game.GAME`; both UI sites surface the `NotImplementedError` as a sentence (`job.py:60`, `controller_view.py:2314/2402`), never a crash; the controller-view test pins both sites; four files, trailer clean.
+Notes: `Scheme` at `accounts.py:176` is a local re-declaration of the catalog Literal (`catalog.py:1005`) -- mypy at both UI sites catches drift, a follow-up could pin `get_args(Accounts.model_fields["scheme"].annotation) == get_args(Scheme)`; `create_account`'s `Raises:` block lacks T9's "no fall-through" sentence (style only); `assert len(known) == 3` is the one line a fourth scheme edits by hand; `passwordcheck.py:69/:122` return `None` for an unknown scheme by design, not a fall-through.
