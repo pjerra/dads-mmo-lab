@@ -29,7 +29,11 @@ halves fail, on the live server, through the real widgets:
       address, and only after Apply is pressed.
       B1  the row is read (the GROUND) and deliberately set to a third address,
           192.168.77.77, which is neither the plan's nor the one this box
-          advertises, and read back by `docker exec mysql`
+          advertises, and read back by `docker exec mysql`. Every one of those
+          reads goes through `require_row()`, which REFUSES on an empty answer
+          rather than passing it on: an empty string satisfies B2's guard and
+          fails B3, so a dead probe would produce exactly the two verdicts this
+          driver came to watch, for a container that had died.
       B2  the ground guard: the clause REFUSES to run if the row already equals
           the plan, because a clause true before its action is this whole
           round's defect
@@ -132,6 +136,25 @@ def realm_row() -> tuple[str, str, str]:
     return tuple(parts) if len(parts) == 3 else (row, "?", "?")  # type: ignore[return-value]
 
 
+def require_row(label: str) -> tuple[str, str, str]:
+    """Read the row, and REFUSE if the read came back empty.
+
+    Round 2. An empty read is not a disagreement, but every predicate in Part B
+    would have treated it as one: `'' != '172.30.48.189'` satisfies B2's ground
+    guard, and `'' == '172.30.48.189'` is false, so B3 would print the `[FAIL]`
+    this driver came to watch — and print it for a container that had died, a
+    renamed table or a password that no longer works, rather than for the thing
+    being measured. A dead probe passes a falsification test, which is the same
+    family of defect as the clause this whole folder exists to repair.
+    """
+    address, local_address, mask = realm_row()
+    if not address or address == "?" or local_address == "?" or not mask:
+        say(f"       REFUSING: the {label} read came back {address!r} -- a dead probe is not "
+            f"a disagreement, and B2 and B3 would BOTH go the way this driver expects on one")
+        raise SystemExit(3)
+    return address, local_address, mask
+
+
 def pump(predicate, timeout_s: float = 90.0, label: str = "") -> bool:
     app = QApplication.instance()
     deadline = time.time() + timeout_s
@@ -208,7 +231,7 @@ def main() -> int:
     for line in plan_text.splitlines():
         say(f"         {line}")
     say(f"       plan.lan_ip, the widget's own computed address: {plan.lan_ip!r}")
-    address, local_address, mask = realm_row()
+    address, local_address, mask = require_row("Part A informational")
     say(f"       the realm row, read by docker exec mysql: address={address!r} "
         f"localAddress={local_address!r} mask={mask!r}")
     say(f"       plan and row {'AGREE' if address == plan.lan_ip else 'DISAGREE'} "
@@ -252,13 +275,14 @@ def main() -> int:
     say("=" * 78)
     say("PART B -- the APPLY half: the row becomes the plan's address, and only after Apply")
     say("=" * 78)
-    ground_address, ground_local, ground_mask = realm_row()
-    say(f"       B1  the GROUND, read before anything: address={ground_address!r} "
+    ground_address, ground_local, ground_mask = require_row("B1 ground")
+    say(f"       B1  the GROUND, read before anything (an empty read would have REFUSED here, "
+        f"not counted as a disagreement): address={ground_address!r} "
         f"localAddress={ground_local!r} mask={ground_mask!r}")
     say(f"       B1  setting the row to {DISAGREEING} so plan and row disagree deliberately")
     mysql(f"UPDATE acore_auth.realmlist SET address='{DISAGREEING}', "
           f"localAddress='{DISAGREEING}' WHERE id=1;")
-    before_address, before_local, before_mask = realm_row()
+    before_address, before_local, before_mask = require_row("B1 read-back")
     say(f"       B1  read back: address={before_address!r} localAddress={before_local!r} "
         f"mask={before_mask!r}")
 
@@ -287,7 +311,7 @@ def main() -> int:
         say(f"         {line}")
     shot(view, "B-networking-tab-after-apply")
 
-    after_address, after_local, after_mask = realm_row()
+    after_address, after_local, after_mask = require_row("B5 post-Apply")
     say(f"       B5  the row, read again by docker exec mysql: address={after_address!r} "
         f"localAddress={after_local!r} mask={after_mask!r}")
     check("B5  the row the server advertises holds the plan's LAN address",
@@ -300,7 +324,7 @@ def main() -> int:
         f"mask {RESTORE_MASK}")
     mysql(f"UPDATE acore_auth.realmlist SET address='{RESTORE_TO}', "
           f"localAddress='{RESTORE_TO}', localSubnetMask='{RESTORE_MASK}' WHERE id=1;")
-    final_address, final_local, final_mask = realm_row()
+    final_address, final_local, final_mask = require_row("B6 read-back")
     say(f"       B6  read back: address={final_address!r} localAddress={final_local!r} "
         f"mask={final_mask!r}")
     check("B6  the row is back to the address this box advertises, on both columns",

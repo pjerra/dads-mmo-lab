@@ -17,8 +17,10 @@ failed; on 09-09 the 8.7a lane had put `100.99.204.5` there so the owner's clien
 VM through the Hyper-V host, and it failed while saying nothing whatever about the widget.
 
 A corrected clause is worth nothing until it has been watched failing, so this folder contains
-two runs and not one: `clause35-falsify.log`, in which both corrected halves are driven until
-they FAIL and then until they PASS, and `widget-run.log`, the full 33.
+three runs and not one: `clause35-falsify.log`, in which both corrected halves are driven until
+they FAIL and then until they PASS; `widget-run.log`, the full 33; and `failclosed/`, in which
+the runner itself is made to fail, because a harness that cannot report a failure is the same
+defect one level up.
 
 ---
 
@@ -30,10 +32,12 @@ the merged `yulon-phase8b` tip this ticket's worktree is based on. `run.log:2` r
 every driver prints the package it imported (`run.log:6`).
 
 That is a deliberate move, not a drift: `pylauncher/yulon` differs between those two shas by
-exactly two files — `apply.py` (new, 140 lines, not reached by this driver) and
-`ui/widgets/log_panel.py` (+18/−2, the `_StreamWorker.stop()` guard that stops a directly-driven
-worker quitting the GUI thread's event loop). The second of those is under the **LogPanel Stop**
-clauses this driver presses, and they pass on the newer code (`widget-run.log:106-110`).
+exactly two files. `apply.py` grew by 140 lines, from 2105 to 2245, in `f8cd55df` — round 1 of
+this folder called it a new file and it is not one; the lines are new, the file is not, and
+nothing this driver reaches is in them. `ui/widgets/log_panel.py` is +18/−2, the
+`_StreamWorker.stop()` guard that stops a directly-driven worker quitting the GUI thread's event
+loop, and that one **is** under the **LogPanel Stop** clauses this driver presses; they pass on
+the newer code (`widget-run.log:106-110`).
 
 Interpreter `/home/pk/dads-mmo-lab/pylauncher/.venv/bin/python`, **Python 3.12.3**, **PySide6
 6.11.2**, **pydantic 2.13.5**, Docker 29.1.3, `QT_QPA_PLATFORM=offscreen` — the same five the
@@ -48,13 +52,14 @@ the process T2 left, still the same pid in `state-final.txt`. 1002 characters. T
 never stopped, started or restarted by this lane; `ac-authserver` was restarted once, on
 purpose, and only after the realm row had been put back (below).
 
-**Two lane constants, not assertions**, are read from the environment by the corrected driver,
-each defaulting to the value the 09-09 run used so an unset environment reproduces that run
-exactly (`run-t3.sh:27-30`):
+**Three lane constants, not assertions**, are read from the environment by the corrected
+driver, each defaulting to the value the 09-09 run used so an unset environment reproduces that
+run exactly (`run-t3.sh:47-49`):
 
 | constant | 09-09 | tonight | why |
 |---|---|---|---|
 | `WIDGET_ACCOUNT` | `WIDGET0909D` | `WIDGET0909T3` | *"the account does not exist before the click"* is only a reading if the name is new |
+| `WIDGET_ACCOUNT_PW` | `widget0909dpw` | `widget0909t3pw` | it travels with the name; the account is deleted on the way out |
 | `WIDGET_SHOTS` | `…/out/shots` | `…/out-t3/shots` | so the 09-09 run's frames are not overwritten |
 
 ---
@@ -161,17 +166,21 @@ widget. The password is passed in `MYSQL_PWD`, so it is on no command line these
 **Apply really applied, and was really put back.** It added two `ufw allow` rules and ran the
 realmlist UPDATE; it did **not** run `ufw enable` — that is the plan's own refusal, rendered in
 full in the tab (`clause35-falsify.log:51`). `run-t3.sh` copies `/etc/ufw/user{,6}.rules` aside
-before the driver and puts them back after, ownership and mode restated rather than left to
-`cp -a` (the 2026-09-08 finding 3a), and the log carries the diff the apply made and the
-sha256s proving the restore: `320f53e1…` and `f6696cd7…` on both the live files and the copies
-(`clause35-falsify.log:103-108`). `ufw` was `inactive` before and after.
+before the driver; the diff the apply made is appended to the driver's own log
+(`clause35-falsify.log:65-69`), and the restore is done by the EXIT trap, which restates
+ownership and mode rather than leaving them to `cp -a` (the 2026-09-08 finding 3a) and prints
+the sha256s that prove it: `320f53e1…` and `f6696cd7…` on both the live files and the copies
+(`restore.log:4-11`). `ufw` was `inactive` before and after.
 
 ---
 
 ## The 33 clauses, against `../7.10-rerun-ubuntu2-2026-09-09/widget-run.log`
 
-**32 of the 33 are identical in wording and verdict.** One clause changed — number 15 — and it
-went FAIL → OK. Nothing else moved.
+**31 of the 33 are identical in wording and verdict.** One clause changed — number 15 — and it
+went FAIL → OK. One more, number 24, has the same verdict and a different label, because its
+label interpolates the free-space reading taken before the click (`free 28.1 GiB` → `free 26.9
+GiB`); that is the clause working as designed, not a clause moving, and it is called out here
+rather than counted as identical.
 
 | # | clause | 09-09 | tonight |
 |---|---|---|---|
@@ -198,7 +207,7 @@ went FAIL → OK. Nothing else moved.
 | 21 | the Install click reached the folder picker | OK | OK |
 | 22 | the preflight REFUSED rather than warned, and nothing was installed | OK | OK |
 | 23 | the refusal names the server's ports, which this box is under | OK | OK |
-| 24 | the refusal names free space, which this box is under | OK | OK |
+| 24 | the refusal names free space, which this box is under *(label carries the reading: `28.1 GiB` → `26.9 GiB`)* | OK | OK |
 | 25 | the refusal reached the user as a modal dialog, not only a log line | OK | OK |
 | 26 | nothing was written into the chosen folder | OK | OK |
 | 27 | no compose file, so nothing could be remembered as installed | OK | OK |
@@ -237,18 +246,26 @@ smoothed:**
 * **`ac-authserver` restarted** after the restore, and its own log is the reading:
   `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.`
 * **`ufw` inactive, rules byte-identical** to the copies taken before the Apply, root:root 640.
-* **The owner's things untouched.** `PERZI`'s `Pakka` (guid 1001, level 6) is there; 1002
-  characters; `Logger.ALE=4,Console Server` is still line **706** of
-  `/home/pk/wowserver/env/dist/etc/worldserver.conf`, whose mtime is 2026-09-08 23:11 — before
-  this lane existed; `LootPet.lua` is 2026-09-08 22:17. *(Its path is `/home/pk/LootPet.lua`;
-  there is no `lua_scripts` directory anywhere under `/home/pk`, which the ticket's description
-  of it will not lead you to.)*
-* **The account this run created is gone.** `WIDGET0909T3` (id 110) was created by clause 11 and
-  deleted afterwards — `account-cleanup.txt`. Its `account_access` row survived the first delete
-  and is the reason `state-after.txt` still lists `110 2`: the joined multi-table `DELETE` in
-  `run-t3.sh` did not take, and the row was removed by hand a minute later. `state-final.txt`
-  shows `account_access` back to `101 102 103 109`, exactly `state-before.txt`. The password
-  `run-t3.sh:28` gives that account is a throwaway that authenticates nothing: the account it
+* **The owner's things untouched, and now actually watched.** `PERZI`'s `Pakka` (level 6) is
+  there and 1002 characters; `Logger.ALE=4,Console Server` is still line **706** of
+  `/home/pk/wowserver/env/dist/etc/worldserver.conf`, mtime 2026-09-08 23:11 — before this lane
+  existed; his `LootPet2.lua` (mtime 2026-09-09 02:06) and the five `dml_*.lua` bridge scripts
+  are all present in `/home/pk/wowserver/env/dist/etc/modules/lua_scripts/`, byte counts and
+  mtimes identical in `state-before.txt` and `state-final.txt`.
+
+  Round 1's probe read `/home/pk/wowserver/lua_scripts/LootPet.lua` and
+  `/home/pk/wowserver/etc/worldserver.conf`. **Neither exists**, and both its `state-before` and
+  its `state-after` said `No such file` — so the pair agreed about nothing, and would have gone
+  on agreeing if the real files had been deleted. That is a dead probe reporting "no change",
+  and it is the same defect as a clause that cannot fail. The paths above are the ones the
+  engine loads.
+* **The account this run created is gone.** `WIDGET0909T3` (id 111) was created by clause 11,
+  which is why `state-after.txt` still lists it; the EXIT trap deletes it and its
+  `account_access` row on the way out, and `state-final.txt` shows `account_access` back to
+  `101 102 103 109`, exactly `state-before.txt` (`restore.log:21-27`). Round 1 used a joined
+  multi-table `DELETE` that did not take and left an orphan access row to be removed by hand;
+  it is two plain statements now, access first. The password
+  `run-t3.sh:48` gives that account is a throwaway that authenticates nothing: the account it
   belonged to no longer exists, and it is written down for the same reason the 09-09 driver
   writes its own default down — so a re-run reproduces the constants rather than inventing them.
   No other password appears in this folder; every database reading passes its own in `MYSQL_PWD`
@@ -257,6 +274,43 @@ smoothed:**
 
 ---
 
+---
+
+## The runner fails closed, and that was exercised rather than asserted
+
+Round 1's `run-t3.sh` captured each driver's exit status, wrote it into `run.log`, and then threw
+it away: `run_driver` ended on an `echo`, so what it returned was that echo's `0`, and with only
+`set -u` the script walked on through its cleanup and printed *"run finished"* whatever had
+happened. A falsification driver that died between B1 and B6 would have left the owner's box
+advertising `192.168.77.77` under a log that said the run was fine — the same family of defect as
+the clause this folder exists to repair: a reading that cannot come out wrong.
+
+`run_driver` returns the driver's status now (`run-t3.sh:189`), both drivers are invoked
+fail-fast through `die`, and **everything that puts the box back is in an EXIT trap** — the ufw
+rules, the realm row on both address columns and its mask, the `ac-authserver` restart, and the
+account the run creates. The trap runs on the way out of a failure exactly as on the way out of a
+success and re-raises the status it was called with, so the script's exit code is the driver's.
+
+**And it was run that way.** `failclosed/` is the same `run-t3.sh`, same box, same trap, with
+`T3_DRIVERS` pointed at a stand-in for `clause35_falsify.py` that does its B1 — reads the realm
+row, sets it to `192.168.77.77`, reads it back — and then exits 1 where B6 would have put it
+back. The stub asserts nothing; one that could fail for a second reason would make the reading
+ambiguous.
+
+| what had to happen | where it is |
+|---|---|
+| the driver exits 1 and the runner **stops there** | `failclosed/run.log:15-16` — `clause35_falsify.py exit 1`, `STOPPED: … (status 1)` |
+| the run is recorded as FAILED, not finished | `failclosed/run.log:18` — `T3 run FAILED, status 1, box restored by the EXIT trap` |
+| the runner's own exit status is the driver's | `RUNNER EXIT STATUS: 1` from the invoking shell |
+| the trap sees the damage | `failclosed/restore.log:12-13` — `the realm row as found now` → `192.168.77.77` |
+| and undoes it anyway | `failclosed/restore.log:14-16` — forced to `100.99.204.5` on both columns, mask `255.255.255.0`, read back |
+| the authserver re-reads it | `failclosed/restore.log:19-20` — `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` |
+| the world was never touched | `failclosed/restore.log:28` — pid `409560`, the one T2 left |
+
+`failclosed/clause35-falsify.log` carries the stub's own output under that name because the
+runner names each log for the driver it ran and the stand-in occupies that driver's place; its
+first lines say plainly which file it is.
+
 ## Files
 
 | file | what it is |
@@ -264,11 +318,13 @@ smoothed:**
 | `widget-run.log` | the full 33-clause widget half, 33 OK 0 FAIL, exit 0 |
 | `clause35-falsify.log` | both corrected halves watched failing and then passing, plus the ufw copy-aside/restore and the authserver restart |
 | `clause35_falsify.py` | the driver that produced it |
-| `run-t3.sh` | the runner: state probes, the ufw handling, both drivers, the account cleanup |
+| `run-t3.sh` | the runner: state probes, the ufw handling, both drivers fail-fast, and the EXIT trap that puts the box back whatever happened |
+| `restore.log` | written by that trap: the ufw restore with its sha256s, the realm row forced back and read back, the authserver restart and its `Added realm` line, the account removed, the world still on pid 409560 |
+| `failclosed/` | the same runner invoked so a driver deliberately fails — see below |
+| `failclosed_stub.py` | the stand-in driver that moves the realm row and exits 1 |
 | `widget_driver.diff` | the complete change to `../7.10-rerun-ubuntu2-2026-09-09/drivers/widget_driver.py` — 46 insertions, 6 deletions, all of it the one clause and the two lane constants |
 | `run.log` | shas, versions, exits, elapsed |
-| `state-before.txt`, `state-after.txt`, `state-final.txt` | the box either side, and after the orphan row was removed |
-| `account-cleanup.txt` | the account created and removed |
+| `state-before.txt`, `state-after.txt`, `state-final.txt` | the box before the drivers, after them, and after the EXIT trap has put it back — `after` is the one that still lists the account the run created |
 | `ufw-user.rules.before`, `ufw-user6.rules.before` | the copies the restore was checked against |
 | `shots/` | 13 frames from the widget run + 4 from the falsify run, each with the containers `docker ps` reported up at the instant of the grab |
 

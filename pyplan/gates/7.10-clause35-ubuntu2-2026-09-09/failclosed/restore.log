@@ -1,0 +1,28 @@
+=== restore, run by the EXIT trap ===
+the status this script is exiting with: 1
+taken (local): 2026-09-09T11:35:01+02:00
+--- putting /etc/ufw rules back exactly as they were ---
+Status: inactive
+320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  /etc/ufw/user.rules
+f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  /etc/ufw/user6.rules
+320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  /home/pk/lane710b/out-t3-failclosed/ufw-user.rules.before
+f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  /home/pk/lane710b/out-t3-failclosed/ufw-user6.rules.before
+-rw-r----- 1 root root 107 Feb 10  2026 /etc/ufw/user6.rules
+-rw-r----- 1 root root 307 Feb 10  2026 /etc/ufw/user.rules
+--- the realm row as found now ---
+192.168.77.77	192.168.77.77	255.255.255.0
+--- forcing it to 100.99.204.5 on BOTH address columns, mask 255.255.255.0 ---
+--- read back ---
+100.99.204.5	100.99.204.5	255.255.255.0
+--- restarting ac-authserver so it re-reads the row it announces ---
+ac-authserver
+[0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
+[0m[36mAdded realm "Yulon ubuntu2" at 100.99.204.5:8085.
+--- the account this run may have created, removed ---
+after the delete (expect no rows for it, and no orphan access row):
+101	3
+102	3
+103	3
+109	3
+--- the world was never stopped or started by this lane ---
+409560 worldserver

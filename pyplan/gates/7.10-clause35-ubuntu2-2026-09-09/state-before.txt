@@ -1,8 +1,8 @@
 === state-before ===
-taken (local): 2026-09-09T11:09:05+02:00   (UTC: 2026-09-09T09:09:05+00:00)
+taken (local): 2026-09-09T11:35:37+02:00   (UTC: 2026-09-09T09:35:37+00:00)
 --- docker ps ---
 ac-worldserver	Up About an hour	127.0.0.1:7878->7878/tcp, 0.0.0.0:8085->8085/tcp, [::]:8085->8085/tcp
-ac-authserver	Up 31 minutes	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
+ac-authserver	Up 35 seconds	0.0.0.0:3724->3724/tcp, [::]:3724->3724/tcp
 ac-database	Up About an hour (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
 --- worldserver pid ---
 409560 worldserver
@@ -22,8 +22,16 @@ ac-database	Up About an hour (healthy)	127.0.0.1:3306->3306/tcp, 33060/tcp
 1002
 --- the owner's things ---
 Pakka	6
-ls: cannot access '/home/pk/wowserver/lua_scripts/LootPet.lua': No such file or directory
-(no Logger.ALE line)
+total 92
+-rw-rw-r-- 1 pk pk  3167 Sep  8 20:53 dml_addclass.lua
+-rw-rw-r-- 1 pk pk  2379 Sep  8 20:53 dml_bridge_ping.lua
+-rw-rw-r-- 1 pk pk  1276 Sep  8 20:53 dml_login.lua
+-rw-rw-r-- 1 pk pk  1177 Sep  8 20:53 dml_uninvite.lua
+-rw-rw-r-- 1 pk pk  1737 Sep  8 20:53 dml_whisper.lua
+-rw-r--r-- 1 pk pk 37294 Sep  9 02:06 LootPet2.lua
+-rw-r--r-- 1 pk pk 31216 Sep  8 23:04 LootPet.lua.bak-20260909-002427
+706:Logger.ALE=4,Console Server
+-rw-r--r-- 1 pk pk 170925 Sep  8 23:11 /home/pk/wowserver/env/dist/etc/worldserver.conf
 --- ufw ---
 Status: inactive
 320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf  /etc/ufw/user.rules
@@ -33,5 +41,5 @@ f6696cd7741aada36ab2055dd1a9d098e23e0290ca3a67dafbbad2920e5fdf60  /etc/ufw/user6
 --- disk ---
 /dev/sda2        97G   65G   27G  71% /
 --- throwaway folders ---
-/home/pk/lane710b/p710-doomed-install: absent
-/home/pk/lane710b/p710-empty: absent
+/home/pk/lane710b/p710-doomed-install: 0 entries
+/home/pk/lane710b/p710-empty: 0 entries

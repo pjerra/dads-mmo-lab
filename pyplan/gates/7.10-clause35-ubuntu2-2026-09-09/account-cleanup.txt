@@ -1,3 +1,0 @@
-=== the account this run created, and its removal ===
-110	WIDGET0909T3
-after the delete (expect no rows):
