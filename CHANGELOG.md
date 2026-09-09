@@ -27,7 +27,7 @@ _Everything below landed on `yulon-phase8b` after `v0.6.59Public` (cut from `Yul
 
 ### Known, named rather than hidden
 - Every module the app installs is silent: a logger declared in a module's own config is not read by the server (bug-checklist 47).
-- Tortoise installs do not apply the fork's `character_updates/` directory; a table its daily honor maintenance truncates is created there, and an install dies on the first maintenance day without it.
+- Tortoise: the fork's `character_updates/` directory is now a catalog phase, applied on a fresh install and re-applied on an install that already carries the import marker (idempotent files, no marker rewritten) -- but only through the engine's install route; the button that reaches an established install from the app is T14, not yet built. (`tortoise-upgrade-m910q-2026-09-09/`, the m910q press of the re-run route still owed)
 - 8.8 (Steam / Deck) has no evidence yet; fullscreen Steam is the agreed stand-in.
 
 ## v0.6.59Public — 2026-08-29
