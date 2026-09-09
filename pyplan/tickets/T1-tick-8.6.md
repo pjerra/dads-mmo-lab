@@ -1,6 +1,6 @@
 # T1 — Tick 8.6, and correct the two gate lines that name a dead box
 
-**Status:** OPEN
+**Status:** DONE (hand reported 2026-09-09 09:02; awaiting review)
 **Filed:** 2026-09-09 08:40 by the lead (Fable)
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/checklist.md`. Nothing else — a second file is a finding for your report, not an edit.
@@ -35,3 +35,11 @@ The Phase 8 exit line (`pyplan/checklist.md:2508`) requires every `8.x` box tick
 ## Report format (mark DONE by appending a `## Report` section here)
 
 Sha, the gate's last line, the diff stat, and **deviations flagged** — anything you decided the spec left silent, anything you could not cite.
+
+## Report (hand, 2026-09-09 09:02)
+
+- sha `886f7f93` on `worktree-agent-ab5bae55cb4fe4a92`, ff-merged from `e2912690`
+- gate `=== --checks: ALL GREEN ===`, 3769 passed, 6 skipped
+- diff `pyplan/checklist.md | 4 ++--` (lines 2500 and 2501)
+- 8.6 ticked with a Gated 2026-09-09 clause: box `yulon-ubuntu2`, code `daeae0a5` (surface) and `5a7e8baa`; all three folders; past-tense readings (engine False then True; "does not exist" then `DML-BRIDGE-READY`; Jilsur in the client's party frame; Kiteema through the panel with the row arriving at 06:05:55 after the join at 06:05:53); NOT-shown paragraph. Gate box and folder names corrected on 2500 and 2501. 8.7a not ticked.
+- Deviations flagged by the hand: (1) correction 3 NOT applied -- `:2500` still says "This route has never been recorded working" ahead of the Gated clause; (2) correction 4 NOT applied -- `:2500` still says "that rebuild is the owner's and is not automatic"; (3) correction 1 (`:2470`) not applied, out of the ticket's items; (4) no tree sha recorded in the panel-live folder, `daeae0a5` used and labelled as the surface's commit; (5) test paths spelled `tests/...`; (6) `OffCritical` wording from correction 1.
