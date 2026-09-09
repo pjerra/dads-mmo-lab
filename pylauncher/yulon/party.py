@@ -793,6 +793,17 @@ def read_spec_names(text: str) -> dict[int, tuple[str, ...]]:
     Column 0 only, which is `read_conf`'s rule for `read_conf`'s reason: the
     shipped file carries commented keys and a pattern that matched them would
     read the file's prose as its settings.
+
+    **A value is taken verbatim to the end of the line, `#` included**, and
+    whether the core's own reader would drop a trailing comment is NOT measured
+    on this tree — so `… = arcane pve # the good one` is read here as the whole
+    string, which is very probably not what the module has. What that costs is
+    bounded, and it is bounded the safe way round: `#` is outside `SPEC_SHAPE`,
+    so `InstallParty.specs` filters such a name out and the picker never offers
+    it. The result of the unmeasured case is a spec missing from the list, not a
+    spec offered that the server would refuse in the game window where nothing
+    can hear it. Measuring `sConfigMgr`'s comment handling is what would let this
+    read the value the module actually holds.
     """
     seen: dict[int, dict[int, str]] = {}
     for line in text.splitlines():

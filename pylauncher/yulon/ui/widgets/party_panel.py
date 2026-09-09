@@ -200,6 +200,20 @@ It has to be SAID: a read of its own clears the report line, so without this an
 armed press followed by Show this character's party would leave a disarmed button
 and nothing anywhere saying the press had been dropped."""
 
+DISMISS_ALL_MOVED = (
+    "Dismiss every bot was not sent: the character or the party is not the one that was "
+    "confirmed. Nothing was sent -- press it again to confirm what is on screen now."
+)
+"""The subject moved between the two presses, so the confirmation is void.
+
+Round 1's finding, from both reviewers, and it is the whole reason an arm carries
+a subject rather than a flag: armed on Pakka's two bots, a person who then types
+another name into the character box and presses again used to send
+`remove_all("Anmi")` -- a party that had never been shown, counted, or named in
+the sentence they agreed to. The second press now requires the SAME normalised
+master and the SAME bots the first press named, and anything else stands the arm
+down with this line instead of firing."""
+
 WORKING = "Working -- the server is being asked. This can take a few seconds."
 """Shown while a press is in flight, and the buttons are disabled under it.
 
@@ -238,12 +252,30 @@ class PartyPanel(QWidget):
         self._busy = False
         self._clear_report = False
         self._after_read = ""
-        self._dismiss_all_armed = False
+        # What an armed "dismiss every bot" is ABOUT: the normalised master and
+        # the bots the arming sentence named, snapshotted at the first press.
+        # `None` is disarmed. A bare flag was round 1's defect -- it armed on one
+        # party and fired on whatever the box said later.
+        self._confirmed: tuple[str, tuple[str, ...]] | None = None
+        # Why the last arm was stood down, said on the NEXT press and then
+        # forgotten. Empty for the ways a person cancels ON PURPOSE (the read,
+        # or moving on to another button), which need no explanation and no
+        # third press; set only where the subject changed underneath them, so
+        # that press explains itself and leaves the button idle rather than
+        # quietly starting a new confirmation about a different party.
+        self._stood_down = ""
+        # Which spec request the picker is currently showing. Bumped per
+        # request, checked at completion: an answer older than the newest
+        # request is about a class the box no longer shows.
+        self._spec_generation = 0
 
         self.character = QLineEdit(self)
         self.character.setPlaceholderText("the character you are playing, logged in")
         self.character.setMaxLength(party.MAX_NAME)
         self.character.returnPressed.connect(self.refresh_party)
+        # Typing is not pressing, but it changes what a confirmed dismissal
+        # would be about, so it stands one down. Every edit, not just Enter.
+        self.character.textChanged.connect(self._character_edited)
         self.refresh_button = QPushButton("Show this character's party", self)
         self.refresh_button.clicked.connect(self.refresh_party)
 
@@ -331,26 +363,44 @@ class PartyPanel(QWidget):
         """
         if self._busy:
             return
-        self._after_read = DISMISS_ALL_CANCELLED if self._dismiss_all_armed else ""
-        self._disarm_dismiss_all()
+        self._after_read = DISMISS_ALL_CANCELLED if self._stand_down("") else ""
         self._load_level_bound()
         self._load_specs()
         self._read(note=WORKING)
 
     def _load_specs(self) -> None:
-        """Re-ask the seam which specs this install has for the chosen class."""
+        """Re-ask the seam which specs this install has for the chosen class.
+
+        The answer carries the request that asked for it. Round 1's finding
+        (Codex): each class change starts an independent read, the completions
+        arrive in whatever order the runner finishes them, and a slower mage read
+        landing after a druid read filled the DRUID picker with mage specs — so
+        the next Add would send a spec `_spec_refusal` refuses, or worse, one
+        this tree's module answers "not found" to in the game window where
+        nothing can hear it.
+        """
+        self._spec_generation += 1
+        asked = self._spec_generation
         klass = self.klass.currentText()
-        self._run(lambda: self._seam.specs(klass), self._specs_read)
+        self._read_alongside(lambda: (asked, klass, self._seam.specs(klass)), self._specs_read)
 
     @Slot(object)
     def _specs_read(self, result: object) -> None:
         """Fill the picker, keeping the chosen spec if the new class has it too.
 
+        A completion older than the newest request is DROPPED rather than drawn:
+        the generation is the panel's own counter, so "older" means "another
+        request has been made since", which is exactly when this answer is about
+        a class the box no longer shows.
+
         `_done()` is deliberately NOT called here: this is a read that rides
         along beside a press rather than one, and re-arming the buttons under an
         add that is still polling would let a second one start.
         """
-        offered = cast("tuple[str, ...]", result)
+        generation, klass, offered = cast("tuple[int, str, tuple[str, ...]]", result)
+        if generation != self._spec_generation:
+            logger.info(f"dropped a stale spec reading for {klass}: {len(offered)} names")
+            return
         wanted = self.spec.currentData()
         self.spec.clear()
         self.spec.addItem(SPEC_AUTO, "")
@@ -361,7 +411,7 @@ class PartyPanel(QWidget):
             self.spec.setCurrentIndex(max(found, 0))
 
     def _load_level_bound(self) -> None:
-        self._run(self._seam.max_level, self._level_bound_read)
+        self._read_alongside(self._seam.max_level, self._level_bound_read)
 
     @Slot(object)
     def _level_bound_read(self, result: object) -> None:
@@ -476,7 +526,7 @@ class PartyPanel(QWidget):
         master = self._master()
         if master is None:
             return
-        self._disarm_dismiss_all()
+        self._stand_down("")
         klass = self.klass.currentText()
         spec = cast("str | None", self.spec.currentData()) or ""
         level = self.level.value() or None
@@ -503,33 +553,79 @@ class PartyPanel(QWidget):
 
     @Slot()
     def dismiss_all(self) -> None:
-        """Arm on the first press, send every bot away on the second.
+        """Arm on the first press, send every bot away on the second — the SAME one.
 
-        The count comes off the list on screen, which is the list the seam last
-        read; the seam reads the group table again for itself when it fires, and
-        it is that reading — not this one — that decides who is actually sent
-        away. What the panel's count is for is the label, so the second press
-        says how many bots it is about before it is pressed.
+        The arm carries its subject: the normalised master and the bots this
+        panel named in the sentence a person agreed to. The second press
+        recomputes both and fires only where they still match; anything else
+        stands the arm down with `DISMISS_ALL_MOVED` and sends nothing. Round
+        1's finding is the reason, and it is not theoretical -- armed on Pakka's
+        two bots, typing another name and pressing again used to dismiss the
+        party of a character who had never been on screen.
+
+        The names are the list the seam last read, and the seam reads the group
+        table again for itself when it fires: it is that reading, not this one,
+        that decides who is actually sent away. This one decides what was
+        CONFIRMED, which is a different question and the only one a person can
+        answer.
+
+        No wall-clock expiry, deliberately. The hazard an expiry addresses is an
+        arm that goes stale while nobody is looking, and the two identities are
+        what "stale" means here -- a clock would be a seam this widget has no
+        other use for, and an arm that outlives nothing is still an arm on
+        exactly the party named on the button and drawn in the list beneath it.
         """
         master = self._master()
         if master is None:
             return
+        if self._stood_down:
+            # The subject moved since the confirmation. Say so and stay idle:
+            # re-arming here would start a NEW confirmation about a different
+            # party off a press that was meant for the old one.
+            said, self._stood_down = self._stood_down, ""
+            self.report.setText(said)
+            return
         count = self.member_list.count()
         if count == 0:
-            self._disarm_dismiss_all()
+            self._stand_down("")
             self.report.setText(NO_BOTS_TO_DISMISS)
             return
-        if not self._dismiss_all_armed:
-            self._dismiss_all_armed = True
+        subject = (master, self._shown_bots())
+        if self._confirmed is None:
+            self._confirmed = subject
             self.dismiss_all_button.setText(f"Press again to dismiss {party.bots_word(count)}")
             self.report.setText(
-                f"This uninvites {party.bots_word(count)} from {master}'s party and whispers "
-                "each one to log out. Press Show this character's party to cancel."
+                f"This uninvites {party.bots_word(count)} from {master}'s party -- "
+                f"{', '.join(subject[1])} -- and whispers each one to log out. Press Show this "
+                "character's party to cancel."
             )
             return
-        self._disarm_dismiss_all()
+        if self._confirmed != subject:
+            self._stand_down("")
+            self.report.setText(DISMISS_ALL_MOVED)
+            return
+        self._stand_down("")
         self._start(WORKING)
         self._run(lambda: self._seam.remove_all(master), self._dismissed_all)
+
+    def _shown_bots(self) -> tuple[str, ...]:
+        """The bots this panel is showing, by name, in the order they are drawn.
+
+        Read off the rows rather than kept in a list of its own, for
+        `_chosen_bot`'s reason: a parallel list is a list that can drift out of
+        step with what somebody is looking at, and what is on screen is exactly
+        what the confirmation is about.
+        """
+        return tuple(
+            self.member_list.item(row).text().split(" — ")[0]
+            for row in range(self.member_list.count())
+        )
+
+    @Slot(str)
+    def _character_edited(self, _text: str) -> None:
+        """A different name in the box is a different party, so any arm goes."""
+        if self._stand_down(DISMISS_ALL_MOVED):
+            self.report.setText(DISMISS_ALL_MOVED)
 
     @Slot(object)
     def _dismissed_all(self, result: object) -> None:
@@ -539,9 +635,18 @@ class PartyPanel(QWidget):
         self._read(note=None)
         self.party_changed.emit()
 
-    def _disarm_dismiss_all(self) -> None:
-        self._dismiss_all_armed = False
+    def _stand_down(self, reason: str) -> bool:
+        """Drop any armed dismiss-all, and say whether there was one.
+
+        `reason` is what the NEXT press will say before it refuses to fire —
+        empty where the person cancelled on purpose (a read, or another button),
+        because that needs no explanation and no third press.
+        """
+        was_armed = self._confirmed is not None
+        self._confirmed = None
+        self._stood_down = reason if was_armed else ""
         self.dismiss_all_button.setText(DISMISS_ALL_IDLE)
+        return was_armed
 
     @Slot()
     def dismiss_bot(self) -> None:
@@ -556,7 +661,7 @@ class PartyPanel(QWidget):
         # Silently, unlike the read's cancellation: this press has an answer of
         # its own and a cancellation notice over it would throw away the only
         # sentence saying what happened to the bot.
-        self._disarm_dismiss_all()
+        self._stand_down("")
         self._start(WORKING)
         self._run(
             lambda: self._seam.remove(master, bot),
@@ -572,11 +677,29 @@ class PartyPanel(QWidget):
 
     @Slot(object)
     def _failed(self, exc: object) -> None:
-        """A seam that raised. One sentence, and the panel stays usable."""
+        """A PRESS whose seam raised. One sentence, and the panel stays usable."""
         self._done()
         logger.warning(f"My Party could not ask the server: {type(exc).__name__}: {exc}")
         self.report.setText(f"My Party could not ask the server: {exc}")
         self.party_changed.emit()
+
+    @Slot(object)
+    def _side_failed(self, exc: object) -> None:
+        """A side READING whose seam raised — the spec list, or the level bound.
+
+        It must NOT call `_done()`. Those two reads ride along beside a press
+        rather than being one, and `_done()` re-arms every button: a `specs()`
+        that raised while an add was still polling would unlock the buttons
+        under it and let a second add start, which is the thing `WORKING` and
+        `_busy` exist to prevent. Round 1 flagged it (not blocking) and it is a
+        slot rather than a comment because that is what makes it impossible.
+
+        The report line is left alone while a press owns it, for the same
+        reason: the press's own sentence is the one a person is waiting for.
+        """
+        logger.warning(f"My Party could not read this install: {type(exc).__name__}: {exc}")
+        if not self._busy:
+            self.report.setText(f"My Party could not read this install: {exc}")
 
     # -- the small print -----------------------------------------------------
 
@@ -609,6 +732,12 @@ class PartyPanel(QWidget):
     def _run(self, work: Callable[[], object], on_done: Callable[[object], None]) -> None:
         self._jobs(work, on_done, self._failed)
 
+    def _read_alongside(
+        self, work: Callable[[], object], on_done: Callable[[object], None]
+    ) -> None:
+        """A reading that is not a press: it fails without unlocking the panel."""
+        self._jobs(work, on_done, self._side_failed)
+
     def _start(self, note: str | None) -> None:
         self._busy = True
         if note is not None:
@@ -620,7 +749,20 @@ class PartyPanel(QWidget):
         self._arm(True)
 
     def _arm(self, on: bool) -> None:
+        """Every control a press would change the meaning of, locked while it runs.
+
+        The three pickers as well as the buttons (round 1, not blocking): the
+        class box changing mid-press re-reads the spec list under an add that
+        has already sent its class, and a level or spec chosen while the server
+        is being asked is one the answer on screen will not be about. The level
+        box also obeys its own bound -- re-enabling it here on an install whose
+        `MaxPlayerLevel` could not be read would offer a control
+        `_level_bound_read` had just withheld.
+        """
         self.refresh_button.setEnabled(on)
         self.add_button.setEnabled(on)
         self.dismiss_button.setEnabled(on and self.member_list.currentItem() is not None)
         self.dismiss_all_button.setEnabled(on)
+        self.klass.setEnabled(on)
+        self.spec.setEnabled(on)
+        self.level.setEnabled(on and self.level.maximum() > 0)

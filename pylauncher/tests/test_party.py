@@ -622,7 +622,11 @@ def _ready_install(tmp_path: Path) -> Path:
 
 
 def _install(
-    server: Path, sql: _Sql, chan: object | None, running: bool = True
+    server: Path,
+    sql: _Sql,
+    chan: object | None,
+    running: bool = True,
+    level_setter: party.LevelSetter | None = None,
 ) -> party.InstallParty:
     return party.InstallParty(
         WOTLK,
@@ -632,6 +636,7 @@ def _install(
         container="ac-worldserver",
         world_running=lambda: running,
         engine=lambda: party.BinaryRead(True, "in"),
+        level_setter=level_setter,
     )
 
 
@@ -1394,3 +1399,44 @@ def test_the_seam_sets_a_level_through_the_characters_tab_and_not_a_second_path(
     seam = _install(_ready_install(tmp_path), _Sql(), None)
     assert seam.level_setter.__self__.__class__ is play.InstallPlay  # type: ignore[attr-defined]
     assert seam.level_setter.__name__ == "set_level"  # type: ignore[attr-defined]
+
+
+def test_the_seam_hands_the_specs_the_bound_and_the_level_setter_to_the_press(
+    tmp_path: Path,
+) -> None:
+    """Round 1's third finding: the three hand-offs had no test of their own.
+
+    Every spec and level test above calls `add_bot` directly and supplies
+    `specs=`, `max_level=` and `set_level=` itself, so the three lines in
+    `InstallParty.add` that fill them in were covered by nothing -- blanking any
+    of them (`specs=()`, `max_level=None`, `set_level=None`) left every test
+    green while the panel's own press refused every spec, refused every level,
+    or raised. This is the one press that goes the whole way: two conf files on
+    disk, the group table read four times, and the level setter injected so the
+    console is not.
+    """
+    server = _ready_install(tmp_path)
+    (server / party.PLAYERBOTS_CONF).write_text(SPEC_CONF)
+    (server / party.WORLD_CONF).write_text("MaxPlayerLevel = 80\n")
+    log: list[str] = []
+    level = _Level(log)
+    chan = _LoggedChan(log, {"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql(
+        "1001\n",  # online_guid for the press
+        "1001\n",  # the ground reading: online_guid…
+        "",  # …and an empty group
+        "1001\n",  # the poll: online_guid…
+        "Newbot\t777\t8\t1\n",  # …and the bot, at the level the server made it
+        "1001\n",  # the level readback: online_guid…
+        "Newbot\t777\t8\t60\n",  # …and characters.level after the press
+    )
+
+    result = _install(server, sql, chan, level_setter=level).add(
+        "Pakka", "mage", spec="fire pve", level=60
+    )
+
+    assert result.blocker == "", result.sentence
+    assert level.asked == [("Newbot", 60)], "the level went through the seam it was handed"
+    assert "dml_whisper Pakka Newbot talents spec fire pve" in chan.sent
+    assert "dml_whisper Pakka Newbot talents autopick" not in chan.sent
+    assert (result.spec, result.level_before, result.level_after) == ("fire pve", 1, 60)
