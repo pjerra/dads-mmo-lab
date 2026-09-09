@@ -1,6 +1,6 @@
 # T12 — No account path defaults an unrecognised scheme to AzerothCore's columns
 
-**Status:** ACCEPT (Fable 2026-09-09 13:12 CEST; Codex owed until 15:04) -- merging
+**Status:** CLOSED -- merged `865b6963`, suite green behind it, 2026-09-09 13:25 CEST; hand retired, worktree removed; branch kept until the owed Codex pass
 **Filed:** 2026-09-09 17:00 by the lead (Fable), from T9's hand (finding 3) and its two reviewers
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/controller_wow_wotlk/accounts.py`, `pylauncher/tests/test_accounts.py`, and `pylauncher/yulon/ui/controller_view.py` **only** at the two `create_account` call sites that pass `scheme=entry.accounts.scheme or "azerothcore"` (T9's reviewer: near lines 886 and 996 on `yulon-phase8b`; verify) plus the test that pins them. Not the Tortoise binding, not `pyplan/checklist.md`.
@@ -41,3 +41,7 @@ Also from T9's reviewer: the `Known: azerothcore, mangos_sha, mangos_srp6` list 
 
 No `else` remains in the module; `_gm_level` refuses before its SELECT; the ordering change is safe (validated input first, pure derivation, no exception type changed, the three INSERT texts byte-identical); `get_args` keeps declaration order so T9's pinned string holds; the UI sentence is literally the Tortoise one and `entry.id` matches `game.GAME`; both UI sites surface the `NotImplementedError` as a sentence (`job.py:60`, `controller_view.py:2314/2402`), never a crash; the controller-view test pins both sites; four files, trailer clean.
 Notes: `Scheme` at `accounts.py:176` is a local re-declaration of the catalog Literal (`catalog.py:1005`) -- mypy at both UI sites catches drift, a follow-up could pin `get_args(Accounts.model_fields["scheme"].annotation) == get_args(Scheme)`; `create_account`'s `Raises:` block lacks T9's "no fall-through" sentence (style only); `assert len(known) == 3` is the one line a fourth scheme edits by hand; `passwordcheck.py:69/:122` return `None` for an unknown scheme by design, not a fall-through.
+
+## Merge (lead, 2026-09-09 13:25 CEST)
+
+`git merge --no-ff eea840b6` -> `865b6963`; `--checks` on `yulon-phase8b` behind it ALL GREEN; pushed. Follow-ups noted, not filed: pin the writer's `Scheme` alias to the catalog Literal; Tortoise's copy of the no-scheme sentence could collapse onto `checked_scheme`.

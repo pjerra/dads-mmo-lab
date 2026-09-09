@@ -22,6 +22,7 @@ _Everything below landed on `yulon-phase8b` after `v0.6.59Public` (cut from `Yul
 - A log panel's Stop now reaches a child blocked in a quiet read; a worker driven on the GUI thread no longer quits the GUI thread's event loop. (`7.10-rerun-ubuntu2-2026-09-09/`)
 - A rebuild waits for the realm line, not for the address a fresh install had — on a server whose address had changed it would otherwise wait six hours and restore the old build.
 - The install-time ready wait asks the install for its realm pair instead of typing one.
+- An account writer handed a scheme it does not know refuses by name -- password reset, account row, GM grant and GM read -- instead of writing AzerothCore's columns; an entry that declares no scheme is refused in the app, not defaulted. Unit-proven; no live folder.
 - Tortoise: the fork's one self-colliding world migration is made idempotent at image build time; the reimport that upgrades an existing install is rehearsed, and its live procedure corrected after the first press.
 
 ### Known, named rather than hidden
