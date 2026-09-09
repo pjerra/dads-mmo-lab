@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** REWORK, code half (rejected by the lead 2026-09-09 12:50, round 1); live half queued for the box
+**Status:** DONE, code half round 2 (hand reported 2026-09-09 13:58; awaiting review 2); live half queued for the box
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -64,3 +64,13 @@ Notes: the seams are the same ones (spec whisper replaces autopick and gear foll
 2. Discard stale spec reads by class or generation (Codex); a reversed-completion test.
 3. One seam-level test through `InstallParty.add` with spec and level (Fable).
 4. In the report: the eight mutations with the test that caught each; the recount.
+
+## Report, code half round 2 (hand, 2026-09-09 13:58)
+
+- shas `de6b1e77` + `387f43f9` (a second commit, not an amend, so the delta reads on its own); gate ALL GREEN 3826; round-2 delta 4 files +393/-26.
+- 1: the arm carries its subject -- the first press snapshots (normalised master, the bots the sentence named) into `_confirmed`; the second recomputes both and fires only on a match; `character.textChanged` stands the arm down; a stand-down caused by the subject moving is remembered and the next press says `DISMISS_ALL_MOVED` rather than silently re-arming; the arming sentence names the bots. No wall-clock expiry, with the reason in the docstring (the two identities are what stale means; offered on request).
+- 2: `_spec_generation` bumped per request and carried with the class into the completion; older answers dropped and logged.
+- 3: `test_the_seam_hands_the_specs_the_bound_and_the_level_setter_to_the_press` -- one press through `_install(..., level_setter=...).add("Pakka","mage", spec="fire pve", level=60)` over conf files and seven scripted SQL answers; the whisper sent, autopick not, the setter asked `("Newbot", 60)`, `("fire pve", 1, 60)`.
+- Two notes fixed: side readings use `_side_failed`/`_read_alongside` (a raising `specs()` no longer re-arms every button under an in-flight add); `_arm` locks the three pickers. The inline-`#` caveat written into `read_spec_names`' docstring; `SPEC_SHAPE` filters such a name out, so the failure is a spec missing rather than one refused unheard.
+- Seventeen mutations enumerated, each with its test; round 2's six were fix-then-test with the mutation as the RED evidence. Recount: 52 new test functions (33 + 18 + 1), 57 collected cases; the earlier 28 was an undercount.
+- Live half still owes: the async `characters.level` lag, level-then-spec order, the in-game "Spec not found", the talent readback, dismiss-all with two bots.
