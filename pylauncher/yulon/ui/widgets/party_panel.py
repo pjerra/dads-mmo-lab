@@ -589,10 +589,12 @@ class PartyPanel(QWidget):
     def dismiss_all(self) -> None:
         """Arm on the first press, send every bot away on the second — the SAME one.
 
-        The arm carries its subject: the normalised master and the bots this
-        panel named in the sentence a person agreed to. The second press
-        recomputes both and fires only where they still match; anything else
-        stands the arm down with `DISMISS_ALL_MOVED` and sends nothing. Round
+        The arm carries its subject: the normalised master and the guids of the
+        bots this panel named in the sentence a person agreed to. The second
+        press hands that snapshot to the seam, which reads the group table
+        again and refuses unless the party is still exactly that set; a changed
+        name in the box stands the arm down, and rows drawn for another
+        character cannot be armed at all (`PRESS_SHOW_FIRST`). Round
         1's finding is the reason, and it is not theoretical -- armed on Pakka's
         two bots, typing another name and pressing again used to dismiss the
         party of a character who had never been on screen.

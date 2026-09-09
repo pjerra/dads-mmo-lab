@@ -1,6 +1,6 @@
 # T5 — My Party: chosen spec, chosen level, dismiss all — the three things 8.6's own line promises and the panel says it lacks
 
-**Status:** DONE, code half round 3 (hand reported 2026-09-09 15:38; awaiting review 3); live half queued for the box
+**Status:** CODE HALF ACCEPTED and MERGED (lead, 2026-09-09 16:40, `e593d3d0`); LIVE HALF pending -- the box is T3's until its round 3 reports
 **Filed:** 2026-09-09 09:55 by the lead (Fable), from T1's round-2 Codex finding
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py`, `pylauncher/yulon/ui/widgets/party_panel.py`, `pylauncher/yulon/ui/controller_view.py` (only where the panel is built, `_build_my_party_group`), `pylauncher/tests/test_party.py`, `pylauncher/tests/test_party_panel.py`, `pylauncher/tests/test_controller_view.py`, `pyplan/write-ledger.md` only if you add a write site, and a NEW `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09/`. Not `pyplan/checklist.md`.
@@ -107,3 +107,11 @@ A third commit is fine; say which. Gate, report.
 
 - [high] `party.py:1621-1631`: the stale-set check closes round 2's bug, but validation is not bound to the group `dml_uninvite` mutates -- the seam verifies the confirmed guids belong to `master`, then issues name-only `dml_uninvite` commands, and the Lua resolves the name at execution and removes the bot from whichever group it occupies then. A confirmed bot that leaves and joins another master's party between the read and the command is removed from an unconfirmed group. Recommendation: pass the expected master (and the guid) into the server command and have the Lua verify the bot is still in that master's group at execution, refusing otherwise; a test seam that moves the bot between the SQL validation and the command.
 Lead's note: the Lua bridge script (`dml_uninvite.lua`) is outside this ticket's file set; the window is the interval between one SQL read and one whisper. Fable round-3 verdict pending; disposition follows both.
+
+## Review 6, code half round 3 (cold Fable reviewer, 2026-09-09 16:32) -- ACCEPT, six notes
+
+Binding in the seam traced (`remove_all` re-reads, refuses on a set difference in both directions, the fresh row's name reaches the whisper; the panel binds the snapshot to a local before standing down); the RED shape recorded; `_drawn_for` and the paired clear pinned by two tests; the deleted branch proved unreachable by tracing every writer of `_drawn`; the equivalent mutant agreed, with the snapshot's reason sound; threads clean; every `remove_all(` call site on the new arity. Notes: (1) `dismiss_all`'s first docstring paragraph is round-2 text left standing -- **cut by the lead at the merge**; (2) the equivalence rests on a comment-level invariant, cost bounded by the seam's refusal; (3) a `state()` that raises leaves the previous rows and `_drawn` intact, unlike a refused read (pre-existing; a later ticket); (4) inside the seam, a bot that joins after the check is left alone and one that leaves is reported by name; (5)-(6) the live half's list, plus: capture one `_not_the_confirmed_party` refusal live by adding a third bot from the console between the two presses, and record whether the bot manager's own timer moves bots inside a normal confirm interval.
+
+## Lead's disposition (2026-09-09 16:40)
+
+Fable ACCEPT; Codex REWORK on the window between the seam's read and the Lua's execution (`dml_uninvite` resolves the name at execution and removes the bot from whichever group it is in then). That fix is the Lua bridge script's contract and is outside this ticket's file set: filed as **T13**. The code half is merged (`e593d3d0`) with the stale docstring paragraph cut; the hand's worktree and branch stay for the live half, which starts when T3 releases the box.
