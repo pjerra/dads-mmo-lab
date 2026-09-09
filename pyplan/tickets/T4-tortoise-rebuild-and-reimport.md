@@ -1,6 +1,6 @@
 # T4 — Rebuild the Tortoise image on the m910q, then the reimport with no pre-application at all
 
-**Status:** DONE, round 2 (hand reported 2026-09-09 13:20; awaiting review 2) -- UPGRADED
+**Status:** ACCEPTED and MERGED (lead, 2026-09-09 13:55) -- UPGRADED; merge and the lead's one correction beside it, suite green behind
 **Filed:** 2026-09-09 08:40 by the lead (Fable). **The owner authorised this rebuild** ("do all 4", 2026-09-09 ~08:30, against the lead's recommendation 4).
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/tortoise-reimport-live.sh` (its step 2 loses its migration half), and a NEW `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`. No product code; a catalog gap you confirm is a finding for the report (it is already named, below).
@@ -75,3 +75,11 @@ T8 (a Rebuild that compiles a stale Dockerfile) and T9 (Repair cannot handle `ma
 ## Review 3 (Codex adversarial, round 2, 2026-09-09 13:30) -- ACCEPT
 
 The transcript is timestamped container output; the order is computed against the image's sorted file list; the no-redaction claim states its checks; step 1's broken run and later repair are explicit with the exact command beside the reproduced 14/0, and a wrong count now stops execution; the redundant index is measured, left unchanged, with an exact remedy. No overclaim, no secret. Fable round-2 verdict pending; merge follows both.
+
+## Review 4 (cold Fable reviewer, round 2, 2026-09-09 13:48) -- ACCEPT
+
+The transcript is the container's own (RFC3339Nano `docker logs -t` prefixes, monotonic, 190 lines); 173 attempts, 173 distinct, self-sorted, 0 failed, re-derived independently; the rewritten file's hash in the transcript equals the sha1 in `image-rewrite-proof.log`; `check-updater-order.sh` computes the order (`diff -u` against the image's sorted list); step 1's broken run stated and the repaired line's quoting read through (untested until the next press); the index finding measured and left undone; secrets none. Notes: README:129-133's "deleted migration" explanation is refuted by the transcript (a hash miss, likely a duplicate name under an older hash) -- **corrected by the lead at the merge**; the checker prints the `Found 173` line but asserts a hard-coded 173; one `docker run` without sudo; the transcript is filtered to updater lines, not the raw log.
+
+## Closed (lead, 2026-09-09 13:55)
+
+Both reviewers ACCEPT on round 2. Merged `dffa3a54`; the README's wrong explanation for the 174 rows corrected in a dated paragraph at the merge; suite behind the merge green. Hand retired, worktree removed, branch deleted. Owed by the lead: the redundant `idx_owner_bot_event` on the m910q (the owner's call), and whether the 174th row was a duplicate hash (read-only, from the dump on the box).

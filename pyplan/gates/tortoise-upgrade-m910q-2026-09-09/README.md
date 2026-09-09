@@ -317,3 +317,8 @@ of the mistake this folder's round 1 made twice; `tail` is gone from the round-2
 
 The database password is generated and never appears in any of these; the channel account's password
 is never printed and lives only in the app's own credential file.
+
+
+## Correction (lead, at the merge, 2026-09-09 13:55)
+
+The explanation above for the 174 rows the rebuild's own start left in `tw_world.migrations` — "173 files plus one row for `20260721013813_world`, a migration the fork has since deleted from the tree" — is refuted by this folder's own transcript: `updater-transcript.log` shows the updater attempting `20260721013813_world` from the image at 08:48:27Z, and `check-updater-order.sh` proves the image's 173 files equal the 173 attempted names. The updater's line (`rebuild-summary.log`, "exists in DB but not as file, old migration?") is a **hash** miss, not a name miss: the likely truth is a second row of the same name under an older hash — 174 rows, 173 distinct names. The command that produced "in the table, not a file" was not committed; `rows-tw_world.migrations.sql` in `~/tortoise-backup-2026-09-09-T4` on the box holds the 158 pre-rebuild rows and would settle it read-only. UPGRADED does not depend on it: the after-state is 173 exactly. Found by the round-2 cold reviewer; recorded here rather than sent round a third time.
