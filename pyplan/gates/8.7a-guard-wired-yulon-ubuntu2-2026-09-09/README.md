@@ -16,8 +16,11 @@ The Server tab's Start was pressed *inside* the database's health wait, and the 
 
 **Box:** `yulon-ubuntu2` (the owner's WotLK install at `/home/pk/wowserver`, native `243c46e3`,
 `mod-ale`, 500 bots, his account `PERZI` and warrior `Pakka`).
-**Tree pressed:** `7b05565f`, checked out on the box as a git worktree at `~/t7` and verified in
-every capture (`yulon package under test: /home/pk/t7/pylauncher/yulon/__init__.py`). The live-half
+**Tree pressed:** `7b05565f`, checked out on the box as a git worktree at `~/t7`; every capture
+prints the package path (`yulon package under test: /home/pk/t7/pylauncher/yulon/__init__.py`),
+not the worktree's sha -- the sha is this README's word, and the behaviour captured (both seams
+`_for_wotlk.<locals>.<lambda>`, `wait_db_healthy timeout=180.0`, the second reading firing) pins
+the tree to `9097264e` or later. The next driver prints `git rev-parse HEAD` once. The live-half
 commit also carries a comments-only correction (120 s → 180 s); **it is not in the pressed tree**,
 and it cannot be — it changes no code.
 **Subject:** `manifests/wow-wotlk/modules/mod-arac.json` — `data/sql/db-world/arac.sql`,
@@ -257,7 +260,7 @@ is its own log at the last capture: `498/500`, `499/500`, `500/500 Bot ... logge
 | Thing | State |
 | --- | --- |
 | `ac-worldserver` | **running**, `pid=538052 restarts=0`, started 11:45:44Z, `500/500` bots logged in |
-| `ac-authserver` | **running**, `pid=538055`, started 11:45:44Z — **not restarted by this gate** |
+| `ac-authserver` | **running**, `pid=538055`, started 11:45:44Z — stopped and started three times through the app's own Stop/Start with the rest of the project (pids 499893 → 532366 → 538055); **no separate `docker restart` followed a realm write**, because the row needed none (`needs a write: False`) |
 | `ac-database` | **running**, healthy, started 11:44:34Z |
 | `controller.status()` | `InstallStatus(db=True, auth=True, world=True)` |
 | realm row | `1  Yulon ubuntu2  100.99.204.5  100.99.204.5  255.255.255.0  8085` — read, `needs a write: False`, **not written** |
@@ -289,8 +292,9 @@ started the world three times, which the clause it proves cannot be tested witho
    through the tab's own slots, rendered offscreen — not a person clicking Install.
 2. **The renderings were made after the presses.** They were produced at 13:49 local from the exact
    strings the presses saved (`refusal-sentence.txt`, `success-report.txt`, `remove-report.txt`), so
-   the `ac-worldserver at capture:` line in the shot log is the state at *rendering* time (running),
-   not at the press. The container states at each press are in the press logs, where they were taken.
+   the `ac-worldserver at capture:` line the renderer printed to the terminal (not committed; no
+   shot log is in this folder) was the state at *rendering* time (running), not at the press. Where
+   the three PNGs are cited above, read them as renderings of those saved strings. The container states at each press are in the press logs, where they were taken.
 3. **`characters` and `playerbots`.** `WORLD_HELD_DBS` has three members and only `world` was
    pressed, on this game. The two shipped manifests with a direct `characters` step
    (`wow-wotlk/ale/accountwide.json`, `wow-wotlk/ale/battlepass.json`) were not pressed; no shipped
