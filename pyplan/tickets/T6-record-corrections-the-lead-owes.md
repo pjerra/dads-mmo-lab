@@ -1,6 +1,6 @@
 # T6 — Four record corrections the lead owes, each found by a reviewer on another ticket
 
-**Status:** OPEN
+**Status:** DONE (hand reported 2026-09-09 11:34; awaiting review)
 **Filed:** 2026-09-09 11:10 by the lead (Fable), from T1's eight reviews
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha — expected `d70642c6` or later)
 **File set (yours alone):** `pyplan/checklist.md` (line 2495 only), `pyplan/gates/8.6-panel-live-yulon-ubuntu2-2026-09-09/README.md`, `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/README.md`. No other file; no other line of the checklist.
@@ -27,3 +27,12 @@ T1's reviewers, across four rounds, named four things that are false or missing 
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the four items each with the line you wrote and what you verified for it, deviations flagged, status DONE.
+
+## Report (hand, 2026-09-09 11:34)
+
+- sha `f04d8a9d` on `worktree-agent-aaf6e031fb23c16e4`, ff-merged from `528f219e`; gate ALL GREEN, 3769 passed; diff: `checklist.md | 2 +-`, `7.10-rerun-ubuntu2-2026-09-08/README.md | 20 +`, `8.6-panel-live-…/README.md | 21 +`.
+- Item 1: dated correction appended to `:2495`; four of the exit review's line numbers were stale and are cited at the resolving line with the symbol (`test_the_soap_trees_keep_their_button` 4266→4372, `_attach_only` 4227→4333, `CONSOLE_CHANNEL_SENTENCE` 1491→1552, `_is_console_channel` 1506→1567); the tick, the 2026-09-07 evidence and the mutation reasoning stand; the rank-at-startup fact cited from the arch folder.
+- Item 2: VM shell +0200, containers UTC, the bare `[HH:MM:SS]` panel stamps are VM-local, `client-agent.log` is a third clock (the host) not measured.
+- Item 3: `daeae0a5` recorded as the nearest commit, `git log daeae0a5..528f219e -- party_panel.py controller_view.py` empty across 39 commits; not the press's sha.
+- Item 4: dates stated on both clocks; the run and its staging commit (`d8c08cb5`, 00:13 +0200 = 22:13Z on the 8th) both fall on 2026-09-08 in UTC; no reason given for the name.
+- Deviations: the ticket's "named for the evening it was staged" was unsupported (the staging commit is also after local midnight) -- the hand declined to give a reason; "a dozen commits" measured as 39; the host clock named rather than an offset invented.
