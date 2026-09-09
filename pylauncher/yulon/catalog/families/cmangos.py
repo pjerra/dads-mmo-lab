@@ -1321,9 +1321,14 @@ class CmangosInstaller(StagedInstaller):
             raise InstallerError(
                 f"{self.entry.name}'s databases do not read as a finished import "
                 f"({seen.state}: {seen.detail}), so these files do not belong to them yet. "
-                f"Nothing was applied, nothing was imported and nothing was cleared. Install "
-                f"this server, or press Install again to resume the install that stopped, and "
-                f"these files go in as part of it."
+                f"Nothing was applied, nothing was imported and nothing was cleared. Finish "
+                f"the install of this folder first -- these files go in as part of it"
+                + (
+                    " -- and if the state above is unreadable, check that Docker is running "
+                    "and that the database container is up before anything else."
+                    if seen.state == "unreadable"
+                    else "."
+                )
             )
         yield f"These databases read as {seen.state}; nothing else in the install plan is re-run."
         yield from self._rerun_on_marked(ctx, plan)
