@@ -1,6 +1,6 @@
 # T4 — Rebuild the Tortoise image on the m910q, then the reimport with no pre-application at all
 
-**Status:** REWORK (rejected by the lead 2026-09-09 12:35, round 1) -- the box IS upgraded; the record owes the ordered transcript
+**Status:** DONE, round 2 (hand reported 2026-09-09 13:20; awaiting review 2) -- UPGRADED
 **Filed:** 2026-09-09 08:40 by the lead (Fable). **The owner authorised this rebuild** ("do all 4", 2026-09-09 ~08:30, against the lead's recommendation 4).
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/tortoise-reimport-live.sh` (its step 2 loses its migration half), and a NEW `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`. No product code; a catalog gap you confirm is a finding for the report (it is already named, below).
@@ -63,3 +63,11 @@ UPGRADED verified from the logs (Found 173, attempted 173, no failure, up in 1m0
 3. **The character index.** Read both index counts (`idx_owner_bot_event`, `uq_owner_bot_event`) on the box now, read-only, and record whether the install's `tw_char` matches head's shape after step 2 re-created an index head's migration drops; if it does not, say what would put it right and do not do it.
 4. Optional: `after.log`'s stop of mangosd/realmd is uncaptured -- say what stopped them.
 T8 (a Rebuild that compiles a stale Dockerfile) and T9 (Repair cannot handle `mangos_sha`) are filed from your findings and are not yours. Amend the single commit, re-run the gate, `test_no_secrets_in_evidence` first, report.
+
+## Report, round 2 (hand, 2026-09-09 13:20)
+
+- sha `dffa3a54` (amended, base `e2912690`); `test_no_secrets_in_evidence` first, then gate ALL GREEN 3769; diff 20 files +3375/-19. Box unchanged except the database started alone for one read and stopped; `docker ps` shows `r6` only.
+- 1: the reimport container (`e716a18c5d8a`, never recreated) still held all 173 lines; `updater-transcript.log` is `docker logs -t` filtered to the updater and the ready banner, nothing redacted because the generated password does not occur in it (checked against `.db_password`, stated in the header). New `check-updater-order.sh`: 173 attempt lines, 173 distinct names, 173 `*.sql` in the image, 0 failed, attempted in exactly the image's sorted order, first `20260504194945_world`, last `20260906190000_world`.
+- 2: the README now says step 1 ran broken twice (the rollback-tag check; the grep quoting printing 0) and was repaired after the run, not re-run end to end; `image-rewrite-proof.log` carries the exact command above the reproduced 14/0 (sha1 `7a3a97e9…`); step 1 now reads the counts through bare ssh and `exit 3`s on anything but `14 0` (`onbox` pipes into `tee`, so nothing it ran could ever stop the script); the header contradiction removed.
+- 3: **`tw_char` does not match head's shape**: head's `20260903211500` dropped `idx_owner_bot_event` and added `uq_owner_bot_event` at the rebuild's own start; step 2 then re-applied `20260708055500` unconditionally and put the dropped index back -- both exist on `ai_playerbot_random_bots` (8,959 rows), uniqueness still enforced. What would put it right, world stopped: `ALTER TABLE tw_char.ai_playerbot_random_bots DROP INDEX idx_owner_bot_event;` -- **not done**; the script's index line now carries a comment; "What is NOT proved" says `tw_char` is not a fresh install at this pin. **Lead's follow-up.**
+- 4: `after.log`'s lone stop line was `tail -2` on a dependency-ordered stop; `docker ps -a` shows mangosd and realmd `Exited (0)` at 08:56:51Z from the same press.
