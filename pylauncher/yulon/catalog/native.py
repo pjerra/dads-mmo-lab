@@ -62,7 +62,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Collection, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -205,30 +205,104 @@ is not a state anybody chose, so `_restore_rollback` asks again after its own
 recreate, which is the thing that frees them.
 """
 
-REBUILD_OPENING_NOTE = (
-    "You can stop this at any time; stopping before the containers are replaced leaves the "
-    "server you have now exactly as it is. This does three things and nothing else: it "
-    "compiles the server again from the source and modules in the folder below, it replaces "
-    "the running containers so the new build is what starts, and it waits for the server to "
-    "come back up. It does not fetch anything, does not rewrite your settings, and does not "
-    "touch your database — your characters, accounts and the module SQL already applied are "
-    "not read or written by this. The server is DOWN from the moment the containers are "
-    "replaced until it reports ready."
-)
-"""What a rebuild costs and what it leaves alone, said before the first stage.
+DOCKERFILE_STAGE = "write-dockerfile"
+"""The stage that renders this install's build recipe from the app's own templates.
 
-`OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
-because almost none of that one is true here: a rebuild clones nothing,
-generates no compose files, downloads nothing and runs no import. Its own
-docstring records what it cost to have one sentence claim more than the stages
-keep, so the rule is the same — every clause names something
-`rebuild_stages()` is responsible for, and the tuple is three stages long
-precisely so the list stays checkable.
+TWO files, and the name says one: `_write_dockerfile()` renders `Dockerfile`
+and `.dockerignore` through a single `dockerfile.write()` that rewrites whichever
+differs and refuses either that carries no marker. Both user sentences say
+"build recipe" and name the pair, because a `.dockerignore` behind its template
+is rewritten by this press exactly as the Dockerfile is, and a dialog promising
+"nothing else in the folder" was wrong about the second one (Fable, round 1).
 
-The downtime clause is the one a user is most likely to be surprised by and is
-the reason it is stated twice: here, and in `rebuild_confirmation()` before
-they agree to it.
+Named here because two things select on it: `rebuild_stages()`, which runs it
+again ahead of every compile for the families that have one, and
+`rebuild_opening_note()`, which counts what the press is about to do. A family
+whose checkout ships its own Dockerfile (AzerothCore) does not have it, and the
+`dockerfile_dir` field's own description is where that is written down.
 """
+
+
+class _UnreadableRecipe:
+    """The third thing a build-recipe file can be: there, and not readable by this process."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNREADABLE_RECIPE"
+
+
+UNREADABLE_RECIPE = _UnreadableRecipe()
+"""`_recipe_ground()`'s "could not ask", kept apart from its "was not there".
+
+A singleton and not `None`, because the two answers lead to opposite acts:
+absent means the re-render created the file and the restore removes it, while
+unreadable means this process never saw the bytes and may not remove anything.
+Collapsing them deleted a user's `Dockerfile` and said it had been "put back
+exactly as it was" (cold review of T8, round 2). `_keep_rollback()` takes the
+same line about `images_built()` answering `None`: destructive work on an
+unanswered question fails closed.
+"""
+
+RecipeGround = bytes | None | _UnreadableRecipe
+"""What `_recipe_ground()` knows about one file: its bytes, absent, or unreadable."""
+
+
+def rebuild_opening_note(*, renders_dockerfile: bool) -> str:
+    """What a rebuild costs and what it leaves alone, said before the first stage.
+
+    `OPENING_NOTE`'s counterpart, and a separate sentence rather than a reuse
+    because almost none of that one is true here: a rebuild clones nothing,
+    generates no compose files, downloads nothing and runs no import. Its own
+    docstring records what it cost to have one sentence claim more than the
+    stages keep, so the rule is the same — every clause names something
+    `rebuild_stages()` is responsible for, and the list is exactly as long as
+    that tuple precisely so it stays checkable.
+
+    It is a function and not a constant because the tuple stopped being one
+    length on 2026-09-09: the families that render their own Dockerfile now
+    write it again from the current template before compiling (T8), and the
+    families whose checkout ships one do not. A single constant would have had
+    to claim the re-render for WotLK, where nothing does it, or hide it from
+    the three CMaNGOS games, where it is the point of the press — and "this
+    does three things and nothing else" is the kind of clause that goes quietly
+    false rather than red.
+
+    The downtime clause is the one a user is most likely to be surprised by and
+    is the reason it is stated twice: here, and in `rebuild_confirmation()`
+    before they agree to it.
+
+    **"stopping ... leaves the server you have now exactly as it is" is a
+    promise the re-render nearly broke**, and it is kept by code rather than by
+    narrowing the words: the stage rewrites two files in the folder before the
+    compile, so `rebuild()` reads them first and `_put_recipe_back()` puts them
+    back on every failure and every cancel that lands before the containers are
+    replaced. Narrowing the sentence to "the containers stay as they are" was
+    the alternative and is worse: a user who stops a press would be left with a
+    build recipe they never agreed to, and the next compile — which may be
+    somebody else's press, hours later — would silently produce a different
+    image. A promise this app can keep is cheaper than a caveat every reader
+    has to hold.
+    """
+    recipe = (
+        "it writes this install's build recipe — its Dockerfile and .dockerignore — again "
+        "from the templates this app ships, so a fix made to them since you installed is in "
+        "what gets compiled, "
+        if renders_dockerfile
+        else ""
+    )
+    return (
+        "You can stop this at any time; stopping before the containers are replaced leaves the "
+        f"server you have now exactly as it is. This does {'four' if recipe else 'three'} things "
+        f"and nothing else: {recipe}it "
+        "compiles the server again from the source and modules in the folder below, it replaces "
+        "the running containers so the new build is what starts, and it waits for the server to "
+        "come back up. It does not fetch anything, does not rewrite your settings, and does not "
+        "touch your database — your characters, accounts and the module SQL already applied are "
+        "not read or written by this. The server is DOWN from the moment the containers are "
+        "replaced until it reports ready."
+    )
+
 
 REBUILD_CLOSING_NOTE = (
     "The server is running the build that was just made, with every module in this folder "
@@ -1766,7 +1840,7 @@ class StagedInstaller:
         )
 
     def rebuild_stages(self) -> tuple[Stage, ...]:
-        """What a rebuild runs: compile, replace the containers, wait for the server.
+        """What a rebuild runs: the build recipe, the compile, the containers, the wait.
 
         Deliberately NOT the install's tuple with the finished stages skipped.
         A rebuild is a different act with a different failure surface, and three
@@ -1776,14 +1850,45 @@ class StagedInstaller:
         characters in it. None of the three has anything to do with "the
         worldserver does not contain the module I just installed".
 
+        **`write-dockerfile` IS re-entered, and until 2026-09-09 it was not.**
+        The exclusion above was written about files a running server reads, and
+        the Dockerfile is not one: nothing but `docker build` ever opens it, and
+        the stage is idempotent by text (`dockerfile.write()` leaves matching
+        bytes alone, so the mtime does not move and the layer cache survives)
+        and refuses a file this app did not write rather than replacing it. What
+        the omission cost was measured on m910q the night of 2026-09-09
+        (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`): that install's
+        Dockerfile had been rendered 2026-09-07 and the template was fixed
+        2026-09-08 (`3a1ed6ee` -- both `FROM` lines to ubuntu:24.04 and the
+        `INSERT IGNORE` rewrite one migration needs to apply at all), so the
+        Rebuild button would have compiled the 22.04 recipe again and produced
+        exactly the image the upgrade existed to replace. The upgrade only
+        worked because the hand ran this stage first. A fix shipped in a
+        template reaches an existing install through this line or through
+        nothing.
+
+        Selected by PRESENCE, not prepended: `dockerfile_dir` is None for
+        AzerothCore because that checkout ships its own Dockerfile, so its
+        family has no such stage and `stage_named()` would refuse every WotLK
+        rebuild by name. `rebuild_confirmation()` reads the same fact off the
+        entry, and `test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_it`
+        binds the two derivations across every shipped entry.
+
         `recreate` is this tuple's own stage rather than the install's `up`,
         and `docker.staged_up_argv()` holds the argument: `up -d` was measured
         to replace a container whose CONFIGURATION changed, and a rebuild
         changes neither the compose files nor the image tag. Never recorded --
         `up` is not either, and a rebuild must not be able to leave a state file
-        claiming a stage the install's own resume would then skip.
+        claiming a stage the install's own resume would then skip. The re-render
+        keeps the family's own `recorded=True` for the opposite reason: it is
+        the install's stage, run with the install's body, and it really did
+        happen.
         """
+        recipe = (
+            (self.stage_named(DOCKERFILE_STAGE),) if DOCKERFILE_STAGE in self.stage_names() else ()
+        )
         return (
+            *recipe,
             self.stage_named("build"),
             Stage("recreate", self.stage_recreate, recorded=False),
             self.stage_named("ready"),
@@ -1860,8 +1965,16 @@ class StagedInstaller:
         opts = options or InstallOptions()
         server_dir = self.server_dir(opts)
         state = self._refuse_unless_rebuildable(server_dir)
+        planned = self.rebuild_stages()
+        renders = any(stage.name == DOCKERFILE_STAGE for stage in planned)
+        # Read BEFORE the first stage and only for the families that have one,
+        # because the promise in the opening note is about this: a press stopped
+        # before the containers are replaced leaves the server exactly as it is,
+        # and a rewritten recipe left on disk is not "exactly as it is" -- the
+        # next build would compile something the user never confirmed.
+        ground = self._recipe_ground(server_dir) if renders else {}
         yield f"Rebuilding {self.entry.name} in {server_dir}"
-        yield REBUILD_OPENING_NOTE
+        yield rebuild_opening_note(renders_dockerfile=renders)
         self._check_cancel(cancel)
         ctx = StageContext(
             server_dir=server_dir,
@@ -1871,9 +1984,6 @@ class StagedInstaller:
             secrets=self.resolve_secrets(server_dir),
             force_build=True,
         )
-        refs = self.built_image_refs(ctx)
-        kept = yield from self._keep_rollback(ctx, refs)
-
         # Two facts the failure path needs and a stage cannot return: whether
         # the compile FINISHED (the live tags name the new image from then on)
         # and whether the containers were TOUCHED (from then on the old build
@@ -1892,11 +2002,50 @@ class StagedInstaller:
             touched = True
             yield from self.stage_recreate(stage_ctx)
 
-        first, second, *rest = self.rebuild_stages()
-        stages = (replace(first, run=build), replace(second, run=recreate), *rest)
+        # BY NAME, and it was positional (`first, second, *rest`) until
+        # 2026-09-09. That was true of a tuple beginning with `build`, and T8
+        # put the re-render in front of it: both wrappers would have slid one
+        # stage early, so `built` would be set by a Dockerfile being written and
+        # `touched` before the compiler had started -- and a compile that then
+        # failed would "restore" tags it never moved and recreate the containers
+        # of a server that is still running the build it had. A tuple's shape is
+        # not a place to keep a fact two closures depend on.
+        #
+        # BEFORE the rollback is kept, so the refusal below can say nothing was
+        # started and mean it: `_keep_rollback()` tags four images.
+        wrappers: dict[str, Callable[[StageContext], Iterator[str]]] = {
+            "build": build,
+            "recreate": recreate,
+        }
+        stages = tuple(
+            replace(stage, run=wrappers.pop(stage.name)) if stage.name in wrappers else stage
+            for stage in planned
+        )
+        if wrappers:
+            # `stage_named()`'s refusal covers a family with no `build` at all;
+            # this covers the other half -- a tuple carrying one under another
+            # name, or a `recreate` this method stopped adding -- because what
+            # that produces otherwise is not a missing stage but a rollback that
+            # silently never fires.
+            raise InstallerError(
+                f"{self.entry.name} cannot be rebuilt safely: its rebuild has no "
+                f"`{sorted(wrappers)[0]}` stage to watch, so a failure could not be rolled "
+                f"back. That is a bug in this build, not something you did. Nothing was "
+                f"started."
+            )
+        refs = self.built_image_refs(ctx)
+        kept = yield from self._keep_rollback(ctx, refs)
         try:
             state = yield from self._staged(stages, ctx)
         except InstallerError as exc:
+            # FIRST, and outside every rollback branch below, because it is not
+            # about the images at all: `touched` False is the whole window the
+            # opening note makes its promise about, and in it the recipe on disk
+            # has to be the one the running build was made from. After the
+            # containers are replaced the promise has already been spent and
+            # `_restore_rollback` owns what happens next.
+            if not touched:
+                yield from self._put_recipe_back(ctx, ground)
             if not kept:
                 raise
             if not built:
@@ -2096,6 +2245,130 @@ class StagedInstaller:
         """Remove the rollback names. A refusal is logged by the seam and changes nothing here."""
         for back in kept:
             self._seams.remove_image(back)
+
+    def _recipe_ground(self, server_dir: Path) -> dict[str, RecipeGround]:
+        """The build-recipe files as found. Bytes, `None` for absent, `UNREADABLE` for neither.
+
+        `_let_go`'s counterpart for the disk: `_keep_rollback` keeps the images
+        the compile is about to overwrite, and this keeps the two files the
+        re-render is about to overwrite. Both are taken before anything runs and
+        both exist so that a press stopped early leaves the machine as it was.
+
+        Bytes, not text: what has to go back is what was there, and a read/write
+        round trip through `str` would rewrite a file's line endings on Windows
+        and call it a restore.
+
+        **THREE answers, and it had two.** Until round 2 of T8's review every
+        `OSError` became `None`, and `None` means "there was no file, so remove
+        the one the re-render made". Traced by the cold reviewer: a `Dockerfile`
+        this process cannot READ (a permission, a directory in its place)
+        answered `None`, `write-dockerfile` then refused it as `UNREADABLE`
+        saying "Nothing was touched", and the restore deleted the user's file
+        and reported "put back exactly as it was". On Windows the `unlink`
+        raised `PermissionError` instead -- not an `InstallerError`, so it flew
+        past `_let_go` and left the rollback tags on the daemon. "Could not ask"
+        is not "was not there", which is the same rule `_keep_rollback` applies
+        to `images_built()` returning `None` one method above.
+
+        The import is local because `families/dockerfile.py` imports `Secrets`
+        from this module; `installer.py` breaks the same cycle the same way. The
+        names are taken from it rather than restated here, so a rename is one
+        edit and not a silent drift into restoring a file nobody writes.
+        """
+        from yulon.catalog.families import dockerfile
+
+        ground: dict[str, RecipeGround] = {}
+        for name in (dockerfile.DOCKERFILE, dockerfile.DOCKERIGNORE):
+            try:
+                ground[name] = (server_dir / name).read_bytes()
+            except FileNotFoundError:
+                ground[name] = None
+            except OSError as exc:
+                logger.warning(f"could not read {server_dir / name} before the rebuild: {exc}")
+                ground[name] = UNREADABLE_RECIPE
+        return ground
+
+    def _put_recipe_back(
+        self, ctx: StageContext, ground: Mapping[str, RecipeGround]
+    ) -> Iterator[str]:
+        """Undo the re-render: the files as they were, and the record that claimed them.
+
+        Called on every failure and every cancel that happens before the
+        containers are replaced, which is exactly the window
+        `rebuild_opening_note()` promises about. Silent when nothing moved --
+        the common case, since the stage writes only on a difference -- so an
+        install that was already current gets no line about a restore that
+        restored nothing.
+
+        The state record goes back with the files, because the two are one
+        claim: `write-dockerfile` is a recorded stage, and leaving its name in
+        `completed` after putting its output back would tell the install's own
+        resume that a stage ran whose effect is no longer on disk. For every
+        install made by a version that had the stage this is already a no-op --
+        the name is in `completed` from the install -- and the case it is for is
+        the folder made before it, which is every install on a disk today.
+
+        `last_error` is deliberately NOT restored: `_staged` has just recorded
+        why this press stopped, and that record is true.
+
+        **Nothing in here may raise.** It runs first in `rebuild()`'s `except`,
+        ahead of `_let_go` and `_restore_rollback`, so an `OSError` escaping
+        this body would take the rollback with it and leave the `-rollback` tags
+        on the daemon for ever -- the failure this method exists to prevent,
+        arriving through the method itself. Every filesystem call is caught and
+        turned into a sentence naming the file, and the press then goes on to
+        put its images back.
+        """
+        moved = False
+        left: list[str] = []
+        for name, was in ground.items():
+            path = ctx.server_dir / name
+            if isinstance(was, _UnreadableRecipe):
+                # `isinstance` and not `is UNREADABLE_RECIPE`, which is the same
+                # test at runtime and does not NARROW: mypy left `bytes |
+                # _UnreadableRecipe` on the write below, which is the type error
+                # that says this branch is load-bearing.
+                #
+                # Never unlinked and never written: this method does not know
+                # what was in it, and a file it could not read is not a file
+                # this press is entitled to remove.
+                left.append(f"{path} could not be read when this rebuild started")
+                continue
+            try:
+                if was is None:
+                    if path.exists():
+                        path.unlink()
+                        moved = True
+                    continue
+                try:
+                    if path.read_bytes() == was:
+                        continue
+                except OSError:
+                    pass
+                path.write_bytes(was)
+                moved = True
+            except OSError as exc:
+                left.append(f"{path} could not be put back ({exc})")
+        if moved:
+            try:
+                now = read_state(ctx.server_dir, valid=self.stage_names())
+                if now is not None and now.completed != ctx.state.completed:
+                    write_state(ctx.server_dir, replace(now, completed=ctx.state.completed))
+            except OSError as exc:
+                logger.warning(f"could not put the stage record back after a rebuild: {exc}")
+        if left:
+            yield (
+                "Part of the build recipe was left as it is now: "
+                + "; ".join(left)
+                + ". Nothing was written to it and nothing was removed from it, so check that "
+                "file before building again."
+            )
+        elif moved:
+            yield (
+                "The build recipe was put back exactly as it was before this rebuild, so the "
+                "server you have now is unchanged and the next build compiles what it compiled "
+                "before."
+            )
 
     def _refuse_unless_rebuildable(self, server_dir: Path) -> InstallState:
         """The two folders this button cannot help, refused by name before anything runs.

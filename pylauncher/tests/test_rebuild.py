@@ -30,16 +30,29 @@ from __future__ import annotations
 
 import re
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
 from tests.support_native import ENTRY, Recorder, engine, install
+from tests.test_families_cmangos import ENTRY as CM_ENTRY
+from tests.test_families_cmangos import client_folder
+from tests.test_families_cmangos import engine as cm_engine
+from tests.test_families_cmangos import install as cm_install
 from yulon import docker
 from yulon.apply import CLONE_DIRS, Applier
 from yulon.catalog import composegen, native
-from yulon.catalog.installer import InstallerError, InstallOptions, rebuild_confirmation
+from yulon.catalog.catalog import load_catalog
+from yulon.catalog.families import dockerfile
+from yulon.catalog.families.cmangos import CmangosInstaller
+from yulon.catalog.installer import (
+    InstallerError,
+    InstallOptions,
+    installer_for,
+    rebuild_confirmation,
+)
 
 PYPLAN = Path(__file__).resolve().parents[2] / "pyplan"
 RENDERED = Path(__file__).resolve().parent / "data" / "wotlk-rendered"
@@ -796,3 +809,502 @@ def test_a_fresh_install_waits_on_the_same_marker_the_rebuild_does(tmp_path: Pat
     assert installed == rec2.ready_specs[-1].auth
     assert installed is not None
     assert re.search(installed, f'Added realm "W" at 127.0.0.1:{ENTRY.ports.world}.')
+
+
+# -- the build recipe the compile is handed ------------------------------------
+#
+# T8, filed from T4's live Tortoise upgrade on m910q (2026-09-09,
+# `pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`). The install's Dockerfile is
+# rendered ONCE, when the server is installed, and `rebuild_stages()` used to be
+# `(build, recreate, ready)` -- so `docker compose build` compiled whatever that
+# render left behind, and a fix shipped in this app's template could never reach
+# a server that was already installed. Measured rather than reasoned: that
+# install's Dockerfile was rendered 2026-09-07 (`FROM ubuntu:22.04`, zero
+# `INSERT IGNORE`), the template had been fixed 2026-09-08 (`3a1ed6ee`), and the
+# upgrade only worked because the hand ran the family's own `write-dockerfile`
+# stage first (`dockerfile-render.log`: "Dockerfile changed: True", both `FROM`
+# lines 22.04 -> 24.04, and the `INSERT IGNORE` rewrite arriving with them).
+#
+# A family whose checkout ships its OWN Dockerfile (AzerothCore: `dockerfile_dir`
+# is None) has no template of ours to be behind, which is why the stage is
+# selected by presence rather than prepended to every rebuild.
+
+
+@pytest.fixture
+def cmangos_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CmangosInstaller._gate` is the double `cm_engine(rec)` attached, as in its own file.
+
+    `test_families_cmangos.py`'s `gated` fixture is autouse THERE and reaches
+    nothing here, so a cmangos install driven from this file would take the real
+    `MarkerGate` to a database that does not exist. Same four lines, same
+    `raising=True`: renaming `_gate` errors here rather than quietly adding an
+    attribute nobody reads.
+    """
+
+    def gate(self: CmangosInstaller, ctx: native.StageContext) -> native.ImportGate:
+        attached = getattr(self, "_test_gate", None)
+        assert attached is not None, "build cmangos engines with cm_engine(rec) in this file"
+        return attached
+
+    monkeypatch.setattr(CmangosInstaller, "_gate", gate, raising=True)
+
+
+def a_finished_cmangos_install(rec: Recorder, tmp_path: Path) -> Path:
+    """`a_finished_install()` for the family that renders its own Dockerfile.
+
+    The same rule: the real install through the machine double, so the state
+    file, the compose files, the `.db_password` the re-render reads back and the
+    Dockerfile itself are the engine's own output rather than a fixture's.
+    """
+    server_dir = tmp_path / "tbc"
+    cm_install(rec, server_dir, client_folder(tmp_path))
+    rec.calls.clear()
+    return server_dir
+
+
+def _stale(server_dir: Path) -> dict[str, bytes]:
+    """Put this install a template-fix behind, in BOTH recipe files, the way a real one gets there.
+
+    An install made before the base image moved: its rendered Dockerfile names
+    the OLD base, on both `FROM` lines, which is the shape the Tortoise
+    template's own comment says they always move in — and its `.dockerignore`
+    carries a line the template has since dropped, because the stage renders
+    that file too and a test that only staled the Dockerfile could not tell a
+    one-file restore from a two-file one. The marker stays on both: these are
+    files Yu'lon wrote, not somebody's own, so the only thing standing between
+    the stale text and the compiler is whether a rebuild renders again.
+
+    Bytes throughout, never `read_text`/`write_text`: `dockerfile.write()` writes
+    with `newline="\\n"` and compares untranslated, so a round trip through
+    Python's universal newlines would hand this test a CRLF "ground" that the
+    engine can never reproduce and the restore would look broken on Windows.
+
+    Returns:
+        Each file's bytes as the templates render them TODAY — what the compile
+        must be handed, and what a stopped press must put back.
+    """
+    edits = {
+        dockerfile.DOCKERFILE: lambda text: text.replace("ubuntu:22.04", "ubuntu:20.04"),
+        dockerfile.DOCKERIGNORE: lambda text: text + "# a line the template has since dropped\n",
+    }
+    fresh: dict[str, bytes] = {}
+    for name, edit in edits.items():
+        path = server_dir / name
+        fresh[name] = path.read_bytes()
+        stale = edit(fresh[name].decode("utf-8"))
+        assert stale.encode("utf-8") != fresh[name], f"{name}: the template no longer renders this"
+        path.write_bytes(stale.encode("utf-8"))
+    return fresh
+
+
+def test_a_rebuild_hands_the_compiler_the_current_template_not_the_render_on_disk(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """THE test for T8. Read at the moment the build seam is called, not afterwards.
+
+    Asserting the file on disk once the run has finished would pass for a
+    rebuild that rendered AFTER compiling, which is the one ordering that
+    changes nothing at all. So the Dockerfile is read INSIDE the build seam --
+    the last moment before the daemon is handed the context -- and what it has
+    to hold is the text the app's own renderer produces today.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    fresh = _stale(server_dir)
+    handed: list[dict[str, bytes]] = []
+
+    def build(
+        build_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        rec.calls.append("build")
+        handed.append({name: (build_dir / name).read_bytes() for name in fresh})
+        return rec.build_result
+
+    said = list(cm_engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir)))
+    assert handed, "the rebuild never reached the compile"
+    assert handed[0] == fresh, (
+        "the compile was handed the build recipe rendered when this server was installed, "
+        "so a fix shipped in the app's templates cannot reach an existing install"
+    )
+    stages = [line for line in said if line.startswith("--- ")]
+    assert stages == ["--- write-dockerfile", "--- build", "--- recreate", "--- ready"], said
+    assert {name: (server_dir / name).read_bytes() for name in fresh} == fresh
+
+
+def test_a_rebuild_that_is_already_current_leaves_the_dockerfile_alone(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """Idempotent, and the stage says so rather than going quiet.
+
+    `dockerfile.write()` leaves unchanged text alone so the mtime does not move
+    -- which is the whole reason this stage can go in front of every rebuild
+    instead of behind a drift check. A re-render that rewrote the byte-identical
+    file would move that mtime, and the `COPY` of the build context would then
+    miss the layer cache on every rebuild anybody ever presses.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    before = (server_dir / dockerfile.DOCKERFILE).stat().st_mtime_ns
+    said = list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert f"{dockerfile.DOCKERFILE} is already exactly what this install needs." in said, said
+    assert f"Wrote {dockerfile.DOCKERFILE}" not in said, said
+    assert (server_dir / dockerfile.DOCKERFILE).stat().st_mtime_ns == before
+
+
+def test_a_checkout_that_ships_its_own_dockerfile_rebuilds_the_same_three_stages(
+    tmp_path: Path,
+) -> None:
+    """AzerothCore has no template of ours to be behind, and must not gain a stage.
+
+    `dockerfile_dir` is None for that entry and the field's own description says
+    what that means: "the checkout ships its own Dockerfile". Prepending the
+    stage to every family would ask `stage_named()` for one AzerothCore does not
+    have and refuse every WotLK rebuild by name -- so the selection is by
+    presence, and this is the half that says so.
+    """
+    rec = Recorder(images=True)
+    assert ENTRY.install.native is not None
+    assert ENTRY.install.native.dockerfile_dir is None
+    names = [stage.name for stage in engine(rec).rebuild_stages()]
+    assert names == ["build", "recreate", "ready"], names
+    cm_names = [stage.name for stage in installer_for(CM_ENTRY).rebuild_stages()]
+    assert cm_names == ["write-dockerfile", "build", "recreate", "ready"], cm_names
+
+
+def test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_it() -> None:
+    """The sentence and the stage tuple, read from the same catalog, entry by entry.
+
+    Two derivations of one fact: `rebuild_confirmation()` holds only the entry,
+    so it asks whether `install.native.dockerfile_dir` names a template, while
+    `rebuild_stages()` asks its own family for a `write-dockerfile` stage. A
+    guard that only checked the sentence was present somewhere would pass while
+    the app promised WotLK users a re-render nothing does -- which is the shape
+    of promise this whole ticket is about. So the two are bound across every
+    shipped entry rather than sampled.
+    """
+    entries = [e for e in load_catalog().games if e.install.native is not None]
+    assert len(entries) >= 4, "the catalog lost its native entries"
+    for entry in entries:
+        native_block = entry.install.native
+        assert native_block is not None
+        renders = native_block.dockerfile_dir is not None
+        staged = "write-dockerfile" in [
+            stage.name for stage in installer_for(entry).rebuild_stages()
+        ]
+        assert renders is staged, (
+            f"{entry.id}: the confirmation reads `dockerfile_dir` and the rebuild reads its "
+            f"stage tuple, and they disagree ({renders} vs {staged})"
+        )
+        text = rebuild_confirmation(entry, Path("/srv"))
+        assert (dockerfile.DOCKERFILE in text) is renders, (entry.id, text)
+        # BOTH files, because the stage writes both through one
+        # `dockerfile.write()`. The clause named only the first and added
+        # "nothing else in the folder is rewritten", which was false of a
+        # `.dockerignore` behind its template (Fable, round 1).
+        assert (dockerfile.DOCKERIGNORE in text) is renders, (entry.id, text)
+        assert "Nothing else in the folder" not in text, (entry.id, text)
+        # And it may not claim that editing one of them stops the press. What
+        # stops it is the FIRST LINE going missing: `_look()` answers `OURS` on
+        # the marker alone, so a file edited under it is replaced whole (cold
+        # review, round 2). The behaviour half is
+        # `test_a_rebuild_hands_the_compiler_the_current_template_not_the_render_on_disk`,
+        # which edits both files below the marker and requires them replaced.
+        assert "if you have edited either" not in text.lower(), (entry.id, text)
+        if renders:
+            assert "templates" in text, (entry.id, text)
+            assert "put back" in text, (entry.id, text)
+            assert "line it writes at the top" in text, (entry.id, text)
+
+
+def test_a_dockerfile_the_user_owns_stops_the_rebuild_before_it_compiles(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """The new failure surface this stage brings, and the sentence the confirmation promises.
+
+    A rebuild can now fail BEFORE the compile, which nothing could do before:
+    `dockerfile.write()` refuses a file that carries no marker, because a
+    Dockerfile this engine did not write is somebody's own build. What makes it
+    "somebody's own" is the first line and only the first line -- `_look()`
+    answers `OURS` on `composegen.GENERATED_MARKER` -- so the file planted here
+    drops that line, which is the one edit the check can actually see, and
+    `rebuild_confirmation()` says so in those terms since round 2.
+
+    The tempting wrong fix is a `try`/`except` around the stage so a Dockerfile
+    problem "does not block a rebuild". That would compile the user's own file
+    and report success, which is this ticket's defect with a friendlier face, so
+    what is asserted is that the press RAISED and never reached the compiler --
+    and that the rollback names taken a moment earlier were let go rather than
+    left on the daemon.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    theirs = "FROM scratch\n# mine, not the app's\n"
+    (server_dir / dockerfile.DOCKERFILE).write_text(theirs, encoding="utf-8")
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert "was not written by Yu'lon" in str(raised.value), raised.value
+    assert "build" not in rec.calls, rec.calls
+    assert "recreate" not in rec.calls, rec.calls
+    assert (server_dir / dockerfile.DOCKERFILE).read_text(encoding="utf-8") == theirs
+    refs = composegen.built_image_refs(CM_ENTRY, server_dir, platform_id=lambda: "linux")
+    backs = [ref + native.ROLLBACK_TAG_SUFFIX for ref in refs]
+    assert [c for c in rec.calls if c.startswith("rmi:")] == [f"rmi:{b}" for b in backs], rec.calls
+    # On the LINES, not on the exception: the restore's sentences are yielded,
+    # so `"put back" not in str(raised.value)` could never have failed (cold
+    # review, round 2). Nothing moved here -- the user's file is the ground --
+    # so nothing may claim it was put back or left behind.
+    # "put back" alone would match `_keep_rollback`'s own line about the images.
+    restored = [
+        line
+        for line in said
+        if "build recipe was put back" in line or "build recipe was left as it is now" in line
+    ]
+    assert not restored, said
+
+
+# -- what a stopped press leaves on the disk ------------------------------------
+#
+# `rebuild_opening_note()` promises that stopping before the containers are
+# replaced leaves the server "exactly as it is", and the re-render put two files
+# in that window: it rewrites them before the compile and records its stage, so a
+# cancel or a failed build used to leave a recipe the user never confirmed for
+# the NEXT press to compile (Codex, round 1). The promise is kept by
+# `_put_recipe_back()` rather than by narrowing the sentence.
+
+
+def _state_without_the_recipe_record(server_dir: Path) -> native.InstallState:
+    """The state file an install made BEFORE this stage existed carries, and its ground.
+
+    Not an invented fixture: `write-dockerfile` is a recorded stage, so every
+    install this app has ever made has it in `completed` — and that is exactly
+    what makes the record half of the restore invisible on a fresh tree. The
+    population it is for is the folders on disk today, whose state files were
+    written by earlier versions, and `read_state`'s own `unknown` field exists
+    because that population is real. Modelled by taking the record back out.
+    """
+    ground = native.read_state(server_dir, valid=CmangosInstaller.STAGE_NAMES)
+    assert ground is not None and native.DOCKERFILE_STAGE in ground.completed
+    ground = replace(
+        ground, completed=tuple(s for s in ground.completed if s != native.DOCKERFILE_STAGE)
+    )
+    native.write_state(server_dir, ground)
+    return ground
+
+
+def test_a_build_that_fails_puts_both_recipe_files_back_as_they_were(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """The disk after a failed compile is the ground's, byte for byte, and so is the record.
+
+    The compile is what the user agreed to and it did not happen, so nothing
+    this press did to the folder may outlive it. Both files are asserted because
+    the stage writes both through one `dockerfile.write()`; the state record is
+    asserted because leaving `write-dockerfile` in `completed` would tell the
+    install's own resume that a stage ran whose output has just been undone.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    ground_state = _state_without_the_recipe_record(server_dir)
+    fresh = _stale(server_dir)
+    was = {name: (server_dir / name).read_bytes() for name in fresh}
+    assert was != fresh, "the stale ground is the same as the template's own render"
+    rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+    with pytest.raises(InstallerError):
+        list(cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
+    assert {name: (server_dir / name).read_bytes() for name in fresh} == was, (
+        "a press that compiled nothing left a build recipe the user never confirmed, so the "
+        "next build would produce a different image"
+    )
+    after = native.read_state(server_dir, valid=CmangosInstaller.STAGE_NAMES)
+    assert after is not None
+    assert after.completed == ground_state.completed, after.completed
+    assert after.last_error, "the failure itself is still recorded"
+
+
+def test_a_stop_between_the_compile_and_the_recreate_puts_the_recipe_back(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """The exact window the promise is about: the compile finished, the containers did not move.
+
+    `_restore_rollback()`'s own docstring names it -- "the running server IS the
+    old build, only the tags name the new one" -- and puts the tags back without
+    restarting anything. The recipe has to come back with them, or the machine
+    is left running a build made from one recipe with a different one on disk.
+    This arm is a different branch from the failed compile above (`built` is
+    True, so the images are restored rather than let go), which is why both are
+    driven rather than one.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    fresh = _stale(server_dir)
+    was = {name: (server_dir / name).read_bytes() for name in fresh}
+    stop = threading.Event()
+
+    def build(
+        build_dir: Path, files: object, *, sink: object = None, cancel: object = None
+    ) -> docker.AttachedRun:
+        rec.calls.append("build")
+        # Stopped while the compiler was running: the spine checks before the
+        # next stage, so this is a press abandoned after an hour of output and
+        # before anything the user is running has been touched.
+        stop.set()
+        return rec.build_result
+
+    with pytest.raises(InstallerError) as raised:
+        list(
+            cm_engine(rec, build=build).rebuild(InstallOptions(server_dir=server_dir), cancel=stop)
+        )
+    assert "recreate" not in rec.calls, rec.calls
+    assert {name: (server_dir / name).read_bytes() for name in fresh} == was, raised.value
+
+
+def test_the_restore_says_so_and_stays_quiet_when_nothing_moved(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """A silent revert is its own defect; a line about a restore that restored nothing is noise.
+
+    The common case is an install already current, where the stage writes
+    nothing and there is nothing to put back — so the sentence has to be tied to
+    a file actually moving rather than to the failure.
+    """
+
+    def failed_rebuild(rec: Recorder, server_dir: Path) -> list[str]:
+        rec.build_result = docker.AttachedRun(1, ("cc1plus: error",))
+        said: list[str] = []
+        with pytest.raises(InstallerError):
+            for line in cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)):
+                said.append(line)
+        return said
+
+    rec = Recorder(images=True)
+    current = a_finished_cmangos_install(rec, tmp_path)
+    quiet = failed_rebuild(rec, current)
+    assert not [line for line in quiet if "put back exactly as it was" in line], quiet
+
+    rec2 = Recorder(images=True)
+    behind = a_finished_cmangos_install(rec2, tmp_path / "again")
+    _stale(behind)
+    said = failed_rebuild(rec2, behind)
+    assert [line for line in said if "put back exactly as it was" in line], said
+
+
+def test_a_ground_file_this_process_cannot_read_is_left_alone_and_named(
+    cmangos_gate: None, tmp_path: Path
+) -> None:
+    """ "Could not ask" is not "was not there", and collapsing the two deleted the file.
+
+    Traced by the cold reviewer, round 2: `_recipe_ground()` mapped every
+    `OSError` to `None`, `None` means "the re-render created this, remove it",
+    and a `Dockerfile` this process cannot READ therefore ended the press by
+    being unlinked under the sentence "put back exactly as it was". On Windows
+    the unlink raises `PermissionError` instead -- not an `InstallerError` -- so
+    it flies past `_let_go` and the `-rollback` tags stay on the daemon for ever.
+
+    A DIRECTORY in the file's place rather than `chmod 000`, so the same test
+    runs on both platforms and needs no skip: `read_bytes()` raises
+    `IsADirectoryError` on Linux and `PermissionError` on Windows, neither of
+    them `FileNotFoundError`, which is exactly the distinction under test. It is
+    also what `_look()` sees, so the stage refuses it as unreadable and the
+    press reaches the restore the way a real one would.
+
+    Three things are asserted, and the third is the one the double can see that
+    a reader cannot: the directory survives, no sentence claims the recipe was
+    put back, and the rollback names were let go -- proof that nothing raised
+    past `_let_go` on the way out.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    path = server_dir / dockerfile.DOCKERFILE
+    path.unlink()
+    path.mkdir()
+    (path / "keep.txt").write_text("a file inside what used to be the Dockerfile\n")
+    # The rule itself, before the press that depends on it: three answers, and
+    # this is the third. Asserted here as well as end-to-end because the harm
+    # the press can show on both platforms is the wrong SENTENCE -- `unlink()`
+    # cannot remove a directory, so the deletion the collapse causes needs a
+    # regular unreadable file, which Windows cannot make.
+    ground = cm_engine(rec)._recipe_ground(server_dir)
+    assert ground[dockerfile.DOCKERFILE] is native.UNREADABLE_RECIPE, ground
+    assert isinstance(ground[dockerfile.DOCKERIGNORE], bytes), ground
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in cm_engine(rec).rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert path.is_dir(), "the unreadable ground was removed"
+    assert (path / "keep.txt").exists(), "what was in it went with it"
+    assert "build" not in rec.calls, rec.calls
+    assert not [line for line in said if "put back exactly as it was" in line], said
+    named = [line for line in said if str(path) in line and "could not be read" in line]
+    assert named, said
+    refs = composegen.built_image_refs(CM_ENTRY, server_dir, platform_id=lambda: "linux")
+    backs = [ref + native.ROLLBACK_TAG_SUFFIX for ref in refs]
+    assert [c for c in rec.calls if c.startswith("rmi:")] == [
+        f"rmi:{b}" for b in backs
+    ], f"something raised past _let_go and left the rollback tags: {rec.calls}; {raised.value}"
+
+
+def test_a_restore_that_cannot_write_says_so_instead_of_taking_the_rollback_with_it(
+    tmp_path: Path,
+) -> None:
+    """Nothing in the restore may raise: it runs ahead of `_let_go` and `_restore_rollback`.
+
+    The window is real rather than theoretical -- the ground was read before the
+    first stage, and anything can have happened to those two paths in the hour
+    of compiling since -- but it cannot be produced through a press, because a
+    path the re-render could not write is a path the stage refused first. So
+    this drives the method: a ground that says "these bytes were here" against a
+    path that is now a directory.
+
+    Without the guard the `OSError` leaves `rebuild()` through its own `except`
+    clause, so `_let_go(kept)` never runs and the `-rollback` names stay on the
+    daemon under a suffix documented as transient -- the same shape as the
+    `-failed` leak measured on yulon-ubuntu 2026-09-09, arriving through the
+    method written to prevent a leak.
+    """
+    installer = engine(Recorder(images=True))
+    server_dir = tmp_path / "srv"
+    (server_dir / dockerfile.DOCKERFILE).mkdir(parents=True)
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.InstallState(ENTRY.id, "abc", "azerothcore"),
+        cancel=None,
+        secrets=native.Secrets(db_password="pw"),
+    )
+    said = list(installer._put_recipe_back(ctx, {dockerfile.DOCKERFILE: b"the recipe\n"}))
+    assert (server_dir / dockerfile.DOCKERFILE).is_dir()
+    assert [line for line in said if "could not be put back" in line], said
+    assert not [line for line in said if "put back exactly as it was" in line], said
+
+
+def test_a_rebuild_tuple_missing_the_stage_the_rollback_watches_refuses_before_tagging(
+    tmp_path: Path,
+) -> None:
+    """The `if wrappers:` arm, driven. Nothing else in the suite reaches it.
+
+    `stage_named()` refuses a family with no `build` at all; this is the other
+    half -- a tuple that carries a `build` under another name, or that stopped
+    adding `recreate` -- and what it produces without the check is not a missing
+    stage but a rollback that silently never fires: `touched` would stay False
+    through a recreate that really happened, so a server that failed to come
+    back up would be "restored" without its containers being replaced.
+
+    Refused BEFORE `_keep_rollback()`, which is what makes "Nothing was started"
+    true, so the absence of any `tag:` call is asserted rather than implied.
+    """
+    rec = Recorder(images=True)
+    server_dir = a_finished_install(rec, tmp_path)
+    installer = engine(rec)
+    installer.rebuild_stages = lambda: tuple(  # type: ignore[method-assign]
+        stage for stage in engine(rec).rebuild_stages() if stage.name != "recreate"
+    )
+    rec.calls.clear()
+    with pytest.raises(InstallerError) as raised:
+        list(installer.rebuild(InstallOptions(server_dir=server_dir)))
+    said = str(raised.value)
+    assert "`recreate` stage to watch" in said, said
+    assert "could not be rolled back" in said and "Nothing was started" in said, said
+    assert not [c for c in rec.calls if c.startswith("tag:")], rec.calls
+    assert "build" not in rec.calls, rec.calls
