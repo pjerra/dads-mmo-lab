@@ -78,7 +78,7 @@ from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
-    IMPORT_CANCEL_NOTE,
+    IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
     RERUN_CANCEL_NOTE,
     UPDATES_BUTTON_LABEL,
@@ -246,7 +246,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
-            Stage("import", self._import, cancel_note=IMPORT_CANCEL_NOTE),
+            Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )

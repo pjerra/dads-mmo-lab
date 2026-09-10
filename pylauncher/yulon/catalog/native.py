@@ -553,6 +553,23 @@ seconds and leaves `acore_world` permanently unimportable (yulon-ubuntu,
 true; without it the honest copy would be the opposite.
 """
 
+IMPORT_STAGE_CANCEL_NOTE = (
+    "If these databases are half-written from an earlier stop, they are detected and cleared "
+    "before the import is run again, so nothing has to be undone by hand; if they already read "
+    "as a finished import, a stop leaves the statements that already ran in place and clears "
+    "nothing, and the flagged phase is applied whole again next time."
+)
+"""What the spine says before the ordinary `import` stage runs -- true on BOTH routes.
+
+The spine says a stage's note before the body runs (A4), and `_import` only learns
+which route it is on from its one probe, inside the body: a fresh or partial import
+(`stage_import()`, whose `partial` arm clears -- `IMPORT_CANCEL_NOTE`'s promise) or a
+finished install's re-run of the flagged phases (`_rerun_on_marked()`, which clears
+nothing -- `RERUN_CANCEL_NOTE`). Said up front, either single-route sentence is false on
+the other route (Codex on T19, round 2); this one names both arms and lets the stop
+itself say which happened.
+"""
+
 RERUN_CANCEL_NOTE = (
     "A stop here leaves the statements that already ran in place and clears nothing; the "
     "flagged phase is applied whole again the next time this is pressed."
