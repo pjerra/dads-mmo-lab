@@ -1,6 +1,6 @@
 # T19 — The updates button cannot reach a marker-less install, and prints the install's cancel note
 
-**Status:** second half MERGED `e2a305c8`; first half at the round cap with a design question open (2026-09-10 19:40 CEST): the branch `hand-t19-probe` at `6e0e043c` is NOT merged; the owner is asked which way to go
+**Status:** second half MERGED `e2a305c8`; first half ROUND 3 by a Fable hand (the owner's word 2026-09-10 19:41 CEST: "use fable on this round only"), sentinel tables derived from the dump files
 **Filed:** 2026-09-10 15:14 CEST by the lead (Fable), from T14's live half (findings 1-2, confirmed by the evidence reviewer against the source)
 **Hand:** Sonnet for the second half alone; Opus if the first half becomes a probe change (it touches the import gate every CMaNGOS install goes through). Worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** second half: `pylauncher/yulon/catalog/native.py` **only** at `update_stages()` (`:2165-2168` at `1f44a995`) and its test file. First half, once decided: `pylauncher/yulon/catalog/sqlplan.py` at `MarkerGate.probe` (`:1251-1279`) and `pylauncher/yulon/catalog/native.py` at `import_reads_as_finished` (`:401`), or a new adopt action beside the updates button in `controller_view.py` — not both; their tests; the T11 ticket's claim corrected by the lead, not the hand.
@@ -85,3 +85,7 @@ Must-fix: completeness requires the plan's own completion evidence, not `player_
 ## The lead's assessment at the cap (2026-09-10 19:40 CEST)
 
 The reviewer is right, and the remaining fix is a design, not a sentence: without a marker, the only completion evidence a probe can derive from the plan is the table set the dump files themselves create (parse `CREATE TABLE` names out of each streamed file, which the updates route already expands), required in full, with the residual risk that a dump interrupted inside its final `INSERT`s still passes -- statable and small, but not zero. That is a third round of an Opus hand (one to two hours), which the two-round cap does not allow the lead to take on its own. The alternative the owner declined -- an explicit "Adopt as imported" press that writes the marker with consent -- has no inference in it. Asked the owner through the question tool; the branch is kept unmerged until the answer.
+
+## Owner (2026-09-10 19:41 CEST, through the question tool): "Use fable on this round only"
+
+A third round, the hand a Fable model, on the sentinel-table design; the cap stands for everything else.
