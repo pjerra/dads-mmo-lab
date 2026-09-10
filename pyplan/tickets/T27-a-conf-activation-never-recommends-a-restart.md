@@ -18,3 +18,7 @@ The activation of `mod-playerbots`' conf through the app's own seam reported `re
 ## Definition of done
 
 `--checks` ALL GREEN from your worktree's `pylauncher/` (announce on the gate box first); the tests red first. One commit, `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch under `<scratchpad>/T27/`.
+
+## Hand's report (Sonnet, 2026-09-11 04:05 CEST, `hand-t27` at `ccd26fb5`)
+
+Gate `=== --checks: ALL GREEN ===` (4152 passed). `_Log.conf_restart` set only at the two sites in `_conf()` that write bytes (the template copy on activate, the key write), read into `restart_recommended` as a fifth clause of the OR; both `done` lines now end "— the world reads <file> at its next start". Three tests plus one rewritten (`test_a_manifest_can_declare_the_restart_it_needs` had pinned the bug: "the derivation cannot see a conf write"); mutations: the clause dropped → red on the two write tests; the identical case folded into the written one → red on the nothing-written test only. Diff +120/−22 in `apply.py` and `tests/test_apply.py`. No deviations. Status DONE. One Codex review running.
