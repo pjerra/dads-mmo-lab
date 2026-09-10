@@ -1,6 +1,6 @@
 # T24 — The engine's install route re-applies a flagged phase without proving the world is down
 
-**Status:** IN PROGRESS (Sonnet hand on `hand-t24` since 2026-09-10 15:29 CEST, gate box m910q)
+**Status:** CLOSED (merged `74536843`, gate ALL GREEN on m910q behind it, 2026-09-10 16:01 CEST; one round, the remedy fixed by the lead's hand; worktree and branch removed)
 **Filed:** 2026-09-10 15:08 CEST by the lead (Fable), from the owed Codex adversarial pass on T11 (`c5e7d78c`+`d90eae50`); the same fact as T11's code-review note 3, which T14 closed on the button's route only
 **Hand:** Sonnet (one interlock and its test; the primitives exist), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/families/cmangos.py` **only** at `_import`'s finished-install branch (`:1165-1169` at `d90eae50`; find it at the tip) and `_only_the_rerunnable_phases` if the check belongs in the shared spot; `pylauncher/yulon/catalog/native.py` only if the world reading must be handed in through `StageContext` (T14's `updates_only` is the shape; T7's `Seams.world_running` is the seam); their tests (name them). Not `controller_view.py`, not the button (T14 owns that route and it already refuses).
