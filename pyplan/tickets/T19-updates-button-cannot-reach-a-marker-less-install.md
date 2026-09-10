@@ -19,3 +19,10 @@
 ## Definition of done
 
 `--checks` ALL GREEN from your worktree's `pylauncher/` (announce on the gate box first; `YULON_TEST_BOX=m910q` while the Hyper-V host is down); the tests red first. One commit per half, `Co-Authored-By: Claude <model> <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch under `<scratchpad>/T19/`.
+
+## Report, second half (hand, Sonnet, 2026-09-10 16:46 CEST)
+
+- `3d674bea` on `hand-t19` (base `6b6db7ab`); gate ALL GREEN on m910q (3974 passed); 2 files +41/-1 (`native.py` +12/-1, `test_database_updates.py` +30).
+- `replace(self.stage_named("import"), recorded=False, cancel_note="")` in `update_stages()`, the docstring extended with why.
+- Test `test_an_updates_press_never_prints_the_import_stage_cancel_note`: `update_databases()` on a finished-import fixture, `IMPORT_CANCEL_NOTE` in no yielded line, `--- start-db` and `--- import` both present. RED against the old code; mutation (the old `replace` without `cancel_note=""`) RED; restored GREEN, 26 in the file; T14's one-probe test green.
+- Deviations: none. Status DONE (second half).
