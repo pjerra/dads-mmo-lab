@@ -337,9 +337,10 @@ realm row as the run found them, and each `restore.log` records the trap's own b
 | characters | 1001 | 1001 |
 | code under test | `528f219e` | `528f219e` |
 
-`ac-authserver` was restarted seven times by this session — once by each of the six runs' traps and
-once by `mut-stale-window.sh` putting the conf back — plus twice more during the two mechanism
-checks described under "What was tried before it was written" below. `ac-worldserver` and
+`ac-authserver` was restarted eight times by this session — once by each of the six runs' traps,
+once by `mut-stale-window.sh` putting the conf back, and once by the hand restore of the realm row
+(`failrestore/hand-restore.txt:9-11`; the reviewer counted the `StartedAt` chain) — plus twice more
+during the two mechanism checks described under "What was tried before it was written" below. `ac-worldserver` and
 `ac-database` were never restarted.
 
 **One reading needs saying plainly, because it looked like damage and was not.** The first
