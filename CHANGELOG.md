@@ -20,6 +20,7 @@ _Everything below landed on `yulon-phase8b` after `v0.6.59Public` (cut from `Yul
 
 ### Fixed
 - A log panel's Stop now reaches a child blocked in a quiet read; a worker driven on the GUI thread no longer quits the GUI thread's event loop. The 7.10 re-run's one clause that compared a plan to itself was corrected and watched failing; the box-restoring trap around it verifies every step it restores. (`7.10-rerun-ubuntu2-2026-09-09/`, `7.10-clause35-ubuntu2-2026-09-09/`)
+- My Party's dismiss: the server-side bridge script that removes a bot now checks, at the moment it acts, that the bot's current party is the party of the master who asked, and says so when it is not; before, a bot that had changed party between the panel's read and the whisper was removed from a party nobody confirmed, and a bridge that found nothing to remove read as success. Unit-proven; the live folder owed on the WotLK box.
 - A rebuild waits for the realm line, not for the address a fresh install had — on a server whose address had changed it would otherwise wait six hours and restore the old build.
 - The install-time ready wait asks the install for its realm pair instead of typing one.
 - An account writer handed a scheme it does not know refuses by name -- password reset, account row, GM grant and GM read -- instead of writing AzerothCore's columns; an entry that declares no scheme is refused in the app, not defaulted. Unit-proven; no live folder.
