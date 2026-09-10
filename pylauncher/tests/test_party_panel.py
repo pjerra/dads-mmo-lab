@@ -13,6 +13,8 @@ as "a bot arrived", which is what "My Party works" used to mean (2026-08-20).
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+
 from yulon import party
 from yulon.ui.widgets.job import run_inline
 from yulon.ui.widgets.party_panel import (
@@ -20,7 +22,10 @@ from yulon.ui.widgets.party_panel import (
     DISMISS_ALL_IDLE,
     DISMISS_ALL_MOVED,
     LEVEL_AS_MADE,
+    LINK_IDLE,
+    NO_ACCOUNT_TYPED,
     NO_BOTS_TO_DISMISS,
+    PRESS_SHOW_CANDIDATES_FIRST,
     PRESS_SHOW_FIRST,
     SPEC_AUTO,
     WORKING,
@@ -51,6 +56,10 @@ class _StubParty:
         mass: party.MassDismissal | None = None,
         specs: dict[str, tuple[str, ...]] | None = None,
         max_level: int | None = 80,
+        picker: party.Picker | None = None,
+        named: party.NamedAddition | None = None,
+        plan: party.AccountLink | None = None,
+        link: party.AccountLink | None = None,
     ) -> None:
         self.state_result = state or party.PartyState(True, "", READY_CHECKS)
         self.addition = addition or party.Addition(
@@ -65,6 +74,18 @@ class _StubParty:
         self.removed: list[tuple[str, str]] = []
         self.dismissed_all: list[tuple[str, tuple[int, ...]]] = []
         self.dismissed: list[str] = []
+        # T26. The picker, the named add and the two halves of the link, each
+        # recorded the same way: what the panel asked for is the assertion.
+        self.picker = picker or party.Picker()
+        self.named = named or party.NamedAddition(True, True, "Nore", "Nore joined the party.")
+        self.plan = plan or party.AccountLink(False, "PERZI", "FRIEND", "would link them")
+        self.link = link or party.AccountLink(
+            True, "PERZI", "FRIEND", "PERZI and FRIEND are linked."
+        )
+        self.picked: list[str] = []
+        self.added_named: list[tuple[str, str]] = []
+        self.planned: list[tuple[str, str]] = []
+        self.linked: list[tuple[str, str]] = []
 
     def state(self, master: str) -> party.PartyState:
         self.asked.append(master)
@@ -87,6 +108,22 @@ class _StubParty:
     ) -> party.Addition:
         self.added.append((master, klass, spec, level))
         return self.addition
+
+    def candidates(self, master: str) -> party.Picker:
+        self.picked.append(master)
+        return self.picker
+
+    def add_named(self, master: str, name: str) -> party.NamedAddition:
+        self.added_named.append((master, name))
+        return self.named
+
+    def link_plan(self, master: str, account: str) -> party.AccountLink:
+        self.planned.append((master, account))
+        return self.plan
+
+    def link_account(self, master: str, account: str) -> party.AccountLink:
+        self.linked.append((master, account))
+        return self.link
 
     def remove(self, master: str, bot: str) -> party.Dismissal:
         self.removed.append((master, bot))
@@ -880,3 +917,193 @@ def test_a_level_bound_that_lands_during_a_press_does_not_hand_the_box_back(qapp
 
     assert panel.level.isEnabled() is False
     assert panel.level.maximum() == 80, "the bound still arrived; only the control stayed locked"
+
+
+# -- T26: adding a named character, and linking an account -------------------
+
+
+def _candidate(
+    name: str = "Nore",
+    *,
+    allowed_by: str = party.ALLOWED_SAME_ACCOUNT,
+    refused_because: str = "",
+) -> party.Candidate:
+    return party.Candidate(
+        name=name,
+        level=60,
+        klass=8,
+        account_or_guild="PERZI",
+        allowed_by=allowed_by,
+        refused_because=refused_because,
+    )
+
+
+def _candidates_shown(panel: PartyPanel) -> list[str]:
+    """The picker's rows as they are drawn. NOT `_offered` above, which is the
+    spec combo -- two lists on one panel and one name for both is how a test
+    passes over the wrong widget."""
+    return [panel.candidate_list.item(i).text() for i in range(panel.candidate_list.count())]
+
+
+def test_add_this_character_sits_beside_add_a_bot_and_not_instead_of_it(qapp: object) -> None:
+    """The owner asked for a second way in, not a different one. "Add a bot"
+    makes a bot of a chosen class; this one puts an EXISTING character -- an
+    alt, a guild mate, a friend's character -- into the party."""
+    panel = _panel(_StubParty())
+    assert panel.add_button.text() == "Add a bot"
+    assert panel.add_named_button.isEnabled() is False, "nothing is chosen yet"
+    assert panel.candidates_button.text()
+
+
+def test_the_picker_draws_every_row_and_greys_the_ones_the_server_would_refuse(
+    qapp: object,
+) -> None:
+    """A refused row is SHOWN with its reason rather than left out: "why is my
+    alt not in this list" is the question a filtered list cannot answer, and the
+    module's own refusal goes to the game window where nothing can hear it.
+
+    Mutation: draw only the allowed rows. The list then reads as the whole truth
+    about a server where 500 characters were refused for being logged in.
+    """
+    stub = _StubParty(
+        picker=party.Picker(
+            rows=(
+                _candidate("Nore"),
+                _candidate("Busy", allowed_by="", refused_because=party.REFUSED_ONLINE),
+            )
+        )
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.show_candidates()
+
+    assert stub.picked == ["Pakka"]
+    assert any("Nore" in row for row in _candidates_shown(panel))
+    assert any(party.REFUSED_ONLINE in row for row in _candidates_shown(panel))
+    assert panel.candidate_list.item(0).flags() & Qt.ItemFlag.ItemIsEnabled
+    assert not panel.candidate_list.item(1).flags() & Qt.ItemFlag.ItemIsEnabled
+
+
+def test_pressing_add_this_character_reaches_the_seam_with_the_chosen_name(
+    qapp: object,
+) -> None:
+    """The name the seam is handed is the row a person chose, and the report is
+    the seam's own sentence."""
+    stub = _StubParty(picker=party.Picker(rows=(_candidate("Nore"),)))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.show_candidates()
+    panel.candidate_list.setCurrentRow(0)
+
+    panel.add_named()
+
+    assert stub.added_named == [("Pakka", "Nore")]
+    assert panel.report.text() == "Nore joined the party."
+
+
+def test_a_row_read_for_another_character_cannot_be_pressed(qapp: object) -> None:
+    """The rows and the character they were read FOR travel together, `_drawn`'s
+    rule: a list read as Pakka and pressed as Anmi would send Anmi a name
+    nothing had worked out the rules for."""
+    stub = _StubParty(picker=party.Picker(rows=(_candidate("Nore"),)))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.show_candidates()
+    panel.candidate_list.setCurrentRow(0)
+    panel.character.setText("Anmi")
+
+    panel.add_named()
+
+    assert stub.added_named == []
+    assert panel.report.text() == PRESS_SHOW_CANDIDATES_FIRST
+
+
+def test_a_picker_that_could_not_be_read_draws_no_rows_and_says_why(qapp: object) -> None:
+    """`Picker.problem`'s reason, on screen: a short list and a failed read look
+    identical."""
+    stub = _StubParty(picker=party.Picker(problem="could not read which characters could be added"))
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.show_candidates()
+
+    assert _candidates_shown(panel) == []
+    assert "could not read" in panel.candidate_note.text()
+
+
+def test_linking_an_account_asks_first_and_names_both_accounts(qapp: object) -> None:
+    """One press arms and says what it would do; the second writes. The panel's
+    own gesture (`DISMISS_ALL_IDLE`), not a modal -- the answers here arrive
+    from a worker thread."""
+    stub = _StubParty(
+        plan=party.AccountLink(False, "PERZI", "FRIEND", "This links the account PERZI to FRIEND")
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.link_name.setText("FRIEND")
+
+    panel.link_account()
+
+    assert stub.planned == [("Pakka", "FRIEND")]
+    assert stub.linked == [], "the first press writes nothing"
+    assert "PERZI" in panel.report.text() and "FRIEND" in panel.report.text()
+
+    panel.link_account()
+
+    assert stub.linked == [("Pakka", "FRIEND")]
+    assert panel.report.text() == "PERZI and FRIEND are linked."
+    assert panel.link_button.text() == LINK_IDLE
+
+
+def test_a_link_the_seam_refuses_never_arms(qapp: object) -> None:
+    """A refusal is the whole answer: an unknown account, the master's own, or a
+    pair already linked. Arming over one would ask somebody to confirm a write
+    that cannot happen."""
+    stub = _StubParty(
+        plan=party.AccountLink(
+            False, "PERZI", "", "there is no account called NOBODY", blocker="no such account"
+        )
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.link_name.setText("NOBODY")
+
+    panel.link_account()
+    panel.link_account()
+
+    assert stub.linked == []
+    assert stub.planned == [
+        ("Pakka", "NOBODY"),
+        ("Pakka", "NOBODY"),
+    ], "each press asks again -- an account can be made between two presses"
+    assert "no account called NOBODY" in panel.report.text()
+
+
+def test_typing_another_account_name_stands_an_armed_link_down(qapp: object) -> None:
+    """The subject of the confirmation is the pair of accounts; a changed name is
+    a different pair. `DISMISS_ALL_MOVED`'s finding, on this control."""
+    stub = _StubParty()
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+    panel.link_name.setText("FRIEND")
+    panel.link_account()
+    panel.link_name.setText("OTHER")
+
+    panel.link_account()
+
+    assert stub.linked == [], "the second press must not write the pair that was armed"
+    assert panel.link_button.text() != LINK_IDLE or panel.report.text()
+
+
+def test_an_empty_account_box_is_refused_here_and_nothing_is_asked(qapp: object) -> None:
+    """The same rule as the empty character box: a press a person can take back
+    should not cost a database read to be told about."""
+    stub = _StubParty()
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.link_account()
+
+    assert stub.planned == []
+    assert panel.report.text() == NO_ACCOUNT_TYPED
