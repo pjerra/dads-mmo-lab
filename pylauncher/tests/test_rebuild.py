@@ -1292,6 +1292,42 @@ def test_a_recreate_that_fails_after_the_daemon_may_have_changed_something_is_no
     assert "was put back" in str(raised.value), raised.value
 
 
+def test_a_failure_between_the_progress_line_and_the_compose_call_is_still_untouched(
+    cmangos_gate: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window round 2 left (its review): `touched` flipped at `stage_recreate()`'s first
+    yield, but `container_spec()` and the compose call come AFTER that yield, and the
+    daemon can go away between the readiness probe and the call. A failure there is still
+    "nothing was touched": both recipe files come back byte for byte, the stage record is
+    restored, and the daemon is never asked to recreate anything. Modelled with
+    `container_spec()` refusing after the progress line has been yielded."""
+    rec = Recorder(images=True)
+    server_dir = a_finished_cmangos_install(rec, tmp_path)
+    ground_state = _state_without_the_recipe_record(server_dir)
+    fresh = _stale(server_dir)
+    was = {name: (server_dir / name).read_bytes() for name in fresh}
+    assert was != fresh, "the stale ground is the same as the template's own render"
+
+    engine_ = cm_engine(rec)
+
+    def no_spec(self: object) -> docker.ContainerSpec:
+        raise InstallerError("the compose file could not be read, so no container was named")
+
+    monkeypatch.setattr(type(engine_.entry), "container_spec", no_spec)
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in engine_.rebuild(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert [line for line in said if "Replacing the running containers" in line], said
+    assert {name: (server_dir / name).read_bytes() for name in fresh} == was, raised.value
+    after = native.read_state(server_dir, valid=CmangosInstaller.STAGE_NAMES)
+    assert after is not None
+    assert after.completed == ground_state.completed, after.completed
+    assert "recreate" not in rec.calls, rec.calls
+    assert [line for line in said if "build recipe was put back exactly as it was" in line], said
+    assert "no container was named" in str(raised.value), raised.value
+
+
 def test_the_restore_says_so_and_stays_quiet_when_nothing_moved(
     cmangos_gate: None, tmp_path: Path
 ) -> None:

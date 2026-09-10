@@ -2359,7 +2359,9 @@ class StagedInstaller:
             f"on its own for it, and the world server stays down."
         )
 
-    def stage_recreate(self, ctx: StageContext) -> Iterator[str]:
+    def stage_recreate(
+        self, ctx: StageContext, *, before_replace: Callable[[], None] | None = None
+    ) -> Iterator[str]:
         """Replace the long-running containers so the binary just built is the one running.
 
         The stage the whole feature turns on. Everything above it can be
@@ -2376,9 +2378,15 @@ class StagedInstaller:
         ONE `compose up --force-recreate` for every service this install has, and a
         `DockerCommandError` from it does not say which of them it got to before failing --
         compose can recreate two services and fail the third, or recreate all three and
-        then fail the running-container check. The wrapper in `rebuild()` reads reaching
-        this method's first yield as the boundary: not "replaced", but "past the point
-        where this call can still fail having changed nothing".
+        then fail the running-container check. `before_replace` is the boundary the
+        wrapper in `rebuild()` needs: it is called synchronously, after every argument is
+        prepared and immediately before the compose command is issued, so a failure
+        anywhere in front of it -- the readiness probe, the progress yield the caller is
+        suspended at, `container_spec()` -- is still "nothing was touched", and only a
+        failure from the command itself is not. (Round 2 read the first yield as that
+        boundary; the round-2 review pointed out the daemon can go away between the
+        probe and the call, and a consumer can stop at the yield, so the flag moved to
+        the call.)
         """
         if not self._seams.docker_ready():
             raise InstallerError(
@@ -2387,8 +2395,11 @@ class StagedInstaller:
                 "touched. Check the docker daemon is up, then press Rebuild again."
             )
         yield "Replacing the running containers so the new build is what starts."
+        spec = self.entry.container_spec()
+        if before_replace is not None:
+            before_replace()
         try:
-            self._seams.recreate(self.entry.container_spec(), ctx.server_dir)
+            self._seams.recreate(spec, ctx.server_dir)
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"The server was rebuilt, but its containers could not be replaced, so the "
@@ -2505,14 +2516,15 @@ class StagedInstaller:
             built = True
 
         def recreate(stage_ctx: StageContext) -> Iterator[str]:
-            nonlocal touched
-            generator = self.stage_recreate(stage_ctx)
-            # Raises here -- `docker_ready()` refused -- and `touched` is never
-            # reached: correct, since nothing downstream of that refusal ever ran.
-            first = next(generator)
-            touched = True
-            yield first
-            yield from generator
+            def mark_touched() -> None:
+                nonlocal touched
+                touched = True
+
+            # `touched` flips inside `stage_recreate()`, synchronously, immediately
+            # before the compose command is issued -- not at the stage's first yield
+            # (round 2), which left a window between the readiness probe and the
+            # command where a failure read as a partial replacement.
+            yield from self.stage_recreate(stage_ctx, before_replace=mark_touched)
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
