@@ -13,9 +13,12 @@ value of the last save, and reported it as the level.
 
 **So what closes the window is a SAVE, not a wait and not a resend.** `.saveall` is
 `ObjectAccessor::SaveAllPlayers` (`01b-source.log:81-87`), which walks every `Player` in the world —
-bots included, though a bot holds no session — and the row agreed 2.0 to 9.2 seconds after it went
-out in all seven trials. The code half sends it and reads `characters.level` afterwards, and only
-then does a row that still disagrees earn a second send.
+bots included, though a bot holds no session — and the row agreed **1.4 to 8.2 seconds after the
+`saveall` came back**, in all seven trials. The code half sends it, reads its answer, and reads
+`characters.level` afterwards; only then does a row that still disagrees earn a second send.
+
+**Round 2** (2026-09-11, after a cold review returned REWORK) fixed three things and took four
+reviewer notes. They are marked **R2** where they appear, and section 13 lists them.
 
 **Every sentence here names the file and line that shows it.** A claim with no `file:line` after it is
 a claim this run did not make. Every `docker logs --since` window was opened with
@@ -46,12 +49,16 @@ md5 before pressing them (`04-second-press.log:7-11`).
 | 05 | 23:46:01–23:47:31 | teardown: the harness off, the world restarted without it | `05-teardown.log` |
 | 06 | 23:49:18–23:49:47 | the box read back against step 01's own numbers | `06-box-as-found.log` |
 | 07 | 23:50:09 | this lane's directories off the box | `07-cleanup.log` |
-| 12 | 23:21 | the mutation table for the code half | `12-mutations.txt` |
+| 12 | 23:21, re-run in round 2 | the mutation table for the code half — ten rows | `12-mutations.txt` |
+| 13 | round 2 | `--checks` on m910q, ALL GREEN | `13-checks-m910q.txt` |
+| 14 | round 2 | the bytes step 04 pressed, reconstructed from the committed file and matched | `14-pressed-bytes.py`, `14-pressed-bytes.txt` |
+| 15 | round 2, 00:28 | every hash of `party.py` this ticket produced, read out of `git show` | `15-hashes.txt` |
+| 07b | round 2, 00:24:41 | the read-back that this lane's directories are gone | `07b-gone.txt` |
 
 Scripts, and they are what ran: `lib.sh`, `01-ground.sh`, `01b-source.sh`, `02-harness.sh`,
 `03-trials.sh`, `03b-fill.sh`, `04-second-press.sh`, `05-teardown.sh`, `06-box-as-found.sh`,
-`07-cleanup.sh`, `08-no-secrets.sh`, the driver `t16press.py`, and the staging harness
-`t16_stage.lua`.
+`07-cleanup.sh`, `08-no-secrets.sh`, `14-pressed-bytes.py`, `16-mut-t16.py`, the driver
+`t16press.py`, and the staging harness `t16_stage.lua`.
 
 Two abandoned runs are kept rather than deleted, and section 7 says why: `03a-trials-abandoned.log`
 and `03b-trials-abandoned.log`.
@@ -191,9 +198,14 @@ Read the table like this:
   (`trial-4.txt`, `trial-5.txt`); the four `fill` rows broke off earlier, at 15 to 46 seconds.
 * **`characters.level` does not move on its own in that time at all** — the "row at the send" and
   "row 10 s after" columns are the same number in all seven rows.
-* **`saveall` is what moves it**, 2.0 to 9.2 seconds later (the `saveall` goes out at send+10, so
-  "row first agreed" minus 10). The three rows whose 3-second reading still showed the old value are
-  the slow end of that range, not a different outcome: all seven ended with the row reading 42.
+* **`saveall` is what moves it.** **R2, and the number is now the measured one rather than a
+  derivation.** The driver stamped each `saveall` and each first agreement itself, so the delta is
+  read off the file and not obtained by subtracting ten seconds from the "first agreed" column:
+  **1.4 s** (`trial-5.txt:107` → its AGREES line), **1.8 s** (`trial-4.txt:84`), **2.2 s**
+  (`trial-2.txt:44`), **4.0 s** (`fill-3.txt:34`), **4.6 s** (`fill-4.txt:100`), **6.2 s**
+  (`fill-2.txt:69`), **8.2 s** (`fill-1.txt:62`) — a measured range of **1.4 to 8.2 seconds**. The
+  three rows whose 3-second reading still showed the old value are the slow end of that range, not a
+  different outcome: all seven ended with the row reading 42.
 * **The app's own seam behaves exactly like the command by hand.** Both `seam` rows are
   indistinguishable from their `hand` neighbours, and `play.set_level`'s own `Outcome` carries the
   server's sentence — `Outcome(done=True, text='You changed level of Boldameg to 42.…')`
@@ -227,26 +239,40 @@ order is **send, save, read, resend, save, read**:
     return LevelStep(after, resent=True, saved=True)
 ```
 
-and `_saved_row_level` is the save plus the join poll's own machinery:
+and `_saved_row_level` is the save, **its answer**, and then the join poll's own machinery:
 
 ```python
-    send(SAVE_COMMAND)
+    refusal = _save_refusal(send(SAVE_COMMAND))
+    if refusal:
+        return (_row_level(members, guid), refusal)
     after: int | None = None
     for attempt in range(tries):
         if attempt:
             sleep(pause)
         after = _row_level(members, guid)
         if after == level or after is None:
-            return after
-    return after
+            return (after, "")
+    return (after, "")
 ```
+
+**R2, must-fix 1: the save is a SEND, and its answer is read like every other send in `add_bot`**
+(`:1187`, `:1240-1241`, `:1247-1248`). Round 1 threw it away, and the cold review traced what that
+buys on a stopping world or a SOAP timeout: `saved=True` — whose own docstring says the row was
+WRITTEN — then up to thirty seconds of polling a row nobody wrote, a resend, a second ignored save,
+and finally the sentence *"…after the row was written and the level was sent a second time"*, which
+would be false in every clause. `_save_refusal` now ends the step in its own sentence instead, with
+`indeterminate` as a separate arm because a SOAP timeout means the command was sent and the answer
+never came, so "the server did not run it" is a claim nothing here can make.
 
 * **`SAVE_COMMAND = "saveall"`** is what closes the window, and its docstring carries section 3's two
   citations. It is the server's own command and what the world does to itself every quarter of an
   hour.
-* **`LEVEL_TRIES = 30`, `LEVEL_SLEEP = 1.0`** — a ceiling of thirty seconds against the 2.0–9.2 s
+* **`LEVEL_TRIES = 30`, `LEVEL_SLEEP = 1.0`** — a ceiling of thirty seconds against the 1.4–8.2 s
   this folder measured, and a ceiling rather than a wait: the poll returns the moment the row agrees.
-  On the second press the whole step took 3.2 s and then 4.4 s.
+  On the second press the whole step took 3.2 s and then 4.4 s. **R2:** the STEP's worst case is two
+  of those ceilings, about sixty seconds plus the two sends, because a written row that disagrees
+  earns a second send and a second save. That path was never reached live and is pinned only in the
+  unit tests; the docstring now says so.
 * **The resend is what a real disagreement earns and nothing else.** Before the save, a disagreeing
   row is a row nobody has written; after it, a disagreeing row is the world disagreeing. A resend on
   the first reading would fire on every press and prove nothing.
@@ -256,6 +282,14 @@ and `_saved_row_level` is the save plus the join poll's own machinery:
   unwritten for as long as this panel watched it"; it now says *"…still reads N, not L, after the row
   was written and the level was sent a second time. Take the level as not set."* The arm is still
   reachable and now means something narrower and true.
+* **R2, two of the reviewer's notes, both taken.** The "already" arm was tested BEFORE the readback,
+  so a bot that WAS at the level asked for and whose written row came back at some other level was
+  told "nothing about the level changed" — off the one reading that says something did. A disagreeing
+  row now wins over "already". And the resend-refused path used to open *"The level was not set"*,
+  which is false: the first send was accepted and the row was written. It now says *"The server took
+  the level and characters.level read N, not L, after the row was written. The second send was
+  refused: …"*. `problem` is a complete sentence from whichever step produced it, and `_level_note`
+  no longer wraps it.
 
 ## 6. THE SECOND PRESS — `party._level_step` against this server
 
@@ -274,6 +308,42 @@ channel, and the app's own group read (`t16press.py`, `levelpress`).
 soon as it was written, which is what section 4 predicted and is why the resend is a guard rather
 than the mechanism. A2 is the row that proves the first reading is not skipped — it sent nothing, it
 saved nothing, and it said so.
+
+### R2, must-fix 2 — the bytes that were pressed, tied to the bytes that shipped
+
+`04-second-press.log:11` prints md5 `fca7d004a700164ff6374b187ce93d16` for the `party.py` the press
+ran against. That tree was `~/t16-live` and it is gone, so the cold review's objection stands as
+written: the log's hash matched neither the committed file nor `12-mutations.txt`'s sha256. **It is
+now tied the other way round, and proved rather than asserted.** `14-pressed-bytes.py` takes the file
+as it was committed, undoes the two edits made after the press — both inside docstrings, both quoted
+in the script — and prints the md5 that comes back:
+
+```
+reconstruction md5 = fca7d004a700164ff6374b187ce93d16
+pressed md5        = fca7d004a700164ff6374b187ce93d16   (04-second-press.log:11)
+MATCH
+```
+
+and then the whole diff between the two, which is four lines of docstring prose in two paragraphs:
+`LEVEL_TRIES` quoting the press's own 3.2 s and 4.4 s (which the press had not yet produced when it
+ran), and `_level_step` bounding the tail claim to the tails' actual lengths. `14-pressed-bytes.txt`
+is that run. So **no statement executed by the second press differs from the statement that shipped**
+— and that is shown, not claimed.
+
+Round 2's own fix to `_level_step` changes the file again. The three hashes, and which is which:
+
+| bytes | md5 | sha256 (first 16) |
+|---|---|---|
+| pressed by step 04 | `fca7d004a700164ff6374b187ce93d16` | — |
+| committed by round 1 (`e241fc95`) | `7e4562af74c0e2bd52535bc405ec752d` | `35946ab7345be778` |
+| the mutation table's own reading, round 1 | — | `7150796f3cfc438d` (an earlier state of the file: the table was run before the trials, and its own docstring numbers were not yet in it) |
+| **committed by round 2** (`818cadaa`) | `9804eb9db0c02dc51448f0444286d6f0` | `056eda535cafc17e` |
+
+`15-hashes.txt` is those hashes read out of `git show` rather than typed, and it is also where the
+loop the review asked about closes: `12-mutations.txt`'s own `sha256 before` / `sha256 after` are both
+`056eda535cafc17e…`, the round-2 committed file. The mutated file IS the shipped file. In round 1 they
+differed, because that table was run before the trials and before the docstrings quoted them — which
+is what the reviewer saw and is stated here rather than explained away.
 
 ## 7. What went wrong in this lane's own driver, and why two logs are abandoned
 
@@ -366,7 +436,12 @@ Ryshar 56` (`06-box-as-found.log:65-95`) — **not one of them is 42 or 55**. It
 the level each had before; a random bot's level is the module's to choose and it re-rolls it itself.
 What the teardown did is hand the choice back, and this sentence is the whole of the claim.
 
-`~/t16-live` and `~/t16-out` are gone (`07-cleanup.log`, and the directories read back as absent).
+`~/t16-live` and `~/t16-out` are gone. **R2, must-fix 3:** round 1 said "and the directories read
+back as absent" and `07-cleanup.log` holds no such read. The read-back is now a capture of its own,
+`07b-gone.txt`, stamped from the box's own clock at 00:24:41 CEST on 2026-09-11 — the day after the
+run, which is when it was taken and is what the file says. It shows `ls -d ~/t16-live ~/t16-out`
+answering `No such file or directory` twice with `rc=2`, `ls -d ~/t16*` finding nothing at all, the
+six bridge scripts, and all three containers up.
 
 ## 10. Secrets
 
@@ -395,6 +470,24 @@ output is `12-mutations.txt`:
 | M4 | a press that needed a second send does not say so | `test_a_level_that_needed_a_second_send_says_so_in_the_panels_own_sentence` | 1 failed | 1 passed |
 | M5 | the did-NOT-take sentence is replaced by the one that says it landed | `test_a_level_the_written_row_still_disagrees_with_is_not_reported_as_set` | 1 failed | 1 passed |
 | M6 | a bot that left the group is treated as a level that disagreed | `test_a_bot_that_left_the_group_before_the_row_was_read_is_not_sent_the_level_again` | 1 failed | 1 passed |
+| **M7** | **the `saveall`'s answer is thrown away, as round 1 threw it away** | `test_a_saveall_the_server_refused_is_its_own_sentence_and_not_a_verdict_on_the_level` | 1 failed | 1 passed |
+| **M8** | **an indeterminate save is reported as one the server refused** | `test_a_saveall_that_never_came_back_is_not_reported_as_one_the_server_refused` | 1 failed | 1 passed |
+| **M9** | **the "already" arm is tested before the readback, as round 1 tested it** | `test_a_bot_already_at_the_chosen_level_whose_written_row_disagrees_is_told_the_row` | 1 failed | 1 passed |
+| **M10** | **a refused second send opens "the level was not set", as round 1 opened it** | `test_a_refused_second_send_says_the_first_one_was_taken` | 1 failed | 1 passed |
+
+**M1's anchor had to be rewritten for round 2's code** (the save is now inside
+`_save_refusal(send(SAVE_COMMAND))`); the harness printed `ANCHOR MATCHED 0 TIMES -- row abandoned,
+nothing written` and refused to report a survivor, which is the guard from
+`mutation-testing-pycache-trap` doing its job. **And M10 SURVIVED on its first run**, because the
+test written for it used one stand-in outcome for both sends, so the FIRST send failed and the arm
+under test never ran — a test that could not fail. `_Level` now takes `then=` for the second send,
+and the test asserts `level.asked` has two entries before it looks at the sentence. Both are in this
+folder's `12-mutations.txt` history rather than smoothed away: the committed table is the run in which
+all ten died.
+
+The harness itself is `16-mut-t16.py`, committed so a reader can re-run the load-bearing rows rather
+than re-read the table (memory note `mutation-testing-pycache-trap`, fourth trap). It lives in a
+directory named for this task, never a shared scratch path.
 
 T5's own level tests are all still green, and one of them was **rewritten rather than kept**:
 `test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set` pinned the sentence
@@ -402,8 +495,12 @@ this folder overturns, so it is now
 `test_a_level_the_written_row_still_disagrees_with_is_not_reported_as_set` and pins the new one, with
 the reason in its own docstring. That is a deviation and section 12 names it.
 
-`--checks` was run on m910q from this worktree's `pylauncher/` and came back **ALL GREEN** — 4099
-passed, 6 skipped, mypy on three platforms, ruff and black clean: `13-checks-m910q.txt`.
+`--checks` was run on m910q from this worktree's `pylauncher/` and came back **ALL GREEN** — in round
+1, and again in round 2 with the four new tests. `13-checks-m910q.txt` is the last of those runs, and
+it is the one taken with **nothing uncommitted**: its first line reads
+`==> syncing hand-t16 (536b2683) to m910q` and there is no `overlaying N uncommitted file(s)` line
+under it, so the 4103 passed are the bytes this folder ships beside. 4103, 6 skipped, mypy on three
+platforms, ruff and black clean.
 
 **One earlier pass of the same gate was RED and it is named here rather than smoothed over.** It
 failed `tests/test_catalog_view.py::test_a_script_that_exits_0_without_installing_is_not_remembered`,
@@ -433,3 +530,20 @@ paragraph is the record that it was the second one.
 7. **Four trials measured nothing** and are reported as such (section 7, item 3).
 8. **One of T5's tests was rewritten, not merely kept green.** Its assertions pinned the sentence
    this folder overturns. Section 11 says which, and the test's own docstring carries the reason.
+
+## 13. Round 2, what the cold review changed
+
+Verdict REWORK, 2026-09-11. The finding and the fix stood; three must-fixes and four notes.
+
+| | what | where it is answered |
+|---|---|---|
+| must-fix 1 | the `saveall`'s `Answer` was thrown away, so a refused or indeterminate save still produced `saved=True`, a pointless thirty-second poll, a resend, and a sentence claiming the row had been written | section 5, `_save_refusal`; tests M7 and M8 |
+| must-fix 2 | the pressed bytes could not be tied to the shipped bytes | section 6's own subsection, `14-pressed-bytes.py` and `14-pressed-bytes.txt` — the reconstruction's md5 matches the log's, and the whole difference is four lines of docstring |
+| must-fix 3 | `07-cleanup.log` carried no read-back for the claim that this lane's directories are gone | section 9, `07b-gone.txt`, stamped from the box |
+| note, taken | the 2.0–9.2 s range was derived by subtracting ten seconds; the measured deltas are 1.4–8.2 s | section 4, each with its file and line; `LEVEL_TRIES`' docstring says "measured rather than derived" |
+| note, taken | the step's worst case is two ceilings, about sixty seconds, not thirty | section 5 and `LEVEL_TRIES`' docstring |
+| note, taken | the "already" arm won even when the written row disagreed | section 5; test M9 |
+| note, taken | the resend-failed path opened "The level was not set" though the first send succeeded | section 5; test M10 |
+
+Nothing on the box was touched in round 2 except one read-only `ls` (`07b-gone.txt`), announced in
+the activity terminal first like every other action.

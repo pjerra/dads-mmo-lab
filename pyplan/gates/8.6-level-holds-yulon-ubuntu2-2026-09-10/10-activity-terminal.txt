@@ -29,3 +29,8 @@
 23:48:59  T16 live: step 06 finished -- the box is read back.
 23:49:18  T16 live: step 06 -- reading the box back against step 01's numbers. Nothing is changed.
 23:49:47  T16 live: step 06 finished -- the box is read back.
+23:50:09  T16 live: step 07 -- removing this lane's own directories from the box. Nothing under ~/wowserver is touched.
+23:50:09  T16 live: step 07 finished -- this lane's directories are gone.
+23:50:23  T16: the live half is done. The harness is off, the world is up, the bots this lane levelled are back with the module-s own randomiser, and this lane-s directories are gone.
+00:06:40  T16: done. Both halves committed on hand-t16, --checks ALL GREEN on m910q. The box is as it was found.
+00:24:41  T16 round 2: reading back that this lane-s directories are gone, for a capture the first round claimed without one.
