@@ -1,9 +1,9 @@
 # T21 — A failed group read after a genuine uninvite is reported as "removed"
 
-**Status:** IN PROGRESS (Sonnet hand on `hand-t21` since 2026-09-10 15:17 CEST, gate box m910q)
+**Status:** REWORK round 1 of 2 (rejected by the lead 2026-09-10 15:29 CEST); the file set widened to `remove_all` and `_mass_sentence`
 **Filed:** 2026-09-10 15:05 CEST by the lead (Fable), from the T13 round-2 Opus review (note 5)
 **Hand:** Sonnet (a parser-sized fix), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
-**File set (yours alone):** `pylauncher/yulon/party.py` **only** at `dismiss()`'s poll after the logout whisper (`:1356-1365` at `1a446392`) and `_rows_only` (`:1760`) if a sibling for the dismiss direction is needed; `pylauncher/tests/test_party.py`. Not `remove_all`, not `_mass_sentence`, not the Lua.
+**File set (yours alone):** `pylauncher/yulon/party.py` **only** at `dismiss()`'s poll after the logout whisper (`:1356-1365` at `1a446392`) and `_rows_only` (`:1760`) if a sibling for the dismiss direction is needed; `pylauncher/tests/test_party.py`. Round 2 widens this to `remove_all` and `_mass_sentence` (the round-1 file set walled off the batch path the finding lives on); still not the Lua, not the panel.
 **Box:** none; unit only. The live contract is T13's live half.
 
 ## The finding (T13 review, note 5)
@@ -31,3 +31,13 @@
 - The sentence: `"<bot> may or may not have left: the group table could not be read (<the string>)"`, `removed=False`.
 - Tests: `test_a_group_read_that_keeps_failing_is_reported_as_unknown_not_removed` -- mutation (fold each read through `_rows_only`, the old path) RED with `removed=True`; `test_a_group_read_that_fails_once_does_not_fail_the_dismiss` -- mutation (`continue` -> `break`) RED; both RED first against the old code.
 - Deviations: none. Status DONE.
+
+## Review (Codex adversarial, 2026-09-10 15:29 CEST) -- REWORK, two
+
+1. **high** `party.py:1763-1768`: `InstallParty.remove_all` still passes every post-uninvite read through `_rows_only`; a failure string becomes `()` and `dismiss()` reports `removed=True` for every bot in the batch during a database outage -- the false success T21 exists to delete, on the batch route. The new tests call `dismiss()` directly, so folding `remove` back through `_rows_only`, or leaving the batch path, survives them.
+2. **medium** `party.py:1465-1477`: `_mass_sentence` treats every `removed=False` as "stayed"; an unknown outcome ("may or may not have left") is summarised as "None ... left" / "Still here", asserting what no read established.
+Confirmed right: the panel's per-row Remove goes through `InstallParty.remove` with the unfolded answer; `add_bot` stays on `_rows_only`; `dismiss()` keeps polling after a transient failure.
+
+## Rejection (lead, round 1)
+
+The ticket's file set caused finding 1; it is widened above. Must-fixes: (1) `remove_all` (and `dismiss_all`'s `members` callable) hands `dismiss()` the unfolded `self.members(master)` -- no `_rows_only` anywhere on the dismiss direction; seam-level tests for BOTH `remove` and `remove_all` with every post-uninvite read failing, asserting no `Dismissal` has `removed=True`, each with the mutation (the fold restored). (2) `_mass_sentence` says an unknown outcome as unknown: three buckets (left / stayed / could not be read), the sentence naming each that is non-empty, never "still here" for a bot whose table was never read; tests for all-unknown and for a mixed batch, with the mutation (unknown folded into stayed). Add a commit (do not amend); gate; report in the same format. Round 2 is the last under the cap.
