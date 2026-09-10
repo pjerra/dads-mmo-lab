@@ -1,6 +1,6 @@
 # T19 — The updates button cannot reach a marker-less install, and prints the install's cancel note
 
-**Status:** second half MERGED `e2a305c8`; adopt press unit MERGED `a62dd763` (2026-09-10 21:31 CEST, gate ALL GREEN on m910q behind it; the write ledger's conflict with T26 resolved by keeping both paragraphs); the m910q press owed, on the owner's yes
+**Status:** CLOSED (2026-09-10 22:03 CEST): second half `e2a305c8`, the adopt press `a62dd763`, the m910q press merged `bfe353e6`; the owner's install adopted and updated; the probe attempts kept as `record/t19-probe-unmerged` (local); worktrees and branches removed
 **Filed:** 2026-09-10 15:14 CEST by the lead (Fable), from T14's live half (findings 1-2, confirmed by the evidence reviewer against the source)
 **Hand:** Sonnet for the second half alone; Opus if the first half becomes a probe change (it touches the import gate every CMaNGOS install goes through). Worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** second half: `pylauncher/yulon/catalog/native.py` **only** at `update_stages()` (`:2165-2168` at `1f44a995`) and its test file. First half, once decided: `pylauncher/yulon/catalog/sqlplan.py` at `MarkerGate.probe` (`:1251-1279`) and `pylauncher/yulon/catalog/native.py` at `import_reads_as_finished` (`:401`), or a new adopt action beside the updates button in `controller_view.py` — not both; their tests; the T11 ticket's claim corrected by the lead, not the hand.
