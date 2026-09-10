@@ -26,3 +26,7 @@ Gate `=== --checks: ALL GREEN ===` (4152 passed). `_Log.conf_restart` set only a
 ## Review, round 1 (Codex adversarial, 2026-09-11 04:20 CEST): needs-attention, one high
 
 `apply.py:2162-2168` sets `conf_restart` for every nonempty `writes` list, and `_set_conf_key` writes on its replace path without comparing bytes, so an already-identical keyed conf still reports a write and recommends a restart; the no-write test covers only the template-copy skip, so the "identical folded into written" mutation is not isolated for the keyed path. Round 2 sent: report whether any key changed the file, set the flag and the sentence only then, a test for the identical keyed apply.
+
+## Round 2 and the lead's check (2026-09-11 04:45 CEST)
+
+`b5f2d00c` (the one commit amended): `_set_conf_key` answers `unchanged` when the substituted text equals the file's, the caller sets `conf_restart` and the sentence only when some key changed the file; new test `test_reapplying_an_identical_keyed_conf_does_not_recommend_a_restart`; three mutations red on their own tests, green restored; gate ALL GREEN (4153). Lead's check in the worktree: 136 apply tests green; the identical-key guard removed → exactly 1 failed; restored → 136. ACCEPT.
