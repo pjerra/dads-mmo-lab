@@ -1,6 +1,6 @@
 # T20 — A paused worldserver passes the direct-SQL guard
 
-**Status:** MERGING (hand DONE `e4514902`, Codex ACCEPT; gate behind the merge on m910q)
+**Status:** CLOSED (merged `ada022c8`, gate ALL GREEN on m910q behind it, 2026-09-10 15:28 CEST; worktree and branch removed)
 **Filed:** 2026-09-10 15:05 CEST by the lead (Fable), from the owed Codex adversarial pass on T7 round 2 (`a6e2aff6`), one high finding
 **Hand:** Sonnet (a one-function fix and its tests), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/docker.py` **only** at `world_running()` (`:2539-2564`) and its docstring; its test (`test_world_running_is_three_valued_and_an_unreadable_inspect_is_not_a_no`, find the file with `git grep -n`); one app-level test beside T7's button test in `pylauncher/tests/test_controller_view.py` (or the apply-seam test file T7 used — name it). Not `apply.py`, not `controller_view.py`.
