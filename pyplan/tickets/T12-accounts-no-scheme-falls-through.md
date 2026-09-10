@@ -45,3 +45,7 @@ Notes: `Scheme` at `accounts.py:176` is a local re-declaration of the catalog Li
 ## Merge (lead, 2026-09-09 12:26 CEST)
 
 `git merge --no-ff eea840b6` -> `865b6963`; `--checks` on `yulon-phase8b` behind it ALL GREEN; pushed. Follow-ups noted, not filed: pin the writer's `Scheme` alias to the catalog Literal; Tortoise's copy of the no-scheme sentence could collapse onto `checked_scheme`.
+
+## Owed Codex pass on `eea840b6` (lead ran it 2026-09-10 15:06 CEST)
+
+Verdict needs-attention, one high finding, **still true at the tip (`a8391aeb`)**: the WotLK password-repair callback `controller_view.py:972` binds `reset=lambda name, pw: wotlk_accounts.reset_own_password(sql, name, pw)` with no `scheme`; the writer's default is `scheme="azerothcore"` (`controller_wow_wotlk/accounts.py:465`), so an entry with no declared scheme — the state `create` two lines above refuses through `checked_scheme` — can still reach repair and run `UPDATE account SET salt=..., verifier=...`. The controller test covers the two create callbacks only. The three CMaNGOS trees' wrappers pass their scheme (`tbc` `mangos_srp6`, `vanilla`/`tortoise` `scheme()`); WotLK is the one site. Follow-up ticket **T22**.

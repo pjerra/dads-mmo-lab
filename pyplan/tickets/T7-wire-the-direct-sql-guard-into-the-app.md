@@ -105,3 +105,7 @@ Notes: (1) the pressed sha is asserted -- every capture prints `yulon.__file__`,
 ## Lead's merge (2026-09-09 14:05 CEST)
 
 Notes 1-3 closed by the lead's hand in the README after the merge; the 8.7a record written on the checklist in the same series.
+
+## Owed Codex pass, round 2 commit `a6e2aff6` (lead ran it 2026-09-10 15:04 CEST)
+
+One finding, high: **a paused worldserver bypasses the direct-SQL guard** (`pylauncher/yulon/docker.py:2561-2564`). `world_running()` answers `False` for every non-empty status except `running` and `restarting`, so Docker's `paused` reads as down; a paused world keeps its database-backed state resident and can resume and write it over the direct SQL. `False` is the guard's only allow value, so both readings in `_sql()` pass. The test `test_world_running_is_three_valued_and_an_unreadable_inspect_is_not_a_no` pins `paused: False`, preserving it. Recommendation: `paused` -> `True` (or every status but `exited`/`dead`/`created` counts as running), flip the test, and an app-level test that a paused WotLK world gives `ApplyError` with zero runner calls. A must-fix -> follow-up ticket (filed by the lead as its own ticket; not fixed here).
