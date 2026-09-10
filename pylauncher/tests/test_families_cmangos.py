@@ -67,6 +67,7 @@ from yulon.catalog.installer import (
     cancelled_install_message,
     installer_for,
 )
+from yulon.catalog.native import UPDATES_BUTTON_LABEL
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -2285,7 +2286,11 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     evidence = finished_extraction(rec, server_dir, client)
 
     with pytest.raises(InstallerError) as caught:
-        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+        list(
+            engine(rec, world_running=a_world_that_is(False)).run(
+                InstallOptions(server_dir=server_dir, client_dir=client)
+            )
+        )
     images, doomed = remedy_steps(str(caught.value), server_dir)
     ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
     assert images == engine(rec).built_image_refs(ctx), str(caught.value)
@@ -2311,7 +2316,11 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     rec.calls.clear()
     rec.container_runs.clear()
 
-    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False)).run(
+            InstallOptions(server_dir=server_dir, client_dir=client)
+        )
+    )
     assert "build" in rec.calls, said
     assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == [
         "ad",
@@ -2407,7 +2416,11 @@ def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_wer
     rec.images = False
     rec.calls.clear()
     rec.container_runs.clear()
-    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False)).run(
+            InstallOptions(server_dir=server_dir, client_dir=client)
+        )
+    )
     assert "build" in rec.calls, said
     assert all(
         extractor_file(server_dir, name).read_bytes()
@@ -4367,7 +4380,11 @@ def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it
     tmp_path: Path,
 ) -> None:
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
-    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False))._import(
+            context(server_with_sql(tmp_path))
+        )
+    )
     assert rec.sql_calls == [], "nothing was sent to the database"
     assert any("leaving them alone" in line for line in said), said
 
@@ -4384,7 +4401,11 @@ def test_the_import_leaves_a_populated_database_that_is_complete_alone(
     """
     full = docker.ImportState("populated", "every schema has tables and rows", complete=True)
     rec = ready_to_import(full)
-    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    list(
+        engine(rec, world_running=a_world_that_is(False))._import(
+            context(server_with_sql(tmp_path))
+        )
+    )
     assert rec.sql_calls == []
 
 
@@ -4406,6 +4427,20 @@ MARKED_ONLY = "SELECT 'only the phases the marker rule covers'"
 
 EVERY_PRESS = "SELECT 'a phase declared rerun_on_marked'"
 """The statement of the flagged phase: applied on every press, finished or not."""
+
+
+def a_world_that_is(answer: bool | None) -> Callable[[str], bool | None]:
+    """The `world_running` seam, answering the same thing however often it is asked.
+
+    Copied rather than shared with `test_database_updates.py`'s helper of the
+    same name (T14's `worlds()` sits beside it for the same reason): that file
+    imports fixtures FROM this one, so the other direction would be circular.
+    """
+
+    def world_running(container: str) -> bool | None:
+        return answer
+
+    return world_running
 
 
 def rerun_plan() -> SqlPlan:
@@ -4451,7 +4486,11 @@ def test_a_phase_declared_rerunnable_reaches_an_install_the_probe_reads_as_finis
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     rec = ready_to_import(finished)
-    said = list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    said = list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
     assert EVERY_PRESS in rec.sql_calls, rec.sql_calls
     assert any("character updates" in line for line in said), said
 
@@ -4470,7 +4509,11 @@ def test_the_phases_a_finished_install_may_not_re_run_are_still_left_alone(
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
-    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
     assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls
     assert not [s for s in rec.sql_scripts if "CREATE DATABASE" in s or "IDENTIFIED BY" in s]
 
@@ -4490,7 +4533,11 @@ def test_a_re_run_over_a_finished_install_writes_no_marker_and_re_asks_no_verify
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
-    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
     assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], rec.sql_scripts
     asked = {rule.query for rule in SQL.verify}
     assert not [s for s in rec.sql_calls if s in asked], rec.sql_calls
@@ -4535,7 +4582,11 @@ def test_a_re_run_that_the_database_refuses_stops_the_install_before_the_world_s
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     rec.failing_sql = EVERY_PRESS
     with pytest.raises(InstallerError, match="Nothing after it was applied"):
-        list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+        list(
+            engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+                context(server_dir)
+            )
+        )
 
 
 def test_a_rerunnable_phase_is_still_asked_whether_its_update_level_landed(
@@ -4575,7 +4626,134 @@ def test_a_rerunnable_phase_is_still_asked_whether_its_update_level_landed(
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
     rec.column_answer = "0\n"
     with pytest.raises(InstallerError, match="required_0002_step"):
-        list(engine_with_sql(plan, rec)._import(context(server_dir)))
+        list(
+            engine_with_sql(plan, rec, world_running=a_world_that_is(False))._import(
+                context(server_dir)
+            )
+        )
+
+
+# -- the world must be down before a finished install's rerun (T24) ----------
+#
+# T11 landed `_rerun_on_marked()`, reached the moment `_import` reads the probe
+# as finished, with nothing before it asking whether the world that owns
+# `tw_char`/`characters` is up: `start-db` only proves the DATABASE container,
+# and `up` runs three stages later, never before. T14 closed this on the
+# Modules-tab button's own route (`update_databases()`), which has its own
+# `ctx.updates_only` arm and its own guard; this route is the OTHER caller of
+# `_rerun_on_marked()` — the ordinary install spine, reached by `engine.run()`
+# (the CLI harness, and any "Use existing..." folder whose world is running).
+
+
+@pytest.mark.parametrize(
+    "running,detail",
+    [
+        (True, "world server is running"),
+        (None, "could not tell whether"),
+    ],
+)
+def test_a_finished_installs_rerun_refuses_before_up_while_the_world_is_up_or_unreadable(
+    tmp_path: Path, running: bool | None, detail: str
+) -> None:
+    """The stage order T11's reviewer read: no SQL, and `up` never runs either.
+
+    A full `run()`, not a bare `_import()` call — a mutation deleting the guard
+    would still pass a test that never gave `up` a chance to run, and asserting
+    stage order is the whole point (T11's reviewer, note 3).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(running))
+    assert detail in str(raised.value)
+    assert rec.sql_calls == [], rec.sql_calls
+    assert "start" not in rec.calls, "the world server was started (`up` ran)"
+    assert "reset" not in rec.calls, "a database was cleared"
+
+
+def test_a_finished_installs_rerun_refuses_naming_press_stop_then_install_again(
+    tmp_path: Path,
+) -> None:
+    """The 8.7a sentence shape, with the remedy this route can actually follow.
+
+    `update_databases()`'s own refusal names the Modules-tab button — the
+    thing a press on THAT route just made. This route is reached by Install (or
+    the CLI harness, or a "Use existing..." folder), so the remedy names that
+    instead; the fact and the "Press Stop" clause are the same rule as T7's and
+    T14's guards, said again so a user meets one rule under three doors.
+    """
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=a_world_that_is(True))._import(
+                context(server_with_sql(tmp_path))
+            )
+        )
+    said = str(raised.value)
+    assert "Press Stop" in said, said
+    # The remedy must be one a REMEMBERED install can follow: its catalog tile is
+    # greyed "Installed" (catalog_view.py:432-439), so "press Install again" is
+    # not it (Codex on T24); the Modules-tab button is enabled for exactly the
+    # plans this route fires on.
+    assert UPDATES_BUTTON_LABEL in said, said
+    assert "press Install again" not in said, said
+    assert "nothing was imported and nothing was cleared" in said, said
+
+
+def test_a_finished_installs_rerun_names_docker_when_the_world_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """The `None` branch, and why the remedy has to name Docker first.
+
+    `docker.container_state()` answers an empty state both for a container
+    that is not there and for a daemon that will not reply, so "Stop the
+    server" is advice nobody stuck on the second one can follow (cold review
+    of T14, round 1 — the same shape, a third time).
+    """
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=a_world_that_is(None))._import(
+                context(server_with_sql(tmp_path))
+            )
+        )
+    said = str(raised.value)
+    assert "could not tell whether" in said, said
+    assert "Docker" in said, said
+    assert rec.sql_calls == [], rec.sql_calls
+
+
+def test_a_finished_installs_rerun_proceeds_once_the_world_reads_down(tmp_path: Path) -> None:
+    """`False` is the one answer that lets this route apply the flagged phase — unchanged."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(False))
+    assert any("leaving them alone" in line for line in said), said
+    assert "start" in rec.calls, "the world was never brought back up"
+
+
+def test_the_finished_installs_rerun_asks_the_world_through_the_same_seam_t7_wired(
+    tmp_path: Path,
+) -> None:
+    """Reused, not re-derived: `Seams.ask_world_running`, T7's seam, is the one asked.
+
+    A second, independently-written mapping from container status to a
+    boolean would be a second place the `paused` finding (T20) has to be
+    fixed. Caught by a seam that raises: if this route asked anything else, an
+    angry `world_running` override would never be reached at all.
+    """
+
+    def angry(container: str) -> bool | None:
+        raise RuntimeError("the daemon is not there")
+
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, world_running=angry)._import(context(server_with_sql(tmp_path))))
+    assert "could not tell whether" in str(raised.value)
+    assert "the daemon is not there" in str(raised.value)
+    assert rec.sql_calls == [], rec.sql_calls
 
 
 def test_the_import_clears_a_half_written_database_before_it_runs(
