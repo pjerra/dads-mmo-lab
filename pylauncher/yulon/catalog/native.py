@@ -2788,6 +2788,13 @@ class StagedInstaller:
             f"Writing one row into `{row.schema}`.`{row.table}`: this install plan "
             f"({row.plan_hash}) is recorded as finished. Nothing else is run."
         )
+        # The reading that counts is the one immediately before the write: the
+        # two the wrapper took are older than the probe, the gap queries and the
+        # yield above, and a consumer paused at that yield leaves the world free
+        # to start in between (Codex on the adopt press). T25's boundary rule,
+        # said again: the check sits at the destructive statement, not at the
+        # stage's entry.
+        self._refuse_writes_into_a_running_world(ADOPT_BUTTON_LABEL)
         self.write_import_marker(ctx)
         after = gate.probe()
         if after.state != "imported":

@@ -1279,6 +1279,40 @@ def test_a_world_started_while_the_database_came_up_is_refused_before_the_row(
     assert asked == [CM_ENTRY.container_spec().world] * 2, asked
 
 
+def test_a_world_started_at_the_pre_write_line_is_refused_before_the_row(
+    tmp_path: Path,
+) -> None:
+    """The window the reviewer of the adopt press found: the wrapper's two readings
+    are older than the probe, the gap queries and the "Writing one row" line,
+    and a consumer paused at that line leaves the world free to start before the
+    statement goes out. The reading that decides is taken immediately before the
+    write, and this run's world comes up exactly then: two readings say down,
+    the third says up, and no marker statement is sent.
+
+    Catches the third reading deleted (the write goes out on the stale readings).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(POPULATED_NO_MARKER)
+    seam, asked = worlds(False, False, True)
+    stop_db, _ = stopper()
+    engine = adoptable(
+        rerun_plan(),
+        rec,
+        world_running=seam,
+        db_running=lambda container: True,
+        stop_db=stop_db,
+    )
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in engine.adopt_as_imported(InstallOptions(server_dir=server_dir)):
+            said.append(line)
+    assert any("Writing one row" in line for line in said), said
+    assert "world server is running" in str(raised.value)
+    assert marker_scripts(rec) == [], rec.sql_scripts
+    assert len(asked) == 3, asked
+
+
 def test_an_adopt_press_over_databases_that_already_carry_the_marker_refuses(
     tmp_path: Path,
 ) -> None:
