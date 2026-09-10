@@ -1,6 +1,6 @@
 # T25 — A rebuild replaces a file whose first line merely begins with Yu'lon's marker, and marks the recreate touched before it starts
 
-**Status:** REWORK round 1 of 2 (rejected by the lead 2026-09-10 16:07 CEST)
+**Status:** CLOSED (merged `55e0c894`, gate ALL GREEN on m910q behind it, 2026-09-10 16:37 CEST; two rounds, the last finding closed by the lead's hand; worktree and branch removed)
 **Filed:** 2026-09-10 15:11 CEST by the lead (Fable), from the owed Codex adversarial pass on T8 round 3 (`b6178611`), two high findings confirmed at the tip
 **Hand:** Sonnet (two bounded fixes and their tests), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/catalog/composegen.py` **only** at `GENERATED_MARKER` and the one place `generate-compose` tests it (`:526`-ish in `dockerfile.py` reuses it — make the comparison one function, used by both); `pylauncher/yulon/catalog/families/dockerfile.py` at `_look()` (`:564`) and the render-time check (`:617`); `pylauncher/yulon/catalog/native.py` **only** at the `recreate` wrapper (`:2465-2468`) and `stage_recreate`'s reporting if it must say whether replacement began; their tests (name them). Not the rollback arm's logic beyond the `touched` boundary.

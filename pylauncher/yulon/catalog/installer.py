@@ -411,9 +411,9 @@ def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
         "the templates this version of the app ships, so a fix made to them since you "
         "installed is in what gets compiled. Yu'lon knows those two files by the line it "
         "writes at the top of each: while that line is there the file is replaced, including "
-        "anything you changed underneath it, and a file that no longer starts with it stops "
-        "the rebuild instead of being overwritten. If you stop the rebuild or it fails "
-        "before your server is replaced, both are put back as they were.\n\n"
+        "anything you changed underneath it, and a file whose first line is no longer exactly "
+        "that line stops the rebuild instead of being overwritten. If you stop the rebuild or "
+        "it fails before your server is replaced, both are put back as they were.\n\n"
         if native_block is not None and native_block.dockerfile_dir is not None
         else ""
     )
