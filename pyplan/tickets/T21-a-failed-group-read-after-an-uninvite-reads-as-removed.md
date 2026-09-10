@@ -1,6 +1,6 @@
 # T21 — A failed group read after a genuine uninvite is reported as "removed"
 
-**Status:** REWORK round 1 of 2 (rejected by the lead 2026-09-10 15:29 CEST); the file set widened to `remove_all` and `_mass_sentence`
+**Status:** CLOSED (merged `cdd81e32`, gate ALL GREEN on m910q behind it, 2026-09-10 15:51 CEST; two rounds, the last finding closed by the lead's hand; worktree and branch removed)
 **Filed:** 2026-09-10 15:05 CEST by the lead (Fable), from the T13 round-2 Opus review (note 5)
 **Hand:** Sonnet (a parser-sized fix), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py` **only** at `dismiss()`'s poll after the logout whisper (`:1356-1365` at `1a446392`) and `_rows_only` (`:1760`) if a sibling for the dismiss direction is needed; `pylauncher/tests/test_party.py`. Round 2 widens this to `remove_all` and `_mass_sentence` (the round-1 file set walled off the batch path the finding lives on); still not the Lua, not the panel.
