@@ -1,6 +1,6 @@
 # T26 — My Party adds a chosen existing character as a bot (own alts, other accounts, friends' and family's characters)
 
-**Status:** unit half MERGING (two rounds, the last finding closed by the lead's hand); the live half waits for a client seat on `yulon-win11`
+**Status:** unit half MERGED `235ed010` (2026-09-10 21:28 CEST; gate ALL GREEN on m910q behind it); the live half waits for a client seat on `yulon-win11`
 **Filed:** 2026-09-10 18:26 CEST by the lead (Fable), from the owner's answer on 8.6 through the question tool: "want to be able to choose alts, that way we can play with altbots there … Alts also from another account, or friends/family chars. This is only for AzerothCore as I know of."
 **Hand:** Opus (a feature with a live half), worktree branched from `yulon-phase8b`
 **Box:** `yulon-ubuntu2` (WotLK; the AzerothCore playerbots module is the only tree with the route), after T13's live half and T23

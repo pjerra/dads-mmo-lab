@@ -1,6 +1,6 @@
 # T19 — The updates button cannot reach a marker-less install, and prints the install's cancel note
 
-**Status:** second half MERGED `e2a305c8`; first half REDIRECTED to the adopt press (2026-09-10 20:11 CEST, the owner's word): the probe branch kept unmerged as `record/t19-probe-unmerged` (local); an Opus hand on `hand-t19-adopt`
+**Status:** second half MERGED `e2a305c8`; adopt press unit MERGING (2026-09-10 21:28 CEST; the pre-write reading closed by the lead's hand at `d0c5ab01`, gate ALL GREEN); the m910q press owed, on the owner's yes
 **Filed:** 2026-09-10 15:14 CEST by the lead (Fable), from T14's live half (findings 1-2, confirmed by the evidence reviewer against the source)
 **Hand:** Sonnet for the second half alone; Opus if the first half becomes a probe change (it touches the import gate every CMaNGOS install goes through). Worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** second half: `pylauncher/yulon/catalog/native.py` **only** at `update_stages()` (`:2165-2168` at `1f44a995`) and its test file. First half, once decided: `pylauncher/yulon/catalog/sqlplan.py` at `MarkerGate.probe` (`:1251-1279`) and `pylauncher/yulon/catalog/native.py` at `import_reads_as_finished` (`:401`), or a new adopt action beside the updates button in `controller_view.py` — not both; their tests; the T11 ticket's claim corrected by the lead, not the hand.
@@ -131,3 +131,7 @@ The probe route is dropped; its three commits stay on the local branch `record/t
 ## Review, adopt press unit (Codex adversarial, 2026-09-10 21:24 CEST) -- REWORK, one high
 
 `native.py:2790-2791`: the wrapper reads the world before `stage_adopt`, but the stage then probes, asks the adoption gaps and yields a progress line before `write_import_marker()`; a consumer paused at that yield lets the world start between the reading and the write, and the marker is written under a running world, against the confirmation's own words. Must-fix: the fail-closed reading again after the last yield and immediately before the write, and a test that starts the world when the pre-write line is consumed and sees no marker statement. The other paths (re-probe, gaps, the shared writer, the conditional stop) no blocker. Closed by the lead's hand (one round is the cap's letter; the fix is one reading and one test).
+
+## Closed by the lead's hand (2026-09-10 21:28 CEST)
+
+`_refuse_writes_into_a_running_world(ADOPT_BUTTON_LABEL)` now sits immediately before `write_import_marker()`, after the "Writing one row" line (T25's boundary rule); `test_a_world_started_at_the_pre_write_line_is_refused_before_the_row` brings the world up at exactly that line (three readings: down, down, up) and sees no marker statement; mutation (the reading deleted): red. `d0c5ab01`, gate ALL GREEN on m910q. Merged behind a gate next; then the m910q press on the owner's yes.
