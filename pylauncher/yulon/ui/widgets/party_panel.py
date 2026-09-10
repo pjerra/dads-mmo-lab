@@ -19,11 +19,14 @@ The prior art's own party page is bigger (`rust-main:launcher/src/lib/pages/Play
 and every part of it this panel leaves out is a part the seam has no method for.
 Left out deliberately, each with the seam gap that decides it:
 
-* **No character picker.** The seam reads one name's guid (`party.InstallParty.online_guid`)
-  and has no "who is online" listing; the prior art's picker is fed by a separate
-  CLI call (`Playerbots.svelte:75` `wowPartyOnline()`, offered as a `<select>` at
-  `:390-398`). So the character is typed, and a name that is not in the world
-  comes back as the seam's own sentence.
+* **No picker for the MASTER's own name.** The seam reads one name's guid
+  (`party.InstallParty.online_guid`) and has no "who is online" listing; the
+  prior art's picker is fed by a separate CLI call (`Playerbots.svelte:75`
+  `wowPartyOnline()`, offered as a `<select>` at `:390-398`). So the character
+  is typed, and a name that is not in the world comes back as the seam's own
+  sentence. T26 added a picker of a different kind beside it -- the characters
+  this server would let that master ADD (`InstallParty.candidates`) -- which is
+  a list of other people's characters and not a list of the master's own.
 * **No "Enable My Party" / bridge deploy button.** `party.deploy()` exists and
   `InstallParty` does not expose it, so there is nothing to press through this
   seam. The panel shows WHICH precondition is unmet instead, which is the half
@@ -39,6 +42,16 @@ until T5 (2026-09-09), and each is now the seam's own method rather than a
 second route: `specs()` reads this install's `playerbots.conf`, the level goes
 through 8.4a's `set_level`, and `remove_all()` is `remove` per bot with each one
 named.
+
+T26 (2026-09-10) added the second way into a party, and both halves of it are
+the seam's own methods for the same reason: "Add this character" offers the
+characters `.playerbots bot add` would accept for this master
+(`candidates()`, four database reads and this install's own `MaxAddedBots`) and
+presses one through `add_named()`; "Link an account" writes the two rows that
+open the friends-and-family route (`link_plan()` asks, `link_account()`
+writes). What the module says about either goes to the master's game window and
+never to this app, which is why the picker refuses in advance and the press
+reports the group table rather than the command's own yes.
 
 One thing the prior art does that this panel copies exactly: a bot that has not
 arrived within the poll window is reported as NOT joined, with its cause
@@ -127,6 +140,14 @@ class PartySeam(Protocol):
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
 
     def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
+
+    def candidates(self, master: str) -> party.Picker: ...
+
+    def add_named(self, master: str, name: str) -> party.NamedAddition: ...
+
+    def link_plan(self, master: str, account: str) -> party.AccountLink: ...
+
+    def link_account(self, master: str, account: str) -> party.AccountLink: ...
 
 
 DISMISS_NOTHING = "Dismiss"
@@ -226,6 +247,50 @@ the sentence they agreed to. The second press now requires the SAME normalised
 master and the SAME bots the first press named, and anything else stands the arm
 down with this line instead of firing."""
 
+SHOW_CANDIDATES = "Show characters I can add"
+"""The picker is READ on a press rather than filled when the panel opens.
+
+It is four database reads -- the party, then the characters, the account names
+and the playerbots tables -- and which characters this server would accept
+changes with who is logged in, so a list drawn at start-up is a list that is
+wrong by the time anybody looks at it. The same rule the rest of this panel
+keeps: facts are re-read per press."""
+
+ADD_NAMED_NOTHING = "Add this character…"
+"""What the button says with no row chosen, and it is disabled saying it -- the
+Dismiss button's rule (`DISMISS_NOTHING`), for its reason: with a row chosen it
+says that row's name, so nobody presses it believing it acts on something
+else."""
+
+PRESS_SHOW_CANDIDATES_FIRST = (
+    "Press Show characters I can add first: the list below was read for another character, so "
+    "nothing in it was worked out for this one. Nothing was sent."
+)
+"""The rows and the character they were read FOR travel together, `_drawn`'s
+rule: which characters may be added is decided per master -- own account, own
+guild, own links -- so a list read as one and pressed as another is a press
+nothing had worked out the rules for."""
+
+NO_CANDIDATE_CHOSEN = "Choose a character in the list first. Nothing was sent."
+
+LINK_IDLE = "Link an account…"
+"""One button, two labels, and the armed one names the account. The tab's own
+gesture again (`DISMISS_ALL_IDLE`): a person who has learned that pressing once
+only arms is not surprised here, and a modal would be wrong twice over -- the
+answers arrive from a worker thread, and this panel does not use them."""
+
+NO_ACCOUNT_TYPED = (
+    "Type the account name of the person whose characters you want to be able to add. It is the "
+    "account name they log in with, not a character's name. Nothing was sent."
+)
+
+LINK_MOVED = (
+    "Link an account was not sent: the character or the account is not the one that was "
+    "confirmed. Nothing was written -- press it again to confirm what is on screen now."
+)
+"""The subject moved between the two presses, so the confirmation is void --
+`DISMISS_ALL_MOVED`'s finding, on the control that writes a database row."""
+
 WORKING = "Working -- the server is being asked. This can take a few seconds."
 """Shown while a press is in flight, and the buttons are disabled under it.
 
@@ -282,6 +347,15 @@ class PartyPanel(QWidget):
         # that press explains itself and leaves the button idle rather than
         # quietly starting a new confirmation about a different party.
         self._stood_down = ""
+        # T26. The rows the picker last read and the character they were read
+        # FOR, together for `_drawn`'s reason: which characters may be added is
+        # decided per master, so a list that outlives the name it was read for
+        # is a list about somebody else's rules.
+        self._offered: tuple[party.Candidate, ...] = ()
+        self._offered_for = ""
+        # What an armed "Link an account" is ABOUT: the normalised master and
+        # the account name the confirmation named. `None` is disarmed.
+        self._link_confirmed: tuple[str, str] | None = None
         # Which spec request the picker is currently showing. Bumped per
         # request, checked at completion: an answer older than the newest
         # request is about a class the box no longer shows.
@@ -316,6 +390,28 @@ class PartyPanel(QWidget):
         self.add_button = QPushButton("Add a bot", self)
         self.add_button.clicked.connect(self.add_bot)
 
+        # T26, and BESIDE "Add a bot" rather than instead of it: that button
+        # makes a bot of a chosen class, this one puts an existing character --
+        # an alt on the same account, a guild mate, a friend's character on a
+        # linked account -- into the party as a bot.
+        self.candidates_button = QPushButton(SHOW_CANDIDATES, self)
+        self.candidates_button.clicked.connect(self.show_candidates)
+        self.candidate_list = QListWidget(self)
+        self.candidate_list.currentRowChanged.connect(self._candidate_chosen)
+        self.candidate_note = QLabel("", self)
+        self.candidate_note.setWordWrap(True)
+        self.add_named_button = QPushButton(ADD_NAMED_NOTHING, self)
+        self.add_named_button.clicked.connect(self.add_named)
+        self.link_name = QLineEdit(self)
+        self.link_name.setPlaceholderText("another player's account name")
+        self.link_name.setMaxLength(party.MAX_ACCOUNT_NAME)
+        # Typing is not pressing, but it changes which two accounts a confirmed
+        # link would be about, so it stands one down. `character` does the same
+        # from the other end -- the master decides whose account is linked.
+        self.link_name.textChanged.connect(self._link_edited)
+        self.link_button = QPushButton(LINK_IDLE, self)
+        self.link_button.clicked.connect(self.link_account)
+
         self.member_list = QListWidget(self)
         self.member_list.currentRowChanged.connect(self._member_chosen)
         self.dismiss_button = QPushButton(DISMISS_NOTHING, self)
@@ -343,10 +439,21 @@ class PartyPanel(QWidget):
         pick.addWidget(QLabel("at level", self))
         pick.addWidget(self.level)
         pick.addWidget(self.add_button)
+        named = QHBoxLayout()
+        named.addWidget(self.candidates_button)
+        named.addWidget(self.add_named_button)
+        link = QHBoxLayout()
+        link.addWidget(QLabel("Link the account", self))
+        link.addWidget(self.link_name)
+        link.addWidget(self.link_button)
         box = QVBoxLayout(self)
         box.addLayout(who)
         box.addLayout(pick)
         box.addWidget(self.level_absent)
+        box.addLayout(named)
+        box.addWidget(self.candidate_list)
+        box.addWidget(self.candidate_note)
+        box.addLayout(link)
         box.addWidget(QLabel("In the party now", self))
         box.addWidget(self.summary)
         box.addWidget(self.member_list)
@@ -356,6 +463,7 @@ class PartyPanel(QWidget):
         box.addWidget(self.check_list)
         box.addWidget(self.report)
         self._member_chosen(-1)
+        self._candidate_chosen(-1)
         # Both are per-install readings and both are read again on every
         # "Show this character's party": a game installed, a conf edited or a
         # module deployed while this tab is open changes both answers, and this
@@ -585,6 +693,190 @@ class PartyPanel(QWidget):
         self._read(note=None)
         self.party_changed.emit()
 
+    # -- T26: the named character, and the account link ----------------------
+
+    @Slot()
+    def show_candidates(self) -> None:
+        """Read which characters this server would let this master add.
+
+        A press of its own, and it carries the master with the answer for
+        `_read`'s reason: the rows a person chooses from have to be
+        attributable to the character they were worked out for, and reading the
+        box again in the slot would attribute them to whatever it says by then.
+        """
+        master = self._master()
+        if master is None:
+            return
+        self._start(WORKING)
+        self._run(lambda: (master, self._seam.candidates(master)), self._candidates_read)
+
+    @Slot(object)
+    def _candidates_read(self, result: object) -> None:
+        """Draw every row, with the refused ones greyed and their reason on them.
+
+        Refused rows are SHOWN rather than filtered out: "why is my alt not in
+        this list" is the question a filtered list cannot answer, and the
+        server's own refusal never reaches this app -- it is printed in the
+        master's game window (`PlayerbotMgr.cpp:115`, `:134`, `:686`). A row
+        that cannot be pressed says which rule shut it out instead.
+        """
+        master, picked = cast("tuple[str, party.Picker]", result)
+        self._done()
+        self.candidate_list.clear()
+        self._offered = ()
+        self._offered_for = ""
+        self._candidate_chosen(-1)
+        if picked.problem:
+            self.candidate_note.setText(picked.problem)
+            return
+        self._offered = picked.rows
+        self._offered_for = master
+        for row in picked.rows:
+            self.candidate_list.addItem(self._candidate_row(row))
+            item = self.candidate_list.item(self.candidate_list.count() - 1)
+            if not row.allowed:
+                # Greyed AND unselectable: a row the server would refuse is not
+                # a row to press, and a disabled Add button under a selected
+                # refusal would say the same thing twice and less clearly.
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+        # `Picker.note` and nothing of this panel's own arithmetic: the count
+        # the seam read is the group table's, which is not the number the
+        # module caps (round 1's second finding), and a line here that put the
+        # two beside each other would be the same claim with a widget making
+        # it.
+        self.candidate_note.setText(picked.note)
+
+    @staticmethod
+    def _candidate_row(row: party.Candidate) -> str:
+        """One offered character. The class is the NUMBER the table holds, for
+        `_row`'s reason: this app has no measured id-to-name table for this
+        tree, and a wrong class name beside a character is worse than the
+        number that was actually read."""
+        return (
+            f"{row.name} — level {row.level} — class {row.klass} — {row.account_or_guild} — "
+            f"{row.allowed_by or row.refused_because}"
+        )
+
+    @Slot(int)
+    def _candidate_chosen(self, row: int) -> None:
+        """Name the character on the button, and disable it where there is none."""
+        chosen = self._chosen_candidate() if row >= 0 else None
+        self.add_named_button.setText(
+            ADD_NAMED_NOTHING if chosen is None else f"Add {chosen.name} as a bot"
+        )
+        self.add_named_button.setEnabled(chosen is not None and not self._busy)
+
+    def _chosen_candidate(self) -> party.Candidate | None:
+        """The row a person chose, or `None` -- never a refused one.
+
+        By index into the rows the read returned rather than by parsing the text
+        on screen: what the seam is handed is the character the picker worked
+        the rules out for, and a name read back off a label is a name a display
+        format can change.
+        """
+        row = self.candidate_list.currentRow()
+        if not 0 <= row < len(self._offered):
+            return None
+        chosen = self._offered[row]
+        return chosen if chosen.allowed else None
+
+    @Slot()
+    def add_named(self) -> None:
+        """Put the chosen existing character into this character's party."""
+        master = self._master()
+        if master is None:
+            return
+        if self._offered_for != master:
+            self.report.setText(PRESS_SHOW_CANDIDATES_FIRST)
+            return
+        chosen = self._chosen_candidate()
+        if chosen is None:
+            self.report.setText(NO_CANDIDATE_CHOSEN)
+            return
+        self._stand_down("")
+        self._stand_link_down()
+        name = chosen.name
+        self._start(WORKING)
+        self._run(lambda: self._seam.add_named(master, name), self._added_named)
+
+    @Slot(object)
+    def _added_named(self, result: object) -> None:
+        """The seam's own sentence, then the group table read back.
+
+        The panel never draws the row itself, `_added`'s rule: this route has
+        four outcomes too, and one of them -- the command issued and no bot
+        arriving -- is the ordinary shape of a refusal here, because the module
+        answers this command only in the master's game window.
+        """
+        self.report.setText(cast(party.NamedAddition, result).sentence)
+        self._done()
+        self._read(note=None)
+        self.party_changed.emit()
+
+    @Slot()
+    def link_account(self) -> None:
+        """Ask on the first press, write on the second -- the SAME two accounts.
+
+        The first press is a READ: it resolves both accounts and refuses an
+        account this server does not have, the master's own, or a pair that is
+        already linked, so nobody is asked to confirm a write that cannot
+        happen. The second press hands the same pair to the seam, which resolves
+        them again -- an account can be renamed, deleted or linked between two
+        presses, and the confirmation is about what was on screen, not about
+        what is true when the row is written.
+        """
+        master = self._master()
+        if master is None:
+            return
+        account = self.link_name.text().strip()
+        if not account:
+            self._stand_link_down()
+            self.report.setText(NO_ACCOUNT_TYPED)
+            return
+        if self._link_confirmed is not None and self._link_confirmed != (master, account):
+            # The subject moved since the confirmation. Say so and stay idle:
+            # re-arming here would start a NEW confirmation about a different
+            # pair off a press meant for the old one.
+            self._stand_link_down()
+            self.report.setText(LINK_MOVED)
+            return
+        armed = self._link_confirmed is not None
+        self._stand_down("")
+        self._start(WORKING)
+        if armed:
+            self._stand_link_down()
+            self._run(lambda: self._seam.link_account(master, account), self._linked)
+            return
+        self._run(lambda: (master, account, self._seam.link_plan(master, account)), self._planned)
+
+    @Slot(object)
+    def _planned(self, result: object) -> None:
+        """Arm on what the seam says it WOULD write, and never on a refusal."""
+        master, account, plan = cast("tuple[str, str, party.AccountLink]", result)
+        self._done()
+        self.report.setText(plan.sentence)
+        if plan.blocker:
+            self._stand_link_down()
+            return
+        self._link_confirmed = (master, account)
+        self.link_button.setText(f"Press again to link {account}")
+
+    @Slot(object)
+    def _linked(self, result: object) -> None:
+        """What the write did, in the seam's words. No group read follows it:
+        a link changes what MAY be added, not what is in the party."""
+        self._done()
+        self.report.setText(cast(party.AccountLink, result).sentence)
+
+    @Slot(str)
+    def _link_edited(self, _text: str) -> None:
+        """A different account name is a different pair, so any arm goes."""
+        self._stand_link_down()
+
+    def _stand_link_down(self) -> None:
+        self._link_confirmed = None
+        self.link_button.setText(LINK_IDLE)
+
     @Slot()
     def dismiss_all(self) -> None:
         """Arm on the first press, send every bot away on the second — the SAME one.
@@ -671,7 +963,13 @@ class PartyPanel(QWidget):
 
     @Slot(str)
     def _character_edited(self, _text: str) -> None:
-        """A different name in the box is a different party, so any arm goes."""
+        """A different name in the box is a different party, so any arm goes.
+
+        Both arms: the master decides whose account a link would be written for,
+        so a changed character is a changed pair as surely as a changed account
+        name is.
+        """
+        self._stand_link_down()
         if self._stand_down(DISMISS_ALL_MOVED):
             self.report.setText(DISMISS_ALL_MOVED)
 
@@ -814,3 +1112,7 @@ class PartyPanel(QWidget):
         self.klass.setEnabled(on)
         self.spec.setEnabled(on)
         self.level.setEnabled(on and self.level.maximum() > 0)
+        self.candidates_button.setEnabled(on)
+        self.add_named_button.setEnabled(on and self._chosen_candidate() is not None)
+        self.link_button.setEnabled(on)
+        self.link_name.setEnabled(on)

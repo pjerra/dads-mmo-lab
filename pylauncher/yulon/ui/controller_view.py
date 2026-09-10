@@ -139,6 +139,14 @@ class MyPartySeam(Protocol):
     the same empty list a working party with no bots in it produces, and the
     2026-08-20 failure is exactly that pair being told apart wrongly.
 
+    It grew by four more in T26 (2026-09-10), and every one of them is a reading
+    OF AN INSTALL for the same reason the T5 three are: `candidates()` is four
+    database reads and this install's own `MaxAddedBots`, `add_named()` is the
+    bridge whisper and the group poll, and the two link halves resolve two
+    accounts across `acore_auth` and `acore_playerbots` before one of them
+    writes. A panel that did any of it itself would be a widget that knows where
+    a server folder and a database are.
+
     It grew by three in T5 (2026-09-09) and every one of them is here rather than
     in the panel because it is a reading OF AN INSTALL: `specs()` is this
     server's `playerbots.conf`, `max_level()` is its `worldserver.conf`, and
@@ -168,6 +176,14 @@ class MyPartySeam(Protocol):
     def remove(self, master: str, bot: str) -> party.Dismissal: ...
 
     def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal: ...
+
+    def candidates(self, master: str) -> party.Picker: ...
+
+    def add_named(self, master: str, name: str) -> party.NamedAddition: ...
+
+    def link_plan(self, master: str, account: str) -> party.AccountLink: ...
+
+    def link_account(self, master: str, account: str) -> party.AccountLink: ...
 
 
 class Uninstall(Protocol):
@@ -1058,6 +1074,14 @@ def _for_wotlk(
             container=spec.world,
             wsl_distro=wsl_distro,
             world_running=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro).settled,
+            # T26, and the only line of this factory the ticket needed: "Link
+            # an account" writes two rows into `acore_playerbots`, and it is
+            # the same `DockerSql` the reads already go through. A seam of its
+            # own rather than a wider `sql`, so `dbreads.SqlReader` keeps the
+            # guarantee its own docstring makes -- what is not in the type
+            # cannot be called through it. Without this line the control could
+            # only ever say it has no route.
+            link_writer=sql,
         ),
         # 8.9a. WotLK first, and Vanilla in 8.9b; the four seams this needs are
         # the ones every install has. `forget` is the default that reads and
