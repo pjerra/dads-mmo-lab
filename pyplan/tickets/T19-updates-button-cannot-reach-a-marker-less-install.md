@@ -1,6 +1,6 @@
 # T19 — The updates button cannot reach a marker-less install, and prints the install's cancel note
 
-**Status:** second half MERGED `e2a305c8`; first half ROUND 3 by a Fable hand (the owner's word 2026-09-10 19:41 CEST: "use fable on this round only"), sentinel tables derived from the dump files
+**Status:** second half MERGED `e2a305c8`; first half after round 3 (2026-09-10 20:10 CEST): `hand-t19-probe` at `fbc043c9` NOT merged, two findings open, the owner asked again
 **Filed:** 2026-09-10 15:14 CEST by the lead (Fable), from T14's live half (findings 1-2, confirmed by the evidence reviewer against the source)
 **Hand:** Sonnet for the second half alone; Opus if the first half becomes a probe change (it touches the import gate every CMaNGOS install goes through). Worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** second half: `pylauncher/yulon/catalog/native.py` **only** at `update_stages()` (`:2165-2168` at `1f44a995`) and its test file. First half, once decided: `pylauncher/yulon/catalog/sqlplan.py` at `MarkerGate.probe` (`:1251-1279`) and `pylauncher/yulon/catalog/native.py` at `import_reads_as_finished` (`:401`), or a new adopt action beside the updates button in `controller_view.py` — not both; their tests; the T11 ticket's claim corrected by the lead, not the hand.
@@ -89,3 +89,17 @@ The reviewer is right, and the remaining fix is a design, not a sentence: withou
 ## Owner (2026-09-10 19:41 CEST, through the question tool): "Use fable on this round only"
 
 A third round, the hand a Fable model, on the sentinel-table design; the cap stands for everything else.
+
+## Report, first half unit round 3 (hand, Fable, 2026-09-10 20:10 CEST)
+
+- Third commit `fbc043c9` (rebased onto `61626ece`; rounds 1-2 now `7ace4a59`, `7d0e6132`); gate ALL GREEN on m910q (3999 passed); 6 files +741/-359.
+- The rule: complete when every plan schema exists, every `player_data` table is present, and EVERY table the plan's streamed files create is present -- read off the files at probe time (`expand()` then `created_tables()`, grammar `CREATE TABLE [IF NOT EXISTS] [schema.]name`, `DROP TABLE`, `USE schema`, gzip through `apply()`'s `_open()`), compared as sets against one `information_schema` names listing per filled schema; no verify rule read by the probe; the catalog's `tw_char` count rule removed; rows-only dump incomplete; an unreadable file or a gate without `server_dir` never complete; residual risk stated (a dump stopped inside its final row inserts). Twenty-odd mutations red including the boundary (every table but the last), a table missing from the middle, the hand-typed set, the parser grammar; both route tests over a laid dump.
+
+## Review, first half unit round 3 (Codex adversarial, 2026-09-10 20:10 CEST) -- REWORK, two
+
+1. **high** `sqlplan.py:1175-1301`: the parser is a per-line regex with no comment, string or multi-line tracking -- a `CREATE TABLE` inside a block comment or a string demands a table that never exists and refuses a finished install for good; a `CREATE` split across lines is missed and an unfinished install can read complete. Wants a streaming lexer (comments, strings, delimiters, multi-line statements) and route-level mutations for both directions.
+2. **medium** `sqlplan.py:1774-1798`: every marker-less populated probe expands and scans every dump file to EOF, gzip inflated, on every press and every ordinary install probe, with no bound, cancellation or cache; wants a persisted manifest keyed by plan hash and file identity.
+
+## The lead's assessment (2026-09-10 20:10 CEST)
+
+Both are right and both are more design: a SQL lexer, and a manifest that is written once and read by probes -- which is a marker by another name, written by the app from the dump files rather than from the import. Three rounds have each found the next layer of "prove a dump finished without a marker". The sound design was the one declined on the 10th: an explicit adopt press that writes the marker with the owner's consent; the module's own idempotent phases then follow the marked route T11 built. The branch is kept, unmerged; asked the owner again.
