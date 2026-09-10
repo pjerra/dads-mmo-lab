@@ -1,6 +1,6 @@
 # T21 — A failed group read after a genuine uninvite is reported as "removed"
 
-**Status:** OPEN (waiting for a lane; shares `party.py` with T16 — serialise)
+**Status:** IN PROGRESS (Sonnet hand on `hand-t21` since 2026-09-10 15:17 CEST, gate box m910q)
 **Filed:** 2026-09-10 15:05 CEST by the lead (Fable), from the T13 round-2 Opus review (note 5)
 **Hand:** Sonnet (a parser-sized fix), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py` **only** at `dismiss()`'s poll after the logout whisper (`:1356-1365` at `1a446392`) and `_rows_only` (`:1760`) if a sibling for the dismiss direction is needed; `pylauncher/tests/test_party.py`. Not `remove_all`, not `_mass_sentence`, not the Lua.
