@@ -1,6 +1,6 @@
 # T17 — 8.8 Steam integration, gated on fullscreen Steam on a Linux VM as the Deck stand-in
 
-**Status:** REWORK round 1 of 2 (rejected by the lead 2026-09-10 22:42 CEST); the evidence stands, five code fixes owed
+**Status:** CLOSED (merged `33f9a4ff`, gate ALL GREEN on m910q behind it, 2026-09-10 23:01 CEST; 8.8 ticked on the stand-in; worktree and branch removed)
 **Hand:** Opus, worktree branched from `yulon-phase8b`; two halves, the read first
 **File set:** to be fixed when the read half lands — expected `pylauncher/yulon/steam.py` (new), `pylauncher/yulon/platform.py` only at the SteamOS read-only helpers already there (`:132`, `:434-439`), a Steam group in `pylauncher/yulon/ui/controller_view.py` (declared before the code half starts; T14/T5/T7/T12 sites untouched), `pylauncher/yulon/catalog/catalog.json` only for artwork paths if the entries carry them, their tests, `pyplan/write-ledger.md`, and `pyplan/gates/8.8-steam-<box>-<date>/`.
 **Box:** a Linux VM with Steam installed and logged in, run in fullscreen (Big Picture) mode as the Deck stand-in — the owner's answer of 2026-09-09 ("we can use full screen steam to emulate steam deck"). `yulon-arch` (Y: drive, docker, internet through the host) is the candidate; installing Steam there is a VM action, allowed; a Steam **login** is not something a hand can supply.

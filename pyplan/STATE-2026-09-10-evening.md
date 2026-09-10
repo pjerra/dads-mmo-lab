@@ -6,7 +6,8 @@ Written by the lead (Fable) at 2026-09-10 22:47 CEST, WSL session, tip `c2141397
 
 | Worktree / branch | Ticket | State | On the report |
 |---|---|---|---|
-| `.claude/worktrees/t17`, `hand-t17` (Opus) | T17 / 8.8 Steam | round 2: five code fixes (atomic write, surrogateescape on the write, an unknown VDF byte as a refusal, CRLF preserved, a frame name) plus `OSError` at `add()` and version-aware Proton ordering; no box re-run | one Codex review of the round-2 diff (code only); ACCEPT -> merge, gate on m910q, push, close, **tick 8.8** in `pyplan/checklist.md` citing `8.8-steam-shortcuts-yulon-arch-2026-09-10/` and `8.8-steam-read-…`; REWORK -> the lead fixes by hand (the cap) |
+| ~~`.claude/worktrees/t17`~~ (removed) | T17 / 8.8 Steam | CLOSED, merged; round 2's two last findings closed by the lead's hand | (done) |
+| (was) | | round 2: five code fixes (atomic write, surrogateescape on the write, an unknown VDF byte as a refusal, CRLF preserved, a frame name) plus `OSError` at `add()` and version-aware Proton ordering; no box re-run | one Codex review of the round-2 diff (code only); ACCEPT -> merge, gate on m910q, push, close, **tick 8.8** in `pyplan/checklist.md` citing `8.8-steam-shortcuts-yulon-arch-2026-09-10/` and `8.8-steam-read-…`; REWORK -> the lead fixes by hand (the cap) |
 | `.claude/worktrees/t16`, `hand-t16` (Opus) | T16 (chosen level does not hold at join) | live measurement first on `yulon-ubuntu2` (the timing table, the module's source), then the code in `party.py` at `add_bot()`'s level step, then a second press | one cold review (Opus, it touches the box) -> merge behind a gate; with T16 in, 8.6 still needs T26's live half |
 
 Ticket status lines and the reports/reviews are on the tickets themselves; the lead records each report, review and close there, in the shape every ticket already shows.
@@ -15,7 +16,7 @@ Ticket status lines and the reports/reviews are on the tickets themselves; the l
 
 - **CLOSED and merged today:** T13 (both halves), T14, T18, T19 (second half, the adopt press, the m910q press: the owner's install adopted and updated), T20, T21, T22, T23, T24, T25, T26 (unit half). The six owed Codex passes ran and became T20–T25.
 - **Open:** T16 (running), T17 (running), T26's live half (needs a client seat on `yulon-win11` and a world restart on `yulon-ubuntu2` for the sixth bridge script — that script is already deployed there by T18), T27 (a conf activation never recommends a restart; Sonnet, unit only, spec on the ticket).
-- **Phase 8: 27 of 29.** 8.8 ticks when T17 merges. 8.6 ticks when T16 and T26's live half hold (dismiss-all by T5, a chosen spec by T18 are proved).
+- **Phase 8: 28 of 29** — 8.8 ticked 2026-09-10 23:01 CEST on the stand-in (T17 merged `33f9a4ff`). 8.6 ticks when T16 and T26's live half hold (dismiss-all by T5, a chosen spec by T18 are proved).
 - **Release:** none cut here — upstream chooses the version when Baerthe merges; PR **146** stays a draft, its body refreshed after every merge from `<scratchpad>/lead/pr146-new-body.md` through `gh api -X PATCH …/pulls/146 --input pr146-patch.json` (`gh pr edit` fails silently on this repo — memory `gh-pr-edit-fails-on-projectcards`), verified by grep.
 - **The report artifact** "Phase 8 Closing Night" (https://claude.ai/code/artifact/85d5b01e-a039-4160-8fcb-7c845cf8778f) was republished at version 3 with the 9th's frames and the six questions, the login card cut; it does not yet carry the 10th's afternoon/evening (T13 live, T18, T19 press, T17). Build: `<scratchpad>/report/build.py` (template + `{{IMG:…}}`; the night images from `night-images.json`).
 
