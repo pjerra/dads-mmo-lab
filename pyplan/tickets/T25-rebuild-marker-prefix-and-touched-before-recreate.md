@@ -23,3 +23,11 @@
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the comparison as written (quoted), the touched rule as written (quoted), the tests and their mutations, deviations, status DONE.
+
+## Report (hand, Sonnet, 2026-09-10 16:05 CEST)
+
+- `4e75943a` on `hand-t25` (base `cfd111a2`); gate ALL GREEN on m910q (3950 passed); 6 files +225/-17 (`composegen.py` +37/-8, `families/dockerfile.py` +14/-7, `native.py` +16/-2, tests +158).
+- The comparison: `composegen.is_marker_line()` -- the line IS the marker, or the marker followed by a space and a hyphen or em dash (the separator every shipped template uses to continue it: "… — do not hand-edit …"); anything else glued to the marker is somebody else's line. Bare equality was ruled out because the shipped templates and this project's own fixtures continue the marker on the same line. Used by `generate-compose`, `_look()` and the render-time check.
+- The touched rule: `touched` moves from the wrapper's entry to after `yield from self.stage_recreate(stage_ctx)`, beside `built`; a `stage_recreate()` that raises before `_seams.recreate()` runs, or before it returns, never reaches the assignment, so `rebuild()`'s except arm calls `_put_recipe_back()` and takes no second recreate.
+- Tests (each RED under its mutation, restored GREEN): look-alike marker is not ours (composegen, 2 params; dockerfile write, 4 params; rebuild end to end, 2 params) under `startswith` restored; the marker's own continuation still ours; a recreate that raises before touching puts the recipe back and recreates once, under `touched = True` moved back before the `yield from`; the stop-between-compile-and-recreate and ready-fails-after-replacement tests stayed green.
+- Deviations: none from the file set. Note for the lead: `installer.py:409-416`'s confirmation says "a file that no longer starts with it stops the rebuild" -- loose now that the check is exact; outside the file set.
