@@ -67,6 +67,7 @@ from yulon.catalog.installer import (
     cancelled_install_message,
     installer_for,
 )
+from yulon.catalog.native import UPDATES_BUTTON_LABEL
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -4691,7 +4692,12 @@ def test_a_finished_installs_rerun_refuses_naming_press_stop_then_install_again(
         )
     said = str(raised.value)
     assert "Press Stop" in said, said
-    assert "Install again" in said, said
+    # The remedy must be one a REMEMBERED install can follow: its catalog tile is
+    # greyed "Installed" (catalog_view.py:432-439), so "press Install again" is
+    # not it (Codex on T24); the Modules-tab button is enabled for exactly the
+    # plans this route fires on.
+    assert UPDATES_BUTTON_LABEL in said, said
+    assert "press Install again" not in said, said
     assert "nothing was imported and nothing was cleared" in said, said
 
 

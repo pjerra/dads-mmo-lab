@@ -80,6 +80,7 @@ from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     IMPORT_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    UPDATES_BUTTON_LABEL,
     ImportGate,
     Secrets,
     Stage,
@@ -1370,15 +1371,19 @@ class CmangosInstaller(StagedInstaller):
                 f"Nothing was applied, nothing was imported and nothing was cleared. Docker "
                 f"itself may be the thing that is not answering — it reads a stopped container "
                 f"and a daemon that is down the same way — so check that Docker is running, "
-                f"then press Stop on the Server tab if the server is up, and press Install "
-                f"again."
+                f"then press Stop on the Server tab if the server is up, and apply these "
+                f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
+                f"again from the command line)."
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied, "
-            f"nothing was imported and nothing was cleared. Press Stop, then press Install "
-            f"again — the database is started on its own for it, and the world server stays "
-            f"down until you start it."
+            f"nothing was imported and nothing was cleared. Press Stop on the Server tab, then "
+            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Modules tab — it starts '
+            f"the database on its own and keeps the world server down — or run the install "
+            f"again from the command line. (A remembered install's catalog tile reads "
+            f"Installed and cannot be pressed, which is why the button is the remedy here; "
+            f"Codex on T24.)"
         )
 
     def _only_the_rerunnable_phases(
