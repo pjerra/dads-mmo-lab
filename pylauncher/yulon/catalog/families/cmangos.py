@@ -1154,6 +1154,24 @@ class CmangosInstaller(StagedInstaller):
         re-runnable, and only those. Everything from `db = ...` down is the
         ordinary import and is not reached there.
 
+        **The world is read once more, right before that call, and not
+        before.** `start-db` above only proves the DATABASE container; `up`
+        runs stages later and never before this one, so until this guard
+        existed a press through `engine.run()` — the CLI harness
+        (`install_wiring.py`) or a "Use existing..." folder whose world is
+        already running — streamed the flagged phases' `ADD INDEX`/`ALTER`/
+        `CREATE TABLE` into a live world's tables (T11's reviewer, note 3;
+        Codex, T24). `_refuse_rerun_into_a_running_world()` is this route's
+        own enforcement point for the rule `update_databases()` already
+        enforces on the button's route — a second point for one rule, not a
+        second rule, T7's and T14's own shape.
+
+        Only right here, and not before `stage_import()` the way `updates_only`
+        is: the finding this closes (T11's reviewer, note 3) is about the
+        finished-install branch alone, and the `absent`/`partial` arms below
+        run the ordinary import, which is a different route with no incident
+        recorded against it.
+
         **`ctx.updates_only` is read before `stage_import()` is called, and that
         ordering is the whole of the updates button's safety argument.** That
         press consents to a named list of files. `stage_import()`'s table would
@@ -1181,6 +1199,7 @@ class CmangosInstaller(StagedInstaller):
         yield from self.stage_import(ctx, gate, None)
         seen = gate.last
         if seen is not None and import_reads_as_finished(seen):
+            self._refuse_rerun_into_a_running_world()
             yield from self._rerun_on_marked(ctx, plan)
             return
         db = self._native().db
@@ -1294,6 +1313,73 @@ class CmangosInstaller(StagedInstaller):
                 f"({type(exc).__name__}: {exc})."
             ) from exc
         yield "The databases are imported and marked complete."
+
+    def _refuse_rerun_into_a_running_world(self) -> None:
+        """Owner answer 7, at the ordinary install route's own enforcement point.
+
+        `_rerun_on_marked()` streams the plan's re-runnable phases into the
+        character database, and nothing before this call has ever asked
+        whether the world server that owns that database is up: `stage_start_db`
+        only proves the DATABASE container is up, and `up` is three stages
+        later and never before this one. T14 closed the same gap on the
+        Modules-tab button's route (`native.StagedInstaller.
+        _refuse_updates_into_a_running_world`); this is the OTHER caller of
+        `_rerun_on_marked()` — the ordinary spine, reached through
+        `engine.run()` (the CLI harness, `install_wiring.py:342`, and any
+        "Use existing..." folder whose world happens to be running) — and that
+        function's own sentence names the button that pressed it, which is not
+        what got THIS call made. So the fact and the "Press Stop" clause are
+        the same rule, said again with the remedy this route can follow:
+        `self._refuse_updates_into_a_running_world` above is one stanza too far
+        to reuse verbatim, so the reading is shared and the words are not.
+
+        Reused, not re-derived: `self._seams.ask_world_running` is `StagedInstaller`'s
+        own T7 seam (`native.Seams.ask_world_running`, wired for every game by
+        T7's applier work and read the same way by T14's guard) — the container
+        status to `True`/`False`/`None` mapping lives once, in `docker.world_running`,
+        and this call is the third caller of it rather than a fourth copy of
+        the table.
+
+        Not stopped on the user's behalf: a stop is its own consent (T7's
+        rule), and this function only ever refuses or returns.
+
+        Fails closed on anything short of an explicit `False`, the same
+        discipline `apply.Applier`'s and `native`'s guards use: `None` and a
+        seam that raises are both refusals, because *could not ask* is not
+        *not running*.
+        """
+        container = self.entry.container_spec().world
+        why = ""
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            running, why = None, f"{type(exc).__name__}: {exc}"
+        if running is False:
+            return
+        if running is None:
+            # Docker named FIRST: `docker.container_state()` answers an empty
+            # state both for a container that is not there and for a daemon
+            # that will not reply, so "Stop the server" is advice that cannot
+            # be followed on a machine where Docker itself is down (cold
+            # review of T14, round 1).
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
+                f"({why or 'the daemon gave no answer'}), and a running one holds these "
+                f"databases in memory and writes back over whatever it finds in them. "
+                f"Nothing was applied, nothing was imported and nothing was cleared. Docker "
+                f"itself may be the thing that is not answering — it reads a stopped container "
+                f"and a daemon that is down the same way — so check that Docker is running, "
+                f"then press Stop on the Server tab if the server is up, and press Install "
+                f"again."
+            )
+        raise InstallerError(
+            f"{self.entry.name}'s world server is running, and it holds these databases in "
+            f"memory and writes back over whatever it finds in them. Nothing was applied, "
+            f"nothing was imported and nothing was cleared. Press Stop, then press Install "
+            f"again — the database is started on its own for it, and the world server stays "
+            f"down until you start it."
+        )
 
     def _only_the_rerunnable_phases(
         self, ctx: StageContext, plan: SqlPlan, gate: _Remembering
