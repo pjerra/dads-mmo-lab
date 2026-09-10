@@ -34,3 +34,10 @@ The stage heading is fixed; a Stop during the updates press is not: `_rerun_on_m
 ## Rejection (lead, round 1)
 
 File set widened to `sqlplan.apply()`'s cancellation wording (one parameter, the install route's default unchanged) and `_rerun_on_marked()`'s call into it in `families/cmangos.py`. Must-fix as the reviewer states it; keep the successful-press test. Consider giving the updates stage a truthful `cancel_note` of its own instead of the empty string, said once by the spine as every other note is. Add a commit (do not amend); gate; report in the same format. Round 2 is the last under the cap.
+
+## Report, second half round 2 (hand, Sonnet, 2026-09-10 17:02 CEST)
+
+- Second commit `ef3e2b78` on `hand-t19` (rebased onto `88d1b679`, round 1 now `fba814ec`); gate ALL GREEN on m910q (3975 passed); whole branch 4 files +171/-21 (`native.py` +42/-14, `sqlplan.py` +24/-7, `cmangos.py` +12, tests +114/-2).
+- `sqlplan.apply(..., cancel_note=IMPORT_CANCEL_NOTE)`; `_check_cancel(cancel, note)` raises "The import was stopped. <note>"; `_rerun_on_marked()` passes `RERUN_CANCEL_NOTE` = "A stop here leaves the statements that already ran in place and clears nothing; the flagged phase is applied whole again the next time this is pressed." (the ordinary resume path and the button both funnel through it and the gate has already read a finished import, so `reset()` is unreachable from either); `_import()`'s fresh-import call keeps the default; `update_stages()` gives the stage that note.
+- Tests: the successful press -- install note absent, rerun note exactly once, right after `--- import` (mutation: the stage note back to "" -> red); a Stop set from inside the exec seam after the first of two statements -- the error and every line carry the rerun note and never the install's, the second statement never ran (mutation: the `cancel_note=` dropped from the call -> red, the install note came back). The install route's own Stop test unchanged and green.
+- Deviations: rebased instead of ff. Status DONE (second half, round 2).
