@@ -54,3 +54,7 @@ The m910q press must show: CLI harness on the established install; the two log l
 ## Merge (lead, 2026-09-09 12:43 CEST)
 
 `git merge --no-ff d90eae50` -> `7b6d1806`; `--checks` on `yulon-phase8b` behind it ALL GREEN; pushed. The reviewer's note 1 became T14 (`pyplan/tickets/T14-apply-pending-database-updates-button.md`); notes 2 and 3 are carried into T14's confirmation and refusal; the m910q press is the lead's, through the CLI harness until T14 lands, and its index reading (note 2b) goes to the owner's open question about `idx_owner_bot_event`.
+
+## Owed Codex pass on `c5e7d78c`+`d90eae50` (lead ran it 2026-09-10 15:08 CEST)
+
+Verdict needs-attention, one high finding — the reviewer's note 3 from the code review, restated with the mechanism: `cmangos.py:1165-1169`'s finished-install branch calls `_rerun_on_marked()` directly; `start-db` before it only ensures the database is up and `up` after it never established that the previous world was down, so on an install press against an established, running server the `ADD INDEX`/`ALTER`/`CREATE TABLE` files contend with live traffic, take metadata locks, or fail partway with an intermediate schema. The tests call `_import()` with a recorder and cannot see the orchestration. T14's button closes it on the button's route (two world readings, refusal when up); the engine route (`engine.run()`, reached today by the CLI harness `install_wiring.py:342` and "Use existing..." folders) is still open. Follow-up **T24**.
