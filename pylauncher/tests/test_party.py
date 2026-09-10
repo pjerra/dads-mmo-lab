@@ -910,6 +910,45 @@ def test_a_row_that_is_still_there_is_not_reported_as_dismissed() -> None:
     assert "still" in result.sentence
 
 
+def test_a_group_read_that_keeps_failing_is_reported_as_unknown_not_removed() -> None:
+    """T21 (T13 round 2 review, note 5). `_rows_only` folds a FAILED read into
+    `()`, which is right for `add_bot`'s poll — watching for a guid to APPEAR,
+    where a read that could not be done adds nothing either way — and wrong
+    for this one, which is watching for a guid to VANISH: `()` reads as
+    "gone". Round 2 of T13 removed the one route that made a failed read
+    look like silence (the Lua's empty SOAP reply); what remains is a genuine
+    uninvite whose follow-up read errors, and it must not become "removed" on
+    a read that never happened."""
+    chan = _Chan()
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: "could not read this character's party: connection refused",
+        tries=2,
+        sleep=lambda _s: None,
+    )
+    assert result.removed is False
+    assert result.logged_out is True
+    assert "Newbot" in result.sentence
+    assert "could not read this character's party: connection refused" in result.sentence
+
+
+def test_a_group_read_that_fails_once_does_not_fail_the_dismiss() -> None:
+    """A transient failure between two polls is neither "still there" nor
+    "already gone" — it is nothing yet, and the poll tries again rather than
+    giving up on the first bad read."""
+    reads = iter(["could not read this character's party: timeout", ()])
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=_Chan().send,
+        members=lambda: next(reads),
+        sleep=lambda _s: None,
+    )
+    assert result.removed is True
+
+
 # -- 8.6, T5: the chosen spec ----------------------------------------------
 #
 # Every fact in this section was measured on `yulon-ubuntu2` on 2026-09-09 by

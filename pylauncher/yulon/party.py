@@ -1311,7 +1311,7 @@ def dismiss(
     player: str,
     bot: str,
     send: Callable[[str], Answer],
-    members: Callable[[], tuple[Member, ...]],
+    members: Callable[[], tuple[Member, ...] | str],
     tries: int = POLL_TRIES,
     pause: float = POLL_SLEEP,
     sleep: Callable[[float], None] = time.sleep,
@@ -1339,6 +1339,21 @@ def dismiss(
     is bounded to what the server actually said — round 1 cut the earlier
     "the group table moved it" wording, which was this app inventing a
     mechanism the bridge never reported.
+
+    **T21** (T13 round 2 review, note 5). `members` answers `tuple[Member,
+    ...] | str` here, the group read's own shape, rather than the folded
+    `tuple[Member, ...]` `add_bot` polls with. The two polls are not the same
+    question: `add_bot` watches for a guid to APPEAR, so a read that could not
+    be done and a read that found nothing both mean "not yet" — `_rows_only`
+    folding a failure into `()` is correct there. This poll watches for a guid
+    to VANISH, so `()` cannot mean both "the row is gone" and "the row could
+    not be read" — round 2 of T13 closed the one route that made a failed
+    read look like silence (the Lua no longer answers an empty SOAP reply),
+    so what is left on a failed read here is a genuine uninvite whose
+    follow-up read errored, and folding it to `()` would report `removed`
+    on a read that never happened. A failed read here neither confirms nor
+    denies, so it keeps the poll going the same as an unchanged row would;
+    only the LAST read decides what expiry reports.
     """
     answer = send(uninvite_command(player, bot))
     if answer.outcome != "yes":
@@ -1353,16 +1368,30 @@ def dismiss(
             bot=bot,
         )
     logged_out = send(logout_command(player, bot)).outcome == "yes"
+    unreadable = ""
     for attempt in range(tries):
         if attempt:
             sleep(pause)
-        if all(member.name != bot for member in members()):
+        rows = members()
+        if isinstance(rows, str):
+            unreadable = rows
+            continue
+        unreadable = ""
+        if all(member.name != bot for member in rows):
             return Dismissal(
                 True,
                 logged_out,
                 f"{bot} left the party" + ("." if logged_out else ", and is still logged in."),
                 bot=bot,
             )
+    if unreadable:
+        return Dismissal(
+            False,
+            logged_out,
+            f"{bot} may or may not have left: the group table could not be read "
+            f"({unreadable.strip()})",
+            bot=bot,
+        )
     window = tries * pause
     return Dismissal(
         False,
@@ -1739,7 +1768,13 @@ class InstallParty:
         )
 
     def remove(self, master: str, bot: str) -> Dismissal:
-        """Uninvite `bot` from `master`'s party and read the group table back."""
+        """Uninvite `bot` from `master`'s party and read the group table back.
+
+        Unfolded — `self.members(master)` reaches `dismiss()`'s poll as the
+        `tuple[Member, ...] | str` it actually is, not `_rows_only`'s "empty
+        party" reading of a failure (T21): this poll needs to tell a row that
+        cleared apart from a table it could not read.
+        """
         send = self._send_or_none()
         if send is None:
             return Dismissal(False, False, _no_channel())
@@ -1747,7 +1782,7 @@ class InstallParty:
             player=master,
             bot=bot,
             send=send,
-            members=lambda: _rows_only(self.members(master)),
+            members=lambda: self.members(master),
         )
 
     def _send_or_none(self) -> Callable[[str], Answer] | None:
@@ -1764,6 +1799,13 @@ def _rows_only(answer: tuple[Member, ...] | str) -> tuple[Member, ...]:
     not be done adds nothing to either side of that comparison, and treating it
     as "the bot is not here yet" makes the press time out and say so rather
     than announce a bot it never saw.
+
+    For `add_bot`'s poll and `remove_all`'s confirmed-set re-read only — both
+    are watching for a guid to APPEAR (or to still be among a confirmed set).
+    `dismiss()`'s own poll watches for a guid to VANISH, where `()` already
+    means "gone"; folding a failure into it there would report a row as
+    removed on a read that never happened, so `InstallParty.remove` hands it
+    the unfolded answer instead (T21).
     """
     return () if isinstance(answer, str) else answer
 
