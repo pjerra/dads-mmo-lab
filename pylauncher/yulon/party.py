@@ -699,6 +699,18 @@ BOT = "bot's"
 not said about the master. The prior art keeps two error builders for the same
 reason (`rust-main:.../party.rs:138,143`)."""
 
+UNINVITE_COMMAND_PATTERN = "^dml_uninvite%s+(%S+)%s+(%S+)$"
+"""The Lua pattern `dml_uninvite.lua` parses its own command with, pinned here
+so the wire grammar `uninvite_command` builds for exists in exactly one place
+that can drift (T13, round 1's must-fix 3 — `test_the_probe_command_is_the_
+one_the_shipped_script_registers` is the pin this copies)."""
+
+UNINVITE_REFUSAL_FORMAT = "%s is not in %s's party now"
+"""The base of `dml_uninvite.lua`'s refusal message — `bot`, then `player` —
+common to every branch that does not remove the bot; each appends its own
+`(<reason>)` after it. Pinned beside `UNINVITE_COMMAND_PATTERN` for the same
+reason."""
+
 
 def valid_name(name: str) -> bool:
     """A character name, and nothing that is also a command separator."""
@@ -735,9 +747,37 @@ def add_command(player: str, klass: str, *, gender: str = "") -> str:
     return f"dml_addclass {player} {klass.strip().lower()}{tail}"
 
 
-def uninvite_command(bot: str) -> str:
-    """`dml_uninvite <bot>` (`rust-main:.../party.rs:184`)."""
-    return f"dml_uninvite {_check_name(bot, BOT)}"
+def uninvite_command(player: str, bot: str) -> str:
+    """`dml_uninvite <player> <bot>`.
+
+    T13 (T5's round-3 Codex review): wider than `rust-main:.../party.rs:184`'s
+    `dml_uninvite <bot>` — that tree's own bridge script never checked who it
+    removed a bot FROM, and the window that costs is real: `remove_all`
+    re-reads the group table and refuses unless the fresh guid set is exactly
+    what was confirmed, but the interval between that read and this whisper
+    landing is one the bot manager's own timers can still move a bot across,
+    into a party nobody confirmed. `player` travels here now so
+    `dml_uninvite.lua` can check it at the moment it acts — the only place
+    left that can still see the group when the whisper lands.
+    """
+    return f"dml_uninvite {_check_name(player, MASTER)} {_check_name(bot, BOT)}"
+
+
+def _uninvite_refusal_marker(player: str, bot: str) -> str:
+    """The base of the words `dml_uninvite.lua` answers with on EVERY branch
+    that does not remove `bot` (T13, round 1's must-fix 2): `player` not
+    found or offline, `bot` not found or offline, `bot` ungrouped, or `bot`
+    grouped with someone else. One marker for all four, each carrying its own
+    `(<reason>)` after it — `dismiss()` only needs to recognise the marker,
+    not enumerate the branches a second time on this side of the wire.
+
+    Read out of `answer.text`, not `answer.outcome`: this bridge's hook never
+    sets the core's error flag, on a refusal any more than on a success, so
+    `SoapChannel` reports "yes" either way — the same reason `read_probe`
+    reads `PROBE_TOKEN` out of a reply that is also always "yes" on its own
+    transport layer, rather than trusting the flag.
+    """
+    return UNINVITE_REFUSAL_FORMAT % (bot, player)
 
 
 def logout_command(player: str, bot: str) -> str:
@@ -1284,11 +1324,34 @@ def dismiss(
     and a bot that stays logged in is standing in the world, not in the group.
 
     `removed` is the group table read AFTER, never the uninvite's own `yes`.
+
+    **T13.** `dml_uninvite.lua` now checks `bot`'s CURRENT group against
+    `player` — membership, the same relationship `group_rows_sql` reads, not
+    leadership (round 1's must-fix 1: a master grouped with another human, or
+    any leader hand-off, is still `player`'s party) — and refuses every
+    non-removing branch (player not found, bot not found, bot ungrouped, bot
+    grouped with someone else) in words this reads back
+    (`_uninvite_refusal_marker`) rather than the core's error flag — the flag
+    never trips either way, so `answer.outcome` alone cannot tell a refusal
+    from a success here. Recognised, nothing more is sent: a bot the bridge
+    just refused to remove gets neither a logout whisper naming the wrong
+    master nor a poll of a group it was never confirmed against. The sentence
+    is bounded to what the server actually said — round 1 cut the earlier
+    "the group table moved it" wording, which was this app inventing a
+    mechanism the bridge never reported.
     """
-    answer = send(uninvite_command(bot))
+    answer = send(uninvite_command(player, bot))
     if answer.outcome != "yes":
         said = (answer.text or answer.reason).strip()
         return Dismissal(False, False, f"the server did not uninvite {bot}: {said}", bot=bot)
+    marker = _uninvite_refusal_marker(player, bot)
+    if marker in answer.text:
+        return Dismissal(
+            False,
+            False,
+            f"{bot} was not removed: the server says {answer.text.strip()}",
+            bot=bot,
+        )
     logged_out = send(logout_command(player, bot)).outcome == "yes"
     for attempt in range(tries):
         if attempt:
