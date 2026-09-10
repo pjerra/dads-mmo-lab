@@ -320,6 +320,28 @@ class CatalogView(QWidget):
         grid = QGridLayout()
         for index, entry in enumerate(catalog.games):
             grid.addWidget(self._tile(entry), index // 2, index % 2)
+        # Equal columns (T28). `index % 2` never addresses a third column, so
+        # 0 and 1 are the whole grid. Left at the default 0/0 stretch, a
+        # `QGridLayout` hands each column its own preferred width and then
+        # splits any leftover space in proportion to those same preferred
+        # widths — so the column whose word-wrapped labels ask for more stays
+        # wider, and by MORE than its content actually needs. Measured through
+        # the owner's frame (`catalog-two-columns-unequal.png`, `yulon-arch`,
+        # 2026-09-10): WotLK/Vanilla drawn at 224px next to TBC/Tortoise at
+        # 451px, in the same row of the same grid. Equal stretch factors make
+        # the two columns share space equally instead.
+        #
+        # No size policy on `_tile()`'s frame was needed on top of this: a
+        # `QFrame`'s default policy is already `Preferred`/`Preferred`, which
+        # lets `QGridLayout` grow it past its size hint, and the word-wrapped
+        # labels' `minimumSizeHint` (the longest WORD, not the longest line —
+        # `_tile_text`'s v0.6.51 fix) is well under 338px either way, so it
+        # never became the binding constraint once the columns were stretched
+        # evenly. Measured at `DEFAULT_WINDOW_SIZE` through the same splitter
+        # `main.py` builds: both columns land at 338/337px, a 1px rounding
+        # remainder `QGridLayout` has to put somewhere.
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         inner = QWidget()
         inner.setLayout(grid)
         scroll = QScrollArea(self)
