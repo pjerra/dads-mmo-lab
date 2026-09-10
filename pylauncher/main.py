@@ -18,7 +18,11 @@ from yulon import platform
 from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
+    from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget
+
     from yulon.state import AppState
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
 
 logger = get_logger(__name__)
 
@@ -41,6 +45,61 @@ this the tile text clips mid-word and the Install button leaves the viewport.
 It is a floor for the splitter, not a preference -- the pane is free to be
 wider, and the user is free to drag it.
 """
+
+
+def build_catalog_tab(
+    window: QMainWindow, catalog_view: CatalogView, log_panel: LogPanel
+) -> tuple[QTabWidget, QLabel, QSplitter]:
+    """Wire the window's central widget, tab bar and the Catalog tab's splitter.
+
+    Extracted out of `build_window()` (T28 round 2 review) so a test can lay
+    the real catalog tiles out inside the SAME chrome the running app gives
+    them, rather than a bare `QSplitter` that skips it. The width a tile
+    actually gets is not just "half the window": the tab bar's own frame, the
+    central widget's `QVBoxLayout`, and the splitter's `setCollapsible(0,
+    False)` / stretch-factor / `setMinimumWidth(_CATALOG_MIN_WIDTH)` rules all
+    eat into or bound that budget before a single tile is measured, and a
+    fixture that reconstructs only the splitter is measuring a window that
+    does not exist (round 1's mistake — it happened not to matter for the
+    first two tests, and there was no reason to expect that to keep holding).
+
+    Returns `(tabs, banner, splitter)`. `build_window()` itself only needs the
+    first two afterwards — `tabs` to add controller tabs and record on the
+    window's `tabs` property, `banner` for the update-check banner host —
+    but a test needs the `splitter` too, to drive it across the width range
+    the user can actually drag it to (`test_catalog_view.py`'s width matrix).
+    `central` and `column` are wiring with nothing left to read once this
+    returns.
+    """
+    from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
+
+    tabs = QTabWidget(window)
+    central = QWidget(window)
+    column = QVBoxLayout(central)
+    banner = QLabel(central)
+    banner.setOpenExternalLinks(True)
+    banner.setVisible(False)
+    column.addWidget(banner)
+    column.addWidget(tabs, 1)
+    window.setCentralWidget(central)
+
+    splitter = QSplitter()
+    splitter.addWidget(catalog_view)
+    splitter.addWidget(log_panel)
+    # The catalog is the thing the window is for; it may shrink, never vanish.
+    # A bare QSplitter honours whatever minimum its children ask for, so one
+    # widget with a wide size hint can squeeze the other to nothing -- which is
+    # exactly what an unwrapped status label did on 2026-09-02, leaving the
+    # tiles clipped mid-word and their buttons unreachable. That label now
+    # wraps, which is the fix; this is the floor, so the next widget with a wide
+    # hint cannot do it again. Stretch goes to the log because it is the pane
+    # whose content grows.
+    splitter.setCollapsible(0, False)
+    splitter.setStretchFactor(0, 0)
+    splitter.setStretchFactor(1, 1)
+    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
+    tabs.addTab(splitter, "Catalog")
+    return tabs, banner, splitter
 
 
 def _warn_about_the_log_file(parent: Any) -> None:
@@ -92,15 +151,7 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
     from PySide6.QtCore import QObject, QThread, Signal, Slot
-    from PySide6.QtWidgets import (
-        QLabel,
-        QMainWindow,
-        QMessageBox,
-        QSplitter,
-        QTabWidget,
-        QVBoxLayout,
-        QWidget,
-    )
+    from PySide6.QtWidgets import QMainWindow, QMessageBox, QWidget
 
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
@@ -135,15 +186,6 @@ def build_window() -> object:
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
-    tabs = QTabWidget(window)
-    central = QWidget(window)
-    column = QVBoxLayout(central)
-    banner = QLabel(central)
-    banner.setOpenExternalLinks(True)
-    banner.setVisible(False)
-    column.addWidget(banner)
-    column.addWidget(tabs, 1)
-    window.setCentralWidget(central)
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -164,22 +206,7 @@ def build_window() -> object:
         # about. Same list `add_controller()` just built the tabs from.
         installed_games=state.installed_dirs(),
     )
-    splitter = QSplitter()
-    splitter.addWidget(catalog_view)
-    splitter.addWidget(log_panel)
-    # The catalog is the thing the window is for; it may shrink, never vanish.
-    # A bare QSplitter honours whatever minimum its children ask for, so one
-    # widget with a wide size hint can squeeze the other to nothing -- which is
-    # exactly what an unwrapped status label did on 2026-09-02, leaving the
-    # tiles clipped mid-word and their buttons unreachable. That label now
-    # wraps, which is the fix; this is the floor, so the next widget with a wide
-    # hint cannot do it again. Stretch goes to the log because it is the pane
-    # whose content grows.
-    splitter.setCollapsible(0, False)
-    splitter.setStretchFactor(0, 0)
-    splitter.setStretchFactor(1, 1)
-    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
-    tabs.addTab(splitter, "Catalog")
+    tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the
     # distro comparison both reach into `services` and `console_log`.
