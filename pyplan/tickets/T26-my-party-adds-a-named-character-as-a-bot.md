@@ -1,6 +1,6 @@
 # T26 — My Party adds a chosen existing character as a bot (own alts, other accounts, friends' and family's characters)
 
-**Status:** unit half REWORK round 1 of 2 (rejected by the lead 2026-09-10 20:30 CEST); the live half waits for a client seat on `yulon-win11`
+**Status:** unit half MERGING (two rounds, the last finding closed by the lead's hand); the live half waits for a client seat on `yulon-win11`
 **Filed:** 2026-09-10 18:26 CEST by the lead (Fable), from the owner's answer on 8.6 through the question tool: "want to be able to choose alts, that way we can play with altbots there … Alts also from another account, or friends/family chars. This is only for AzerothCore as I know of."
 **Hand:** Opus (a feature with a live half), worktree branched from `yulon-phase8b`
 **Box:** `yulon-ubuntu2` (WotLK; the AzerothCore playerbots module is the only tree with the route), after T13's live half and T23
@@ -66,3 +66,7 @@ Add a commit (do not amend); gate; report in the same format. Round 2 is the las
 ## Review, unit half round 2 (Codex adversarial, 2026-09-10 21:23 CEST) -- REWORK, one high
 
 The transaction and readback path: no blocking defect. `party.py:1877-1889`: `_flag()` reads only `1` and `0`, while the core consumes these keys through `GetOption<bool>` / `StringTo<bool>`, which accepts textual booleans; a deployed `AiPlayerbot.AllowAccountBots = true` enables the rule in the module and reads as unreadable here, greying rows the module allows -- fail-closed, but the picker breaks on a valid conf; the test codified the mismatch as "unmeasured". Match the pinned core's grammar, parity tests per spelling, absent/invalid stays `None`, no `.dist` fallback. Closed by the lead's hand (round cap), the grammar read off the core on the box.
+
+## Closed by the lead's hand (round cap, 2026-09-10 21:26 CEST)
+
+`_flag()` reads the core's non-strict `StringTo<bool>` grammar, read off `src/common/Utilities/StringConvert.h:110-121` on the pinned tree on `yulon-ubuntu2`: `1 y on yes true` on, `0 n off no false` off, the words case-insensitively, anything else and an absent key unread; a parity test over every spelling; mutation (the words dropped): red. `9f02a002`, gate ALL GREEN on m910q. Merged behind a gate next; the live half needs a client seat.
