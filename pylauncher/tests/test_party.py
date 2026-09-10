@@ -302,6 +302,17 @@ def test_the_probe_command_is_the_one_the_shipped_script_registers() -> None:
     assert party.PROBE_TOKEN in text
 
 
+def test_the_uninvite_grammar_and_refusal_sentence_are_the_shipped_scripts_own() -> None:
+    """Round 1's must-fix 3: the wire grammar `uninvite_command` builds for and
+    the refusal sentence `dismiss()` parses each existed twice — once in this
+    file, once in `dml_uninvite.lua` — with nothing binding them to the ONE
+    script that actually speaks the protocol. Same shape as the probe-command
+    pin above."""
+    text = (resources.lua_dir() / "party" / "dml_uninvite.lua").read_text()
+    assert party.UNINVITE_COMMAND_PATTERN in text
+    assert party.UNINVITE_REFUSAL_FORMAT in text
+
+
 def test_the_measured_refusal_reads_as_a_bridge_that_did_not_arrive() -> None:
     """MEASURED on `yulon-ubuntu`, 2026-09-08 09:38Z, over the app's own SOAP
     channel, with nothing deployed:
@@ -604,10 +615,17 @@ def test_a_bot_that_moved_to_another_party_is_recognised_and_nothing_more_is_sen
     "yes" goes on to whisper `logout` and poll the group table — sending a
     command for a party this master was never in, and (with the bot durably
     parked in someone else's party) eventually reporting the same `removed`
-    result for the wrong reason. `chan.sent` is what tells them apart: the
-    right code sends nothing more once the bridge has already said no.
+    result for the wrong reason. `chan.sent` and `logged_out` are what tell
+    them apart: the right code sends nothing more once the bridge has already
+    said no.
     """
-    chan = _Chan({"dml_uninvite": Answer("yes", "Newbot is not in Pakka's party now")})
+    chan = _Chan(
+        {
+            "dml_uninvite": Answer(
+                "yes", "Newbot is not in Pakka's party now (Newbot is grouped with someone else)"
+            )
+        }
+    )
     result = party.dismiss(
         player="Pakka",
         bot="Newbot",
@@ -616,7 +634,66 @@ def test_a_bot_that_moved_to_another_party_is_recognised_and_nothing_more_is_sen
         sleep=lambda _s: None,
     )
     assert result.removed is False
+    assert result.logged_out is False
     assert "Newbot" in result.sentence
+    assert chan.sent == ["dml_uninvite Pakka Newbot"], (
+        "a refused uninvite must not whisper logout or poll the table of a party "
+        "this master was never confirmed against"
+    )
+
+
+def test_the_refusal_sentence_relays_the_server_and_invents_nothing() -> None:
+    """Round 1's must-fix 1: the sentence is bounded to what the bridge
+    actually said, not a Python-invented mechanism (the earlier "the group
+    table moved it into a different party" wording asserted something no
+    reply ever reported)."""
+    chan = _Chan(
+        {
+            "dml_uninvite": Answer(
+                "yes", "Newbot is not in Pakka's party now (Newbot is grouped with someone else)"
+            )
+        }
+    )
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: (),
+        sleep=lambda _s: None,
+    )
+    assert result.sentence == (
+        "Newbot was not removed: the server says Newbot is not in Pakka's party now "
+        "(Newbot is grouped with someone else)"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "Pakka not found or offline",
+        "Newbot not found or offline",
+        "Newbot is not grouped with anyone",
+        "Newbot is grouped with someone else",
+    ],
+)
+def test_every_non_removing_branch_is_recognised_and_sends_no_logout_whisper(reason: str) -> None:
+    """Round 1's must-fix 2: `dml_uninvite.lua` answers ALL FOUR non-removing
+    branches (player not found, bot not found, bot ungrouped, bot grouped with
+    someone else) with the one shared marker plus that branch's own reason —
+    "the one marker with the reason" of the lead's two offered options — and
+    `dismiss()` must recognise every one of them the same way the single
+    "moved to another party" case above is recognised: no logout whisper, no
+    poll of a party this master was never confirmed against."""
+    chan = _Chan({"dml_uninvite": Answer("yes", f"Newbot is not in Pakka's party now ({reason})")})
+    result = party.dismiss(
+        player="Pakka",
+        bot="Newbot",
+        send=chan.send,
+        members=lambda: (party.Member("Newbot", 777, 8, 1),),
+        sleep=lambda _s: None,
+    )
+    assert result.removed is False
+    assert result.logged_out is False
     assert chan.sent == ["dml_uninvite Pakka Newbot"], (
         "a refused uninvite must not whisper logout or poll the table of a party "
         "this master was never confirmed against"
