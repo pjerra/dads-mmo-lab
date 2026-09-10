@@ -10,8 +10,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QWidget,
+)
 
+import main
 from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import JOB_PACE, process_events, pump_until, spelled_bounds, wait_for_panel
 from yulon import platform, runner, wsl
@@ -122,6 +130,160 @@ def test_one_tile_per_catalog_entry_with_install_button(qapp: object) -> None:
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
     for game in CATALOG.games:
         assert view.button_for(game.id).text() == "Install"
+
+
+# ------------------------------------------------- T28: the two columns come out equal
+
+
+def _tile_widths_by_row(scroll: QScrollArea) -> list[tuple[int, ...]]:
+    """Each grid row's tile widths, left to right, off the live widgets.
+
+    Walks the `QGridLayout` under the scroll area rather than trusting anything
+    computed, because the frame T28 was filed from
+    (`catalog-two-columns-unequal.png`) is exactly a mismatch between what the
+    two columns actually measure on screen.
+    """
+    grid = scroll.widget().layout()
+    assert isinstance(grid, QGridLayout)
+    rows: list[tuple[int, ...]] = []
+    for row in range(grid.rowCount()):
+        widths = [
+            item.widget().width()
+            for column in range(grid.columnCount())
+            if (item := grid.itemAtPosition(row, column)) is not None and item.widget() is not None
+        ]
+        if widths:
+            rows.append(tuple(widths))
+    return rows
+
+
+def _assert_the_two_columns_are_equal(scroll: QScrollArea) -> None:
+    """Every row's tiles the same width within a pixel, and column to column too.
+
+    The within-a-row check alone would pass a grid where row 0 is 400/400 and
+    row 1 is 300/300 -- each row internally even, the two COLUMNS still not
+    the same width the ticket asks for. `QGridLayout` gives one width per
+    column across the whole grid, so this either holds everywhere or is a bug
+    in the layout, not a hidden per-row coincidence.
+    """
+    rows = _tile_widths_by_row(scroll)
+    assert rows, "no tile rows found under the scroll area"
+    for row in rows:
+        assert max(row) - min(row) <= 1, f"a row's tiles differ in width: {row}"
+    full_rows = [row for row in rows if len(row) == 2]
+    if full_rows:
+        lefts = [row[0] for row in full_rows]
+        rights = [row[1] for row in full_rows]
+        assert max(lefts) - min(lefts) <= 1, f"left column width varies by row: {lefts}"
+        assert max(rights) - min(rights) <= 1, f"right column width varies by row: {rights}"
+        assert (
+            max(lefts + rights) - min(lefts + rights) <= 1
+        ), f"the two columns are not the same width: left={lefts} right={rights}"
+
+
+def test_the_shipped_catalogs_tile_columns_come_out_equal_widths(qapp: object) -> None:
+    """T28: the owner's frame off `yulon-arch` showed WotLK and Vanilla's column
+    drawn narrow and TBC/Tortoise's wide -- an unstretched `QGridLayout` column
+    takes the width its content asks for, and a word-wrapped label asks in
+    proportion to its longest line.
+
+    Laid out through `_catalog_in_the_default_window()` rather than a bare
+    `view.resize(*DEFAULT_WINDOW_SIZE)`: the catalog's own budget is not the
+    whole window, it is a `QSplitter` half of it beside the log panel
+    (`main.py`'s `build_window()`), and resizing the view alone to the full
+    1100px gives it more room than it ever gets in the real app -- room wide
+    enough that the very defect this test exists for stopped reproducing.
+    """
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    # The fixture has to be measuring a REAL constraint, not the full window --
+    # round 1's bare-splitter version happened to give the tiles a viewport
+    # nearly the whole 1100px wide, which is why it stopped reproducing the
+    # defect it was written for.
+    viewport_width = scroll.viewport().width()
+    assert 0 < viewport_width < DEFAULT_WINDOW_SIZE[0], (
+        f"the catalog pane is not actually constrained by the splitter: "
+        f"viewport={viewport_width} of a {DEFAULT_WINDOW_SIZE[0]}px window"
+    )
+    _assert_the_two_columns_are_equal(scroll)
+
+
+def test_the_columns_stay_equal_with_one_long_and_one_short_description(qapp: object) -> None:
+    """A second, built-for-this catalog: one entry's description much longer than
+    the other's -- the shape of the owner's frame, WotLK/Vanilla against
+    TBC/Tortoise -- so this keeps exercising the layout rule even if
+    `catalog.json`'s own descriptions are ever edited to be nearly the same
+    length.
+    """
+    from yulon.catalog.catalog import Catalog
+
+    short = CATALOG.get("wow-wotlk").model_copy(update={"description": "Short."})
+    long_winded = CATALOG.get("wow-tbc").model_copy(
+        update={"description": "A very long description of this server. " * 12}
+    )
+    two = Catalog(games=(short, long_winded))
+    panel = LogPanel()
+    view = CatalogView(two, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    viewport_width = scroll.viewport().width()
+    assert 0 < viewport_width < DEFAULT_WINDOW_SIZE[0], (
+        f"the catalog pane is not actually constrained by the splitter: "
+        f"viewport={viewport_width} of a {DEFAULT_WINDOW_SIZE[0]}px window"
+    )
+    _assert_the_two_columns_are_equal(scroll)
+
+
+def test_the_columns_stay_equal_across_the_splitters_supported_width_range(
+    qapp: object,
+) -> None:
+    """T28 round 2: the catalog pane is not a fixed width -- it is one side of a
+    `QSplitter` the user drags, and the two tests above only ever measured it
+    at the width a fresh window happens to open at.
+
+    Three points across the range `build_window()` actually allows:
+
+    * the width a fresh window's first layout gives it, with no `setSizes()`
+      call at all -- the same point the two tests above check;
+    * `main._CATALOG_MIN_WIDTH`, the floor `build_catalog_tab()` sets on the
+      catalog view (`catalog_view.setMinimumWidth`) and the narrowest the
+      splitter will honour;
+    * a wide point with room to spare, so the stretch factors are exercised
+      giving the columns MORE than their preferred width too, not only less.
+
+    All three must land at genuinely different viewport widths -- a matrix
+    that silently measured the same width three times would prove nothing
+    beyond the first test.
+    """
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, splitter = _catalog_in_the_default_window(view, panel)
+    total = sum(splitter.sizes())
+
+    measured: dict[str, int] = {}
+
+    # 1. The default allocation: the state `_catalog_in_the_default_window()`
+    # already laid out, untouched.
+    measured["default"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    # 2. The floor.
+    splitter.setSizes([main._CATALOG_MIN_WIDTH, total - main._CATALOG_MIN_WIDTH])
+    process_events()
+    measured["min"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    # 3. Wide -- comfortably above both other points, still inside the window.
+    wide = 900
+    splitter.setSizes([wide, total - wide])
+    process_events()
+    measured["wide"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    assert (
+        len(set(measured.values())) == 3
+    ), f"the three points did not land at genuinely different widths: {measured}"
+    assert measured["min"] < measured["default"] < measured["wide"], measured
 
 
 def test_install_asks_for_folders_then_streams_the_installer(
@@ -1661,28 +1823,32 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
 
 def _catalog_in_the_default_window(
     view: CatalogView, panel: LogPanel
-) -> tuple[QSplitter, QScrollArea]:
+) -> tuple[QMainWindow, QScrollArea, QSplitter]:
     """Lay the catalog out exactly as `build_window()` does, at the size it opens at.
 
-    The tiles' width budget is not the window's — the Catalog tab is a splitter
-    with the log panel beside it, so the view gets roughly half of it. Rebuilding
-    that arrangement rather than resizing the view to some chosen number is the
-    point: the budget has to be the app's own, or the test is measuring a window
-    that does not exist.
+    Built through `main.build_catalog_tab()` — the SAME function
+    `build_window()` calls — rather than a bare `QSplitter` that only mimics
+    it. T28 round 1's version of this helper WAS that bare splitter, and round
+    2's review is why it is gone: the tab bar's own frame, the central
+    widget's `QVBoxLayout`, and the splitter's `setCollapsible(0, False)` /
+    stretch-factor / `setMinimumWidth(_CATALOG_MIN_WIDTH)` rules all eat into
+    or bound the catalog's width budget before a single tile is measured, and
+    none of that exists on a splitter built by hand. It happened not to change
+    round 1's two assertions, which is exactly why it was the wrong thing to
+    trust.
 
-    The splitter comes back with the scroll area because `addWidget()` reparents
-    both children onto it: dropping it here would delete the C++ side of the very
-    widgets the caller is about to measure.
+    Returns the window, the scroll area (for the tile geometry), and the
+    splitter (so a caller can drive it across a width range with `setSizes()`
+    — round 2's width matrix does exactly that).
     """
-    splitter = QSplitter()
-    splitter.addWidget(view)
-    splitter.addWidget(panel)
-    splitter.resize(*DEFAULT_WINDOW_SIZE)
-    splitter.show()
+    window = QMainWindow()
+    _tabs, _banner, splitter = main.build_catalog_tab(window, view, panel)
+    window.resize(*DEFAULT_WINDOW_SIZE)
+    window.show()
     process_events()
     scroll = view.findChild(QScrollArea)
     assert isinstance(scroll, QScrollArea)
-    return splitter, scroll
+    return window, scroll, splitter
 
 
 def test_every_install_button_is_inside_the_default_window(qapp: object) -> None:
@@ -1703,7 +1869,7 @@ def test_every_install_button_is_inside_the_default_window(qapp: object) -> None
     """
     panel = LogPanel()
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
-    window, scroll = _catalog_in_the_default_window(view, panel)
+    window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
     assert window.isHidden() is False  # geometry is only meaningful once laid out
     viewport = scroll.viewport()
 
