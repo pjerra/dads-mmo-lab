@@ -821,6 +821,11 @@ class _Log:
     done: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     pending_sql: list[PendingSql] = field(default_factory=list)
+    # Set by `_conf()` the moment it actually writes a byte to a deployed conf
+    # file — a template copied in, or a key set — never by a conf step that
+    # found nothing to do (the file already there, or no keyed value to write).
+    # See `_report()`: this is the fourth thing `restart_recommended` can now see.
+    conf_restart: bool = False
 
 
 class _NoAdoption(Enum):
@@ -2128,7 +2133,11 @@ class Applier:
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(template, target)
-                log.done.append(f"activate {conf.file} from {conf.template}")
+                log.done.append(
+                    f"activate {conf.file} from {conf.template} — the world reads "
+                    f"{conf.file} at its next start"
+                )
+                log.conf_restart = True
             writes = [(k.key, k.default) for k in conf.keys if k.default is not None]
             # A key the catalog names with no `default` is a step nobody takes.
             # Measured on yulon-ubuntu 2026-09-08 (8.7a, defect 1): the four
@@ -2150,9 +2159,17 @@ class Applier:
             if not target.is_file():
                 log.skipped.append(f"conf {conf.file}: file missing, keys not written")
                 continue
+            changed = False
             for key, default in writes:
-                _set_conf_key(target, key, _render(default, vals, f"conf {key}"))
-            log.done.append(f"set {len(writes)} key(s) in {conf.file}")
+                mode = _set_conf_key(target, key, _render(default, vals, f"conf {key}"))
+                changed = changed or mode != "unchanged"
+            if not changed:
+                continue  # every key already read this value: nothing to restart for
+            log.done.append(
+                f"set {len(writes)} key(s) in {conf.file} — the world reads "
+                f"{conf.file} at its next start"
+            )
+            log.conf_restart = True
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         for step in manifest.client:
@@ -2198,17 +2215,27 @@ class Applier:
             done=tuple(log.done),
             skipped=tuple(log.skipped),
             rebuild_required=manifest.build.rebuild and action != "configure",
-            # Declared first, then derived. The derivation reads three things
-            # that reach the database or the data volume, and a manifest whose
-            # whole content is `conf[].keys` reaches neither — so it answered
-            # "nothing further needed" over a value the emulator reads once, at
-            # startup. `build.restart` is that fact stated by the item; it can
-            # only ADD a yes, never take one away.
+            # Declared first, then derived. Three of the four derived clauses
+            # read the manifest itself — NPCs, direct SQL and server DBCs, all
+            # of which reach the database or the data volume. The fourth reads
+            # what THIS RUN actually did: `log.conf_restart`, set by `_conf()`
+            # the moment it writes a byte to a file the running world reads
+            # only at startup (T27; measured live, `pyplan/gates/8.6-spec-
+            # takes-effect-yulon-ubuntu2-2026-09-10/03-activate.log:38` —
+            # activating `mod-playerbots`' conf reported `restart_recommended
+            # = False` while the world went on running the OLD config until
+            # the next restart). A conf step that found nothing to write —
+            # the file already there, no keyed value in the catalog — leaves
+            # `conf_restart` False, same as a manifest with no `conf` at all.
+            # `build.restart` is the one clause that is a DECLARATION rather
+            # than an observation; every clause here can only ADD a yes, never
+            # take one away.
             restart_recommended=bool(
                 manifest.build.restart
                 or manifest.npcs
                 or any(s.applied_by == "direct" for s in manifest.sql)
                 or manifest.server_dbc
+                or log.conf_restart
             ),
             pending_sql=tuple(log.pending_sql),
         )
@@ -2249,15 +2276,25 @@ def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
     return True
 
 
-_KeyMode = Literal["replace", "append"]
+_KeyMode = Literal["replace", "append", "unchanged"]
 
 
 def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
-    """Set `key = value` in a worldserver-style conf: replace the line, or append it."""
+    """Set `key = value` in a worldserver-style conf: replace the line, append it, or —
+
+    T27 round 2 (Codex adversarial review): a re-apply of a keyed conf that already
+    reads `key = value` byte-for-byte used to hit the replace branch every time and
+    write the file anyway, so `_conf()` could not tell a real change from a no-op —
+    it reported `restart_recommended = True` over a conf it had not touched. `new ==
+    text` is that no-op, caught before the write rather than after: nothing on disk
+    changes, and the caller sees `"unchanged"` rather than `"replace"`.
+    """
     text = path.read_text(encoding="utf-8")
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
     new, count = pattern.subn(f"{key} = {value}", text, count=1)
     if count:
+        if new == text:
+            return "unchanged"
         path.write_text(new, encoding="utf-8", newline="\n")
         return "replace"
     sep = "" if text.endswith("\n") or not text else "\n"
