@@ -69,6 +69,7 @@ from yulon import (
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
 from yulon import play as play_module
+from yulon import steam as steam_module
 from yulon.apply import Applier, ApplyReport, DockerSql, PendingSql, required_prompts
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import CatalogEntry
@@ -506,6 +507,15 @@ class ControllerServices:
     """
     play: object | None = None
     """8.4a's Characters tab, where this tree has measured what it needs."""
+    steam: steam_module.SteamShortcuts | None = None
+    """8.8's two Steam library entries, on Linux and the Steam Deck only.
+
+    `None` on Windows and macOS, and that is what makes the button ABSENT there
+    rather than disabled: the checklist's own words are "nothing is drawn on
+    Windows or macOS", and a greyed-out control is still something drawn. The
+    decision is taken once, in `_steam_seam()`, so no view code branches on the
+    operating system.
+    """
     """This install's user accounts, for a game whose stores are measured (8.3a).
 
     One object and not three callables for the reason `channel_setup` is one:
@@ -811,10 +821,28 @@ def _no_manifest_store(entry: CatalogEntry) -> ManifestStore | None:
     return None
 
 
+def _steam_seam(
+    entry: CatalogEntry, server_dir: Path, client_dir: Path | None
+) -> steam_module.SteamShortcuts | None:
+    """8.8's Add to Steam..., or `None` on the two platforms it is not for.
+
+    The one place in this file that asks what operating system this is, and it
+    asks once: 8.8 is "Linux and Steam Deck only -- nothing is drawn on Windows
+    or macOS", and the way to draw nothing is to hand the view no seam, exactly
+    as a game without an uninstall route is handed no `uninstall`.
+    """
+    if platform.detect() != "linux":
+        return None
+    return steam_module.SteamShortcuts(
+        game=entry.name, server_dir=server_dir, client_dir=client_dir
+    )
+
+
 def _assemble(
     entry: CatalogEntry,
     server_dir: Path,
     *,
+    client_dir: Path | None,
     wsl_distro: str | None,
     controller: Controller,
     sql: DockerSql,
@@ -850,6 +878,7 @@ def _assemble(
     """
     spec = entry.container_spec()
     return ControllerServices(
+        steam=_steam_seam(entry, server_dir, client_dir),
         controller=controller,
         logs_source=lambda: docker.follow_logs(spec.world, wsl_distro=wsl_distro),
         send_console=send_console,
@@ -1107,6 +1136,7 @@ def _for_wotlk(
     return _assemble(
         entry,
         server_dir,
+        client_dir=client_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
@@ -1360,6 +1390,7 @@ def _for_tbc(
     return _assemble(
         entry,
         server_dir,
+        client_dir=client_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
@@ -1503,6 +1534,7 @@ def _for_vanilla(
     return _assemble(
         entry,
         server_dir,
+        client_dir=client_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
@@ -1586,8 +1618,11 @@ def _for_tortoise(
     `controller_for()` is that package's own constructor and it is the one used
     rather than `TortoiseController(...)` directly, because the decision to
     attach no import probe is written down inside it.
+
+    `client_dir` used to be `del`-ed here. Since 8.8 it is passed on: this tree
+    has no manifests that want it, but the Steam client entry is a path to that
+    folder's own executable and there is nowhere else to get it.
     """
-    del client_dir
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
@@ -1642,6 +1677,7 @@ def _for_tortoise(
     return _assemble(
         entry,
         server_dir,
+        client_dir=client_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
@@ -2332,6 +2368,20 @@ class ControllerView(QWidget):
         self.uninstall_label.setWordWrap(True)
         self.uninstall_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.uninstall_label.setVisible(False)
+        # 8.8. Beside Start, because it is the same errand seen from the other
+        # side: Start plays this server from here, and this puts it and its
+        # client in the Steam library so a Deck in Gaming Mode can. Built only
+        # where the seam is wired, which is Linux -- on Windows and macOS there
+        # is no button rather than a dead one.
+        self.steam_button: QPushButton | None = None
+        self.steam_label = QLabel("", tab)
+        self.steam_label.setWordWrap(True)
+        self.steam_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.steam_label.setVisible(False)
+        if self.services.steam is not None:
+            self.steam_button = QPushButton("Add to Steam\u2026", tab)
+            self.steam_button.clicked.connect(self.add_to_steam)
+            self.steam_label.setVisible(True)
         if self.services.uninstall is not None:
             self.uninstall_button = QPushButton("Uninstall\u2026", tab)
             self.uninstall_button.clicked.connect(self.show_uninstall_plan)
@@ -2354,6 +2404,8 @@ class ControllerView(QWidget):
             self.repair_button,
         ):
             row.addWidget(b)
+        if self.steam_button is not None:
+            row.addWidget(self.steam_button)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
@@ -2363,6 +2415,7 @@ class ControllerView(QWidget):
         box.addWidget(self.enable_channel_button)
         box.addWidget(self.repair_channel_button)
         box.addLayout(row)
+        box.addWidget(self.steam_label)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
         box.addWidget(self.repair_label)
@@ -3248,6 +3301,49 @@ class ControllerView(QWidget):
         self.uninstall_confirm_button.setVisible(False)
         message = str(exc)
         self.uninstall_label.setText(message)
+        self.action_failed.emit(message)
+
+    @Slot()
+    def add_to_steam(self) -> None:
+        """8.8. Put this server and its client in the Steam library.
+
+        Off the GUI thread like every other action here: the press draws an icon
+        and reads and rewrites two files in the user's Steam profile, and none of
+        that belongs on the thread that repaints the window.
+
+        Not part of `_set_busy()`'s lock, and that is deliberate rather than an
+        oversight: this touches no container, no compose project and no database,
+        so there is nothing for it to race with. It locks only its own button,
+        so a second press cannot arrive while the first is still writing.
+        """
+        shortcuts = self.services.steam
+        if shortcuts is None or self.steam_button is None:  # pragma: no cover - not built
+            return
+        self.steam_button.setEnabled(False)
+        self.steam_label.setText("Writing the two Steam entries\u2026")
+        self._run(shortcuts.add, self._steam_done, self._steam_failed)
+
+    @Slot(object)
+    def _steam_done(self, result: object) -> None:
+        """Name everything the press changed, so it can be checked by hand."""
+        if self.steam_button is not None:
+            self.steam_button.setEnabled(True)
+        said = steam_module.confirmation(cast(steam_module.AddReport, result))
+        self.steam_label.setText(said)
+        logger.info(f"steam: {self.entry.id}: {said}")
+
+    @Slot(object)
+    def _steam_failed(self, exc: object) -> None:
+        """One of five refusals, each of which says what to do about it.
+
+        On the label AND on `action_failed`, for the reason every refusal on this
+        tab is on both: the label is where the person looks and the signal is
+        what the app's own log keeps.
+        """
+        if self.steam_button is not None:
+            self.steam_button.setEnabled(True)
+        message = str(exc)
+        self.steam_label.setText(message)
         self.action_failed.emit(message)
 
     @Slot()
