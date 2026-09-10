@@ -1,6 +1,6 @@
 # T20 — A paused worldserver passes the direct-SQL guard
 
-**Status:** IN PROGRESS (Sonnet hand on `hand-t20` since 2026-09-10 15:17 CEST, gate box m910q)
+**Status:** MERGING (hand DONE `e4514902`, Codex ACCEPT; gate behind the merge on m910q)
 **Filed:** 2026-09-10 15:05 CEST by the lead (Fable), from the owed Codex adversarial pass on T7 round 2 (`a6e2aff6`), one high finding
 **Hand:** Sonnet (a one-function fix and its tests), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/docker.py` **only** at `world_running()` (`:2539-2564`) and its docstring; its test (`test_world_running_is_three_valued_and_an_unreadable_inspect_is_not_a_no`, find the file with `git grep -n`); one app-level test beside T7's button test in `pylauncher/tests/test_controller_view.py` (or the apply-seam test file T7 used — name it). Not `apply.py`, not `controller_view.py`.
@@ -32,3 +32,7 @@
 - Tests: the three-valued docker test flipped (`paused: True`, `dead: False`, `removing: True`, a future status `True`), RED first, mutation (the old two-word table) RED; `test_a_paused_world_refuses_direct_sql_on_the_wotlk_modules_tab` patches `container_state` (not `world_running`) so the real mapping runs through the shipped wiring into `applier.install()`: `ApplyError` with the 8.7a sentence, zero `DockerSql` calls; mutation RED (the un-refused guard fell through to `start_database` and the conftest docker-CLI guard failed the run).
 - Other readers: the 8.7a applier guard on all four games and `native.py`'s updates guard -- affected as intended; Tortoise `autoupdate.GuardedApplier`'s restart-survivability check shares the same callable, so a paused Tortoise world now reads as up there too (side effect, outside the file set, flagged); My Party, observability, readiness polling and channel_setup read `container_state` fields or UI state, not affected.
 - Deviations: none; the first commit lacked the trailer and was amended before the report, one commit on the branch. Status DONE.
+
+## Review (Codex adversarial, 2026-09-10 15:27 CEST) -- ACCEPT
+
+"Docker's emitted inspect states are covered conservatively: created/exited/dead are down; paused/restarting/running/removing are treated as unsafe. The changed meaning correctly propagates to Tortoise's restart-survivability guard and native updates guard; My Party uses a separate state mapping. The app-level test traverses shipped wiring and would fail under the old paused->False mutation." No findings. The lead read the Tortoise guard: a paused world now gets the survivability check instead of the "not running" skip, the conservative direction.

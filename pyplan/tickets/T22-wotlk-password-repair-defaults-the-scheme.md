@@ -1,6 +1,6 @@
 # T22 — The WotLK password-repair callback defaults the account scheme to AzerothCore
 
-**Status:** MERGING (hand DONE `4079dfaf`, Codex ACCEPT; gate behind the merge on m910q)
+**Status:** CLOSED (merged `3b4b5d81`, gate ALL GREEN on m910q behind it, 2026-09-10 15:27 CEST; worktree and branch removed)
 **Filed:** 2026-09-10 15:06 CEST by the lead (Fable), from the owed Codex adversarial pass on T12 (`eea840b6`), one high finding, confirmed at the tip
 **Hand:** Sonnet (one binding and its test), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/ui/controller_view.py` **only** at the WotLK `reset=` lambda (`:972` at `a8391aeb`; the `create=` binding two lines above is the pattern); `pylauncher/yulon/controller_wow_wotlk/accounts.py` **only** if `reset_own_password`'s default must go (T12's rule: an entry that declares no scheme is refused, not defaulted — consider making `scheme` required and letting mypy find every caller); the controller test file T12 used (name it). Not the three CMaNGOS trees (their wrappers already pass a scheme).
