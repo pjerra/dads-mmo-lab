@@ -183,6 +183,36 @@ def test_the_import_stage_of_an_updates_press_is_never_written_into_the_state_fi
     assert engine.stage_named("import").recorded is True, "the install's own is still recorded"
 
 
+def test_an_updates_press_never_prints_the_import_stage_cancel_note(tmp_path: Path) -> None:
+    """`IMPORT_CANCEL_NOTE` is a claim about `gate.reset()`, unreachable on this route.
+
+    `stage_named("import")` carries `cancel_note=IMPORT_CANCEL_NOTE` ("Databases
+    left half-written are detected and cleared before the import is run
+    again…"), true of the install route because `stage_import()`'s `partial`
+    arm calls `gate.reset()` before it re-imports. `_only_the_rerunnable_phases`
+    never calls `stage_import()` — it is the second way IN to `_import`, past
+    the branch that clears anything — so the sentence is false here, and the
+    spine prints any `cancel_note` right after the stage's own `--- <name>`
+    line whether or not the stage earns it (T19, finding 2).
+
+    Pinned on the panel's own lines rather than on the stage object: the two
+    `--- <name>` markers the spine always yields for this route's two stages
+    are asserted present, so a fix that also swallowed those would be caught
+    here rather than passing this test by deleting too much.
+
+    Catches `replace(stage_named("import"), recorded=False)` with no
+    `cancel_note=""` alongside it.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
+    said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+    assert not any(native.IMPORT_CANCEL_NOTE in line for line in said), said
+    assert "--- start-db" in said, said
+    assert "--- import" in said, said
+
+
 def test_the_press_runs_only_the_phases_the_plan_declares_rerunnable(tmp_path: Path) -> None:
     """The whole point, at the engine: the flagged phase moved and nothing else did.
 

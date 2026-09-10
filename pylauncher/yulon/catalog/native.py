@@ -2161,10 +2161,20 @@ class StagedInstaller:
         its next resume skip the import on the strength of this press. The same
         rule `rebuild_stages()` applies to `recreate`, arrived at from the other
         side: there the stage is not the install's, here the outcome is not.
+
+        **`cancel_note` cleared too**, and for the same reason as `recorded`:
+        the install's `import` carries `IMPORT_CANCEL_NOTE` because its
+        `partial` arm calls `gate.reset()` before it re-imports, and the spine
+        prints that note right after `--- import` on every route through this
+        stage, earned or not. `_only_the_rerunnable_phases` is the second way in
+        to `_import`, past the branch that clears anything — `stage_import()`
+        is never called, so `gate.reset()` is unreachable here — and a note
+        promising a clear-before-reimport that this press cannot do would be
+        read as a promise about a press it is not (T19, finding 2).
         """
         return (
             self.stage_named("start-db"),
-            replace(self.stage_named("import"), recorded=False),
+            replace(self.stage_named("import"), recorded=False, cancel_note=""),
         )
 
     def update_files(self, ctx: StageContext) -> tuple[str, ...]:
