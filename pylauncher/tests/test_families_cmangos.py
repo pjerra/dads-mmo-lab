@@ -4977,8 +4977,28 @@ def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(
     rec = Recorder()
     said = install(rec, tmp_path / "srv", client_folder(tmp_path))
     at = said.index("--- import")
-    assert said[at + 1] == native.IMPORT_CANCEL_NOTE
-    assert said.count(native.IMPORT_CANCEL_NOTE) == 1
+    assert said[at + 1] == native.IMPORT_STAGE_CANCEL_NOTE
+    assert said.count(native.IMPORT_STAGE_CANCEL_NOTE) == 1
+
+
+def test_a_finished_installs_ordinary_run_never_says_the_bare_clearing_promise(
+    tmp_path: Path,
+) -> None:
+    """The spine says the import stage's note BEFORE `_import` probes, so on a finished
+    install -- whose route is `_rerun_on_marked()`, which clears nothing -- a note that
+    promised clearing was false up front and contradicted by the stop's own words later
+    (Codex on T19, round 2). The stage's note now names both arms; the bare clearing
+    promise (`IMPORT_CANCEL_NOTE`) is a stop-time sentence for the fresh-import route and
+    appears in no line of a finished install's run, and the re-run note is the updates
+    stage's, not this one's. Catches the stage note reverted to `IMPORT_CANCEL_NOTE`."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(False))
+    assert said.count(native.IMPORT_STAGE_CANCEL_NOTE) == 1, said
+    assert not any(native.IMPORT_CANCEL_NOTE in line for line in said), said
+    assert not any(native.RERUN_CANCEL_NOTE in line for line in said), said
+    assert any("leaving them alone" in line for line in said), said
 
 
 def test_import_is_recorded_and_sits_between_start_db_and_up() -> None:

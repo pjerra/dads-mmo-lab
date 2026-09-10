@@ -24,7 +24,7 @@ from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     DOWNLOAD_CANCEL_NOTE,
-    IMPORT_CANCEL_NOTE,
+    IMPORT_STAGE_CANCEL_NOTE,
     OUR_OWN_FILES,
     CallableGate,
     Stage,
@@ -59,7 +59,7 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("build", self.stage_build, cancel_note=BUILD_CANCEL_NOTE),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
             Stage("start-db", self._start_db, recorded=False),
-            Stage("import", self._import, cancel_note=IMPORT_CANCEL_NOTE),
+            Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )

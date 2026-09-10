@@ -30,8 +30,11 @@ exists the m910q evidence for this route is T11's, through the CLI harness.
 
 from __future__ import annotations
 
+import subprocess
 import threading
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
@@ -139,6 +142,40 @@ def file_plan() -> object:
     )
 
 
+SECOND_RERUN_STATEMENT = "SELECT 'a second step of a phase declared rerun_on_marked'"
+"""The flagged phase's second statement in `two_statement_rerun_plan()`.
+
+Named apart from `EVERY_PRESS` so a test can tell "the first run went out" from
+"the second run never happened" by which of the two strings landed in
+`rec.sql_calls`.
+"""
+
+
+def two_statement_rerun_plan() -> object:
+    """`rerun_plan()`'s pair, with the flagged phase carrying two statements instead of one.
+
+    `sqlplan.apply()` checks cancel BEFORE each run and never mid-file (A10), so
+    a one-statement flagged phase has no run left to catch a Stop set on the way
+    out of the first — the window this exists to test is between two runs of
+    `_rerun_on_marked()`'s own `sqlplan.apply()` call, and a plan with only one
+    statement in the flagged phase cannot open it.
+    """
+    plan = rerun_plan()
+    return plan.model_copy(
+        update={
+            "phases": (
+                plan.phases[0],
+                SqlPhase(
+                    name="character updates",
+                    into=CM_ENTRY.databases.characters,
+                    statements=(EVERY_PRESS, SECOND_RERUN_STATEMENT),
+                    rerun_on_marked=True,
+                ),
+            )
+        }
+    )
+
+
 # -- the tuple ---------------------------------------------------------------
 
 
@@ -181,6 +218,101 @@ def test_the_import_stage_of_an_updates_press_is_never_written_into_the_state_fi
     assert by_name["import"].recorded is False
     assert by_name["start-db"].recorded is False
     assert engine.stage_named("import").recorded is True, "the install's own is still recorded"
+
+
+def test_an_updates_press_says_the_truthful_note_once_and_never_the_installs(
+    tmp_path: Path,
+) -> None:
+    """`IMPORT_CANCEL_NOTE` is a claim about `gate.reset()`, unreachable on this route.
+
+    `stage_named("import")` carries `cancel_note=IMPORT_CANCEL_NOTE` ("Databases
+    left half-written are detected and cleared before the import is run
+    again…"), true of the install route because `stage_import()`'s `partial`
+    arm calls `gate.reset()` before it re-imports. `_only_the_rerunnable_phases`
+    never calls `stage_import()` — it is the second way IN to `_import`, past
+    the branch that clears anything — so the sentence is false here.
+
+    Round 1 cleared the stage's `cancel_note` to `""` and the reviewer rejected
+    it: the spine says every stage's note once, up front, the way A4 says every
+    other stage's is — a Stop that lands here gets no warning at all rather
+    than a false one, which is not the fix. `update_stages()` now gives the
+    stage `RERUN_CANCEL_NOTE`, the true sentence, in its place.
+
+    Pinned on the panel's own lines rather than on the stage object: the two
+    `--- <name>` markers the spine always yields for this route's two stages
+    are asserted present, so a fix that also swallowed those would be caught
+    here rather than passing this test by deleting too much.
+
+    Catches `replace(stage_named("import"), recorded=False)` with no
+    `cancel_note=` alongside it, and `cancel_note=""` back in its place.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    engine = engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))
+    said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+    assert not any(native.IMPORT_CANCEL_NOTE in line for line in said), said
+    assert said.count(native.RERUN_CANCEL_NOTE) == 1, said
+    at = said.index("--- import")
+    assert said[at + 1] == native.RERUN_CANCEL_NOTE, said
+    assert "--- start-db" in said, said
+
+
+def test_a_stop_between_rerunnable_runs_says_nothing_is_cleared(tmp_path: Path) -> None:
+    """`sqlplan.apply()`'s own between-run check, reached through the updates route.
+
+    Round-1 rework's one high finding: the stage heading was fixed but
+    `_rerun_on_marked()`'s call into `sqlplan.apply()` still defaulted to
+    `IMPORT_CANCEL_NOTE`, so a Stop caught between two of the flagged phase's
+    own statements raised the install route's clearing promise on a route that
+    clears nothing — completed statements and a partially executed file stay,
+    and the flagged phase is re-run whole on the next press.
+
+    The event is set from inside the exec seam, on the way out of the FIRST
+    statement, so the window under test is the real one between two runs
+    rather than a cancel that was pending before the press started (the same
+    discipline `test_a_stop_arriving_during_the_last_dump_is_caught_before_verify_and_the_marker`
+    uses on the install route).
+
+    Catches `cancel_note=RERUN_CANCEL_NOTE` dropped from `_rerun_on_marked()`'s
+    `sqlplan.apply()` call, which reverts the parameter to `sqlplan.apply()`'s
+    own default and brings `IMPORT_CANCEL_NOTE` back into the raised error.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    stop = threading.Event()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    inner = rec.exec_stdin
+
+    def exec_stdin(
+        container: str,
+        argv: Sequence[str],
+        source: BinaryIO,
+        *,
+        env: Mapping[str, str],
+        wsl_distro: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        proc = inner(container, argv, source, env=env, wsl_distro=wsl_distro)
+        if rec.sql_calls[-1] == EVERY_PRESS:
+            stop.set()
+        return proc
+
+    engine = engine_with_sql(
+        two_statement_rerun_plan(),
+        rec,
+        world_running=a_world_that_is(False),
+        exec_stdin=exec_stdin,
+    )
+    said: list[str] = []
+    with pytest.raises(InstallerError) as raised:
+        for line in engine.update_databases(InstallOptions(server_dir=server_dir), cancel=stop):
+            said.append(line)
+    assert "The import was stopped." in str(raised.value), raised.value
+    assert native.RERUN_CANCEL_NOTE in str(raised.value), raised.value
+    assert native.IMPORT_CANCEL_NOTE not in str(raised.value), raised.value
+    assert not any(native.IMPORT_CANCEL_NOTE in line for line in said), said
+    assert EVERY_PRESS in rec.sql_calls, "the first run went out before the stop was seen"
+    assert SECOND_RERUN_STATEMENT not in rec.sql_calls, "the second run never happened"
 
 
 def test_the_press_runs_only_the_phases_the_plan_declares_rerunnable(tmp_path: Path) -> None:

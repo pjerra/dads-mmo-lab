@@ -78,8 +78,9 @@ from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
-    IMPORT_CANCEL_NOTE,
+    IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    RERUN_CANCEL_NOTE,
     UPDATES_BUTTON_LABEL,
     ImportGate,
     Secrets,
@@ -245,7 +246,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
-            Stage("import", self._import, cancel_note=IMPORT_CANCEL_NOTE),
+            Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )
@@ -1458,6 +1459,16 @@ class CmangosInstaller(StagedInstaller):
         Phase 0 is not reached from here on purpose. `create_schemas()` writes
         `CREATE USER ... IDENTIFIED BY` and its grants, and this route runs
         against a server somebody is playing on.
+
+        **`cancel_note=RERUN_CANCEL_NOTE`, not `sqlplan.apply()`'s default**,
+        because both of this method's callers reach it with the gate already
+        reading a finished import: a stop mid-run here changes neither the
+        marker nor the gate's next answer, so `IMPORT_CANCEL_NOTE`'s clearing
+        promise would be false whichever caller it came from. Found by the
+        cold reviewer round 1: clearing the stage's own `cancel_note` in
+        `update_stages()` did not close this, because `sqlplan.apply()`'s
+        between-run check raises independently of the stage heading, and it
+        was still defaulting to the install route's wording here.
         """
         phases = rerunnable_phases(plan)
         if not phases:
@@ -1483,6 +1494,7 @@ class CmangosInstaller(StagedInstaller):
                 exec_stdin=self._seams.exec_stdin,
                 sink=sink,
                 cancel=ctx.cancel,
+                cancel_note=RERUN_CANCEL_NOTE,
             ),
             cancel=ctx.cancel,
         )

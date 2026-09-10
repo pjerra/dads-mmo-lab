@@ -553,6 +553,41 @@ seconds and leaves `acore_world` permanently unimportable (yulon-ubuntu,
 true; without it the honest copy would be the opposite.
 """
 
+IMPORT_STAGE_CANCEL_NOTE = (
+    "If these databases are half-written from an earlier stop, they are detected and cleared "
+    "before the import is run again, so nothing has to be undone by hand; if they already read "
+    "as a finished import, a stop leaves the statements that already ran in place and clears "
+    "nothing, and the flagged phase is applied whole again next time."
+)
+"""What the spine says before the ordinary `import` stage runs -- true on BOTH routes.
+
+The spine says a stage's note before the body runs (A4), and `_import` only learns
+which route it is on from its one probe, inside the body: a fresh or partial import
+(`stage_import()`, whose `partial` arm clears -- `IMPORT_CANCEL_NOTE`'s promise) or a
+finished install's re-run of the flagged phases (`_rerun_on_marked()`, which clears
+nothing -- `RERUN_CANCEL_NOTE`). Said up front, either single-route sentence is false on
+the other route (Codex on T19, round 2); this one names both arms and lets the stop
+itself say which happened.
+"""
+
+RERUN_CANCEL_NOTE = (
+    "A stop here leaves the statements that already ran in place and clears nothing; the "
+    "flagged phase is applied whole again the next time this is pressed."
+)
+"""The honest cousin of `IMPORT_CANCEL_NOTE`, for the one call `_rerun_on_marked()` makes.
+
+`gate.reset()` — `DROP DATABASE IF EXISTS` over every schema the plan names — is
+`stage_import()`'s own `partial` arm, reached only while a fresh import is still
+running. `_rerun_on_marked()` runs after the gate already reads a FINISHED import,
+through either caller: the ordinary spine's own resume, or the updates button's
+`_only_the_rerunnable_phases()`, which never calls `stage_import()` at all (T19,
+finding 2). A stop mid-way through its statements changes neither the marker nor
+the gate's answer, so `IMPORT_CANCEL_NOTE`'s clearing promise is false for this
+call specifically — the round-1 rework found it still reached the updates route
+through `sqlplan.apply()`'s between-run check after the stage's own note had
+been cleared, which removed the only advance warning of the real cost.
+"""
+
 REALM_HOST_TOKEN = "{{REALM_HOST}}"
 """The catalog token `ready.auth` names the realm's advertised address with."""
 
@@ -2161,10 +2196,24 @@ class StagedInstaller:
         its next resume skip the import on the strength of this press. The same
         rule `rebuild_stages()` applies to `recreate`, arrived at from the other
         side: there the stage is not the install's, here the outcome is not.
+
+        **`cancel_note` swapped, not cleared**, and for the same reason
+        `recorded` is turned off: the install's `import` carries
+        `IMPORT_CANCEL_NOTE` because its `partial` arm calls `gate.reset()`
+        before it re-imports, and that promise is false on this route —
+        `_only_the_rerunnable_phases` never calls `stage_import()`, so
+        `gate.reset()` is unreachable (T19, finding 2). An empty string looked
+        like the fix and was rejected round 1: the spine still says a stage's
+        note once, up front, and a Stop can still land mid-run inside
+        `sqlplan.apply()`'s own between-run check — silence there is not the
+        same as a true sentence, it is just no advance warning at all.
+        `RERUN_CANCEL_NOTE` is the true one, and `_rerun_on_marked()` passes it
+        into `sqlplan.apply()` by name so the mid-run raise says the same
+        thing this heading does.
         """
         return (
             self.stage_named("start-db"),
-            replace(self.stage_named("import"), recorded=False),
+            replace(self.stage_named("import"), recorded=False, cancel_note=RERUN_CANCEL_NOTE),
         )
 
     def update_files(self, ctx: StageContext) -> tuple[str, ...]:
