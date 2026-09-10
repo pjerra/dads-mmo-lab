@@ -1222,15 +1222,46 @@ class _Level:
     two of these tests are about and two separate lists cannot show it.
     """
 
-    def __init__(self, log: list[str], outcome: Outcome | None = None) -> None:
+    def __init__(
+        self, log: list[str], outcome: Outcome | None = None, *, then: Outcome | None = None
+    ) -> None:
         self.log = log
         self.outcome = outcome or Outcome(True, "level changed")
+        self.then = then
+        """What the SECOND send answers, where a test is about the resend (T16
+        round 2). One stand-in that answers the same thing twice cannot tell a
+        first send that failed apart from a second one that did, and a test that
+        cannot tell them apart passes against code that confuses them — which is
+        what happened to the first version of the resend-refused test."""
         self.asked: list[tuple[str, int]] = []
 
     def __call__(self, character: str, level: int) -> Outcome:
         self.asked.append((character, level))
         self.log.append(f"set_level {character} {level}")
+        if self.then is not None and len(self.asked) > 1:
+            return self.then
         return self.outcome
+
+
+class _Rows:
+    """The group read, scripted, with the LAST reading repeating for ever (T16).
+
+    `lambda: next(iter([...]))` was enough while the level step read the row
+    once. It polls now — the row of an ONLINE character is written by its next
+    save and not by the level command (`cs_character.cpp:252-281`) — and a
+    finite script ends such a test in `StopIteration` rather than in the answer
+    the test is about. Repeating the last reading is what a group table that has
+    stopped changing does, and `taken` lets a test say how many reads its own
+    claim cost.
+    """
+
+    def __init__(self, *readings: tuple[party.Member, ...]) -> None:
+        self.readings = list(readings)
+        self.taken = 0
+
+    def __call__(self) -> tuple[party.Member, ...]:
+        self.taken += 1
+        return self.readings[min(self.taken, len(self.readings)) - 1]
 
 
 class _LoggedChan(_Chan):
@@ -1369,34 +1400,44 @@ def test_a_bot_already_at_the_chosen_level_is_told_so_rather_than_counted_as_a_c
     assert "already" in result.sentence
 
 
-def test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set() -> None:
+def test_a_level_the_written_row_still_disagrees_with_is_not_reported_as_set() -> None:
     """The command accepted and `characters.level` unchanged is a third state, and
-    it is the one a console that answered `yes` to nothing looks like."""
+    it is the one a console that answered `yes` to nothing looks like.
+
+    **T16 rewrote what this test pins, and the change is the point.** Until
+    2026-09-10 it pinned a sentence saying the row "has been seen to stay
+    unwritten for as long as this panel watched it" — a reading taken from
+    `8.6-spec-level-dismiss-…`'s two photographs, where the row read 1 seconds
+    after a level of 42 and of 55. `8.6-level-holds-yulon-ubuntu2-2026-09-10`
+    put the world's own `.pinfo` beside that row and found the level had landed
+    within a second every time; the row had simply not been written. So this arm
+    is now reachable only AFTER the step has asked the server to write the rows
+    and has sent the level a second time, and the sentence says so.
+    """
     log: list[str] = []
     low = party.Member("Newbot", 777, 8, 1)
-    reads = iter([(), (low,), (low,)])
+    rows = _Rows((), (low,), (low,))
+    level = _Level(log)
     result = party.add_bot(
         facts=_facts(),
         player="Pakka",
         klass="mage",
         level=60,
         max_level=80,
-        set_level=_Level(log),
+        set_level=level,
         send=_LoggedChan(log).send,
-        members=lambda: next(reads),
+        members=rows,
+        level_tries=2,
+        level_pause=0.0,
         sleep=lambda _s: None,
     )
     assert (result.level_before, result.level_after) == (1, 1)
+    assert level.asked == [("Newbot", 60), ("Newbot", 60)], "sent again, and exactly once again"
+    assert log.count(party.SAVE_COMMAND) == 2, "each reading was taken off a row that was written"
+    assert result.level_resent is True
     assert "still reads 1, not 60" in result.sentence
-    # Live on `yulon-ubuntu2` 2026-09-09 this arm was the answer to two presses,
-    # and both are in the gate folder: `panel-8-…png` (42 asked, row 1) and
-    # `panel-9-…png` with `panel-transcript.log:61-130` (55 asked, row 1 for the
-    # sixty-eight seconds the bot was in the party, 13:17:35 to 13:18:43).
-    # What the folder does NOT hold is a forced save leaving it unwritten, so the
-    # sentence claims no mechanism -- it says what was read, and where that
-    # leaves the reader.
-    assert "stay unwritten for as long as this panel watched it" in result.sentence
-    assert "not set until the row says otherwise" in result.sentence
+    assert "after the row was written and the level was sent a second time" in result.sentence
+    assert "Take the level as not set." in result.sentence
 
 
 def test_a_refused_level_does_not_stop_the_spec_or_the_gear() -> None:
@@ -1432,7 +1473,6 @@ def test_the_level_is_set_before_the_spec_is_whispered() -> None:
     applied at level 1 and then levelled to 60 is a bot with a level-1 build."""
     log: list[str] = []
     joined = party.Member("Newbot", 777, 8, 1)
-    reads = iter([(), (joined,), (joined,)])
     party.add_bot(
         facts=_facts(),
         player="Pakka",
@@ -1443,12 +1483,276 @@ def test_the_level_is_set_before_the_spec_is_whispered() -> None:
         max_level=80,
         set_level=_Level(log),
         send=_LoggedChan(log).send,
-        members=lambda: next(reads),
+        members=_Rows((), (joined,), (party.Member("Newbot", 777, 8, 60),)),
         sleep=lambda _s: None,
     )
     assert log.index("set_level Newbot 60") < log.index(
         "dml_whisper Pakka Newbot talents spec fire pve"
     )
+
+
+# -- 8.6, T16: the chosen level holds, and the row is written before it is read
+#
+# MEASURED on `yulon-ubuntu2` 2026-09-10,
+# `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`. On a bot freshly
+# joined to a master's party the level sent at +0, +5, +10, +20 and +30 seconds
+# after the group row appeared landed every time and STAYED landed: the world's
+# own `.pinfo` read the chosen level within a second and still read it a minute
+# later. There is no window in which the module takes it back. What T5
+# photographed is `characters.level` not having been written --
+# `.character level` on an ONLINE character calls `GiveLevel` and writes no row
+# (AzerothCore `src/server/scripts/Commands/cs_character.cpp:252-281`), and a
+# character writes its own row at `PlayerSaveInterval`, 900 000 ms here. So the
+# fix is not a wait and not a blind resend: it is asking the server to write the
+# rows, which is what `party.SAVE_COMMAND` is.
+
+
+def test_the_level_readback_is_the_row_the_server_wrote_and_not_the_commands_own_yes() -> None:
+    """The readback is `characters.level` AFTER a save, and never the reply.
+
+    `set_level` here answers exactly what the box answered -- `You changed level
+    of Newbot to 60.` -- while the row still reads 1, which is the state this
+    whole ticket exists about. A step that believed the reply would report a
+    level it had not read; a step that read the row without writing it first
+    would report the last save. This one sends `SAVE_COMMAND` between the two.
+    """
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    high = party.Member("Newbot", 777, 8, 60)
+    level = _Level(log, Outcome(True, "You changed level of Newbot to 60."))
+    rows = _Rows((), (low,), (low,), (low,), (high,))
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=rows,
+        level_tries=6,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)], "one send: the row agreed once it was written"
+    assert log.count(party.SAVE_COMMAND) == 1
+    assert log.index("set_level Newbot 60") < log.index(party.SAVE_COMMAND)
+    assert (result.level_before, result.level_after) == (1, 60)
+    assert result.level_resent is False
+    assert "characters.level read 1 before the press and 60 after" in result.sentence
+
+
+def test_a_level_the_written_row_agrees_with_is_never_sent_a_second_time() -> None:
+    """The resend fires on a disagreement and on nothing else.
+
+    The row here disagrees at the first reading -- it always does, because
+    nothing has written it -- and agrees at the first reading after the save.
+    That is the ordinary press, and the ordinary press must send the level once.
+    """
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    high = party.Member("Newbot", 777, 8, 60)
+    level = _Level(log)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=_Rows((), (low,), (low,), (high,)),
+        level_tries=4,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)]
+    assert result.level_resent is False
+    assert "had to be sent a second time" not in result.sentence
+
+
+def test_a_level_that_needed_a_second_send_says_so_in_the_panels_own_sentence() -> None:
+    """A press that only worked the second time is not the same press as one that
+    worked, and a sentence that hid the difference would make the two
+    indistinguishable in a gate folder."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    high = party.Member("Newbot", 777, 8, 60)
+    level = _Level(log)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=_Rows((), (low,), (low,), (low,), (low,), (high,)),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60), ("Newbot", 60)]
+    assert log.count(party.SAVE_COMMAND) == 2
+    assert result.level_resent is True
+    assert (result.level_before, result.level_after) == (1, 60)
+    assert "had to be sent a second time to get there" in result.sentence
+
+
+def test_a_saveall_the_server_refused_is_its_own_sentence_and_not_a_verdict_on_the_level() -> None:
+    """T16 round 2's must-fix 1. The save is a SEND, and its answer is read.
+
+    Thrown away — which is what the first version of the level step did — a
+    `saveall` the server refused bought thirty seconds of polling a row nobody
+    had written, then a resend, then a second ignored save, and then a sentence
+    saying the row HAD been written and the level had been sent twice. All four
+    are wrong and the last one is a lie in the panel's own words.
+
+    So a refused save ends the step: no poll, no resend, and a sentence that says
+    what happened instead of ruling on the level.
+    """
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log)
+    chan = _LoggedChan(log, {party.SAVE_COMMAND: Answer("no", text="Server is shutting down")})
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=chan.send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=30,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)], "no resend: nothing was read that could disagree"
+    assert log.count(party.SAVE_COMMAND) == 1, "and no second save either"
+    assert result.level_resent is False
+    assert f"the server did not run {party.SAVE_COMMAND}" in result.sentence
+    assert "Server is shutting down" in result.sentence
+    assert "nothing here says whether the level took" in result.sentence
+    assert "still reads 1, not 60" not in result.sentence, "not a verdict on the level"
+    assert "Take the level as not set." not in result.sentence
+
+
+def test_a_saveall_that_never_came_back_is_not_reported_as_one_the_server_refused() -> None:
+    """`indeterminate` is its own arm: a SOAP timeout means the command was sent
+    and the answer never came (`channel.Answer`), so the rows may be written and
+    may not. "The server did not run it" is a claim nothing here can make, and
+    `add_bot` has no business retrying a write it cannot see."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log)
+    chan = _LoggedChan(
+        log,
+        {party.SAVE_COMMAND: Answer("unknown", reason="the reply never came", indeterminate=True)},
+    )
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=chan.send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=30,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)]
+    assert log.count(party.SAVE_COMMAND) == 1
+    assert "did not come back" in result.sentence
+    assert "may have run and may not" in result.sentence
+    assert f"the server did not run {party.SAVE_COMMAND}" not in result.sentence
+
+
+def test_a_bot_already_at_the_chosen_level_whose_written_row_disagrees_is_told_the_row() -> None:
+    """Round 2's reviewer, on the order of the arms. "Nothing about the level
+    changed" was tested BEFORE the readback, so a bot that was already at 60 and
+    whose WRITTEN row came back at 1 was told nothing had changed — off the one
+    reading that says something did."""
+    log: list[str] = []
+    already = party.Member("Newbot", 777, 8, 60)
+    moved = party.Member("Newbot", 777, 8, 1)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=_Level(log),
+        send=_LoggedChan(log).send,
+        members=_Rows((), (already,), (moved,)),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert (result.level_before, result.level_after) == (60, 1)
+    assert "still reads 1, not 60" in result.sentence
+    assert "already read" not in result.sentence
+
+
+def test_a_refused_second_send_says_the_first_one_was_taken() -> None:
+    """Round 2's reviewer: the resend-failed path used to open "The level was not
+    set", which is false — the first send was accepted and the row was written.
+    What failed is the second send, and the sentence has to say which.
+
+    `then=` is what makes this test able to fail: the first send succeeds and the
+    SECOND is refused. Written with one outcome for both, the first arm fires and
+    the test passes against code that opens either sentence."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log, then=Outcome(False, problem="There is no such subcommand"))
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60), ("Newbot", 60)], "the second send is the one refused"
+    assert result.level_resent is True
+    assert "The server took the level and characters.level read 1, not 60" in result.sentence
+    assert "The second send was refused: There is no such subcommand" in result.sentence
+    assert "The level was not set" not in result.sentence
+
+
+def test_a_bot_that_left_the_group_before_the_row_was_read_is_not_sent_the_level_again() -> None:
+    """A row that is not there is not a level, and it must not earn a
+    resend or a save. The bot manager logs bots in and out on its own timer, and
+    a level sent again at a bot that has gone is a command sent about a party
+    nobody is in."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=_Rows((), (low,), ()),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)]
+    assert log.count(party.SAVE_COMMAND) == 0
+    assert result.level_after is None
+    assert result.level_resent is False
+    assert "no longer in the group table" in result.sentence
 
 
 def test_a_level_with_no_route_to_set_it_raises_rather_than_reporting_a_send() -> None:

@@ -695,6 +695,47 @@ seconds. The prior art's numbers (`rust-main:crates/dml-wow/src/party.rs:321`
 and `:327`, both env-overridable there) rather than a guess of our own; what
 this tree actually took is recorded in 8.6's gate folder beside the press."""
 
+SAVE_COMMAND = "saveall"
+"""The server's own "write every online character's row now", and the reason
+the level step needs one at all.
+
+**T16, measured on `yulon-ubuntu2` 2026-09-10**
+(`pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`). `.character level`
+on an ONLINE character calls `Player::GiveLevel` and writes no row at all — the
+row is written only on the offline arm
+(`src/server/scripts/Commands/cs_character.cpp:252-281`, read on the box at
+AzerothCore `413bea61a85e`, captured in `01b-source.log`). So an online
+character's `characters.level` keeps whatever its last save wrote, and the next
+save of its own accord is up to `PlayerSaveInterval`, 900 000 ms on this install
+(`01b-source.log`, SOURCE D). That is the whole of what T5 photographed: the
+level was accepted, the world held it, and the row had not been written.
+
+`saveall` is `ObjectAccessor::SaveAllPlayers` (`cs_misc.cpp:1402-1407` ->
+`ObjectAccessor.cpp:286-293`), which walks every `Player` in the world — bots
+included, since a playerbot is a `Player` in that map even though it holds no
+session — and calls `SaveToDB` on each. It is what the world does to itself
+every quarter of an hour; asking for it early is the only route measured to make
+`characters.level` answerable inside one press."""
+
+LEVEL_TRIES = 30
+LEVEL_SLEEP = 1.0
+"""How long the row gets to catch up after a save, and why it is not the join
+poll's six seconds.
+
+Measured across all seven trials in that folder, and MEASURED rather than derived
+— the driver stamped each one: a `saveall` on this install writes 500 online
+characters, and the row the trial was watching first agreed **1.4 to 8.2 seconds
+after the `saveall` came back** (`trial-5.txt` at the fast end, `fill-1.txt` at
+the slow one). Thirty reads a second apart is that with room for a world under
+more load.
+
+It is a CEILING and not a wait: the poll returns the moment the row agrees, and
+on the second press the whole step — send, save, read — took 3.2 seconds and then
+4.4. **The step's own worst case is two of these ceilings**, about sixty seconds
+plus the two sends, because a written row that disagrees earns a second send and
+a second save; that path was never measured live and is pinned only in the unit
+tests."""
+
 
 MASTER = "character's"
 BOT = "bot's"
@@ -1062,6 +1103,13 @@ class Addition:
     what makes a chosen level provable: a bot the server already made at 60,
     asked for 60, has proved nothing, and `_level_note` says so rather than
     reporting a change that did not happen."""
+    level_resent: bool = False
+    """Whether the level had to be sent a SECOND time (T16).
+
+    Set only when the row disagreed with what was asked for AFTER the row was
+    written — which is the one reading that means the world, and not the
+    database, is behind. A resend on an unwritten row would fire on every press
+    and prove nothing, so `_level_step` never does it."""
 
 
 LevelSetter = Callable[[str, int], Outcome]
@@ -1088,6 +1136,8 @@ def add_bot(
     set_level: LevelSetter | None = None,
     tries: int = POLL_TRIES,
     pause: float = POLL_SLEEP,
+    level_tries: int = LEVEL_TRIES,
+    level_pause: float = LEVEL_SLEEP,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Addition:
     """Add one bot of `klass` to `player`'s party, and say what actually happened.
@@ -1114,6 +1164,14 @@ def add_bot(
     level-1 build on a level-60 bot; and `autogear` follows the spec because gear
     must match the new talents (`90-main.sh:3975-3977`, whose own comment says
     so).
+
+    **The level step reads a row that has been written (T16).** It is
+    `_level_step`, and the whole of why it is not one send and one read is in
+    that function's docstring: on this core `.character level` changes an online
+    character in memory and writes no row, so the readback T5 shipped was
+    reading the last save and reporting it as the level. The step asks the
+    server to write the rows before it believes what they say, and sends the
+    level a second time only when a written row disagrees.
     """
     stop = blocker(facts)
     if stop is not None:
@@ -1165,12 +1223,22 @@ def add_bot(
     level_before = joined.level
     level_after: int | None = level_before
     level_problem = ""
+    level_resent = False
     if level is not None and set_level is not None:
-        outcome = set_level(joined.name, level)
-        if not outcome.done:
-            level_problem = (outcome.problem or outcome.text).strip()
-        after = next((row for row in members() if row.guid == joined.guid), None)
-        level_after = None if after is None else after.level
+        step = _level_step(
+            bot=joined.name,
+            guid=joined.guid,
+            level=level,
+            set_level=set_level,
+            send=send,
+            members=members,
+            tries=level_tries,
+            pause=level_pause,
+            sleep=sleep,
+        )
+        level_after = step.after
+        level_problem = step.problem
+        level_resent = step.resent
     if spec:
         # One or the other, never both: see `spec_command`'s docstring for the
         # measurement. The gear follows, because it must match the new talents.
@@ -1191,12 +1259,196 @@ def add_bot(
         specced,
         f"{joined.name} joined the party"
         + _finish(geared, specced, spec)
-        + _level_note(level, level_before, level_after, level_problem),
+        + _level_note(level, level_before, level_after, level_problem, resent=level_resent),
         spec=spec,
         level=level,
         level_before=level_before,
         level_after=level_after,
+        level_resent=level_resent,
     )
+
+
+@dataclass(frozen=True)
+class LevelStep:
+    """What the level step did, in the states a caller has to tell apart.
+
+    `after` is `characters.level`, always — never the level that was asked for
+    and never the console's own `You changed level of <bot> to N.`, which this
+    module has watched be true of the world and false of the row at the same
+    moment.
+    """
+
+    after: int | None
+    problem: str = ""
+    """A complete sentence, or "". Each producer writes the whole of its own,
+    because "the level was not set" is true of a refused level command and false
+    of a level the server took and a `saveall` that never ran (round 2's
+    reviewer)."""
+    resent: bool = False
+    saved: bool = False
+    """Whether the row was written by a save the server CONFIRMED, after the last
+    send. A reading taken without one is a reading of the previous save and says
+    nothing about this press — so a `saveall` that came back `no`, or came back
+    not at all, leaves this False and sets `problem` instead."""
+
+
+def _save_refusal(answer: Answer) -> str:
+    """Why the row could not be written, or "" for a save the server ran.
+
+    **Round 2's must-fix 1.** The first version of the level step threw this
+    answer away, and every other send in `add_bot` reads its own outcome
+    (`:1187`, `:1240-1241`, `:1247-1248`). Thrown away, a stopping world or a
+    SOAP timeout bought thirty seconds of polling a row nobody had written, then
+    a resend, then another ignored save, and finally a sentence claiming the row
+    HAD been written and the level sent twice — the one shape of lie this whole
+    module exists to delete.
+
+    `indeterminate` is its own arm and not folded into `no`: a SOAP timeout means
+    the command was sent and the answer never came (`channel.Answer`), so the
+    rows may be written and may not, and "the server did not run it" would be a
+    claim nothing here can make.
+    """
+    if answer.outcome == "yes":
+        return ""
+    said = (answer.text or answer.reason).strip()
+    tail = f": {said}" if said else ""
+    if answer.indeterminate:
+        return (
+            f"The level was sent and the server accepted it. The {SAVE_COMMAND} that would "
+            f"write characters.level did not come back{tail}, so it may have run and may not, "
+            "and the row still reads what its last save wrote. Nothing here says whether the "
+            "level took."
+        )
+    return (
+        f"The level was sent and the server accepted it, and then the server did not run "
+        f"{SAVE_COMMAND}{tail} — so characters.level was never written and nothing here says "
+        "whether the level took."
+    )
+
+
+def _row_level(members: Callable[[], tuple[Member, ...]], guid: int) -> int | None:
+    """`characters.level` for one guid, out of the group read this press makes.
+
+    `None` is "that guid is not in the group table now", which is a third answer
+    and not a level: a bot the manager's own timer moved out of the party
+    between the send and the read has not proved anything about its level.
+    """
+    row = next((member for member in members() if member.guid == guid), None)
+    return None if row is None else row.level
+
+
+def _saved_row_level(
+    *,
+    level: int,
+    guid: int,
+    send: Callable[[str], Answer],
+    members: Callable[[], tuple[Member, ...]],
+    tries: int,
+    pause: float,
+    sleep: Callable[[float], None],
+) -> tuple[int | None, str]:
+    """Ask the server to write the rows, then poll `characters.level` for it.
+
+    Returns the row and the save's own refusal, and the refusal is checked BEFORE
+    the poll: polling for a write nobody made is thirty seconds spent proving
+    nothing, and reporting its result as a reading of this press is
+    `_save_refusal`'s docstring.
+
+    The poll is the join poll's own machinery — read, sleep, read — for the same
+    reason it is used there: the answer arrives when the server gets to it and
+    not on a schedule this app sets, so it returns the moment the row agrees and
+    the ceiling is the ceiling rather than the wait.
+    """
+    refusal = _save_refusal(send(SAVE_COMMAND))
+    if refusal:
+        return (_row_level(members, guid), refusal)
+    after: int | None = None
+    for attempt in range(tries):
+        if attempt:
+            sleep(pause)
+        after = _row_level(members, guid)
+        if after == level or after is None:
+            return (after, "")
+    return (after, "")
+
+
+def _level_step(
+    *,
+    bot: str,
+    guid: int,
+    level: int,
+    set_level: LevelSetter,
+    send: Callable[[str], Answer],
+    members: Callable[[], tuple[Member, ...]],
+    tries: int,
+    pause: float,
+    sleep: Callable[[float], None],
+) -> LevelStep:
+    """Set the level, make `characters.level` answerable, and read it back.
+
+    **The measurement this is built on** is
+    `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`, and it overturns
+    the reading T5 left behind rather than adding to it. On a bot freshly joined
+    to a master's party, the level sent at +0, +5, +10, +20 and +30 seconds
+    after the group row appeared LANDED every time and stayed landed: the
+    world's own `.pinfo` read the chosen level within a second of the send and
+    never stopped reading it — ninety seconds later in the three rows whose tail
+    ran that long, fifteen to forty-six in the other four. There is no window.
+    What T5 photographed is
+    `characters.level` not having been written: `.character level` on an ONLINE
+    character calls `GiveLevel` and writes no row
+    (`cs_character.cpp:252-281`), and a character writes its own row at
+    `PlayerSaveInterval` — a quarter of an hour here — so the panel's readback
+    a second later was reading the last save and reporting it as the level.
+
+    So what closes the window is not a wait for the module and not a resend: it
+    is a SAVE, which is what `SAVE_COMMAND`'s docstring cites and what
+    `_saved_row_level` sends. The row is then a reading of this press — and only
+    if the SERVER SAID IT SAVED. A save that came back `no`, or did not come back
+    at all, ends the step in `_save_refusal`'s own sentence rather than in a
+    verdict about the level: nothing was written, so nothing was read.
+
+    **The resend is what a real disagreement earns, and only that.** Once the
+    row has been written, a row that still disagrees is the world disagreeing —
+    the case the ticket was filed for — and that one gets the level sent a
+    second time and the row written and read again. A resend before the save
+    would fire on every press, on a row that had simply not been written yet,
+    and prove nothing; this never does it.
+
+    The order — send, save, read, resend, save, read — is also why the first
+    reading is not skipped: a bot the server already made at the level that was
+    asked for needs no save and no resend, and `add_bot` says so in
+    `_level_note`'s "already" arm.
+    """
+    outcome = set_level(bot, level)
+    if not outcome.done:
+        said = (outcome.problem or outcome.text).strip()
+        return LevelStep(_row_level(members, guid), f"The level was not set: {said}")
+    after = _row_level(members, guid)
+    if after == level or after is None:
+        return LevelStep(after)
+    after, refusal = _saved_row_level(
+        level=level, guid=guid, send=send, members=members, tries=tries, pause=pause, sleep=sleep
+    )
+    if refusal:
+        return LevelStep(after, refusal)
+    if after == level or after is None:
+        return LevelStep(after, saved=True)
+    outcome = set_level(bot, level)
+    if not outcome.done:
+        said = (outcome.problem or outcome.text).strip()
+        return LevelStep(
+            after,
+            f"The server took the level and characters.level read {after}, not {level}, after the "
+            f"row was written. The second send was refused: {said}",
+            resent=True,
+        )
+    after, refusal = _saved_row_level(
+        level=level, guid=guid, send=send, members=members, tries=tries, pause=pause, sleep=sleep
+    )
+    if refusal:
+        return LevelStep(after, refusal, resent=True)
+    return LevelStep(after, resent=True, saved=True)
 
 
 def _spec_refusal(spec: str, klass: str, specs: tuple[str, ...]) -> str:
@@ -1271,41 +1523,51 @@ def _finish(geared: bool, specced: bool, spec: str = "") -> str:
     return ". Neither the autogear nor the talents whisper was accepted."
 
 
-def _level_note(level: int | None, before: int | None, after: int | None, problem: str) -> str:
+def _level_note(
+    level: int | None,
+    before: int | None,
+    after: int | None,
+    problem: str,
+    *,
+    resent: bool = False,
+) -> str:
     """What the chosen level did, read out of `characters.level` on both sides.
 
     The "already" arm is the gate rule in the app's own voice: a step whose
     assertion was true before its action has proved nothing, and a bot the server
     happened to make at the level that was asked for is exactly that step.
 
-    **The "still reads" arm is what this tree does, and the wording is bounded by
-    what a committed artifact shows** — the folder is
-    `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09`.
-    Two presses are photographed: a level of 42 asked for at 13:12
-    (`panel-8-…png`, the row reading 1) and one of 55 at 13:17
-    (`panel-9-…png` with `panel-transcript.log:61-130`, the row reading 1 for the
-    sixty-eight seconds the bot stayed in the party, 13:17:35 to 13:18:43). The same readings carry
-    `Bafossan — level 42` and `Kenvadi — level 37`, so the column does show levels
-    that have changed — the row is not simply always 1.
+    **The "still reads" arm was rewritten by T16, and this is what changed.**
+    Until 2026-09-10 it said the row "has been seen to stay unwritten for as long
+    as this panel watched it" and told the reader to take the level as not set.
+    That was true of what
+    `pyplan/gates/8.6-spec-level-dismiss-yulon-ubuntu2-2026-09-09` photographed —
+    a level of 42 at 13:12 (`panel-8-…png`) and one of 55 at 13:17 (`panel-9-…png`
+    with `panel-transcript.log:61-130`), the row reading 1 in both — and it was
+    the wrong conclusion to draw from it. `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10`
+    measured the same press with the world's own `.pinfo` beside the row: the
+    level had landed within a second every time, and the row was simply not
+    written yet (`cs_character.cpp:252-281`; see `SAVE_COMMAND`). So the panel
+    was reading the last save and calling it the level.
 
-    What is NOT in that folder, and so is not asserted here: that a forced save
-    leaves it unwritten, that the same command sent later holds, and the timing
-    that would explain either. Those were run at the console and never captured,
-    and an earlier version of this docstring stated one of them as fact. So this
-    says what was seen and stops: whether such a level lands later, nothing the
-    app can read from here says. The fix — read back and re-send, the way the
-    join already polls — needs the timing measured and captured first, and is a
-    ticket rather than a guess.
+    The arm survives, because it is still reachable and still means something —
+    but only now that `_level_step` writes the row before reading it and has
+    sent the level twice. It is no longer "the row has not caught up"; it is the
+    world disagreeing, after being asked twice and asked to write it down.
+
+    **The order of the arms is round 2's reviewer's**, and it is not cosmetic:
+    the "already" arm used to be tested before the readback, so a bot that WAS at
+    the level asked for and whose written row came back at some other level was
+    told "nothing about the level changed" — the one reading that says something
+    did. A disagreeing row now wins over "already", and `problem` carries a
+    complete sentence from whichever step produced it rather than being wrapped
+    in "the level was not set" here, because a refused `saveall` is not a level
+    that was not set.
     """
     if level is None:
         return ""
     if problem:
-        return f" The level was not set: {problem}"
-    if before == level:
-        return (
-            f" characters.level already read {level} before the press, so nothing about the "
-            "level changed and this says nothing about whether it would have."
-        )
+        return f" {problem}"
     if after is None:
         return (
             " The level was sent and this bot is no longer in the group table, so no level "
@@ -1314,8 +1576,18 @@ def _level_note(level: int | None, before: int | None, after: int | None, proble
     if after != level:
         return (
             f" The server accepted the level and characters.level still reads {after}, not "
-            f"{level}. On this tree that row has been seen to stay unwritten for as long as "
-            "this panel watched it, so take the level as not set until the row says otherwise."
+            f"{level}, after the row was written and the level was sent a second time. Take "
+            "the level as not set."
+        )
+    if before == level:
+        return (
+            f" characters.level already read {level} before the press, so nothing about the "
+            "level changed and this says nothing about whether it would have."
+        )
+    if resent:
+        return (
+            f" characters.level read {before} before the press and {after} after — the level "
+            "had to be sent a second time to get there."
         )
     return f" characters.level read {before} before the press and {after} after."
 
