@@ -1491,11 +1491,22 @@ def _mass_sentence(done: tuple[Dismissal, ...]) -> str:
     unread = [one for one in done if not one.removed and one.unreadable]
     if not stayed and not unread:
         return f"{bots_word(len(done))} left the party: {', '.join(gone)}."
-    head = (
-        f"{len(gone)} of {bots_word(len(done))} left the party: {', '.join(gone)}. "
-        if gone
-        else f"None of {bots_word(len(done))} left the party. "
-    )
+    if unread:
+        # A count over a batch some of whose reads never happened is a count
+        # of what was CONFIRMED, and the head says so (Codex, round 2): "None
+        # of 2 bots left" over two unreadable polls asserted an outcome no
+        # read established, when all two may have left.
+        head = (
+            f"{len(gone)} of {bots_word(len(done))} confirmed left the party: {', '.join(gone)}. "
+            if gone
+            else f"None of {bots_word(len(done))} were confirmed to have left the party. "
+        )
+    else:
+        head = (
+            f"{len(gone)} of {bots_word(len(done))} left the party: {', '.join(gone)}. "
+            if gone
+            else f"None of {bots_word(len(done))} left the party. "
+        )
     tail = []
     if stayed:
         # Every refusal in its own words. Summarising them ("2 failed") is how
