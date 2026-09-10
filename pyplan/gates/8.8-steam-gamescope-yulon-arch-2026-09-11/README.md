@@ -1,29 +1,40 @@
-# T29 Half 2 — Resume under gamescope: it works, and Yu'lon needs no change (`yulon-arch`, 2026-09-11)
+# T29 Half 2 — under gamescope, coming out of the Steam UI puts Yu'lon back in front (`yulon-arch`, 2026-09-11, headless backend)
 
-**8.8's one open item is closed.** The 8.8 gate
-(`pyplan/gates/8.8-steam-resume-yulon-arch-2026-09-10/`) proved that on a plain X11 desktop
-Big Picture's **Resume** raises nothing, traced it to Steam rather than to Yu'lon, and left one
-claim unproven: that under gamescope — the Deck's Gaming Mode — Resume brings Yu'lon back.
-It does.
+**What is proven here.** Under gamescope, launching the "Turtle WoW Server" entry from Steam's
+gamepad UI makes **gamescope focus Yu'lon by itself**, and coming back out of the Steam UI —
+including by activating the running-game card's **Resume game** — leaves Yu'lon focused again.
+On the plain X11 desktop (`pyplan/gates/8.8-steam-resume-yulon-arch-2026-09-10/`) neither
+happened: Big Picture stayed in front and its menu had no running-game card at all.
 
-```
---- immediately BEFORE Resume  (2026-09-10T23:07:34+00:00)
-    GAMESCOPE_FOCUSED_APP(CARDINAL) = 769                  <- Steam
-    GAMESCOPE_KEYBOARD_FOCUS_DISPLAY(CARDINAL) = 12602, 0, 47
---- immediately AFTER Resume  (2026-09-10T23:07:41+00:00)
-    GAMESCOPE_FOCUSED_APP(CARDINAL) = 4102716320           <- the "Turtle WoW Server" entry
-    GAMESCOPE_KEYBOARD_FOCUS_DISPLAY(CARDINAL) = 12858, 0, 49
-```
+**What is NOT proven here, and the title says so.** Two things.
 
-**Yu'lon was not modified for this.** The window gamescope focused, `6291463`, is the plain Qt
-top-level `Yu'lon — Dad's MMO Lab launcher 0.6.59` with `_NET_WM_PID` set — the same window the
-8.8 run photographed Steam ignoring on X11. Nothing was stamped on it, no OpenGL surface was
-added, and the Steam overlay still never hooks it. gamescope focuses by PID, and that is
-enough.
+* **This ran on gamescope's *headless* backend**, because no visible backend can start on this
+  GPU-less VM (§1). The compositor, the two XWayland servers, the focus stack and the atoms are
+  the same code; what a headless run cannot show is that the *picture* on a Deck's screen follows
+  the focus.
+* **The readings cannot separate "Resume game was activated" from "the overlay was
+  dismissed."** gamescope binds `Shift+Tab` itself, and §4's two controls show that *any*
+  dismissal — a second `Shift+Tab`, or `Escape` — returns `GAMESCOPE_FOCUSED_APP` to the entry
+  with Resume never touched, writing the same two lines to Steam's own log. So the Resume press
+  in §5 is evidenced by the *highlight photographed on "Resume game" immediately before the
+  Return* and by the card's own state, not by a signature in the atoms. See §6 for what that
+  does and does not leave standing.
 
-**gamescope cannot open a *visible* backend on this GPU-less VM.** Section 1 has the exact
-error and every line tried. The run above used its **headless** backend, which starts here;
-section 2 says what that costs and what it does not.
+**Yu'lon was not modified for any of it.** The window gamescope focused is the plain Qt
+top-level `Yu'lon — Dad's MMO Lab launcher 0.6.59`, id `6291463` on XWayland `:2`, carrying
+`_NET_WM_PID = 18219` — the pid of `main.py` under `reaper SteamLaunch AppId=4102716320`
+(`30-run2-readings-and-presses.txt`). Nothing was stamped on it, no OpenGL surface was added,
+and the Steam overlay still never hooks it.
+
+**This is the ordinary desktop Steam client run inside gamescope by hand — not SteamOS's own
+build in a `gamescope-session`.** A Deck runs a Valve-patched session with a controller, a real
+GPU and its own session manager; what is reproduced here is the mechanism (gamescope focusing a
+launched app by PID, and the gamepad UI's running-game card), not the Deck's whole environment.
+
+Two gamescope runs are in this folder. **Run 2 (`29-`, `30-`, `gs2-*`) is the one every claim
+above rests on**; run 1 (`25-`, `26-`, `gs-*`) is kept because it is a real run and because the
+three attempts at getting back to Steam are recorded there, but its Resume press has no recorded
+command and its window readings cover `:1` only — which is why run 2 exists.
 
 Every stamp was read from the box's own clock (UTC); every action was announced first with
 `~/bin/claude-say`. **The Steam account is named only by its userdata id `18347166`**; no
@@ -38,12 +49,11 @@ printf 'yulon\n' | sudo -S -p '' pacman -Sy --noconfirm --needed gamescope vulka
 ```
 
 giving **gamescope 3.16.28**, **vulkan-swrast (lavapipe) 1:26.2.2**, `xorg-xwayland 24.1.13`
-(`22-gamescope-installed.txt`). The box has no display adapter on `lspci`, one DRM node
-(`/dev/dri/card1`, held by `Xorg :0`), and two Vulkan ICDs on disk of which only lavapipe is
-real.
+(`22-gamescope-installed.txt`). No display adapter on `lspci`, one DRM node (`/dev/dri/card1`,
+held by `Xorg :0`), and of the two Vulkan ICDs on disk only lavapipe is real.
 
-`23-gamescope-attempts.txt` is **seven** command lines, each with its exit status and the tail
-of its own output. The ticket's line first:
+`23-gamescope-attempts.txt` is **seven** command lines, each with its exit status and the tail of
+its own output. The ticket's line first:
 
 ```
 $ gamescope -W 1920 -H 1080 -e -- sleep 10
@@ -57,206 +67,251 @@ exit: 1
 
 The same two lines end `--backend sdl`, `--backend wayland`, `--backend sdl --xwayland-count 2`
 and `-b` without `-e`. `--backend drm` fails one step earlier (`vulkan: not a valid physical
-device`, `Failed to initialize Vulkan`) because there is no DRM-capable device to be master of.
-`--backend headless` is the only one that returns **exit 0**.
+device`) because there is no DRM-capable device to be master of. `--backend headless` is the only
+one returning **exit 0**.
 
-`24-vulkan-device.txt` checks gamescope's complaint against the driver rather than taking its
-word. The only device the loader offers is
-`llvmpipe (LLVM 22.1.8, 256 bits)`, `deviceType = PHYSICAL_DEVICE_TYPE_CPU`, and `vulkaninfo`
-mentions `VK_KHR_swapchain` three times and **`VK_KHR_present_id` and `VK_KHR_present_wait`
-zero times each**. So this is not a gamescope bug or a missing flag: a CPU rasteriser with no
-present-timing extensions cannot drive gamescope's compositor, and no `--backend`, ICD or
-option on this VM changes that. **A real Deck, or any box with a GPU, is not affected by
-this.**
+`24-vulkan-device.txt` checks that complaint against the driver rather than taking gamescope's
+word: the only device the loader offers is `llvmpipe (LLVM 22.1.8, 256 bits)`,
+`deviceType = PHYSICAL_DEVICE_TYPE_CPU`, and `vulkaninfo` mentions `VK_KHR_swapchain` three times
+and **`VK_KHR_present_id` and `VK_KHR_present_wait` zero times each**. Not a gamescope bug and not
+a missing flag: a CPU rasteriser without present-timing extensions cannot drive gamescope's
+compositor. **A real Deck, or any box with a GPU, is not affected.**
 
-## 2. The headless backend, and what it does and does not cost — `25-`, `frame-01`
-
-The run that produced the result at the top:
+## 2. The headless run, and what it costs — `29-`, `frame-01`
 
 ```
 gamescope --backend headless -W 1920 -H 1080 -e --xwayland-count 2 -- steam -gamepadui
 ```
 
-`25-gamescope-run-log.txt` is its own log: `Creating headless backend`, `Running compositor on
-wayland display 'gamescope-0'`, `Starting Xwayland on :1`, `Starting Xwayland on :2`,
-`Updating mode for xwayland server #0: 1920x1080@60`. Two XWayland servers is the Deck's own
-shape — Steam on `:1`, the launched app on `:2`.
+`29-gamescope-run-2-log.txt` is its own log: `Creating headless backend`, `Starting Xwayland on
+:1`, `Starting Xwayland on :2`, and — the line §4 turns on —
+
+```
+29-:58  [gamescope] [Info]  binding: (GuideKeyboardHotkey) -> Adding new trigger [Tab + Shift_L].
+29-:59  [gamescope] [Info]  binding: (QAMKeyboardHotkey) -> Adding new trigger [Tab + Control_L + Shift_L].
+```
+
+so **`Shift+Tab` is gamescope's own guide hotkey**, not something Steam receives as a keystroke.
+Two XWayland servers is the Deck's own shape: Steam on `:1`, the launched app on `:2`.
 
 **What headless costs:** nothing is drawn to `:0`.
-`frame-01-vm-console-while-gamescope-ran.png` is the VM console taken while Steam's gamepad UI
-and Yu'lon were both running inside gamescope — a bare XFCE desktop. So the VM-console
-screenshots the other frames in this project use cannot show the gamepad UI at all, and the
-`gs-*` images here are Qt grabs of the windows on gamescope's own XWayland displays
-(`grab.py`, `QScreen.grabWindow(<wid>)`) instead. They are real pixels off a real X server; they
-are simply not photographs of the monitor, because there is nothing on the monitor to
-photograph.
+`frame-01-vm-console-while-gamescope-ran.png` is the VM console taken while Steam's gamepad UI and
+Yu'lon were both running inside gamescope — a bare XFCE desktop. So the VM-console screenshots
+this project uses elsewhere cannot show the gamepad UI at all, and the `gs-*` / `gs2-*` images are
+Qt grabs of the windows on gamescope's own XWayland displays (`grab.py`,
+`QScreen.grabWindow(<wid>)`). Real pixels off a real X server; simply not photographs of a monitor,
+because there is nothing on the monitor to photograph.
 
-**What headless does not cost:** the compositor, the window management, the two XWayland
-servers, the focus stack and the atoms are the same code paths. `GAMESCOPE_FOCUSED_APP`,
-`GAMESCOPE_FOCUSED_WINDOW` and `GAMESCOPECTRL_BASELAYER_APPID` are set and updated exactly as
-they would be with a display attached — which is why the question 8.8 left open can be answered
-here at all. What is *not* proven by a headless run is that the picture on a Deck's screen
-follows the focus; only that gamescope's focus does.
+## 3. Launch — gamescope focuses Yu'lon by itself. `30-` §1-2, `gs2-01`, `gs2-02`
 
-## 3. Steam's gamepad UI inside gamescope — `gs-01`, `gs-02`, `gs-03`
+`30-run2-readings-and-presses.txt` is the run in order. Every press in it goes through `press.sh`,
+which echoes the display, the key, a stamp and `xdotool`'s exit status; every reading goes through
+`atoms.sh`, which reads the atoms on `:1` and lists the windows on **both** XWayland displays with
+their `_NET_WM_PID`, the entry's own process line, and `free -m`.
 
-`gs-01-gamepadui-inside-gamescope.png` is Steam's gamepad UI at 1920x1080 on gamescope's
-XWayland `:1`, signed in, with both entries on the Recent Games row. `26-resume-under-gamescope.txt`
-records the atoms at that moment: `GAMESCOPE_FOCUSED_APP = 769` (Steam itself),
-`GAMESCOPE_FOCUSED_WINDOW = 25165876` (its Big Picture window), `GAMESCOPECTRL_BASELAYER_APPID =
-413091, 769`.
-
-Keyboard input reaches it: `gs-02-server-entry-focused.png` is **"Turtle WoW Server"** focused
-after one `Right`, and `gs-03-server-entry-page-play.png` is its page with the green **Play**.
-
-## 4. Launching the entry — gamescope focuses Yu'lon by itself
-
-`Return` on Play, and 25 seconds later:
+Steam alone in gamescope (`gs2-01-gamepadui-server-entry-focused.png`, the Recent Games row with
+"Turtle WoW Server" focused):
 
 ```
---- after Play on Turtle WoW Server, inside gamescope  (23:04:04)
-    GAMESCOPE_FOCUSED_APP(CARDINAL) = 4102716320
-    GAMESCOPE_FOCUSED_APP_GFX(CARDINAL) = 4102716320
-    GAMESCOPE_FOCUSED_WINDOW(CARDINAL) = 6291463
-    GAMESCOPECTRL_BASELAYER_APPID(CARDINAL) = 413091, 4102716320, 769
+--- Steam alone in gamescope  (23:33:31)
+    GAMESCOPE_FOCUSED_APP = 769                 GAMESCOPE_FOCUSED_WINDOW = 25165876
+    GAMESCOPECTRL_BASELAYER_APPID = 413091, 769
+  [windows on :1]  25165876  pid=17153  Steam Big Picture Mode   (and steam, steamwebhelper ×2, …)
+  [windows on :2]  2097153   pid=<none> steamcompmgr             — nothing else yet
 ```
 
-`4102716320` is the "Turtle WoW Server" entry's 32-bit appid — the same one the 8.8 run saw
-Steam track. Window `6291463` is on the **second** XWayland (`:2`), which is why it is absent
-from `:1`'s window list; on `:2` the windows are `steamcompmgr`, `Qt Selection Owner for
-main.py`, `main.py` and `Yu'lon — Dad's MMO Lab launcher 0.6.59`, and the process is
-`reaper SteamLaunch AppId=4102716320 -- /home/pk/y8v313/bin/python /home/pk/y8/pylauncher/main.py`.
-
-**gamescope raised Yu'lon with no help from Yu'lon.** On the plain X11 desktop the same launch
-left Steam's Big Picture in front with a page and a dead Resume button.
-
-`gs-04-yulon-window-on-xwayland-2-black.png` is an honest failure and is kept as one: a Qt grab
-of window `6291463` comes back black, because gamescope redirects its clients and the window's
-own contents are not readable that way. The atoms, the window title on `:2` and the process
-line are what say Yu'lon is up and focused; that image says nothing and is included so the
-attempt is on the record.
-
-## 5. Getting back to Steam — three attempts, `26-`
-
-The ticket asked for the chord gamescope maps, then `steam://open/bigpicture`, then whatever was
-tried. All three are in `26-resume-under-gamescope.txt` with their atoms:
-
-1. **`Super`, on `:2` and then on `:1`** — no change; `GAMESCOPE_FOCUSED_APP` stays
-   `4102716320`. gamescope 3.16.28's own `Super` chords are display filters and screenshots
-   (`Super+F/N/U/Y/S/G`); none of them is a switch-to-Steam.
-2. **`steam steam://open/bigpicture`** — no change; still `4102716320`. Unlike the desktop, where
-   8.8 showed `steam://rungameid/…` raising the window, this URL does not move gamescope's focus.
-3. **`Shift+Tab`** — **this is the one.** Steam's own UI bundle names it: the localisation key
-   `GuidedTour_BPM_SteamButton_Description_Keyboard` reads `"Shift + Tab"`, i.e. it is Steam's
-   published keyboard equivalent of the Deck's STEAM button. Sent on `:2`, the display Yu'lon
-   held:
+`Return` opens the entry page (`gs2-02-…-play.png`, the green **Play**), `Return` again is Play,
+and thirty seconds later:
 
 ```
---- after Shift+Tab on :2  (23:06:41)
-    GAMESCOPE_FOCUSED_APP(CARDINAL) = 769          <- Steam is in front
-    GAMESCOPE_FOCUSED_APP_GFX(CARDINAL) = 4102716320  <- Yu'lon is still what is being rendered under it
-    GAMESCOPE_KEYBOARD_FOCUS_DISPLAY(CARDINAL) = 12602, 0, 47
+--- after Play: gamescope has focused the launched entry  (23:34:38)
+    GAMESCOPE_FOCUSED_APP = 4102716320          GAMESCOPE_FOCUSED_APP_GFX = 4102716320
+    GAMESCOPE_FOCUSED_WINDOW = 6291463
+    GAMESCOPECTRL_BASELAYER_APPID = 413091, 4102716320, 769
+    GAMESCOPE_KEYBOARD_FOCUS_DISPLAY = 12858, 0, 49
+  [windows on :2]  6291463  pid=18219  Yu'lon — Dad's MMO Lab launcher 0.6.59
+                   6291465  pid=<none> main.py
+                   6291461  pid=<none> Qt Selection Owner for main.py
+  [the entry's own process]
+    18218  …/reaper SteamLaunch AppId=4102716320 -- /home/pk/y8v313/bin/python /home/pk/y8/pylauncher/main.py
+    18219  /home/pk/y8v313/bin/python /home/pk/y8/pylauncher/main.py
+  [memory]  Mem: 19990 total, 17283 available
 ```
 
-`gs-05-steam-menu-running-game-card.png` is what that produced, and it is the frame 8.8 could
-not get: **the STEAM menu with a running-game card** — `Turtle WoW Server` at the top of the
-rail, and under it **Resume game**, Controller settings, View game details, Guides, Notes, Game
-Recording, Exit game. 8.8's frame 7 recorded the same menu on plain X11 with **no running-game
-card at all** — "which on a Deck is where Resume lives". It lives there here.
+`4102716320` is the entry's 32-bit appid; window `6291463` is on `:2` and its `_NET_WM_PID` is
+`18219`, the pid Steam's own reaper launched. **This step involves no overlay and no dismissal**,
+so it is the unambiguous half of the result: gamescope raised Yu'lon with no help from Yu'lon,
+where the plain X11 desktop left Big Picture in front with a dead Resume button.
 
-## 6. Resume — `gs-06`, `gs-07`, `26-`
+`gs-04-yulon-window-on-xwayland-2-black.png` (run 1) is an honest failure kept as one: a Qt grab of
+window `6291463` comes back black, because gamescope redirects its clients. The atoms, the window
+title, the `_NET_WM_PID` and the process line above are what say Yu'lon is up and focused.
 
-`gs-06-resume-game-focused.png` is **Resume game** highlighted after one `Right`. `Return`, and
-the two readings quoted at the top of this file: `GAMESCOPE_FOCUSED_APP` **769 → 4102716320**
-and `GAMESCOPE_KEYBOARD_FOCUS_DISPLAY` **12602 → 12858**, i.e. keyboard focus moved from Steam's
-window on `:1` back to Yu'lon's on `:2`. A third reading six seconds later is identical, so it is
-a settled state and not a flicker. `GAMESCOPECTRL_BASELAYER_APPID` is `413091, 4102716320, 769`
-throughout — the stack never changed; what changed is which member of it gamescope focuses.
+## 4. The control: dismissal alone moves the same atoms — `30-` §3, `gs2-03`, `gs2-04`
 
-`gs-07-steam-after-resume-blank.png` is Steam's own window grabbed straight after: blank. Steam
-stops painting the gamepad UI once gamescope has taken focus away from it, which is the same
-"Steam steps aside" the 8.8 run saw for `glxgears` and the Proton client — except that here the
-step-aside is *toward Yu'lon* rather than toward nothing.
+Because `Shift+Tab` is gamescope's guide hotkey (§2), the round-1 evidence could not tell "Resume
+was activated" from "the overlay went away". Run 2 takes the control twice, **with Resume never
+touched**:
 
-**So the 8.8 stand-in's last claim holds.** On a Deck, the entry launches, the STEAM button
-brings the menu, and Resume returns to Yu'lon. Nothing in Yu'lon has to change for it, and
-nothing 8.8 proposed and rejected (stamping `STEAM_GAME`, rendering through OpenGL,
-intercepting the click) was needed.
+| | after opening the guide | after dismissing it |
+| --- | --- | --- |
+| **control A** — dismissed by a second `Shift+Tab` | `FOCUSED_APP = 769`, `..._GFX = 4102716320`, keyboard display `12602` | `FOCUSED_APP = 4102716320`, keyboard display `12858` |
+| **control B** — dismissed by `Escape` | `FOCUSED_APP = 769`, keyboard display `12602` | `FOCUSED_APP = 4102716320`, keyboard display `12858` |
+
+and control B's dismissal added **two** lines to Steam's `console-linux.txt`:
+`Adding process 19072 for gameID 17621032419199025152` and one more like it. **That is exactly the
+transition, and exactly the log delta, that the Resume press produces in §5.** So neither the
+atoms nor Steam's own log is a signature of Resume.
+
+`gs2-03-control-guide-open-running-game-card.png` is the guide open — **the running-game card**
+with `Turtle WoW Server` in the rail and `Resume game`, Controller settings, View game details,
+Guides, Notes, Game Recording, Exit game. 8.8's frame 7 recorded the same menu on plain X11 with
+**no running-game card at all** ("which on a Deck is where Resume lives"). It exists here, and
+that fact is independent of the ambiguity above.
+`gs2-04-control-guide-dismissed-no-resume.png` is the same window after the dismissal.
+
+## 5. The press — `30-` §4-5, `gs2-05` … `gs2-09`
+
+**A misfire first, recorded rather than hidden.** The card remembers where the rail was left, so
+one `Right` after re-opening the guide landed on **Exit game**
+(`gs2-05-misfire-exit-game-highlighted.png`, grabbed between the `Right` and the `Return`). The
+`Return` therefore activated Exit game — which did **not** exit anything: it raised an
+`Exit game? / Unsaved game data may be lost. / Confirm / Cancel` modal
+(`gs2-06-exit-game-confirmation.png`), which is why focus stayed on Steam and Yu'lon kept running.
+It was cancelled on **Cancel** (`gs2-07-card-after-cancel.png`, the card back with Exit game
+highlighted), and the rail was then walked up six times with the highlight photographed **before**
+the Return:
+
+`gs2-08-resume-game-highlighted-before-the-press.png` — **the highlight is on "Resume game"**.
+Then, from `30-`:
+
+```
+--- immediately BEFORE Resume, guide open, Resume game highlighted  (23:39:06)
+    GAMESCOPE_FOCUSED_APP = 769      ..._GFX = 4102716320   keyboard display = 12602
+  $ DISPLAY=:1 xdotool key Return        # ACTIVATE Resume game
+    stamp: 2026-09-10T23:39:06+00:00
+    exit: 0
+--- immediately AFTER Resume  (23:39:12)
+    GAMESCOPE_FOCUSED_APP = 4102716320   ..._GFX = 4102716320   keyboard display = 12858
+    lines console-linux.txt gained across the Resume activation: 2
+      | [2026-09-10 23:39:09] Adding process 20796 for gameID 17621032419199025152
+      | [2026-09-10 23:39:09] Adding process 20795 for gameID 17621032419199025152
+--- fourteen seconds after Resume  (23:39:20)
+    GAMESCOPE_FOCUSED_APP = 4102716320   keyboard display = 12858
+```
+
+Settled, not a flicker. `GAMESCOPECTRL_BASELAYER_APPID` is `413091, 4102716320, 769` throughout —
+the stack never changed; what changed is which member gamescope focuses.
+`gs2-09-steam-window-after-resume.png` is Steam's own window grabbed straight after: blank.
+**Do not read that as "Steam stopped painting"** — `gs-04` shows the same grab method returning
+black for a window gamescope has redirected, so the blankness is at least as likely to be the
+grab as the client.
+
+## 6. What §5 leaves standing, stated plainly
+
+* The atoms after Resume are **identical** to the atoms after a bare dismissal (§4). Steam's log
+  delta is identical too. **Nothing measured here distinguishes the two.**
+* What the Resume press *is* evidenced by: `gs2-08`, the highlight photographed on "Resume game"
+  immediately before a `Return` whose command, display, stamp and exit status are in `30-`; and
+  the card's own state, which offers Resume as the way back.
+* What is unaffected by the ambiguity: **§3.** The launch focuses Yu'lon with no overlay in the
+  picture at all, and §4's card exists under gamescope where it did not on X11.
+* So the Deck-shaped claim this half can make is: *under gamescope, the entry launches into
+  focus, the STEAM button brings a running-game card, and leaving that card — by Resume or by any
+  dismissal — returns to Yu'lon.* The narrower claim "the **Resume item specifically** is what
+  raises it" is **not** separable with these instruments, and 8.8's stand-in should be read
+  against the first sentence, not the second.
+* Either way Yu'lon needs no change, and nothing 8.8 proposed and rejected (stamping
+  `STEAM_GAME`, rendering through OpenGL, intercepting the click) was needed.
 
 ## 7. The box as left — `27-`, `28-`, `frame-02`
 
-Steam was shut down from inside gamescope (`steam -shutdown`), gamescope exited with it, and no
-Yu'lon process survived. Steam was then started again the ordinary way on `:0`:
+Steam was shut down from inside gamescope (`steam -shutdown`); gamescope exited with it and no
+Yu'lon process survived. Steam was then started the ordinary way on `:0` with `-bigpicture`.
 
-```
-DISPLAY=:0 XAUTHORITY=/home/pk/.Xauthority setsid nohup steam -bigpicture …
-```
+`28-half2-box-as-left.txt` at 23:42:44: **steam runs and `-bigpicture` is on its argv**, the window
+in front on `:0` is `Steam Big Picture Mode`, **no gamescope process, no Yu'lon process, no client
+process**, all three Tortoise containers `Exited (0)`, **`nothing listening on either port`**, and
+Yu'lon's source tree `~/y8` at `679d2df` with `git status --short: clean, nothing modified or
+untracked`. `frame-02-vm-console-box-as-left.png` shows it: ordinary Big Picture on XFCE, signed
+in, both entries.
 
-`28-half2-box-as-left.txt` at 23:10:22: **steam runs and `-bigpicture` is on its argv**, the
-window in front on `:0` is `Steam Big Picture Mode`, **no gamescope process, no Yu'lon process,
-no client process**, all three Tortoise containers `Exited (0)` and **nothing listening on 3724
-or 8090** (Half 1 stopped the server cleanly through Yu'lon's own Stop). `frame-02-vm-console-box-as-left.png`
-is the VM console showing exactly that: ordinary Big Picture on XFCE, signed in, both entries.
-
-`27-shortcuts-as-left.txt` handles `shortcuts.vdf`. Its sha256 moved twice —
-`e4068f33…` (as found) → `244a23ed…` (after the client entry ran) → `351bae71…` (after the server
-entry ran in gamescope) — and **the entries never changed**. Read with the app's own codec
-(`yulon.steam.vdf_parse`), the file is 681 bytes at every reading and holds exactly `Turtle WoW`
-(`"/home/pk/clients/TurtleWoW/WoW.exe"`) and `Turtle WoW Server` (`"/home/pk/y8v313/bin/python"`
-with `LaunchOptions: /home/pk/y8/pylauncher/main.py`); the only field that differs is
-`LastPlayTime`, which Steam writes itself whenever a shortcut is launched — and launching both
-entries is what this ticket asked for.
+`27-shortcuts-as-left.txt` handles `shortcuts.vdf` — see deviation 1.
 
 **Left installed on the box:** `gamescope 3.16.28-1`, `vulkan-swrast 1:26.2.2-1`,
-`vulkan-tools 1.4.357.0-1` (and the transaction's own dependencies: `sdl3`, `sdl2-compat`,
-`seatd`, `xcb-util-errors`, `xorg-xwayland`), the way 8.8 left `mesa-utils`. The run's scratch
-tree is `~/t29`; the throwaway account's password file in it was shredded and the working copy
-of `shortcuts.vdf` removed.
+`vulkan-tools 1.4.357.0-1` and the transaction's dependencies (`sdl3`, `sdl2-compat`, `seatd`,
+`xcb-util-errors`, `xorg-xwayland`), the way 8.8 left `mesa-utils`. The run's scratch tree is
+`~/t29`; the throwaway account's password file in it was shredded and the working copy of
+`shortcuts.vdf` removed.
 
 ## Deviations, stated
 
-1. **The half ran on gamescope's headless backend**, because no visible backend can start on
-   this VM (section 1, with the error text and seven attempted lines). The ticket's fallback was
-   "record the exact error and still close the half"; this goes one better by answering the
-   actual question through the atoms, and section 2 states plainly what a headless run does and
-   does not prove.
-2. **The `gs-*` frames are Qt window grabs off gamescope's XWayland displays, not VM-console
-   screenshots**, for the reason `frame-01` shows: with a headless backend the monitor is blank.
-   The two `frame-*` images here are ordinary VM-console shots and bracket the run.
-3. **`gs-04` is black.** Yu'lon's window inside gamescope cannot be grabbed that way. Kept as a
-   recorded failure; the claim it would have supported rests on the atoms, the window title on
-   `:2` and the process line instead.
-4. **Steam was returned to with `Shift+Tab`, not a controller's STEAM button** — no controller
-   is attached (`gs-05` says `No controller connected.`). `Shift+Tab` is Steam's own published
-   keyboard equivalent, quoted from its UI bundle.
-5. **The VM was hard-reset earlier in the ticket, before this half**, and restarted with 20 GB
-   instead of 12 — see Half 1's deviation 1. gamescope was installed and run only after that,
-   with the server stopped and the client closed, and `free -m` taken before
-   (`20-mem-before-gamescope.txt`: 18994 MB available) and during the run (17172 MB available
-   with Steam and Yu'lon both up inside gamescope). Nothing here went near the memory ceiling.
-6. `vulkan-tools` was installed beyond the ticket's list, to check gamescope's complaint against
-   the driver instead of repeating it (`24-vulkan-device.txt`).
+1. **`shortcuts.vdf`'s sha256 moved, three times, against the ticket's "untouched (sha256 before
+   and after)".** `e4068f33…` (as found) → `244a23ed…` (after the client entry ran) → `351bae71…`
+   (after run 1) → `03adf146…` (as left). Steam writes `LastPlayTime` into the file whenever a
+   shortcut is launched, and launching both entries is what the ticket asked for. Read with the
+   app's own codec the file is **681 bytes at every reading** and holds exactly `Turtle WoW`
+   (`"/home/pk/clients/TurtleWoW/WoW.exe"`) and `Turtle WoW Server`
+   (`"/home/pk/y8v313/bin/python"` + `LaunchOptions: /home/pk/y8/pylauncher/main.py`); only
+   `LastPlayTime` differs. **Honesty note, also in `27-`: the as-found file was only hashed, never
+   parsed** — no copy of it was kept — so "the entries never changed" rests on the parses of the
+   later readings, the constant 681 bytes, and T17's and 8.8's own listings, not on a
+   parse-to-parse diff against the as-found bytes.
+2. **The half ran on gamescope's headless backend** (§1-2), with §2 stating what that does and
+   does not show.
+3. **The `gs-*` and `gs2-*` frames are Qt window grabs off gamescope's XWayland displays, not
+   VM-console screenshots**, for the reason `frame-01` shows. The two `frame-*` images are
+   ordinary VM-console shots and bracket the run.
+4. **`gs-04` is black** — Yu'lon's window inside gamescope cannot be grabbed that way. Kept as a
+   recorded failure; the claim it would have supported rests on the atoms, the window title, the
+   `_NET_WM_PID` and the process line.
+5. **Steam was returned to with `Shift+Tab`, not a controller's STEAM button** — no controller is
+   attached (`gs2-03` says `No controller connected.`). `Shift+Tab` is gamescope's own guide
+   binding, quoted from its log at `29-:58`, which is also why §4's control was necessary.
+6. **A press in run 2 landed on Exit game rather than Resume game** (§5). It raised a confirmation,
+   which was cancelled; nothing exited, and the press was redone with the highlight verified first.
+   Both are in `30-` and in the frames.
+7. **The VM was hard-reset earlier in the ticket, before this half**, and restarted with 20 GB
+   instead of 12 — the host's worker process was killed at about 22:41 on the box's clock. See
+   Half 1's deviation 1 for the numbers. gamescope was installed and run only after that, with the
+   server stopped and the client closed; `free -m` before (`20-`: 18994 MB available) and inside the
+   run (`30-`: 17283 MB available with Steam and Yu'lon both up). Nothing here went near the ceiling.
+8. **`vulkan-tools` was installed beyond the ticket's list**, to check gamescope's complaint against
+   the driver instead of repeating it (`24-`).
+9. **Run 1 is superseded but kept** (`25-`, `26-`, `gs-*`). Its Resume press has no recorded command
+   and its readings cover `:1` only; `26-`'s head says so.
 
 ## Files
 
-`20-mem-before-gamescope.txt` · `21-pacman-gamescope.txt` · `22-gamescope-installed.txt` ·
-`23-gamescope-attempts.txt` (seven command lines, each with its exit status and output) ·
-`24-vulkan-device.txt` · `25-gamescope-run-log.txt` (gamescope's own log for the run) ·
-`26-resume-under-gamescope.txt` (**the run in order: every atom reading with its stamp**) ·
-`27-shortcuts-as-left.txt` · `28-half2-box-as-left.txt` · the scripts (`gsfacts.sh`, `gstry.sh`,
-`atoms.sh`, `grab.py`, `asleft2.sh`) · and nine images:
-
-| image | what it shows |
+| file | what it is |
 | --- | --- |
-| `gs-01-gamepadui-inside-gamescope.png` | Steam's gamepad UI at 1920x1080 inside gamescope, both entries |
-| `gs-02-server-entry-focused.png` | "Turtle WoW Server" focused — keyboard input reaches gamescope |
-| `gs-03-server-entry-page-play.png` | its page, green Play |
-| `gs-04-yulon-window-on-xwayland-2-black.png` | the failed grab of Yu'lon's window (kept as a recorded failure) |
-| `gs-05-steam-menu-running-game-card.png` | **the STEAM menu WITH a running-game card and Resume game** — what 8.8's frame 7 lacked |
-| `gs-06-resume-game-focused.png` | "Resume game" highlighted, the moment before the press |
-| `gs-07-steam-after-resume-blank.png` | Steam's window straight after Resume: blank, focus given away |
-| `frame-01-vm-console-while-gamescope-ran.png` | the real screen while all of the above ran: a bare XFCE desktop |
-| `frame-02-vm-console-box-as-left.png` | the box as left — ordinary Big Picture on XFCE, signed in, two entries |
+| `20-mem-before-gamescope.txt` | `free -m` immediately before gamescope was first started |
+| `21-pacman-gamescope.txt` | the install transaction |
+| `22-gamescope-installed.txt` | versions, ICDs, the machine, no GPU |
+| `23-gamescope-attempts.txt` | seven command lines, each with exit status and output |
+| `24-vulkan-device.txt` | `vulkaninfo`: llvmpipe, and the two extensions absent |
+| `25-gamescope-run-log.txt` | run 1's gamescope log |
+| `26-resume-under-gamescope.txt` | run 1's readings and the three attempts at returning to Steam |
+| `29-gamescope-run-2-log.txt` | run 2's gamescope log, with the two hotkey bindings at `:58-59` |
+| `30-run2-readings-and-presses.txt` | **run 2 in order: every press with its command, display, stamp and exit status; every reading with both displays' windows, their `_NET_WM_PID`, the reaper line and `free -m`** |
+| `27-shortcuts-as-left.txt` | the four sha256 readings, the parse as left, and the honesty note |
+| `28-half2-box-as-left.txt` | the box as left, including `~/y8`'s HEAD and clean status |
+| `atoms.sh`, `press.sh`, `grab.py`, `x.sh`, `gsfacts.sh`, `gstry.sh`, `asleft2.sh`, `vdf2.sh` | the scripts that produced the above |
+
+| image | run | what it shows |
+| --- | --- | --- |
+| `gs2-01-gamepadui-server-entry-focused.png` | 2 | the gamepad UI inside gamescope, server entry focused |
+| `gs2-02-server-entry-page-play.png` | 2 | its page, green Play |
+| `gs2-03-control-guide-open-running-game-card.png` | 2 | **the running-game card** — what plain X11 never had |
+| `gs2-04-control-guide-dismissed-no-resume.png` | 2 | the same, dismissed, Resume never touched |
+| `gs2-05-misfire-exit-game-highlighted.png` | 2 | the misfire: the highlight on Exit game |
+| `gs2-06-exit-game-confirmation.png` | 2 | the modal it raised — nothing exited |
+| `gs2-07-card-after-cancel.png` | 2 | cancelled, back on the card |
+| `gs2-08-resume-game-highlighted-before-the-press.png` | 2 | **the highlight on "Resume game", immediately before the Return** |
+| `gs2-09-steam-window-after-resume.png` | 2 | Steam's window after Resume: blank (see §5's caveat) |
+| `gs-01` … `gs-07` | 1 | run 1's equivalents, kept; `gs-04` is the black Yu'lon grab |
+| `frame-01-vm-console-while-gamescope-ran.png` | — | the real screen while all of it ran: a bare XFCE desktop |
+| `frame-02-vm-console-box-as-left.png` | — | the box as left: ordinary Big Picture on XFCE, two entries |
 
 ## Checks
 

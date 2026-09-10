@@ -119,8 +119,10 @@ writes the realm row and *names* the address for the player, and `networking.wri
 has no UI caller in this build (`tests/test_spine.py` lists it as a writer with a glob). Rather
 than hand-edit, `clientrealm.py` calls that function — Yu'lon's own code doing it
 (`07-client-realmlist.txt`): `b'set realmlist logon.turtle-server-eu.kz\r\n'` →
-`b'set realmlist 127.0.0.1\n'`. **This is the only thing under `~/clients/TurtleWoW` this run
-touched, and it is left pointing at the local server.**
+`b'set realmlist 127.0.0.1\n'`. **`realmlist.wtf` is the only file under `~/clients/TurtleWoW`
+this run edited**, and it is left pointing at the local server. It is not the only file under that
+folder that changed: running the client is what the ticket asked for, and the client writes its own
+`WTF/Config.wtf`, `Logs/` and `WDB/` as it always does. Nothing else was edited by hand.
 
 ## 5. Start, and the server running — `frame-09`, `08-world-ready-and-ports.txt`
 
@@ -152,12 +154,24 @@ left in `~/t29`). **No account of the owner's was used and no character was touc
 ## 7. The client entry reaches the server — frames 12-16, `10-realmd-login.txt`
 
 `frame-12` is Big Picture with the **"Turtle WoW"** tile focused; `frame-13` is its page with the
-green **Play**. The entry launched (Steam's `reaper SteamLaunch AppId=3811632958`), and
-`frame-14-client-login-screen.png` is the Turtle WoW login screen, **Version 1.18.1 (7272)
+green **Play**. Steam's own `gameprocess_log.txt` records what it then ran
+(`12-steam-own-launch-lines.txt`, the 22:45:30 line):
+
+```
+AppID 16370838898999296000 adding PID 4656 as a tracked process
+  ".../steam-launch-wrapper -- .../reaper SteamLaunch AppId=3811632958 --
+   '.../SteamLinuxRuntime_4'/_v2-entry-point --verb=waitforexitandrun --
+   '.../compatibilitytools.d/GE-Proton11-6-x86_64'/proton waitforexitandrun
+   "/home/pk/clients/TurtleWoW/WoW.exe""
+```
+
+and `frame-14-client-login-screen.png` is the Turtle WoW login screen, **Version 1.18.1 (7272)
 (Release)**.
 
 `frame-15` shows `T29TEST` and a masked password typed into it, and `frame-16` is what pressing
-Login produced: the client is **past the login screen**, on WoW's realm-choosing page. The
+Login produced: the client is **past the login screen**, on WoW's first-login realm-style
+wizard ("Choosing a Realm" / "Choose your realm style") — the page that precedes the realm
+list, not a named realm. The
 realmd container's own log for that window (`10-realmd-login.txt`, `--since` five seconds before
 the press) is the other side of it:
 
@@ -191,12 +205,20 @@ Both Start and Stop went through the app's own Server tab, never a raw `docker` 
 
 ## 9. `shortcuts.vdf` — `09-shortcuts-vdf.txt`, and `27-shortcuts-as-left.txt` in the other folder
 
-The file's sha256 **moved**, and the entries did not. Steam writes `LastPlayTime` into
-`shortcuts.vdf` whenever a shortcut is launched, and this ticket asked for both entries to be
-launched. Read with the app's own codec (`yulon.steam.vdf_parse`), the file is 681 bytes before
-and after, holding exactly `Turtle WoW` (`…/clients/TurtleWoW/WoW.exe`) and `Turtle WoW Server`
-(`~/y8v313/bin/python` + `…/y8/pylauncher/main.py`); only `LastPlayTime` differs. The three
-readings are tabulated in `27-shortcuts-as-left.txt`.
+The file's sha256 **moved** — see deviation 8. Steam writes `LastPlayTime` into `shortcuts.vdf`
+whenever a shortcut is launched, and this ticket asked for both entries to be launched. Read with
+the app's own codec (`yulon.steam.vdf_parse`), the file is **681 bytes at every reading**, holding
+exactly `Turtle WoW` (`…/clients/TurtleWoW/WoW.exe`) and `Turtle WoW Server`
+(`~/y8v313/bin/python` + `…/y8/pylauncher/main.py`); only `LastPlayTime` differs. All four sha256
+readings are tabulated in `27-shortcuts-as-left.txt`, together with the honesty note repeated in
+deviation 8.
+
+## 10. Yu'lon's own source tree — `28-half2-box-as-left.txt` in the other folder
+
+Nothing under `~/y8` was written by this ticket. The box's clone was at `803a686` when Half 1 ran
+(`01-as-found.txt`); the lead has since fast-forwarded it, and the as-left reading is
+`679d2df STATE: the Phase 8 exit release is a fork pre-release, v0.6.60-phase8, no version bump`
+with `git status --short: clean, nothing modified or untracked`.
 
 ## Deviations, stated
 
@@ -228,15 +250,29 @@ readings are tabulated in `27-shortcuts-as-left.txt`.
    `last_error` from 2026-09-08 (the world "never reported ready") is still there and is now
    contradicted by `08-world-ready-and-ports.txt`: on this run the world reported ready in
    1 minute 53 seconds.
+8. **`shortcuts.vdf`'s sha256 moved, against the ticket's "untouched (sha256 before and after)".**
+   `e4068f33…` (as found) → `244a23ed…` (after the client entry ran) → `351bae71…` → `03adf146…`
+   (as left, after Half 2's two gamescope runs). The cause is Steam's own `LastPlayTime`, and
+   launching both entries is what the ticket asked for; the entries themselves are byte-identical
+   in every parse and the file is 681 bytes throughout. **The as-found file was only hashed, never
+   parsed** — no copy of it was kept — so "the entries never changed" rests on the parses of the
+   later readings, the constant size, and T17's and 8.8's own listings, not on a parse-to-parse
+   diff against the as-found bytes. `27-shortcuts-as-left.txt` says the same in place.
+9. **Running the client changed files under `~/clients/TurtleWoW` besides the realmlist** —
+   `WTF/Config.wtf`, `Logs/`, `WDB/`, which the client writes for itself. `realmlist.wtf` is the
+   only file this run *edited*; no capture of the others was taken.
 
 ## Files
 
 `01-as-found.txt` · `02-containers-as-found.txt` · `03-startdb.txt` · `04-probe-before.txt` ·
 `05-adopt-press-refusal.txt` · `06-realmlist-after-apply.txt` · `07-client-realmlist.txt` ·
 `08-world-ready-and-ports.txt` · `09-shortcuts-vdf.txt` · `10-realmd-login.txt` ·
-`11-half1-box-as-left.txt` · the scripts that produced them (`containers.py`, `startdb.py`,
-`probe.py`, `adoptpress.py`, `realmread.py`, `clientrealm.py`, `shortcuts.py`, `ready.sh`,
-`realmd.sh`, `asleft1.sh`) · and eighteen frames:
+`11-half1-box-as-left.txt` · `12-steam-own-launch-lines.txt` (Steam's own record of both entry
+launches, with the `reaper SteamLaunch` argv for each) · the scripts that produced them
+(`containers.py`, `startdb.py`, `probe.py`, `adoptpress.py`, `realmread.py`, `clientrealm.py`,
+`shortcuts.py`, `ready.sh`, `realmd.sh`, `steamlog.sh`, `asleft1.sh`, and `x.sh`, the two-line
+wrapper that put `DISPLAY=:0 XAUTHORITY=…` in front of every `xdotool` call in this half) ·
+and eighteen frames:
 
 | frame | what it shows |
 | --- | --- |
@@ -255,7 +291,7 @@ readings are tabulated in `27-shortcuts-as-left.txt`.
 | `frame-13-bigpicture-turtle-wow-page-play.png` | its page, green Play |
 | `frame-14-client-login-screen.png` | the login screen, 1.18.1 (7272) |
 | `frame-15-client-credentials-entered.png` | `T29TEST` typed in |
-| `frame-16-client-authenticated-realm-chooser.png` | **past the login screen** — the realm chooser |
+| `frame-16-client-authenticated-realm-chooser.png` | **past the login screen** — WoW's first-login realm-style wizard (not a named realm) |
 | `frame-17-tab-reopened-after-vm-reset.png` | Yu'lon reattaching from `state.json` after the reset |
 | `frame-18-server-tab-stopped.png` | `stopped`, and the saved server log |
 
