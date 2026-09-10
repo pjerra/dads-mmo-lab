@@ -1,6 +1,6 @@
 # T13 — `dml_uninvite` removes a bot only from the party of the master that asked
 
-**Status:** REWORK, code half (rejected by the lead 2026-09-09 14:28 CEST, round 1 of 2) -- the leader test is not membership, and a silent branch reads as success; live half queued for the box
+**Status:** REVIEW, code half round 2 of 2 (committed by the lead 2026-09-10 14:35 CEST; the Sonnet hand died mid-round with the work uncommitted); gate ALL GREEN on m910q (the VM host is offline); live half blocked on `yulon-ubuntu2` until the host is back
 **Filed:** 2026-09-09 17:05 by the lead (Fable), from T5's round-3 Codex review
 **Hand:** Sonnet (budget rule 2026-09-09; the trailer says Sonnet), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** the bridge script `dml_uninvite.lua` where the app ships it (find it: `git grep -l dml_uninvite -- '*.lua'`; the deploy list in `pylauncher/yulon/party.py` names the five), `pylauncher/yulon/party.py` **only** at `uninvite_command()` and the seam sentence for a refusal (T5's round-3 `remove_all` and its tests are merged and must keep passing), `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-uninvite-contract-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not `controller_view.py`, not `pyplan/checklist.md`.
@@ -48,3 +48,25 @@ Notes: `GetLeaderGUID() ~= GetGUID()` on userdata without `__eq` would refuse al
 2. Every non-removing branch (player not found, bot not found, no group, not a member) replies over `handler` with a sentence the seam recognises as a refusal, each its own `Dismissal(removed=False, ...)` wording or the one marker with the reason -- your choice, say which; a test per branch that the logout whisper is not sent.
 3. The Lua/Python pin test (must-fix 3).
 Round 2 is the last under the owner's cap; the lead closes what remains by hand. Add a commit; gate; report in the same format.
+
+## Report, code half round 2 (the hand's work, committed by the lead, 2026-09-10 14:35 CEST)
+
+- The Sonnet hand died on the limit with round 2 uncommitted in its worktree; the lead read the diff, ran it, and committed it unchanged as `0d832391` on top of `b9531de9`. 3 files +177/-52 (`dml_uninvite.lua` +62/-36, `test_party.py` +80/-3, `party.py` +35/-13).
+- Gate: `YULON_TEST_BOX=m910q` (the Hyper-V host `desktop-fp27auv` is offline on the tailnet, last seen ~20 h before; `yulon-fedora` and `yulon-ubuntu2` unreachable) `--checks` -> `=== --checks: ALL GREEN ===`, 3903 passed 6 skipped, mypy x3, ruff, black.
+- **Must-fix 1**: `local g = b:GetGroup(); if g == nil then ... end; if not g:IsMember(p:GetGUID()) then` -> membership, the relationship `group_rows_sql` reads. `Group:IsMember` checked against `azerothcore/mod-ale` master `GroupMethods.h` (the engine `rebuild-live-yulon-ubuntu2-2026-09-09` cloned): `ObjectGuid guid = ALE::CHECKVAL<ObjectGuid>(L, 2); ALE::Push(L, group->IsMember(guid));`, and `Player:GetGUID()` pushes an ObjectGuid, so the comparison is C++-side, no Lua `__eq` involved. The Python sentence is now `"<bot> was not removed: the server says <answer.text>"`, nothing invented.
+- **Must-fix 2**: one `refuse(reason)` closure; all four non-removing branches (player not found/offline, bot not found/offline, ungrouped, grouped with someone else) go through it: `handler:SendSysMessage(msg)` when `handler ~= nil`, then `print`, `return false`. Marker `"<bot> is not in <player>'s party now (<reason>)"` -- the hand chose the one-marker-with-reason option. A parametrised test per branch asserts `removed is False`, `logged_out is False`, and `chan.sent == ["dml_uninvite Pakka Newbot"]` (no logout whisper, no poll).
+- **Must-fix 3**: `UNINVITE_COMMAND_PATTERN` and `UNINVITE_REFUSAL_FORMAT` live in `party.py`; `test_the_uninvite_grammar_and_refusal_sentence_are_the_shipped_scripts_own` asserts both are substrings of the shipped `lua/party/dml_uninvite.lua`; `_uninvite_refusal_marker` builds from the format constant.
+- Mutations (lead, `__pycache__` purged each side): marker never matches (`if False and marker in answer.text`) -> 6 fail; command pattern drifts -> 1 fail; refusal format drifts -> 7 fail; sentence invents a mechanism again -> 1 fail. Restored: 121 pass.
+- Deviations: gate box m910q not `yulon-fedora` (host offline); the commit trailer names Sonnet (the hand wrote every line); the live half cannot start until the host is up.
+
+## Review, code half round 2 (cold Opus reviewer, 2026-09-10 14:41 CEST) -- ACCEPT, no must-fixes
+
+All three delivered; no new defect. Must-fix 1: `IsMember` on the bot's group is the same predicate as `group_rows_sql` (a player is in at most one group); the C++-side compare sidesteps the `__eq` hazard; the sentence relays the server's words, pinned by test. Must-fix 2: all four branches go through `refuse()`; the only other early returns are the in-game origin and the pattern miss (falls to the core, `LANG_CMD_INVALID`, `outcome == "no"`); `bname` cannot be nil there; `handler` is non-nil on SOAP per `dml_bridge_ping.lua:34-36`. Must-fix 3: both pinned literals occur exactly once in the Lua, so a drift in either file fails the pin; `%` formatting is correct with the `'s`.
+
+Notes (non-blocking, recorded for follow-up):
+1. `UNINVITE_COMMAND_PATTERN` is referenced only by the pin test; the builder's own drift is caught by the `chan.sent` assertions, so weaker, not broken.
+2. `answer.text.strip()` is relayed whole; a world that put a second line into the same `<result>` would land it in the panel label and `_mass_sentence`; `splitlines()[0]` would bound it.
+3. Regex-special names cannot reach either side (`valid_name` is `isalpha()`).
+4. `dml_uninvite Pakka Pakka` passes `IsMember` and would remove the master from their own party; unreachable from the app (`group_rows_sql`'s `bot_clause` excludes the master) and not new; `if b == p then return refuse(...)` would be free -- for the live half's commit.
+5. Outside this file set: `_rows_only` turns a FAILED group read into `()` and the poll reads that as `removed=True`; round 2 removed the Lua-silence route into it, a genuine uninvite whose follow-up read errors remains. Its own ticket.
+6. The Lua header cites the Eluna docs, not ALE; the live half's honest case stays load-bearing.
