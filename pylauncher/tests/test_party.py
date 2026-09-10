@@ -1530,6 +1530,142 @@ def test_the_seam_dismisses_nothing_where_the_party_could_not_be_read(tmp_path: 
     assert chan.sent == []
 
 
+class _AlwaysFailsAfterOnline:
+    """`online_guid` always resolves; every group-table read raises.
+
+    An outage that starts the moment the press goes out: `dml_uninvite` and
+    the logout whisper still land (this is not a channel that is down), but
+    the poll's own read errors on every attempt."""
+
+    def __init__(self, guid: str = "1001\n") -> None:
+        self._guid = guid
+
+    def query(self, db: str, statement: str) -> str:
+        if "group_member" in statement:
+            raise RuntimeError("connection refused")
+        return self._guid
+
+
+class _SucceedsOnceThenFails:
+    """The group table reads once (the seam's own pre-dismiss confirmation)
+    and raises on every read after -- an outage starting after the batch is
+    already confirmed and the presses are already going out."""
+
+    def __init__(self, first_group_row: str, guid: str = "1001\n") -> None:
+        self._guid = guid
+        self._first_group_row = first_group_row
+        self._group_reads = 0
+
+    def query(self, db: str, statement: str) -> str:
+        if "group_member" in statement:
+            self._group_reads += 1
+            if self._group_reads == 1:
+                return self._first_group_row
+            raise RuntimeError("connection refused")
+        return self._guid
+
+
+def test_the_seam_does_not_report_removed_when_every_poll_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T21, round 2's must-fix 1 (Codex adversarial review, round 1): `dismiss`'s
+    own unit tests call it directly with an already-unfolded `members`, so a
+    regression that put `_rows_only` back between `InstallParty.remove` and the
+    poll would sail through them unnoticed. This goes through the seam instead.
+
+    `InstallParty.remove` exposes no `tries`/`pause`/`sleep` of its own, so the
+    poll's real wait is silenced the same way `dismiss`'s own tests silence it
+    -- by reaching past the seam to the one place that wait is injectable,
+    `dismiss.__kwdefaults__["sleep"]` -- rather than actually waiting out
+    `POLL_TRIES * POLL_SLEEP` (6 seconds) for a database that is never coming
+    back in this test.
+    """
+    monkeypatch.setitem(party.dismiss.__kwdefaults__, "sleep", lambda _s: None)
+    chan = _Chan()
+    result = _install(_ready_install(tmp_path), _AlwaysFailsAfterOnline(), chan).remove(
+        "Pakka", "Newbot"
+    )
+    assert result.removed is False
+    assert result.unreadable is True
+    assert "connection refused" in result.sentence
+
+
+def test_the_batch_seam_does_not_report_removed_when_every_poll_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same finding on the batch route (Codex adversarial review, round 1,
+    must-fix 1): round 1 of this ticket fixed `InstallParty.remove` and left
+    `InstallParty.remove_all` handing `dismiss_all` the `_rows_only`-folded
+    read, so a database outage mid-batch still reported every bot in it
+    `removed=True`. `remove_all`'s own confirmation read succeeds once (that is
+    what lets the batch start); the poll behind it never gets another good
+    read."""
+    monkeypatch.setitem(party.dismiss_all.__kwdefaults__, "sleep", lambda _s: None)
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _SucceedsOnceThenFails("Anmi\t949\t8\t1\n")
+    result = _install(_ready_install(tmp_path), sql, chan).remove_all("Pakka", (949,))
+    assert result.attempted == 1
+    assert not any(d.removed for d in result.dismissals)
+    assert all(d.unreadable for d in result.dismissals)
+    assert "connection refused" in result.sentence
+
+
+# -- 8.6, T5: three buckets for a mass dismissal (T21, round 2) -------------
+
+
+def test_a_mass_dismissal_where_every_bot_is_unreadable_says_so_not_stayed() -> None:
+    """T21, round 2's must-fix 2 (Codex adversarial review, round 1): "Still
+    here" asserts a row somebody actually saw. A read that never happened
+    cannot say that, so it gets its own words rather than being folded into
+    the bucket for bots the poll actually watched stay."""
+    result = party.dismiss_all(
+        player="Pakka",
+        bots=("Anmi", "Jilsur"),
+        send=_Chan().send,
+        members=lambda: "could not read this character's party: connection refused",
+        tries=1,
+        sleep=lambda _s: None,
+    )
+    assert not any(d.removed for d in result.dismissals)
+    assert "None of 2 bots left the party" in result.sentence
+    assert "Still here" not in result.sentence
+    assert "Could not be confirmed" in result.sentence
+    assert "connection refused" in result.sentence
+
+
+def test_a_mixed_mass_dismissal_names_each_bucket_in_its_own_words() -> None:
+    """One bot that went, one the bridge refused outright (a row somebody
+    read), and one whose table could not be read at all: three different
+    findings, and the sentence must not collapse the last two together."""
+
+    class _Mixed(_Chan):
+        def send(self, command: str) -> Answer:
+            self.sent.append(command)
+            if command == "dml_uninvite Pakka Jilsur":
+                return Answer(
+                    "yes",
+                    "Jilsur is not in Pakka's party now (Jilsur is grouped with someone else)",
+                )
+            return Answer("yes", "ok")
+
+    reads = iter([(), "could not read this character's party: timeout"])
+    result = party.dismiss_all(
+        player="Pakka",
+        bots=("Anmi", "Jilsur", "Newbot"),
+        send=_Mixed().send,
+        members=lambda: next(reads),
+        tries=1,
+        sleep=lambda _s: None,
+    )
+    assert [d.removed for d in result.dismissals] == [True, False, False]
+    sentence = result.sentence
+    assert "1 of 3 bots left the party: Anmi." in sentence
+    still_here = sentence.split("Still here — ")[1].split(" Could not be confirmed")[0]
+    unreadable = sentence.split("Could not be confirmed — ")[1]
+    assert "Jilsur" in still_here and "Newbot" not in still_here
+    assert "Newbot" in unreadable and "Jilsur" not in unreadable
+
+
 # -- 8.6, T5: what the seam offers the panel --------------------------------
 
 
