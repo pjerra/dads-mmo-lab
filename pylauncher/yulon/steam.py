@@ -94,8 +94,16 @@ TERMINATOR = bytes([END, END])
 
 
 def _read_cstr(buf: bytes, i: int) -> tuple[str, int]:
+    """A NUL-terminated string, with every byte kept.
+
+    `surrogateescape`, not `replace`: this file also holds shortcuts somebody
+    else made, and a code-page byte in one of their names would otherwise come
+    back as U+FFFD and be written out as UTF-8 by the rewrite -- an unrelated
+    shortcut silently altered by a press that never meant to touch it (Codex on
+    T17, round 2). The bytes go back out exactly as they came in.
+    """
     j = buf.index(b"\x00", i)
-    return buf[i:j].decode("utf-8", "replace"), j + 1
+    return buf[i:j].decode("utf-8", "surrogateescape"), j + 1
 
 
 def vdf_parse(buf: bytes, i: int = 0) -> tuple[VdfMap, int]:
@@ -133,13 +141,13 @@ def vdf_serialize(d: VdfMap) -> bytes:
     """A map's contents, without its own END. Insertion order is the file order."""
     parts = bytearray()
     for key, val in d.items():
-        kb = key.encode("utf-8") + b"\x00"
+        kb = key.encode("utf-8", "surrogateescape") + b"\x00"
         if isinstance(val, dict):
             parts += bytes([MAP]) + kb + vdf_serialize(val) + bytes([END])
         elif isinstance(val, int):
             parts += bytes([INT]) + kb + struct.pack("<i", val)
         else:
-            parts += bytes([STR]) + kb + str(val).encode("utf-8") + b"\x00"
+            parts += bytes([STR]) + kb + str(val).encode("utf-8", "surrogateescape") + b"\x00"
     return bytes(parts)
 
 
@@ -377,7 +385,13 @@ def find_compat_tool(steam_root: Path) -> str | None:
             reverse=True,
         )
         for entry in installed:
-            return _tool_name_from_manifest(entry / "compatibilitytool.vdf") or entry.name
+            # A directory whose manifest cannot be read or names no tool is not a
+            # tool Steam can resolve, whatever its name says; naming it in
+            # `CompatToolMapping` leaves the client unable to launch (Codex on
+            # T17, round 2). Skipped, and the next one asked.
+            name = _tool_name_from_manifest(entry / "compatibilitytool.vdf")
+            if name:
+                return name
     common = steam_root / "steamapps" / "common"
     if common.is_dir():
         numbered: list[tuple[int, str]] = []

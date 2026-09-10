@@ -332,6 +332,58 @@ def test_a_shortcut_somebody_else_added_is_left_alone(tmp_path: Path) -> None:
     assert root["shortcuts"]["0"] == theirs
 
 
+def test_a_shortcut_with_a_byte_that_is_not_utf8_comes_back_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """The codec keeps every byte of a string it did not write.
+
+    A hand-made shortcut whose name carries a code-page byte (`b"\\xff"`) used to
+    come back as U+FFFD and be written out as UTF-8 by the press, an unrelated
+    shortcut silently altered (Codex on T17, round 2). Removing only Yu'lon's two
+    entries from the rewritten file gives the original bytes back exactly.
+
+    Catches `errors="replace"` on the read, and a UTF-8-only encode on the write.
+    """
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    theirs = dict(_captured_entries()[0]) | {"AppName": "Dekaron Server"}
+    original = steam.vdf_dump({"shortcuts": {"0": theirs}}).replace(
+        b"Dekaron Server", b"Dekaron \xff Server"
+    )
+    assert steam.vdf_dump(steam.vdf_parse(original)[0]) == original
+    (config / "shortcuts.vdf").write_bytes(original)
+
+    _shortcuts(tmp_path, client_dir=client).add()
+
+    root, _ = steam.vdf_parse((config / "shortcuts.vdf").read_bytes())
+    ours = [k for k, e in root["shortcuts"].items() if e["AppName"] != "Dekaron \udcff Server"]
+    assert len(ours) == 2, root["shortcuts"].keys()
+    for k in ours:
+        del root["shortcuts"][k]
+    assert steam.vdf_dump(root) == original
+
+
+def test_a_tool_directory_without_a_readable_manifest_does_not_win_on_its_name(
+    tmp_path: Path,
+) -> None:
+    """A higher-versioned folder with no manifest is not a tool Steam can resolve.
+
+    `GE-Proton99-old` beside a valid `GE-Proton10-1`: the name in
+    `CompatToolMapping` must be the one read off a manifest, else the client
+    entry cannot launch (Codex on T17, round 2).
+
+    Catches the fallback to the directory's own name.
+    """
+    _profile(tmp_path)
+    _proton(tmp_path, "GE-Proton10-1")
+    stale = tmp_path / ".local/share/Steam/compatibilitytools.d/GE-Proton99-old"
+    stale.mkdir(parents=True)
+    assert steam.find_compat_tool(tmp_path / ".local/share/Steam") == "GE-Proton10-1"
+    (stale / "compatibilitytool.vdf").write_text("not a manifest at all\n", encoding="utf-8")
+    assert steam.find_compat_tool(tmp_path / ".local/share/Steam") == "GE-Proton10-1"
+
+
 def test_an_entry_whose_stored_appid_was_never_derived_keeps_it(tmp_path: Path) -> None:
     """Replace preserves the stored appid, because the artwork on disk is named after it.
 
