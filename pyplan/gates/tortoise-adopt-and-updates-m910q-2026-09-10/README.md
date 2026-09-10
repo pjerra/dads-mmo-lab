@@ -10,7 +10,7 @@ Pressed from `95b53a84` (the tip of `yulon-phase8b` at the time, carrying the
 adopt press `a62dd763` and T14's updates button), on the owner's explicit yes of
 2026-09-10 through the question tool. The code was read on the box from
 `~/yulon-runs/t19-press`, a `git clone --shared` of the box's own clone checked
-out at that commit and clean; the app ran under the venv at
+out at that commit (no capture of its `git status` was taken; the commit is the one the trace names); the app ran under the venv at
 `~/dads-mmo-lab/pylauncher/.venv` (Python 3.11.15, PySide6 6.11.2).
 
 Every stamp in every file here was read from the box's own clock by the script
@@ -45,7 +45,9 @@ the owner consented to — every statement this capture issued of its own accord
 a `SELECT` or a `SHOW`.
 
 The scratch tree `~/t19-live` and the checkout `~/yulon-runs/t19-press` were
-removed after the captures were copied off.
+removed after the captures were copied off; the lane took no capture of the removal, so
+`17-box-as-left-by-the-lead.txt` (a read-only listing the lead took afterwards, its own
+stamp) shows both absent and the containers as they then stood.
 
 ## What was pressed, and how
 
@@ -64,7 +66,7 @@ False`), exactly as T14's press did, and the driver then calls the app's own
 `refresh_status()` slot — the one the five-second poll calls — and pumps the
 event loop until the tab has the answer. **Nothing in the driver sets
 `_adopt_state`**; the tab set it from its own probe, which is the first eight
-statements of `sql-trace-adopt.txt:1-25`. `05-press-adopt.txt` records the
+statements of `sql-trace-adopt.txt:1-26`. `05-press-adopt.txt` records the
 result: `view._adopt_state: ImportState(state='populated', …)`.
 
 Two concessions to a headless box, both narrow, both T14's:
@@ -175,11 +177,11 @@ header `finished: done`, the route's own lines verbatim:
 cannot be one from this button** — see finding 2.
 
 **The SQL trace** (`sql-trace-adopt.txt`) — after the tab's own reading
-(`:1-25`) and the `systemd-inhibit` at `:31` where the spine starts, the press
+(`:1-26`) and the `systemd-inhibit` at `:31` where the spine starts, the press
 issues, in order: `docker ps` (`:32`, `start_database` finding the container
 already up, so no `compose up`), `docker inspect tortoise-mangosd` (`:34`, the
 second world reading, in the by-name wrapper), the gate's own probe and
-`adoption_gaps()` (`:36-67`, eleven `SELECT`/`SHOW` statements), `docker inspect
+`adoption_gaps()` (`:36-68`, eleven `SELECT`/`SHOW` statements), `docker inspect
 tortoise-mangosd` again (`:69`), and then **exactly one script into `tw_world`**
 (`:71-74`):
 
@@ -188,7 +190,7 @@ CREATE TABLE IF NOT EXISTS `tw_world`.`yulon_install` (plan_hash CHAR(16) NOT NU
 INSERT INTO `tw_world`.`yulon_install` (plan_hash, finished_unix) VALUES ('8b60e764371f2293', 1789069479);
 ```
 
-then the re-probe (`:75-88`). **Three `docker inspect` reads of the world in the
+then the re-probe (`:75-88`). **Three `docker inspect` reads of the world in the whole driver run, two of them in the
 press, and the third is immediately before the write** (`:69-70`, one line above
 the script) — `d0c5ab01`'s fix, visible in the trace. The reading of
 `tortoise-db` at `:29-30`, before the spine starts, is `ask_db_running()`
@@ -266,7 +268,7 @@ is in no line of `panel-updates.txt`.
 (`:1-19`), `systemd-inhibit` at `:20`, then `docker ps`, one `docker inspect
 tortoise-mangosd`, the press's single probe (`:25-38`, five statements — the
 `imported` branch short-circuits), and then the three files streamed into
-`tw_char`, one `docker exec` each (`:40`, `:53`, `:73`). Every statement in the
+`tw_char`, one `docker exec` each (`:40`, `:53`, `:73`; `:25-39` the lines before). Every statement in the
 file that is not a comment:
 
 ```
@@ -369,7 +371,7 @@ its readings, `12` with the stack up, `14` with the world up, `15` stopped again
 `tortoise-mangosd` reads `status=exited running=false` in every block from `01`
 to `09-10` — **the world was down across both presses** — `running=true` in `12`
 and `14`, and `exited exit=0` again in `15`. The two steps without a block of
-their own are `11` (the empty log window) and `13`/`16`, whose own files carry
+their own are `11` (the empty log window), `13` and `16`, whose own files carry
 their stamps.
 
 ## Deviations, stated
@@ -390,7 +392,8 @@ their stamps.
    not from the copy the app saved on Stop; the empty pre-Start window
    (`11-`) is what bounds it.
 6. The box's clone was given one `git fetch origin yulon-phase8b` so the commit
-   could be checked out; nothing was pushed and no branch on the box was moved.
+   could be checked out; nothing was pushed and no branch on the box was moved (no
+   capture of the fetch itself; the checkout's commit is the one every trace names).
 
 ## Findings
 
@@ -411,9 +414,14 @@ in this folder end to end, one press each.
 started it (`was_up is False`). But the button is only enabled once the tab has a
 `populated` reading, and that reading is only taken when the database is already
 up — `_ask_about_the_import()` returns early on `not status.db` and
-`_forget_the_adopt_reading()` drops the answer when it goes down. So through the
-GUI `was_up` is always True, and the sentence never appears: it is absent from
-`panel-adopt.txt`, and `sql-trace-adopt.txt` has no `compose stop`. The branch is
+`_forget_the_adopt_reading()` drops the answer when it goes down. So the sentence is
+not reachable on the ordinary path: the enabling reading is only taken while the
+database is up, and only a status poll drops it (`controller_view.py:2653-2660`, the
+5-second poll at `:2137`; the press itself does not re-take it, `:5222-5227`), so
+`was_up` is False only if the database goes down inside the poll window before the
+press. Here it did not: the sentence is absent from `panel-adopt.txt`, and
+`sql-trace-adopt.txt` has no `compose stop`. A spec slip (the adopt spec expected a
+panel line the enabling rule mostly precludes), not a defect; the guard is honest. The branch is
 reachable from `adopt_as_imported()` called directly (the CLI wiring, and the
 unit half's tests), not from the press. Not a defect — the guard is honest either
 way — but the panel line the spec expected is not one a user will see, and the
@@ -452,9 +460,14 @@ was actually run.
 | `frame-adopt-1-modules-tab.png` | the Modules tab with **both** buttons enabled, beside Rebuild |
 | `frame-adopt-1b-adopt-button.png` / `-1c-updates-button.png` | each button alone, enabled |
 | `frame-adopt-2-confirmation.png` | the adopt confirmation: the folder, the three databases, the one row with the plan hash, the consequence paragraph, the stopped-world clause, No focused as the default |
-| `frame-adopt-3-report.png` / `-3b-report-panel.png` / `-4-after.png` | the window and the panel after the adopt press: `finished: done` and the route's four lines |
+| `frame-adopt-3-report.png` / `-3b-report-panel.png` | the window and the panel after the adopt press: `finished: done` and the route's four lines (`-4-after.png` is the same window grabbed again, byte-identical to `-3-report.png`) |
 | `frame-updates-1-modules-tab.png` | the same tab after the adopt press |
 | `frame-updates-1b-adopt-button.png` | the adopt button **greyed** — its own press wrote the row |
 | `frame-updates-1c-updates-button.png` | the updates button, still enabled |
 | `frame-updates-2-confirmation.png` | the updates confirmation: the three real files, the marker clause, the stopped-world clause, the guild-bank clause, No focused as the default |
-| `frame-updates-3-report.png` / `-3b-report-panel.png` / `-4-after.png` | the window and the panel after the updates press, carrying **both** route lines and the truthful re-run cancel note |
+| `frame-updates-3-report.png` / `-3b-report-panel.png` | the window and the panel after the updates press, carrying **both** route lines and the truthful re-run cancel note (`-4-after.png` is the same window grabbed again, byte-identical) |
+
+
+## Checks
+
+`tests/test_no_secrets_in_evidence.py` was run against this worktree by the hand before its commit and again by the lead after the rework (`18-no-secrets.txt`).
