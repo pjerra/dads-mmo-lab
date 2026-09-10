@@ -2735,3 +2735,100 @@ def test_the_gate_answers_the_import_gate_protocol() -> None:
         actual = inspect.signature(getattr(sqlplan.MarkerGate, name))
         assert list(actual.parameters) == list(declared.parameters), name
         assert actual.return_annotation == declared.return_annotation, name
+
+
+# -- J.7: adoption_gaps(), the presence reading an adopt press consents to ----
+#
+# T19's adopt press writes the marker row with the person's consent, and the one
+# thing it checks first is PRESENCE: every schema the plan names, and every table
+# its `player_data` names inside one. Not completeness -- three rounds of trying
+# to derive "this dump finished" from the files themselves each found the next
+# layer of inference, and the owner's answer was to stop inferring and ask. What
+# is left is the check that keeps the press off a database that is obviously not
+# the thing being claimed, and it is a separate reading from `probe()` on purpose:
+# `probe()` may not raise and answers one state, while this answers a list and
+# lets a database that will not talk raise, so the press refuses rather than
+# reporting no gaps.
+
+
+def test_adoption_gaps_is_empty_when_every_schema_and_player_table_is_there() -> None:
+    """The install the press exists for: made by the shell scripts, no marker row.
+
+    Catches a reading that demands the marker table (which is the row about to
+    be written) or a `verify` rule (which is the completeness claim this press
+    deliberately does not make).
+    """
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    )
+    assert _gate(server).adoption_gaps() == ()
+
+
+def test_adoption_gaps_names_a_schema_the_plan_needs_that_does_not_exist() -> None:
+    """A missing schema is named, and its tables are not then named after it.
+
+    Catches the schema check dropped, and a missing schema reported twice -- once
+    as itself and once per table it would have held.
+    """
+    server = _Server(
+        databases=["mangos", "characters", "logs"],
+        tables={"characters": ["characters"]},
+        rows={("characters", "characters"): 903},
+    )
+    gaps = _gate(server).adoption_gaps()
+    assert any("realmd" in gap and "does not exist" in gap for gap in gaps), gaps
+    assert not any("realmd.account" in gap for gap in gaps), gaps
+
+
+def test_adoption_gaps_names_a_player_table_that_is_not_there() -> None:
+    """The schema exists and the table the plan names does not.
+
+    This is the shape a half-made install takes: `realmd` created, its `account`
+    table never filled in. The press must not write a row claiming an import
+    finished over it.
+
+    Catches the `player_data` check dropped.
+    """
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        rows={("characters", "characters"): 903},
+    )
+    gaps = _gate(server).adoption_gaps()
+    assert any("realmd.account" in gap for gap in gaps), gaps
+
+
+def test_adoption_gaps_reads_the_tables_off_the_plan_and_never_a_typed_list() -> None:
+    """A third `player_data` entry added to a copy of the plan is then demanded.
+
+    Catches the table names written out here rather than read off the plan --
+    which passes every test above and would go on passing while a plan gained a
+    table nothing ever looked for.
+    """
+    widened = GATE_PLAN.model_copy(
+        update={"player_data": (*GATE_PLAN.player_data, PlayerData(db="logs", table="logs"))}
+    )
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    )
+    assert _gate(server, plan=widened).adoption_gaps() == ("logs.logs is not there",)
+
+
+def test_adoption_gaps_lets_a_database_that_will_not_answer_raise() -> None:
+    """`probe()` may not raise and turns this into `unreadable`; this one may.
+
+    The two are asked for different things. A state has an `unreadable` member
+    to land in; a list of gaps has no way to say "I could not look" -- an empty
+    tuple from a database that never answered would read as "everything is
+    there", which is the one answer that lets the marker be written over a
+    database nobody could see.
+
+    Catches the reading wrapped in a `try` that answers `()`.
+    """
+    server = _Server(databases=ALL, down="No such container: tbc-db")
+    with pytest.raises(docker.DockerCommandError):
+        _gate(server).adoption_gaps()

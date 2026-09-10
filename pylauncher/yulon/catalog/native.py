@@ -349,6 +349,107 @@ between these words and a press that contradicts them.
 """
 
 
+ADOPT_BUTTON_LABEL = "Adopt as imported…"
+"""The adopt control's label, here for `UPDATES_BUTTON_LABEL`'s reason.
+
+Quoted by the refusals `adopt_as_imported()` raises — *"press Stop on the
+Server tab, then press … again"* — and a refusal naming a button that does not
+exist under that name is the defect T7's ticket is titled after. One string, so
+a rename moves both.
+"""
+
+ADOPT_CONSEQUENCE = (
+    "Yu'lon will treat these databases as a finished import from now on. It cannot check that "
+    "the import finished; you are saying so. If it did not, the next press of Apply pending "
+    "database updates will run the flagged files on an unfinished database."
+)
+"""What adopting COSTS, in the owner's own words, said in the confirmation.
+
+Verbatim from the ticket's spec and not paraphrased, and it is the sentence the
+whole feature turns on: three rounds of an Opus and a Fable hand tried to
+DERIVE "this import finished" from the plan — per-schema table counts, the
+plan's own `verify` rules, then the table set parsed out of every dump file —
+and each round's reviewer found the next layer of inference underneath. The
+owner's answer was to stop inferring. So this press claims nothing, and this
+sentence is where the claim moves from the app to the person making it.
+
+It names *Apply pending database updates* without `UPDATES_BUTTON_LABEL`'s
+trailing ellipsis, which is how the owner wrote it: the ellipsis is a
+convention about dialogs, and a sentence quoting it mid-clause reads as a
+trailing-off rather than as a name.
+"""
+
+ADOPT_OPENING_NOTE = (
+    "You can stop this at any time. This does three things and nothing else: it starts this "
+    "install's database on its own if it is down, it writes one row saying this install plan "
+    "finished, and it puts the database back down again if this press was what started it. It "
+    "imports nothing, drops nothing, streams no file, creates no user, and never starts the "
+    "world server. If these databases already carry that row, or do not hold the schemas and "
+    "tables this plan names, this stops and says so rather than writing it."
+)
+"""What an adopt press costs and what it leaves alone, said before the first stage.
+
+`UPDATES_OPENING_NOTE`'s counterpart under the same rule: every clause names
+something `adopt_stages()` is responsible for, and the last sentence names what
+the press REFUSES — which belongs here for the reason that note's does, because
+it is the only thing standing between these words and a press that contradicts
+them.
+"""
+
+
+@dataclass(frozen=True)
+class MarkerRow:
+    """The one row an adopt press writes, spelled the way the writer spells it.
+
+    Carried out of the family rather than read inside the confirmation, because
+    `native.py` cannot import `families.sqlplan` — that module imports THIS one
+    (`IMPORT_CANCEL_NOTE`), and the cycle is real. So the family, which holds
+    the plan and the marker table's name, hands the four facts up and the
+    dialog's words are written once, here, where they can be asserted without
+    Qt and without a database.
+
+    `plan_hash` is `SqlPlan.plan_hash()` — the same string `sqlplan.write_marker()`
+    puts in the row — and not a hash this dialog computes. A confirmation naming
+    a hash the write does not use would be a promise about a different row.
+    """
+
+    schema: str
+    """The database the row goes into: the plan's `marker_db`, as the writer spells it."""
+    table: str
+    """`sqlplan.MARKER_TABLE`, created by the writer if it is not there."""
+    plan_hash: str
+    """This plan's hash, exactly as the import would have written it."""
+    databases: tuple[str, ...]
+    """Every schema this plan names, for the dialog to list."""
+
+
+@dataclass(frozen=True)
+class AdoptRoute:
+    """The three parts of an adopt control, wired together so they cannot arrive apart.
+
+    `UpdateRoute`'s shape with one more field, and the extra field is the whole
+    difference: this control is offered on a READING of the databases, not on a
+    fact about the catalog. `state` is that reading, and it is a callable the
+    tab asks at a moment of its own choosing rather than a value computed when
+    the tab is built — the probe is `docker exec … mariadb` several times over
+    and a tab that took it at build time would pay for it on every install the
+    app opens, most of which will never press this.
+
+    A tab holding a `confirmation` with no `press` describes a press it cannot
+    make; one holding a `press` with no `state` offers to write a marker row
+    without having asked the databases anything. `None` for the whole thing is
+    the only other legal state and it greys the control.
+    """
+
+    state: Callable[[], docker.ImportState]
+    """What the databases read as, for the enabling rule. Never raises: everything
+    that could not be asked comes back as `unreadable`, which greys the button."""
+    confirmation: Callable[[], str]
+    """The dialog's text for this install. Pure — no database is asked to compose it."""
+    press: Callable[[threading.Event | None], Iterator[str]]
+    """Cancel in, lines out: `RebuildSource`'s shape, for the same panel."""
+
+
 @dataclass(frozen=True)
 class UpdateRoute:
     """The two halves of an updates control, wired together so they cannot arrive apart.
@@ -497,6 +598,50 @@ def updates_confirmation(
         f"If a file cannot be applied the press stops on it and says which file and why — "
         f"nothing after it runs. The one refusal known to be reachable is a guild bank balance "
         f"that has gone negative, which the column type these files set cannot hold."
+    )
+
+
+def adopt_confirmation(entry: CatalogEntry, server_dir: Path, row: MarkerRow) -> str:
+    """What the user agrees to before an adopt press: the folder, the databases, the row, the cost.
+
+    Authored here and not in the view, for `updates_confirmation()`'s reason:
+    it has assertions on it that run without Qt.
+
+    **The row is named exactly as it will be written**, down to the schema, the
+    table and the plan hash, because that is the whole of what this press does
+    and a dialog that said "records the import as finished" would be describing
+    an effect rather than an act. `MarkerRow` comes out of the family that owns
+    the writer, so the two cannot disagree about which row this is.
+
+    **`ADOPT_CONSEQUENCE` is the last thing said before the buttons**, and it is
+    quoted rather than reworded. It is the only sentence in this dialog that is
+    about the person rather than about the app: the app cannot check that the
+    import finished, and pressing Yes is the person saying it did. Every other
+    control in this package refuses on a reading it took itself; this one is the
+    one place a reading is replaced by a consent, and the sentence says so in
+    those words.
+
+    The stopped-world clause is here as well as in the refusal for
+    `updates_confirmation()`'s reason: a user who meets the refusal has already
+    paid for the dialog.
+    """
+    listing = ", ".join(row.databases)
+    return (
+        f"Adopt {entry.name}'s databases as a finished import?\n\n"
+        f"Folder: {server_dir}\n\n"
+        f"These databases: {listing}\n\n"
+        f"This writes ONE row and nothing else. Into `{row.schema}`.`{row.table}` — the table "
+        f"this app's own import creates and writes at the end of a successful one, created here "
+        f"if it is not already there — goes a row recording that this install plan "
+        f"({row.plan_hash}) finished. Nothing is imported, nothing is dropped, no user is "
+        f"created, no SQL file is streamed, and your characters, accounts and world are read "
+        f"only to learn which state they are in.\n\n"
+        f"{ADOPT_CONSEQUENCE}\n\n"
+        f"The server must be STOPPED first — press Stop on the Server tab, and leave it down "
+        f"until this has finished. A running world server holds these tables in memory and "
+        f"writes back over whatever it finds in them, so this press refuses while it is up. The "
+        f"database alone is started if it is down, and stopped again afterwards if this press "
+        f"was what started it; the world server is never started by this."
     )
 
 
@@ -1097,6 +1242,8 @@ class ImportGate(Protocol):
 
     def reset(self) -> tuple[str, ...]: ...
 
+    def adoption_gaps(self) -> tuple[str, ...]: ...
+
 
 @dataclass(frozen=True)
 class CallableGate:
@@ -1109,9 +1256,29 @@ class CallableGate:
 
     probe_fn: docker.ImportProbe
     reset_fn: docker.ResetUnfinished | None
+    gaps_fn: Callable[[], tuple[str, ...]] | None = None
+    """What `adoption_gaps()` answers, or None: this gate cannot look table by table.
+
+    Defaulted to None and NOT to a callable answering `()`, because the two are
+    opposite answers: `()` means "the plan's schemas and tables are all there",
+    which is what an adopt press writes a completion marker on the strength of.
+    A gate built out of the AzerothCore probe pair has no plan to read tables
+    off, and it must say so rather than say nothing is missing.
+    """
 
     def probe(self) -> docker.ImportState:
         return self.probe_fn()
+
+    def adoption_gaps(self) -> tuple[str, ...]:
+        """`gaps_fn`'s answer, or the one gap a gate that cannot look must report.
+
+        Fails CLOSED. The caller's rule is "no gaps, so the row may be written",
+        and a gate with nothing behind this question answering `()` would put a
+        completion marker on a database it never opened.
+        """
+        if self.gaps_fn is None:
+            return ("these databases cannot be checked table by table by this install's probe",)
+        return self.gaps_fn()
 
     def reset(self) -> tuple[str, ...]:
         if self.reset_fn is None:
@@ -1843,9 +2010,44 @@ class Seams:
     is proved and is the shape this copies.
     """
 
+    db_running: Callable[[str], bool | None] | None = None
+    """Is this install's DATABASE container up? Three-valued, `world_running`'s shape.
+
+    A second field and not the same one pointed at another container, because
+    the two are asked for opposite reasons and a test that could not tell them
+    apart could not see either answer: the world is read to REFUSE, and the
+    database is read to decide whether an adopt press has to put the container
+    back down when it is finished. One seam answering both would make a test
+    that models "the world is down and the database is up" — the state every
+    successful press runs in — impossible to write.
+
+    A LATE lookup for `world_running`'s reason, and it defaults to the same
+    function: `docker.world_running()` is a three-valued reading of ANY
+    container of this install (it is named for the caller T7 wrote it for, not
+    for the container it can be asked about), and its mapping is the one this
+    press needs — a container it could not read is `None`, which is not "down",
+    so a press that could not tell leaves the database exactly as it found it.
+    """
+
+    stop_db: Callable[[list[str]], None] = docker.stop_containers
+    """Stop these containers. Used by ONE press, to put back what it started.
+
+    `docker.stop_containers()` and not `stop_staged()`: this is a single
+    container by name, never the install's whole stack — an adopt press that
+    started the database alone must put back exactly that and must not touch a
+    world server it never started (it refuses while one is up, so there is none
+    to touch, and a stop that reached for the stack anyway would be a second
+    promise this press has no business making).
+    """
+
     def ask_world_running(self, container: str) -> bool | None:
         """The world's state, through the seam if one was given, else `docker`'s own."""
         ask = self.world_running
+        return (ask if ask is not None else docker.world_running)(container)
+
+    def ask_db_running(self, container: str) -> bool | None:
+        """The database container's state, through the seam if one was given, else `docker`'s."""
+        ask = self.db_running
         return (ask if ask is not None else docker.world_running)(container)
 
     def ask_selinux(self) -> bool | None:
@@ -2332,7 +2534,7 @@ class StagedInstaller:
         # a press against a live world must leave the stack exactly as it found
         # it, and starting containers under a world this guard is about to
         # refuse would undo the guard's own advice on a stack the user stopped.
-        self._refuse_updates_into_a_running_world()
+        self._refuse_writes_into_a_running_world(UPDATES_BUTTON_LABEL)
         self._check_cancel(cancel)
         planned = self.update_stages()
         # BY NAME, never positionally: T8 recorded what a positional wrapper
@@ -2346,22 +2548,32 @@ class StagedInstaller:
                 f"is a bug in this build, not something you did. Nothing was started."
             )
         stages = tuple(
-            replace(stage, run=self._guard_then(stage)) if stage.name == "import" else stage
+            (
+                replace(stage, run=self._guard_then(stage, UPDATES_BUTTON_LABEL))
+                if stage.name == "import"
+                else stage
+            )
             for stage in planned
         )
         ctx = self._update_context(server_dir, cancel)
         yield from self._staged(stages, ctx)
 
-    def _guard_then(self, stage: Stage) -> Callable[[StageContext], Iterator[str]]:
-        """`stage`, with the world read once more immediately before its body runs."""
+    def _guard_then(self, stage: Stage, button: str) -> Callable[[StageContext], Iterator[str]]:
+        """`stage`, with the world read once more immediately before its body runs.
+
+        `button` is the label the refusal tells the user to press again; see
+        `_refuse_writes_into_a_running_world()`. Both presses that wrap a stage
+        in this wrap the one that writes, so the reading is as young as it can
+        be made without asking inside the family's own body.
+        """
 
         def run(ctx: StageContext) -> Iterator[str]:
-            self._refuse_updates_into_a_running_world()
+            self._refuse_writes_into_a_running_world(button)
             yield from stage.run(ctx)
 
         return run
 
-    def _refuse_updates_into_a_running_world(self) -> None:
+    def _refuse_writes_into_a_running_world(self, button: str) -> None:
         """Owner answer 7 at this engine's own enforcement point. Fails closed.
 
         A second enforcement point for one rule, not a second rule, and the
@@ -2373,6 +2585,15 @@ class StagedInstaller:
         is not *not running*: `docker.container_state()` answers an empty state
         for a missing container and for a daemon that will not reply, and the
         one answer that would let DDL into a live world's tables is `False`.
+
+        **`button` is the label of the press being refused**, and it is a
+        parameter rather than a constant because two presses now come through
+        here — T14's updates press and T19's adopt press — and each refusal
+        ends by telling the user to press that press again. Named `updates`
+        until the second caller arrived; a refusal from the adopt button
+        reading *press "Apply pending database updates…" again* would be an
+        instruction that does the wrong thing when followed, which is the
+        defect T7's ticket is titled after rather than a cosmetic one.
         """
         container = self.entry.container_spec().world
         why = ""
@@ -2398,14 +2619,387 @@ class StagedInstaller:
                 f"was applied. Docker itself may be the thing that is not answering — it reads "
                 f"a stopped container and a daemon that is down the same way — so check that "
                 f"Docker is running, then press Stop on the Server tab if the server is up, and "
-                f'press "{UPDATES_BUTTON_LABEL}" again.'
+                f'press "{button}" again.'
             )
         raise InstallerError(
             f"{self.entry.name}'s world server is running, and it holds these databases in "
             f"memory and writes back over whatever it finds in them. Nothing was applied. "
             f"Press Stop on the Server tab, then press "
-            f'"{UPDATES_BUTTON_LABEL}" again — the database is started '
+            f'"{button}" again — the database is started '
             f"on its own for it, and the world server stays down."
+        )
+
+    # -- adopting an install this app did not make (T19) ----------------------
+
+    def adopt_gate(self, ctx: StageContext) -> ImportGate | None:
+        """The gate an adopt press probes, checks and writes its marker through.
+
+        `None` on the spine, which is a family saying it has no marker to
+        adopt: AzerothCore imports through a compose one-shot and records
+        nothing this app wrote, so there is no row for a person to consent to.
+        The CMaNGOS family overrides it with the SAME gate its import stage
+        uses — one question, one implementation, so the reading that offers the
+        button and the reading the press takes cannot come from two probes that
+        disagree.
+        """
+        return None
+
+    def marker_row(self) -> MarkerRow | None:
+        """The row an adopt press would write for this install, or None: no marker to write.
+
+        The four facts the confirmation names, carried up out of the family
+        because `native.py` cannot import `families.sqlplan` — see `MarkerRow`.
+        `None` here and `None` from `adopt_gate()` are one fact said twice and
+        are asserted to agree, because a family that could probe but not name
+        the row would offer a dialog with a hole in it.
+        """
+        return None
+
+    def write_import_marker(self, ctx: StageContext) -> None:
+        """Write the completion marker for this install, through the family's own writer.
+
+        The spine cannot: the row is `sqlplan.write_marker()`'s, and this module
+        may not import that one. The refusal here is what a family that never
+        learned to adopt says, and it is a bug in this build rather than a state
+        of the machine.
+
+        Raises:
+            InstallerError: this family has no marker writer, or the write failed.
+        """
+        raise InstallerError(
+            f"{self.entry.name} keeps no completion marker this app can write, so there is "
+            f"nothing to adopt. That is a fact about this game's install plan, not about your "
+            f"install. Nothing was written."
+        )
+
+    def adopt_stages(self) -> tuple[Stage, ...]:
+        """What an adopt press runs: the database on its own, then the one row.
+
+        Two stages, and the interesting half is again what is NOT here.
+        `update_stages()` selects the family's `import` stage; this one does
+        not, and must not: `import` is the five-branch table, and this press
+        consented to a single INSERT. So the second stage is this method's own,
+        with a body no install ever runs.
+
+        `start-db` IS the family's own, selected by name for `rebuild_stages()`'s
+        reason — the probe reaches the databases through `docker exec`, so with
+        nothing running it answers `unreadable` and this press would refuse on a
+        machine with nothing wrong with it.
+
+        **Neither is recorded.** `start-db` never is. `adopt` must not be,
+        because a state file naming a stage no install tuple contains is a
+        record the next resume would have to interpret, and this press does not
+        import: the row it writes says the PLAN finished, which is exactly the
+        claim the state file's `import` entry would make on the strength of
+        something that never happened.
+
+        No `cancel_note`: a stop lands either before the one statement or after
+        it, and `sqlplan.write_marker()` sends both of its lines in one script
+        to one client. There is no half-written state to warn about, and a note
+        promising one would be a sentence about a route this tuple does not
+        have.
+        """
+        return (
+            self.stage_named("start-db"),
+            Stage("adopt", self.stage_adopt, recorded=False),
+        )
+
+    def stage_adopt(self, ctx: StageContext) -> Iterator[str]:
+        """Probe, refuse, write the one row, probe again. The whole of the press's body.
+
+        The branch table, in the order a wrong answer costs:
+
+        * **`imported`** — these databases already carry the row. Refused, not
+          skipped silently: a press that reported success having written
+          nothing would teach the user that the button is decorative.
+        * **anything but `populated`** — `absent`, `partial` and `unreadable`
+          are databases with nobody's data in them, or none this app could
+          read. Adopting is a claim about an import somebody already made; over
+          these it would be a claim about nothing.
+        * **a gap** — `populated` says a `player_data` table has rows in it, and
+          it short-circuits on the first one. It does NOT say the plan's other
+          schemas exist or that its other tables are there, and this press
+          writes a row saying the whole plan finished. So the gate is asked once
+          more, for presence only (`MarkerGate.adoption_gaps()`), and a gap is a
+          refusal naming it.
+
+        **Presence and never completeness**, and that is the ticket's own
+        conclusion rather than a shortcut. Three rounds tried to derive "this
+        dump finished" from the plan and each found the next layer of inference
+        beneath the last; the owner's answer was to stop inferring and let the
+        person say so. `ADOPT_CONSEQUENCE` is where the claim changes hands, and
+        these checks are only the floor under it — they keep the row off a
+        database that is plainly not the thing being claimed.
+
+        **The probe runs again after the write**, and it is the only proof this
+        press has that anything happened: the writer answers by not raising,
+        which is the client's exit status and not a reading of the row. A
+        re-probe that does not say `imported` is a write that did not land where
+        the gate looks, and it is raised rather than reported — the alternative
+        is a green press and a button that goes on offering itself.
+        """
+        gate = self.adopt_gate(ctx)
+        row = self.marker_row()
+        if gate is None or row is None:
+            raise InstallerError(
+                f"{self.entry.name} keeps no completion marker this app can write, so there is "
+                f"nothing to adopt. That is a fact about this game's install plan, not about "
+                f"your install. Nothing was written."
+            )
+        seen = gate.probe()
+        yield f"The databases read as {seen.state}: {seen.detail}"
+        if seen.state == "imported":
+            raise InstallerError(
+                f"{self.entry.name}'s databases already carry Yu'lon's marker ({seen.detail}), "
+                f"so there is nothing to adopt — they already read as a finished import. "
+                f"Nothing was written. If you meant to apply the files this install plan has "
+                f'gained since, press "{UPDATES_BUTTON_LABEL}" instead.'
+            )
+        if seen.state != "populated":
+            raise InstallerError(
+                f"{self.entry.name}'s databases do not hold an import to adopt ({seen.state}: "
+                f"{seen.detail}). This button is for databases somebody has already imported "
+                f"and played on, and says so on their behalf; it does not make them. Nothing "
+                f"was written."
+                + (
+                    " The state above is unreadable, which reads the same whether the database "
+                    "is down or Docker is not answering, so check that Docker is running "
+                    "before anything else."
+                    if seen.state == "unreadable"
+                    else " Install this server, or finish the install of this folder, instead."
+                )
+            )
+        try:
+            gaps = gate.adoption_gaps()
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"{self.entry.name}'s databases could not be asked which of this plan's tables "
+                f"they hold ({exc}), so nothing was written. Adopting says these databases are "
+                f"a finished import, and that is not a thing to say about a database that would "
+                f"not answer."
+            ) from exc
+        if gaps:
+            raise InstallerError(
+                f"{self.entry.name}'s install plan names things these databases do not have: "
+                f"{'; '.join(gaps)}. A marker row here would say this plan finished over them, "
+                f"which it plainly did not. Nothing was written."
+            )
+        yield (
+            f"Writing one row into `{row.schema}`.`{row.table}`: this install plan "
+            f"({row.plan_hash}) is recorded as finished. Nothing else is run."
+        )
+        # The reading that counts is the one immediately before the write: the
+        # two the wrapper took are older than the probe, the gap queries and the
+        # yield above, and a consumer paused at that yield leaves the world free
+        # to start in between (Codex on the adopt press). T25's boundary rule,
+        # said again: the check sits at the destructive statement, not at the
+        # stage's entry.
+        self._refuse_writes_into_a_running_world(ADOPT_BUTTON_LABEL)
+        self.write_import_marker(ctx)
+        after = gate.probe()
+        if after.state != "imported":
+            raise InstallerError(
+                f"The marker row was written, but {self.entry.name}'s databases still read as "
+                f"{after.state} ({after.detail}). Something wrote the row somewhere this app "
+                f"does not look for it, so nothing can be established either way — do not treat "
+                f"this install as adopted."
+            )
+        yield f"These databases now read as {after.state}: {after.detail}"
+        yield (
+            f'"{UPDATES_BUTTON_LABEL}" can now apply the files this install plan has gained '
+            f"since this server was made. No import ran and nothing was cleared."
+        )
+
+    def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState:
+        """What these databases read as, for the adopt button's enabling rule. NEVER raises.
+
+        The tab asks this to decide whether to offer the control at all, which
+        is why every way of not knowing has to come back as `unreadable`: a
+        password file that cannot be read, a catalog the gate refuses to be
+        built from, a database that will not answer. `unreadable` greys the
+        button, and the one outcome that must never follow from a question
+        nobody answered is a control that writes a marker row appearing.
+
+        The same discipline `controller_wow_tortoise.repair.import_state()`
+        takes for the Repair button, and for the same reason: this is called
+        from a status path, which has nowhere to put an exception.
+
+        A family with no marker answers `unreadable` too. It is the honest
+        answer — nothing here knows what state such an install is in — and the
+        view greys the control on the route being `None` before it ever asks.
+        """
+        server_dir = self.server_dir(options or InstallOptions())
+        try:
+            gate = self.adopt_gate(self._update_context(server_dir, None))
+        except Exception as exc:  # noqa: BLE001 - a status path has nowhere to put one
+            logger.warning(f"could not build the import gate for {server_dir}: {exc}")
+            return docker.ImportState(
+                "unreadable",
+                f"this install's databases could not be asked what state they are in "
+                f"({type(exc).__name__}: {exc})",
+            )
+        if gate is None:
+            return docker.ImportState(
+                "unreadable", f"{self.entry.name} keeps no completion marker this app can read"
+            )
+        try:
+            return gate.probe()
+        except Exception as exc:  # noqa: BLE001 - `probe()` promises not to; this is the boundary
+            logger.warning(f"the import probe raised for {server_dir}: {exc}")
+            return docker.ImportState(
+                "unreadable",
+                f"the databases could not be asked what state they are in "
+                f"({type(exc).__name__}: {exc})",
+            )
+
+    def adopt_confirmation(self, options: InstallOptions | None = None) -> str:
+        """The dialog's text for this install. Asks the databases nothing.
+
+        Unlike `update_confirmation()`, which expands the plan against the
+        folder and can refuse there, this one is pure: the row is read off the
+        plan and the folder off the options. What could refuse — the marker
+        already present, the databases not populated, a table missing — is read
+        by the PRESS, after the person has agreed, because every one of those
+        readings costs a `docker exec` and the answer can change between the
+        dialog and the press anyway.
+
+        Raises:
+            InstallerError: this family keeps no marker, so there is no row to
+                describe. The view never offers the control there.
+        """
+        row = self.marker_row()
+        if row is None:
+            raise InstallerError(
+                f"{self.entry.name} keeps no completion marker this app can write, so there is "
+                f"nothing to adopt. That is a fact about this game's install plan, not about "
+                f"your install."
+            )
+        return adopt_confirmation(self.entry, self.server_dir(options or InstallOptions()), row)
+
+    def adopt_as_imported(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]:
+        """Record that these databases are a finished import, on the person's word. Yields live.
+
+        The press the owner chose after three rounds of the alternative. T14's
+        button refuses an install with no marker row, and the install it was
+        built for — the owner's Tortoise server, made by the shell scripts —
+        is exactly that: `populated`, complete in every way a person can see,
+        and unreachable by the one button that would put the files it is
+        missing onto it. The probe cannot prove that import finished, so this
+        press does not try; it writes the row a person consented to.
+
+        **The world is read before anything and again after the database is
+        up**, `update_databases()`'s two readings for `update_databases()`'s
+        reasons: a running worldserver holds these tables in memory and writes
+        back over whatever it finds in them, and the window between the two is
+        the health wait, inside which the Server tab's Start is one click away.
+        Both refuse on anything but an explicit `False`.
+
+        **The database is put back down if this press was what started it**, and
+        the reading that decides is taken BEFORE the first stage. This is a
+        press a user makes on a server they stopped, and leaving its database up
+        afterwards would be this app changing something it was not asked to
+        change. `None` from that reading — could not tell — leaves the container
+        alone, which is the same fail-closed direction the world reading takes
+        pointed at a smaller question.
+
+        Raises:
+            InstallerError: the entry has no re-runnable phase, the world is up
+                or unreadable, the databases already carry the marker, do not
+                read as `populated`, or are missing something the plan names,
+                the writer failed, or the press was cancelled. The message is
+                the sentence a user reads.
+        """
+        opts = options or InstallOptions()
+        server_dir = self.server_dir(opts)
+        if not update_phases(self.entry):
+            raise InstallerError(
+                f"{self.entry.name}'s install plan carries no phase meant to be re-applied to a "
+                f"server that already exists, so adopting these databases would buy nothing: "
+                f"there is no press that would then do anything it cannot do now. Nothing was "
+                f"started. That is a fact about this game's plan, not about your install."
+            )
+        yield f"Adopting {self.entry.name}'s databases in {server_dir} as a finished import"
+        yield ADOPT_OPENING_NOTE
+        # FIRST, before the database is started and before a secret is resolved,
+        # for the reason `update_databases()` reads it first: a press against a
+        # live world must leave the stack exactly as it found it, and starting
+        # containers under a world this guard is about to refuse would undo the
+        # guard's own advice on a stack the user stopped.
+        self._refuse_writes_into_a_running_world(ADOPT_BUTTON_LABEL)
+        self._check_cancel(cancel)
+        # BEFORE the first stage, so what is put back is what was found. Read
+        # here rather than off `start_database()`'s own return — which does say
+        # whether it had to start the container — because `stage_start_db()` is
+        # the family's stage and discards it, and a copy of that stage taken to
+        # keep the answer would be a second spelling of the one primitive T7
+        # wired.
+        container = self.entry.container_spec().db
+        try:
+            was_up: bool | None = self._seams.ask_db_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            was_up = None
+        planned = self.adopt_stages()
+        # BY NAME, never positionally: T8 recorded what a positional wrapper
+        # cost when a stage was later prepended to the rebuild's tuple.
+        if not [stage for stage in planned if stage.name == "adopt"]:
+            raise InstallerError(
+                f"{self.entry.name} cannot be adopted safely: its adopt tuple has no `adopt` "
+                f"stage to guard, so the second reading of the world would never happen. That "
+                f"is a bug in this build, not something you did. Nothing was started."
+            )
+        stages = tuple(
+            (
+                replace(stage, run=self._guard_then(stage, ADOPT_BUTTON_LABEL))
+                if stage.name == "adopt"
+                else stage
+            )
+            for stage in planned
+        )
+        ctx = self._update_context(server_dir, cancel)
+        try:
+            yield from self._staged(stages, ctx)
+        except BaseException:
+            # Logged and not yielded: a generator whose consumer has abandoned
+            # it may not yield again, and a press that failed has already said
+            # why. The container still goes back down — putting back what this
+            # press started is not conditional on the press succeeding.
+            if was_up is False:
+                logger.info(self._stop_the_database_again(container))
+            raise
+        if was_up is False:
+            yield self._stop_the_database_again(container)
+
+    def _stop_the_database_again(self, container: str) -> str:
+        """Put the database back down, and say so. Never raises.
+
+        One spelling for both exits of `adopt_as_imported()` — the successful
+        one, which yields this sentence into the panel, and the failed one,
+        which logs it — because the two must not be able to stop different
+        things or say different words about it.
+
+        A failure to stop is a sentence and not a refusal. The row is already
+        written by then on the successful path, and raising here would report a
+        press that did its work as having failed; on the failed path there is
+        already a refusal in flight and this must not replace it.
+        """
+        try:
+            self._seams.stop_db([container])
+        except Exception as exc:  # noqa: BLE001 - a tidy-up may not become the failure
+            logger.warning(f"could not stop {container} again: {exc}")
+            return (
+                f"The database could not be stopped again ({type(exc).__name__}: {exc}), so it "
+                f"is still running. Nothing else was left behind; Stop on the Server tab takes "
+                f"it down."
+            )
+        return (
+            "The database is stopped again: it was down when this began, and this press was "
+            "what started it."
         )
 
     def stage_recreate(

@@ -456,6 +456,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # absent on the REFERENCE too: AzerothCore imports through a compose
         # one-shot and carries no phase list for a flag to sit on.
         unupdatable = set() if native.update_phases(entry) else {"updates"}
+        # T19's adopt press, gated on the SAME fact and read through the same
+        # function, which is the point: the row it writes is a claim about the
+        # databases that nothing takes back, and it buys something only where a
+        # later press would then do what it cannot do now. So a game with no
+        # flagged phase is missing both seams together or neither, and a day
+        # when one is offered without the other is a real gap.
+        unadoptable = set() if native.update_phases(entry) else {"adopt"}
         allowed = (
             unstocked
             | unmeasured
@@ -468,9 +475,10 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             | unpartied
             | uncounted
             | unupdatable
+            | unadoptable
         )
         if game == "wow-wotlk":
-            reference = unprobed | unupdatable
+            reference = unprobed | unupdatable | unadoptable
             assert (
                 set(absent) == reference
             ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"

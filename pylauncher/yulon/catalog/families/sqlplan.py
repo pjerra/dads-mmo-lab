@@ -1166,7 +1166,7 @@ _VOLUME_NOTE = (
 """What to do about the commonest `unreadable`, which is not a bug in the databases."""
 
 
-def _plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
+def plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     """Every schema on the server this plan touches, in `create` order then first mention.
 
     The same five places `expand()` reads names from, refused in the same words
@@ -1177,6 +1177,11 @@ def _plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     `probe()` may not raise: a catalog typo that surfaced out of the probe would
     reach `stage_import()` as neither a state nor an `InstallerError`, and the
     stage has one code path for each.
+
+    Public since T19: the adopt confirmation lists the databases the row it
+    writes is a claim about, and that list has to be THIS one — a dialog naming
+    `plan.create` would leave out the schemas only a phase's `into` mentions,
+    which for the Tortoise plan is every one of them.
     """
     _check_plan_schemas(plan, schemas)
     seen: dict[str, None] = {}
@@ -1244,7 +1249,7 @@ class MarkerGate:
         self._sql_query = sql_query
         self._exec_stdin = exec_stdin
         self._wsl_distro = wsl_distro
-        self._names = _plan_schemas(plan, schemas)
+        self._names = plan_schemas(plan, schemas)
         for data in plan.player_data:
             for name in data.exclude_usernames:
                 _refuse_unquotable(name, f"the seeded account name {name!r} in the SQL plan")
@@ -1296,6 +1301,50 @@ class MarkerGate:
             f"{', '.join(present)} exist{'s' if len(present) == 1 else ''} but there is no "
             "import marker, so the import never finished",
         )
+
+    def adoption_gaps(self) -> tuple[str, ...]:
+        """What this plan names and these databases do not have. `()` when nothing is missing.
+
+        The reading an ADOPT press consents to (T19), and deliberately not part
+        of `probe()`. Presence and nothing else: every schema the plan names
+        exists, and every table its `player_data` names is inside the schema
+        that should hold it. Nothing here claims the import FINISHED — three
+        rounds of trying to derive that from the plan (per-schema table counts,
+        the plan's own `verify` rules, then the table set parsed out of every
+        dump file) each found the next layer of inference, and the answer was to
+        stop inferring and let the person say so. What is left is the check that
+        keeps a marker row off a database that is plainly not the thing being
+        claimed: a `realmd` that was never created, an `account` table that is
+        not there.
+
+        `player_data` is the only place a `SqlPlan` names a TABLE rather than a
+        file, which is why the set is exactly that and not more. A table created
+        inside a dump is invisible without opening the dump.
+
+        A schema that is missing is named ONCE — its tables are not then listed
+        after it, because "realmd does not exist" already says why
+        `realmd.account` is not there and a reader given both reads two faults.
+
+        Unlike `probe()`, this MAY raise: `docker.DockerCommandError` travels
+        out of `_databases()` and `_table_exists()`. That is the point of it
+        being separate. A state has an `unreadable` member to land in; a list of
+        gaps has none, and an empty tuple from a database that never answered
+        would read as "everything is there" — the one answer that would let the
+        row be written over a database nobody could see. The caller turns the
+        raise into its own refusal.
+
+        Raises:
+            docker.DockerCommandError: the databases could not be asked.
+        """
+        present = self._databases()
+        gaps = [
+            f"{name} does not exist on this server" for name in self._names if name not in present
+        ]
+        for data in self._plan.player_data:
+            schema = self._schemas[data.db]
+            if schema in present and not self._table_exists(schema, data.table):
+                gaps.append(f"{schema}.{data.table} is not there")
+        return tuple(gaps)
 
     def reset(self) -> tuple[str, ...]:
         """Drop the plan's schemas that exist — only from `partial`, only the plan's own.
