@@ -2453,7 +2453,21 @@ class StagedInstaller:
         # the compile FINISHED (the live tags name the new image from then on)
         # and whether the containers were TOUCHED (from then on the old build
         # is not what is running). Read off the stages as they pass rather
-        # than guessed from the exception's wording.
+        # than guessed from the exception's wording -- set AFTER the `yield
+        # from`, both of them, so a stage that raises before finishing leaves
+        # its flag exactly where it started.
+        #
+        # `touched` was set on ENTRY to `recreate()` until T25 found what that
+        # costs: `stage_recreate()` can raise before `_seams.recreate()` ever
+        # runs (the daemon unreachable, compose refusing the file) or before it
+        # returns, and with `touched` already True the `except` below in
+        # `rebuild()` skipped `_put_recipe_back()` -- the recipe just re-rendered
+        # stayed on disk though no container had moved -- and `_restore_rollback`
+        # took its second `stage_recreate()` call for a server nothing had
+        # touched the first time. Moving the assignment to where `built`'s
+        # already sat closes it: `yield from` only returns past a sub-generator
+        # that ran to its own end, so a `stage_recreate()` that raises never
+        # reaches the line that would set this True.
         built = False
         touched = False
 
@@ -2464,8 +2478,8 @@ class StagedInstaller:
 
         def recreate(stage_ctx: StageContext) -> Iterator[str]:
             nonlocal touched
-            touched = True
             yield from self.stage_recreate(stage_ctx)
+            touched = True
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
