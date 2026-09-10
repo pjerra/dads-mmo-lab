@@ -13,9 +13,10 @@
       of the console's own USAGE list (`.help group` on this box answers
       with `group list` alone) and refuse when called anyway -- measured,
       `03-stage.log`.
-    * `dml_addclass <bot> mage` runs, and nothing happens: the module's
-      `addclass` needs a master that is not itself a bot, and every one of
-      this install's 500 online characters is one. Measured too, same log.
+    * `dml_addclass <bot> mage` runs and creates nothing (same log). The
+      cause was NOT determined: "the master is a bot" fits, and so does
+      `RNDBOT0` already holding 10 characters with `CharactersPerRealm = 10`
+      (`03b-addclass-cause.log`, README section 6).
     * `.playerbots bot ...` is Console::No by design -- that is the whole
       reason `dml_addclass.lua` exists.
 

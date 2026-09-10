@@ -41,7 +41,7 @@ staging harness `t13_stage.lua`.
 |---|---|
 | all three containers were up before anything was done | `01-ground.log:6-8` — `ac-worldserver`, `ac-authserver`, `ac-database (healthy)` |
 | the world was carrying the **old one-argument** `dml_uninvite.lua` — md5 `a52a64e7…`, and its whole text, `dml_uninvite <botName>`, no master check | `01-ground.log:17` and `01-ground.log:26-57` |
-| the redeploy went through the app's own seam, `party.deploy(party.lua_root(), party.dest_dir(SERVER))` — the function "Enable My Party" calls — and reported all five changed | `02-deploy-restart.log:6-9`; the call is `t13press.py:110-118` |
+| the redeploy went through the app's own seam, `party.deploy(party.lua_root(), party.dest_dir(SERVER))` — the function "Enable My Party" calls — and reported `changed=True`, naming all five it deploys; the one whose bytes differed is `dml_uninvite.lua` (`a52a64e7…` before, `3a8dcdb5…` after), the other four already matched the worktree | `01-ground.log:14-25` vs `02-deploy-restart.log:6-21`; the call is `t13press.py:110-118` |
 | after it, the deployed `dml_uninvite.lua` is byte-for-byte the worktree's (md5 `3a8dcdb5…` on both sides) | `02-deploy-restart.log:12-21` |
 | the world was restarted, and the bridge answered again 48 s later | `02-deploy-restart.log:33-37` — `DML-BRIDGE-READY dml_bridge_ping` |
 | **the line the ticket asks for**, from the world's own log: `[dml_uninvite] loaded -- group-remove relay ready`, with the other four beside it | `02-deploy-restart.log:40-47` |
@@ -126,7 +126,7 @@ own definition (`group_rows_sql`) asks whether he is *in* it.
 
 | claim | capture |
 |---|---|
-| leadership was handed from `Jurnaar` to `Dalio`; the `groups` row's `leaderGuid` moves from 1 to 4 | `07-member-not-leader.log:16-18` and `:29-31` |
+| leadership was handed from `Jurnaar` to `Dalio`; the `groups` row's `leaderGuid` moves from 1 to 4 | `07-member-not-leader.log:11-12` (from 1), `:16-18` and `:29-31` |
 | the server then reports `leaderGUID=4 Jurnaar-is-leader=false; IsMember(Jurnaar)=true` | `07-member-not-leader.log:27` |
 | the window was proved empty before the press | `07-member-not-leader.log:40-41` |
 | **the honest case still succeeds for a non-leader master**, pressed through `InstallParty.remove` — the whole Python half, `dismiss()` included: `Dismissal(removed=True, logged_out=True, sentence='Nore left the party.', …)` | `07-member-not-leader.log:46` |
@@ -169,7 +169,7 @@ Three routes to a party were tried first and are captured failing, which is why 
 master]". That is more than the run measured. What was measured is that it ran and created nothing.
 `03b-addclass-cause.log:7-16` shows the second explanation that fits just as well: `RNDBOT0` already
 holds 10 characters and this world's `CharactersPerRealm = 10`, so `addclass` had nowhere to put an
-alt either way. **The cause was not determined; only the unavailability of the route was.**
+alt either way. **The cause was not determined; only the unavailability of the route was.** The same overreach stood in `t13_stage.lua`'s header (lines 16-18 as committed by the hand) and is cut back there too by the lead.
 
 So the two parties were built by `t13_stage.lua`, a harness that is not part of the app, is not in
 `party.BRIDGE_SCRIPTS`, registers a command name nothing in the app ever sends, and never calls
@@ -196,7 +196,7 @@ section 4 is unreachable from the app.
 | the world is up, the bridge answers, all three containers running | `08-teardown.log:52`, `:78-84` |
 | the five characters this run touched are all back online, level unchanged | `08-teardown.log:70-74` — `Jurnaar 80`, `Nore 74`, `Dalio 24`, `Grirmirn 69`, `Zarraden 78`, all `online=1` |
 | the realm row is exactly what step 01 read — `100.99.204.5` on both address columns, mask `255.255.255.0`, port 8085, flag 0 — never edited, so no authserver restart was owed or made | `01-ground.log:61` vs `08-teardown.log:88`; `ac-authserver` still `started=2026-09-10T10:48:01.8042228Z`, the same value step 01 read (`01-ground.log:64` vs `08-teardown.log:82`) |
-| **no account was created, deleted or changed.** 103 accounts at the end, the same three non-bot ids (101 `YULON_243C46E3`, 102 `PERZI`, 103 `YULONADMIN`) with the same gm levels | `01-ground.log:68-70` vs `08-teardown.log:92-102` |
+| **no account was created, deleted or changed.** 103 accounts at the end, the same three non-bot ids (101 `YULON_243C46E3`, 102 `PERZI`, 103 `YULONADMIN`) with the same gm levels | the before-read of the three ids and their gm levels is `03-stage.log:17-19`; the count and the same three at the end `08-teardown.log:92-102` (no before-count was taken, so "103" rests on the end read plus those three ids) |
 | **no throwaway account was needed**: the second master is an existing random-bot character, so nothing had to be created and nothing had to be removed | the account counts above; `03-stage.log:77-93` shows both parties made from existing characters |
 | `PERZI`'s `last_login` is unchanged at `2026-09-08 23:24:16`; `PERZI` was never used | `01-ground.log:69` vs `08-teardown.log:106` |
 | `Pakka` is unchanged: guid 1001, level 6, offline | `01-ground.log:72` vs `08-teardown.log:108` |
@@ -208,7 +208,7 @@ The world was restarted three times (steps 02, 03, 08) — allowed for this tick
 own log window is captured. `ac-database` and `ac-authserver` were never restarted
 (`08-teardown.log:82-84`).
 
-Every action on the box was announced first in its Claude activity terminal (`lib.sh:24`, called at
+Every action on the box was announced first in its Claude activity terminal (`lib.sh:22`, called at
 the top and bottom of each step script); the window was launched at 18:29 and there is exactly one.
 
 **This lane's own three directories are off the box** (`09-cleanup.log`, 18:56:50): `~/t13-live`
@@ -241,8 +241,8 @@ of the six fields in the channel's credential file, only `account` and `host` oc
 `t13press.py` never prints it: the channel is built by `channel_setup.InstallChannel.live_channel`,
 which reads it itself (`t13press.py:53-68`).
 
-`tests/test_no_secrets_in_evidence.py` was run against this worktree before the commit; its result is
-in the report on the ticket.
+`tests/test_no_secrets_in_evidence.py` was run against this worktree by the hand before its commit and
+again by the lead after this rework; the lead's run is `10-no-secrets.txt`.
 
 ## 9. What this folder does NOT show
 
