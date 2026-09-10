@@ -2142,11 +2142,7 @@ GATE_SECRET = "cmangos-1a2b3c4d5e6f7a8b"
 GATE_PLAN = SqlPlan(
     create=("mangos", "realmd", "characters", "logs"),
     phases=(SqlPhase(name="world base", into="mangos", files=("mangos.sql",)), *PLAN.phases),
-    verify=(
-        *PLAN.verify,
-        VerifyRule(db="mangos", query=sqlplan.SCHEMA_TABLE_COUNT.format(schema="mangos"), min=150),
-        VerifyRule(db="realmd", query=sqlplan.SCHEMA_TABLE_COUNT.format(schema="realmd"), min=5),
-    ),
+    verify=PLAN.verify,
     player_data=(
         PlayerData(db="characters", table="characters"),
         PlayerData(
@@ -2160,29 +2156,14 @@ GATE_PLAN = SqlPlan(
 """`wow-tortoise`'s shape, which is what the completeness branch is written against.
 
 TWO schemas filled by file phases (`world base` into `mangos`, `realmd base`
-into `realmd`), a declared table count for each, and `PLAN.verify`'s
-`item_template` rule left in place as the row-count rule the probe must NOT
-run. A plan whose only file phase filled `realmd` — which this was until T19
-round 2 — could not say the thing the round-1 review found: `player_data` names
-a table in `characters` and one in `realmd` and nothing at all in the world
-schema the dumps fill.
+into `realmd`), `player_data` naming a table in `characters` and one in
+`realmd` — nothing at all in the world schema the dumps fill, which is what the
+round-1 review found — and `PLAN.verify`'s `item_template` rule left in place
+as a rule the probe must NOT run. The files themselves are laid per test by
+`laid()`, because the expected set is read off them.
 """
 
 ALL = ("mangos", "realmd", "characters", "logs")
-
-
-def counts_that_satisfy(plan: SqlPlan = GATE_PLAN) -> dict[str, int]:
-    """Per-schema table counts that meet every expectation the plan declares.
-
-    Read off the plan rather than written out, so a test using it is measuring
-    against the plan object: change a `min` in `GATE_PLAN` and these move with
-    it. `rule.db` is the schema (the identity mapping, A10).
-    """
-    return {
-        rule.db: rule.min
-        for rule in plan.verify
-        if rule.query == sqlplan.SCHEMA_TABLE_COUNT.format(schema=rule.db)
-    }
 
 
 class _Server:
@@ -2203,10 +2184,9 @@ class _Server:
     Both exist because an idempotent fake cannot tell a re-read from a
     remembered answer, and `reset()` re-reads on purpose.
 
-    `counts` is how many tables a schema holds, for the plan's own table-count
-    expectations; it defaults to the length of `tables`, so a test that cares
-    only about which tables are there does not have to say a number, and a test
-    about a half-filled world schema says one without listing 150 names.
+    `tables` answers both questions the probe asks about them — whether one is
+    there, and the listing of a schema's names — from one dict, so a test that
+    says which tables a server holds has said everything the probe can find.
 
     `undroppable` names schemas whose DROP is accepted and does nothing, which
     is the only way to reach the check after the drop.
@@ -2221,7 +2201,6 @@ class _Server:
         databases: Sequence[str] = (),
         tables: Mapping[str, Sequence[str]] | None = None,
         marker_hash: str | None = None,
-        counts: Mapping[str, int] | None = None,
         rows: Mapping[tuple[str, str], int] | None = None,
         seeded: Mapping[tuple[str, str], int] | None = None,
         raw: Mapping[str, str] | None = None,
@@ -2235,7 +2214,6 @@ class _Server:
         if marker_hash is not None:
             self.tables.setdefault("mangos", set()).add("yulon_install")
         self.marker_hash = marker_hash
-        self.counts = dict(counts or {})
         self.rows = dict(rows or {})
         self.seeded = dict(seeded or {})
         self.raw = dict(raw or {})
@@ -2270,13 +2248,13 @@ class _Server:
         exists = re.search(r"table_schema='([^']+)' AND table_name='([^']+)'", statement)
         if exists:
             return "1\n" if exists.group(2) in self.tables.get(exists.group(1), set()) else "0\n"
-        whole = re.fullmatch(
-            r"SELECT COUNT\(\*\) FROM information_schema\.tables WHERE table_schema='([^']+)'",
+        names = re.fullmatch(
+            r"SELECT table_name FROM information_schema\.tables WHERE table_schema='([^']+)'",
             statement,
         )
-        if whole:
-            schema = whole.group(1)
-            return f"{self.counts.get(schema, len(self.tables.get(schema, ())))}\n"
+        if names:
+            held = sorted(self.tables.get(names.group(1), ()))
+            return "".join(f"{name}\n" for name in held)
         if statement.startswith("SELECT plan_hash"):
             return f"{self.marker_hash}\n" if self.marker_hash else ""
         count = re.search(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`", statement)
@@ -2314,8 +2292,14 @@ def _gate(
     schemas: Mapping[str, str] | None = None,
     password: str = "pw",
     wsl_distro: str | None = None,
+    server_dir: Path | None = None,
 ) -> sqlplan.MarkerGate:
-    """`MarkerGate` over one fake server, with the arguments every test repeats."""
+    """`MarkerGate` over one fake server, with the arguments every test repeats.
+
+    `server_dir` is where the plan's files are read from on the `populated`
+    branch; left None, that branch can never read complete, which is what every
+    test not about completeness wants.
+    """
     return sqlplan.MarkerGate(
         plan,
         container="tbc-db",
@@ -2325,6 +2309,7 @@ def _gate(
         sql_query=server.query,
         exec_stdin=server.exec_stdin,
         wsl_distro=wsl_distro,
+        server_dir=server_dir,
     )
 
 
@@ -2433,15 +2418,14 @@ def test_probe_populated_on_one_account_beyond_the_seeded_usernames() -> None:
     assert state.state == "populated" and "1 rows in realmd.account" in state.detail
 
 
-def test_probe_reports_every_populated_table_not_only_the_first() -> None:
+def test_probe_reports_every_populated_table_not_only_the_first(tmp_path: Path) -> None:
     server = _Server(
         databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
+        tables={"characters": ["characters"], "realmd": REALMD_TABLES, "mangos": WORLD_TABLES},
         rows={("characters", "characters"): 3, ("realmd", "account"): 9},
         seeded={("realmd", "account"): 4},
     )
-    state = _gate(server).probe()
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
     assert state.detail == "3 rows in characters.characters, 5 rows in realmd.account"
 
 
@@ -2541,200 +2525,326 @@ def test_probe_is_unreadable_when_the_marker_lookup_answers_more_than_one_row() 
 # every schema full - was refused by the updates button and by `_import`'s
 # re-run route alike (the owner's m910q Tortoise install: 903 characters, 110
 # accounts, no `yulon_install` in any schema, `pyplan/gates/
-# tortoise-updates-button-m910q-2026-09-09/`). The expected set below is read
-# off the plan, so these tests build the plan they measure against rather than
-# naming tables of their own.
+# tortoise-updates-button-m910q-2026-09-09/`).
+#
+# The evidence is the plan's own FILES: the tables its dumps create, read out
+# of them at probe time and required in full. Round 1 asked `player_data`
+# alone (Tortoise names nothing in the world schema); round 2 asked the plan's
+# table-COUNT rules, which a dump stopped after its 150th table satisfies.
+# These tests therefore lay real dump files and read the expected set off
+# those, never off a list written here.
 
 
-def test_probe_imported_is_complete_without_asking_which_tables_are_there() -> None:
+WORLD_TABLES = ("item_template", "creature_template", "game_tele", "spell_chain", "quest_template")
+"""What the fixture world dump creates, in the order it creates them."""
+
+REALMD_TABLES = ("account", "realmlist", "uptime")
+"""What the fixture realmd dump creates; `account` is also a `player_data` table."""
+
+
+def dump(*tables: str, rows_only: bool = False) -> str:
+    """A mysqldump-shaped file: each table's DROP, CREATE and one INSERT, in order.
+
+    The shape the fork's own `sql/base/*.sql` has (`pyplan/phase8-reads/
+    cmangos.md:283` quotes "CREATE TABLE `item_template` (" at `mangos.sql:2962`).
+    `rows_only`
+    leaves the INSERTs and drops the DDL — a dump of rows into tables something
+    else created, which is the case that must not read as finished.
+    """
+    text = "-- MariaDB dump 10.19\n/*!40101 SET NAMES utf8mb4 */;\n"
+    for name in tables:
+        if not rows_only:
+            text += (
+                f"DROP TABLE IF EXISTS `{name}`;\n"
+                f"CREATE TABLE `{name}` (\n  `entry` int(10) unsigned NOT NULL\n) ENGINE=InnoDB;\n"
+            )
+        text += f"INSERT INTO `{name}` VALUES (1);\n"
+    return text
+
+
+def laid(
+    tmp_path: Path,
+    world: Sequence[str] = WORLD_TABLES,
+    realmd: Sequence[str] = REALMD_TABLES,
+    *,
+    rows_only: bool = False,
+) -> Path:
+    """A server dir holding the two dumps `GATE_PLAN`'s file phases stream."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir(exist_ok=True)
+    (server_dir / "mangos.sql").write_text(dump(*world, rows_only=rows_only), encoding="utf-8")
+    (server_dir / "realmd.sql").write_text(dump(*realmd), encoding="utf-8")
+    return server_dir
+
+
+def finished(world: Sequence[str] = WORLD_TABLES, realmd: Sequence[str] = REALMD_TABLES) -> _Server:
+    """The m910q install: every schema, 903 characters, 110 accounts, no marker row."""
+    return _Server(
+        databases=ALL,
+        tables={"mangos": world, "realmd": realmd, "characters": ["characters"]},
+        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    )
+
+
+def listings(server: _Server) -> list[str]:
+    """Which schemas the probe asked for their table names, in order, once per ask."""
+    return [
+        m.group(1)
+        for _schema, question in server.asked
+        if (
+            m := re.fullmatch(
+                r"SELECT table_name FROM information_schema\.tables WHERE table_schema='([^']+)'",
+                question,
+            )
+        )
+    ]
+
+
+def test_probe_imported_is_complete_without_asking_which_tables_are_there(
+    tmp_path: Path,
+) -> None:
     """The `imported` branch is untouched by the completeness rule: a marker row
     is proof, and a plan whose `player_data` moved must not turn a finished
-    import into an unfinished one."""
+    import into an unfinished one. The files are there to be read and are not:
+    no listing is asked, which is what reading them would lead to."""
     server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
-    state = _gate(server).probe()
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
     assert (state.state, state.complete) == ("imported", True)
     assert not any(
         f"table_name='{data.table}'" in question
         for _schema, question in server.asked
         for data in GATE_PLAN.player_data
     )
+    assert listings(server) == []
 
 
-def test_probe_populated_is_complete_when_every_table_the_plan_names_is_there() -> None:
+def test_probe_populated_is_complete_when_every_table_the_plans_files_create_is_there(
+    tmp_path: Path,
+) -> None:
     """The m910q install, which is the one this branch exists for."""
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
-    )
-    state = _gate(server).probe()
+    server = finished()
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
     assert (state.state, state.complete) == ("populated", True)
     assert state.detail == "903 rows in characters.characters, 110 rows in realmd.account"
 
 
-def test_probe_populated_stays_incomplete_when_a_table_the_plan_names_is_missing() -> None:
+def test_probe_populated_stays_incomplete_when_a_table_the_plan_names_is_missing(
+    tmp_path: Path,
+) -> None:
     """And the detail says WHICH: a refusal a user cannot act on is the thing
-    `ImportState.detail` exists to prevent."""
-    absent = GATE_PLAN.player_data[1]
+    `ImportState.detail` exists to prevent. `characters.characters` is the
+    named table no file creates, so this clause and not the files' is what
+    finds it."""
     server = _Server(
         databases=ALL,
-        tables={"characters": ["characters"]},
-        counts=counts_that_satisfy(),
+        tables={"mangos": WORLD_TABLES, "realmd": REALMD_TABLES},
+        rows={("realmd", "account"): 110},
+    )
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert state.detail == (
+        "110 rows in realmd.account, but characters.characters is missing, "
+        "so this is not a finished import"
+    )
+
+
+def test_a_named_table_a_dump_also_creates_is_reported_once(tmp_path: Path) -> None:
+    """`realmd.account` is both a `player_data` table and one `realmd.sql`
+    creates; an install without it is told so once, by the file clause, rather
+    than twice by two clauses that noticed the same absence."""
+    server = _Server(
+        databases=ALL,
+        tables={
+            "mangos": WORLD_TABLES,
+            "realmd": ["realmlist", "uptime"],
+            "characters": ["characters"],
+        },
         rows={("characters", "characters"): 903},
     )
-    state = _gate(server).probe()
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
     assert (state.state, state.complete) == ("populated", False)
-    assert f"{SCHEMAS[absent.db]}.{absent.table} is missing" in state.detail
-    assert "903 rows in characters.characters" in state.detail
+    assert state.detail.count("account") == 1, state.detail
+    assert "realmd is missing 1 of the 3 tables this plan's files create (account)" in state.detail
 
 
-def test_probe_populated_stays_incomplete_when_a_schema_the_plan_names_is_not_there() -> None:
+def test_probe_populated_stays_incomplete_when_a_schema_the_plan_names_is_not_there(
+    tmp_path: Path,
+) -> None:
     """A schema the import never created is not a finished import, whatever the
     schemas beside it hold."""
-    server = _Server(
-        databases=["mangos", "realmd", "characters"],
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903},
-    )
-    state = _gate(server).probe()
+    server = finished()
+    server.databases = ["mangos", "realmd", "characters"]
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
     assert (state.state, state.complete) == ("populated", False)
     assert "logs does not exist" in state.detail
 
 
-def test_the_expected_set_is_read_off_the_plans_own_player_data() -> None:
+def test_the_expected_set_is_read_off_the_plans_own_player_data(tmp_path: Path) -> None:
     """Not a list written into this module: a plan naming a third table demands
     the third table, with nothing in `sqlplan` edited."""
     plan = GATE_PLAN.model_copy(
         update={"player_data": (*GATE_PLAN.player_data, PlayerData(db="logs", table="logs"))}
     )
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903},
-    )
-    assert _gate(server).probe().complete is True
-    state = _gate(server, plan=plan).probe()
+    server_dir = laid(tmp_path)
+    assert _gate(finished(), server_dir=server_dir).probe().complete is True
+    state = _gate(finished(), plan=plan, server_dir=server_dir).probe()
     assert (state.state, state.complete) == ("populated", False)
     assert "logs.logs is missing" in state.detail
 
 
-# -- the plan's own completion evidence (T19 round 2) -------------------------
-#
-# `player_data` alone certified nothing about the schema the dumps fill:
-# Tortoise names a table in `tw_char` and one in `tw_logon` and none in
-# `tw_world`, so an install with accounts and characters and an empty world read
-# as finished (Codex on T19, round 1). The third clause is the plan's own
-# table-count `verify` rules, asked again here.
+# -- the tables the plan's files create (T19 round 3) --------------------------
 
 
-def test_probe_asks_the_plans_own_table_count_for_every_schema_its_files_fill() -> None:
-    """The complete case, and the two queries that make it a claim about the dumps.
-
-    Deleting `world base` from the plan reds this: the count is then asked for
-    `realmd` alone, because nothing in the plan says a file ever reaches
-    `mangos`. That is what "read from the plan" means here.
-    """
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
-    )
-    state = _gate(server).probe()
-    assert (state.state, state.complete) == ("populated", True)
-    asked = [question for _schema, question in server.asked]
-    for name in ("mangos", "realmd"):
-        wanted = sqlplan.SCHEMA_TABLE_COUNT.format(schema=name)
-        assert asked.count(wanted) == 1, (name, asked)
-
-
-def test_probe_never_runs_the_plans_row_count_verify_rules() -> None:
-    """`SELECT COUNT(*) FROM item_template` is a rule about ROWS: a table scan on
-    somebody's live server that says nothing about whether the dumps landed.
-    `verify()` asks it after an import; this probe must not."""
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
-    )
-    _gate(server).probe()
-    rows_rule = next(
-        rule.query
-        for rule in GATE_PLAN.verify
-        if rule.query != sqlplan.SCHEMA_TABLE_COUNT.format(schema=rule.db)
-    )
-    assert not any(rows_rule in question for _schema, question in server.asked), server.asked
-
-
-def test_probe_stays_incomplete_when_a_filled_schema_is_short_of_the_plans_count() -> None:
-    """The round-1 hole, in one fixture: every named table there, characters and
-    accounts populated, and a world schema holding three tables of the 150 the
-    plan's own rule requires. The detail names the schema and both numbers."""
-    wanted = counts_that_satisfy()
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts={**wanted, "mangos": 3},
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
-    )
-    state = _gate(server).probe()
+def test_the_expected_tables_are_read_off_the_plans_files_not_typed_here(
+    tmp_path: Path,
+) -> None:
+    """A table appended to the dump is demanded of the server from then on, with
+    nothing in `sqlplan` edited. The mutation this catches is the one the ticket
+    forbade: an expected set — or a count — written by hand."""
+    server_dir = laid(tmp_path)
+    assert _gate(finished(), server_dir=server_dir).probe().complete is True
+    with (server_dir / "mangos.sql").open("a", encoding="utf-8") as world:
+        world.write("CREATE TABLE `spell_learn_spell` (\n  `entry` int(10) unsigned NOT NULL\n);\n")
+    state = _gate(finished(), server_dir=server_dir).probe()
     assert (state.state, state.complete) == ("populated", False)
-    assert f"mangos holds 3 tables and this plan's own check requires {wanted['mangos']}" in (
+    assert "mangos is missing 1 of the 6 tables this plan's files create (spell_learn_spell)" in (
         state.detail
+    )
+
+
+def test_a_world_holding_every_table_but_the_last_one_its_dump_creates_is_not_finished(
+    tmp_path: Path,
+) -> None:
+    """The boundary round 2 missed: a dump stopped after its penultimate table
+    holds every table a count could ask for, and is not a finished import."""
+    server = finished(world=WORLD_TABLES[:-1])
+    state = _gate(server, server_dir=laid(tmp_path)).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert state.detail == (
+        "903 rows in characters.characters, 110 rows in realmd.account, but mangos is missing "
+        f"1 of the {len(WORLD_TABLES)} tables this plan's files create ({WORLD_TABLES[-1]}), "
+        "so this is not a finished import"
     )
     assert native.import_reads_as_finished(state) is False
 
 
-def test_probe_stays_incomplete_when_the_plan_declares_no_count_for_a_schema_it_fills() -> None:
-    """Fail closed. A plan that says its files fill a schema and says nothing
-    probeable about the result cannot certify that schema, and assuming it
-    finished is the assumption this branch exists to stop making."""
-    plan = GATE_PLAN.model_copy(
+def test_a_world_holding_only_the_first_tables_of_its_dump_names_the_rest_bounded(
+    tmp_path: Path,
+) -> None:
+    """The first N tables of a file and none after them: the detail names what
+    is missing, the first three by name and the rest as a count, so a refusal
+    over a 300-table dump is a sentence and not a listing."""
+    server_dir = laid(tmp_path)
+    two = _gate(finished(world=WORLD_TABLES[:2]), server_dir=server_dir).probe()
+    assert (two.state, two.complete) == ("populated", False)
+    assert (
+        "mangos is missing 3 of the 5 tables this plan's files create "
+        "(game_tele, spell_chain, quest_template)"
+    ) in two.detail
+    one = _gate(finished(world=WORLD_TABLES[:1]), server_dir=server_dir).probe()
+    assert (one.state, one.complete) == ("populated", False)
+    assert (
+        "mangos is missing 4 of the 5 tables this plan's files create "
+        "(creature_template, game_tele, spell_chain and 1 more)"
+    ) in one.detail
+
+
+def test_a_world_missing_a_table_from_the_middle_of_its_dump_is_not_finished(
+    tmp_path: Path,
+) -> None:
+    """Every table is required, not a sentinel: the reviewer offered "the last
+    `CREATE TABLE` each file makes, or the full set", and the last one alone
+    would pass an install whose dump was applied with one table dropped."""
+    held = [name for name in WORLD_TABLES if name != "game_tele"]
+    state = _gate(finished(world=held), server_dir=laid(tmp_path)).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert (
+        "mangos is missing 1 of the 5 tables this plan's files create (game_tele)" in state.detail
+    )
+
+
+def test_probe_asks_the_table_names_of_every_schema_the_plans_files_fill_once_each(
+    tmp_path: Path,
+) -> None:
+    """One `information_schema` listing per filled schema, none for a schema no
+    file reaches, and the comparison in Python. Deleting `world base` from the
+    plan stops the `mangos` listing: nothing then says a file reaches it, which
+    is what "read from the plan" means here."""
+    server_dir = laid(tmp_path)
+    server = finished()
+    assert _gate(server, server_dir=server_dir).probe().complete is True
+    assert sorted(listings(server)) == ["mangos", "realmd"]
+
+    without_world = GATE_PLAN.model_copy(
+        update={"phases": tuple(p for p in GATE_PLAN.phases if p.name != "world base")}
+    )
+    server = finished()
+    _gate(server, plan=without_world, server_dir=server_dir).probe()
+    assert listings(server) == ["realmd"]
+
+
+def test_probe_never_runs_any_of_the_plans_verify_rules(tmp_path: Path) -> None:
+    """`SELECT COUNT(*) FROM item_template` is a rule about ROWS on somebody's
+    live server, and round 2's table-count rules were not completion evidence
+    either. `verify()` asks them after an import; this probe asks none."""
+    server = finished()
+    _gate(server, server_dir=laid(tmp_path)).probe()
+    for rule in GATE_PLAN.verify:
+        assert not any(rule.query in question for _schema, question in server.asked), server.asked
+
+
+def test_a_schema_whose_dump_creates_no_table_cannot_read_as_finished(tmp_path: Path) -> None:
+    """Rows into tables something else made: the plan says its files fill
+    `mangos`, the files leave no table behind to look for, so nothing here can
+    tell a finished import from a stopped one — and it says so rather than
+    assuming. Nothing is asked of that schema, because there is no question."""
+    server = finished()
+    state = _gate(server, server_dir=laid(tmp_path, rows_only=True)).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert (
+        "this plan's files fill mangos but create no table in it, so a finished import "
+        "cannot be recognised there"
+    ) in state.detail
+    assert listings(server) == ["realmd"]
+
+
+def test_a_dump_that_cannot_be_read_makes_the_probe_unreadable_never_complete(
+    tmp_path: Path,
+) -> None:
+    """Two ways: the clone is not there (a `fail` phase matches nothing), and a
+    file that is there but is not what the phase says (gzip bytes expected).
+    Both are `unreadable` naming the reason — the answer that leads nowhere —
+    and neither is the `partial` that drops or the `complete` that runs DDL."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    absent = _gate(finished(), server_dir=empty).probe()
+    assert (absent.state, absent.complete) == ("unreadable", False)
+    assert "world base" in absent.detail and "mangos.sql" in absent.detail, absent.detail
+
+    gzipped = GATE_PLAN.model_copy(
         update={
-            "verify": tuple(
-                rule
-                for rule in GATE_PLAN.verify
-                if rule.query != sqlplan.SCHEMA_TABLE_COUNT.format(schema="mangos")
+            "phases": (
+                SqlPhase(name="world base", into="mangos", files=("mangos.sql",), gzip=True),
+                *GATE_PLAN.phases[1:],
             )
         }
     )
-    server = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
-    )
-    state = _gate(server, plan=plan).probe()
+    server = finished()
+    broken = _gate(server, plan=gzipped, server_dir=laid(tmp_path)).probe()
+    assert (broken.state, broken.complete) == ("unreadable", False)
+    assert "mangos.sql" in broken.detail and "BadGzipFile" in broken.detail, broken.detail
+    assert listings(server) == [], "nothing was asked of a server whose plan could not be read"
+
+
+def test_a_gate_built_without_the_install_folder_never_reads_complete() -> None:
+    """The three `repair.py` status probes build the gate with no folder and
+    read `complete` nowhere; they get the answer they always had, and a detail
+    that says why rather than a completeness nobody checked."""
+    server = finished()
+    state = _gate(server).probe()
     assert (state.state, state.complete) == ("populated", False)
-    assert "fill mangos but it declares no table count for it" in state.detail
-    assert sqlplan.SCHEMA_TABLE_COUNT.format(schema="mangos") not in [
-        question for _schema, question in server.asked
-    ], "there is no question to ask, so none is asked"
-
-
-def test_the_shipped_tortoise_plan_declares_a_count_for_every_schema_its_files_fill() -> None:
-    """Measured against the catalog, not against prose: `wow-tortoise` is the one
-    entry with a `rerun_on_marked` phase, so it is the one entry whose install
-    has to be able to read complete without a marker row. `wow-tbc` and
-    `wow-vanilla` declare none and fail closed, which costs them nothing — they
-    offer no updates button (`native.update_phases()` is empty for both)."""
-    entry = load_catalog().get("wow-tortoise")
-    assert entry.install.native is not None and entry.install.native.cmangos is not None
-    plan = entry.install.native.cmangos.sql
-    schemas = {name: name for name in (*plan.create, plan.marker_db, *(r.db for r in plan.verify))}
-    schemas.update({data.db: data.db for data in plan.player_data})
-    for phase in plan.phases:
-        schemas.update({name: name for name in (phase.into_each or {})})
-        if phase.into:
-            schemas[phase.into] = phase.into
-    filled = sqlplan._filled_schemas(plan, schemas)
-    declared = sqlplan._plan_expectations(plan, schemas)
-    assert set(filled) <= set(declared), (filled, declared)
-    assert filled, "the premise: this plan streams files into at least one schema"
+    assert "the install folder was not given to this probe" in state.detail
+    assert listings(server) == []
 
 
 def test_probe_partial_is_never_complete() -> None:
@@ -2753,22 +2863,87 @@ def test_probe_unreadable_is_never_complete() -> None:
     assert (state.state, state.complete) == ("unreadable", False)
 
 
-def test_a_marker_less_install_reads_as_finished_through_the_real_gate() -> None:
+def test_a_marker_less_install_reads_as_finished_through_the_real_gate(tmp_path: Path) -> None:
     """`native.import_reads_as_finished()`'s second arm, which was unreachable
     through this gate until T19 - the whole of finding 1."""
-    finished = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"], "realmd": ["account"]},
-        counts=counts_that_satisfy(),
-        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    server_dir = laid(tmp_path)
+    half = finished(world=WORLD_TABLES[:-1])
+    assert native.import_reads_as_finished(_gate(finished(), server_dir=server_dir).probe()) is True
+    assert native.import_reads_as_finished(_gate(half, server_dir=server_dir).probe()) is False
+
+
+# -- the parser: what a streamed file leaves behind ----------------------------
+
+
+def _file_runs(
+    server_dir: Path, *files: tuple[str, str | None, bool]
+) -> tuple[sqlplan.PhaseRun, ...]:
+    """`PhaseRun`s over `(name, schema, gzip)` files already on disk, in order."""
+    runs = []
+    for name, schema, gz in files:
+        phase = SqlPhase(name=name, into=schema, files=(name,), gzip=gz)
+        runs.append(sqlplan.PhaseRun(phase, schema, server_dir / name, None, gz, name))
+    return tuple(runs)
+
+
+def test_the_parser_reads_every_spelling_of_create_table_the_dumps_use(tmp_path: Path) -> None:
+    """The grammar, pinned: backticked or bare, `IF NOT EXISTS`, any case, no
+    space before the column list, a schema prefix (honoured when it names a
+    plan schema, ignored when it does not), `USE` switching the current schema,
+    `DROP TABLE` taking a table back out (a list too), and the lines that must
+    NOT count — a comment, a `TEMPORARY` table, an INSERT whose text says
+    "CREATE TABLE"."""
+    (tmp_path / "world.sql").write_text(
+        "-- CREATE TABLE `commented_out` (\n"
+        "DROP TABLE IF EXISTS `item_template`;\n"
+        "CREATE TABLE `item_template` (\n  `entry` int\n);\n"
+        "create table if not exists game_tele(\n  `id` int\n);\n"
+        "CREATE TABLE `characters`.`characters` (`guid` int);\n"
+        "CREATE TABLE `elsewhere`.`not_ours` (`id` int);\n"
+        "CREATE TEMPORARY TABLE `scratch` (`id` int);\n"
+        "INSERT INTO `item_template` VALUES (1, 'CREATE TABLE `in_a_string` (x int)');\n"
+        "CREATE TABLE `obsolete` (`id` int);\n"
+        "CREATE TABLE `obsolete_too` (`id` int);\n"
+        "DROP TABLE `obsolete`, `obsolete_too`;\n"
+        "USE `realmd`;\n"
+        "CREATE TABLE IF NOT EXISTS `account` LIKE `account_template`;\n"
+        "USE logs;\n"
+        "CREATE TABLE `logs_here` (`id` int);\n",
+        encoding="utf-8",
     )
-    half = _Server(
-        databases=ALL,
-        tables={"characters": ["characters"]},
-        rows={("characters", "characters"): 903},
+    left = sqlplan.created_tables(
+        _file_runs(tmp_path, ("world.sql", "mangos", False)), SCHEMAS.values()
     )
-    assert native.import_reads_as_finished(_gate(finished).probe()) is True
-    assert native.import_reads_as_finished(_gate(half).probe()) is False
+    assert left == {
+        "mangos": ["item_template", "game_tele"],
+        "characters": ["characters"],
+        "realmd": ["account"],
+        "logs": ["logs_here"],
+    }
+
+
+def test_the_parser_inflates_a_gzip_dump_and_starts_each_file_in_its_own_schema(
+    tmp_path: Path,
+) -> None:
+    """A `USE` in one file does not leak into the next: every run is its own
+    client invocation and starts in the phase's schema, or in none."""
+    (tmp_path / "a.sql.gz").write_bytes(
+        gzip.compress(
+            b"CREATE TABLE `first` (`id` int);\nUSE `logs`;\nCREATE TABLE `stray` (`id` int);\n"
+        )
+    )
+    (tmp_path / "b.sql").write_text("CREATE TABLE `second` (`id` int);\n", encoding="utf-8")
+    (tmp_path / "c.sql").write_text("CREATE TABLE `nowhere` (`id` int);\n", encoding="utf-8")
+    left = sqlplan.created_tables(
+        _file_runs(
+            tmp_path,
+            ("a.sql.gz", "mangos", True),
+            ("b.sql", "mangos", False),
+            ("c.sql", None, False),
+        ),
+        SCHEMAS.values(),
+    )
+    assert left == {"mangos": ["first", "second"], "logs": ["stray"]}
 
 
 def test_probe_asks_the_daemon_that_holds_the_container() -> None:

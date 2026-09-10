@@ -57,7 +57,7 @@ from tests.test_families_cmangos import (
 )
 from yulon import docker
 from yulon.catalog import native
-from yulon.catalog.catalog import PlayerData, SqlPhase, SqlPlan, VerifyRule, load_catalog
+from yulon.catalog.catalog import PlayerData, SqlPhase, SqlPlan, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
@@ -793,22 +793,24 @@ def test_a_press_can_be_stopped_before_it_reaches_the_first_statement(tmp_path: 
     assert rec.sql_calls == [], rec.sql_calls
 
 
-# -- the half-built world, through both routes (T19 round 2) -------------------
+# -- the unfinished world, through both routes (T19) --------------------------
 #
-# The round-1 probe read `populated` + complete from `player_data` alone, and
 # Tortoise's `player_data` names a table in `tw_char` and one in `tw_logon` and
-# none at all in the world schema its dumps fill. So an install with accounts
-# and characters and an empty world read as a finished import. These two tests
-# drive the REAL `MarkerGate` — built by the family's own `_gate()` over the
-# engine's seams — because that is the object the finding was about; every other
-# test in this file answers the probe from a canned `ImportState`, which could
-# not have caught it and cannot pin the fix.
+# none at all in the world schema its dumps fill, so round 1 read an install
+# with accounts and characters and an empty world as finished; round 2 read
+# the plan's table-COUNT rule, which a dump stopped after its 150th table
+# satisfies. The evidence is now the tables the plan's own files create,
+# required in full. These tests drive the REAL `MarkerGate` — built by the
+# family's own `_gate()` over the engine's seams, with the dump laid on disk —
+# because that is the object the finding was about; every other test in this
+# file answers the probe from a canned `ImportState`, which could not have
+# caught it and cannot pin the fix.
 
 
 class _Databases:
-    """A server the real `MarkerGate` can be asked about: schemas, tables, counts, rows.
+    """A server the real `MarkerGate` can be asked about: schemas, tables, rows.
 
-    Small and local rather than `test_sqlplan._Server` imported: what these two
+    Small and local rather than `test_sqlplan._Server` imported: what these
     tests need is the four statements the gate issues and nothing else, and the
     other file's double carries the drop/undroppable machinery `reset()` needs.
     """
@@ -817,12 +819,10 @@ class _Databases:
         self,
         databases: Sequence[str],
         tables: Mapping[str, Sequence[str]],
-        counts: Mapping[str, int],
         rows: Mapping[tuple[str, str], int],
     ) -> None:
         self.databases = list(databases)
         self.tables = {name: set(names) for name, names in tables.items()}
-        self.counts = dict(counts)
         self.rows = dict(rows)
         self.asked: list[str] = []
 
@@ -842,13 +842,12 @@ class _Databases:
         exists = re.search(r"table_schema='([^']+)' AND table_name='([^']+)'", statement)
         if exists:
             return "1\n" if exists.group(2) in self.tables.get(exists.group(1), set()) else "0\n"
-        whole = re.fullmatch(
-            r"SELECT COUNT\(\*\) FROM information_schema\.tables WHERE table_schema='([^']+)'",
+        names = re.fullmatch(
+            r"SELECT table_name FROM information_schema\.tables WHERE table_schema='([^']+)'",
             statement,
         )
-        if whole:
-            name = whole.group(1)
-            return f"{self.counts.get(name, len(self.tables.get(name, ())))}\n"
+        if names:
+            return "".join(f"{name}\n" for name in sorted(self.tables.get(names.group(1), ())))
         count = re.search(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`", statement)
         if count:
             return f"{self.rows.get((count.group(1), count.group(2)), 0)}\n"
@@ -859,13 +858,16 @@ WORLD = CM_ENTRY.databases.world
 AUTH = CM_ENTRY.databases.auth
 CHARS = CM_ENTRY.databases.characters
 
+WORLD_TABLES = ("item_template", "creature_template", "game_tele", "spell_chain")
+"""What the laid world dump creates, in order; the server below lacks the last."""
 
-def half_built_plan() -> SqlPlan:
-    """`rerun_plan()` with a dump phase filling the world schema and the count for it.
 
-    The shape the finding is about: files reach ONE schema, the plan declares
-    what a finished one holds, and `player_data` names tables in two other
-    schemas entirely.
+def unfinished_world_plan() -> SqlPlan:
+    """`rerun_plan()` with a dump phase filling the world schema.
+
+    The shape the finding is about: a file reaches ONE schema, and
+    `player_data` names tables in two other schemas entirely. The plan
+    declares nothing else; what the world must hold is read off the dump.
     """
     plan = rerun_plan()
     return plan.model_copy(
@@ -873,11 +875,6 @@ def half_built_plan() -> SqlPlan:
             "phases": (
                 SqlPhase(name="world base", into=WORLD, files=("src/world/*.sql",)),
                 *plan.phases,
-            ),
-            "verify": (
-                VerifyRule(
-                    db=WORLD, query=sqlplan.SCHEMA_TABLE_COUNT.format(schema=WORLD), min=150
-                ),
             ),
             "player_data": (
                 PlayerData(db=CHARS, table="characters"),
@@ -887,43 +884,61 @@ def half_built_plan() -> SqlPlan:
     )
 
 
-def half_built_databases(world_tables: int = 3) -> _Databases:
-    """Every schema there, 903 characters, 110 accounts, and a world that never finished."""
+def lay_world_dump(server_dir: Path) -> None:
+    """The one file `world base` streams: a mysqldump-shaped dump of `WORLD_TABLES`."""
+    path = server_dir / "src" / "world" / "world.sql"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            f"DROP TABLE IF EXISTS `{name}`;\nCREATE TABLE `{name}` (\n  `entry` int(10)\n);\n"
+            for name in WORLD_TABLES
+        ),
+        encoding="utf-8",
+    )
+
+
+def all_but_the_last_table() -> _Databases:
+    """Every schema there, 903 characters, 110 accounts, and a world dump that
+    stopped one `CREATE TABLE` short: the boundary a count cannot see."""
     return _Databases(
         databases=[WORLD, AUTH, CHARS, "logs"],
-        tables={CHARS: ["characters"], AUTH: ["account"]},
-        counts={WORLD: world_tables},
+        tables={CHARS: ["characters"], AUTH: ["account"], WORLD: WORLD_TABLES[:-1]},
         rows={(CHARS, "characters"): 903, (AUTH, "account"): 110},
     )
 
 
-def gated_on(plan: SqlPlan, rec: Recorder, server: _Databases, **overrides: object) -> object:
-    """An engine whose import gate is the REAL `MarkerGate`, over `server`."""
+def gated_on(
+    plan: SqlPlan, rec: Recorder, server: _Databases, server_dir: Path, **overrides: object
+) -> object:
+    """An engine whose import gate is the REAL `MarkerGate`, over `server`, reading `server_dir`."""
     engine = engine_with_sql(plan, rec, sql_query=server.query, **overrides)
-    engine._test_gate = REAL_GATE(engine, context(Path("/nonexistent")))  # type: ignore[attr-defined]
+    engine._test_gate = REAL_GATE(engine, context(server_dir))  # type: ignore[attr-defined]
     return engine
 
 
 def test_the_press_refuses_a_world_that_never_finished_and_applies_nothing(
     tmp_path: Path,
 ) -> None:
-    """Round 1's hole on the route it was found on. The refusal names the state,
-    the schema and both numbers, and no statement of the flagged phase reaches
-    the database — the whole point being that this install's world is missing a
-    dump, so its character DDL is not the thing to apply to it."""
+    """The boundary on the route it matters most on. The refusal names the
+    state, the schema and the table the dump would have created last, and no
+    statement of the flagged phase reaches the database — the whole point
+    being that this install's world is missing part of a dump, so its
+    character DDL is not the thing to apply to it."""
     server_dir = tmp_path / "srv"
     server_dir.mkdir()
-    plan = half_built_plan()
+    lay_world_dump(server_dir)
+    plan = unfinished_world_plan()
     rec = ready_to_import()
-    server = half_built_databases()
-    engine = gated_on(plan, rec, server, world_running=a_world_that_is(False))
+    server = all_but_the_last_table()
+    engine = gated_on(plan, rec, server, server_dir, world_running=a_world_that_is(False))
 
     with pytest.raises(InstallerError) as refused:
         list(engine.update_databases(InstallOptions(server_dir=server_dir)))
 
     said = str(refused.value)
     assert "populated" in said and WORLD in said, said
-    assert "3 tables" in said and "150" in said, said
+    assert f"{WORLD} is missing 1 of the {len(WORLD_TABLES)} tables" in said, said
+    assert WORLD_TABLES[-1] in said, said
     assert rec.sql_calls == [], rec.sql_calls
     assert EVERY_PRESS not in rec.sql_calls
 
@@ -938,13 +953,22 @@ def test_an_ordinary_run_over_that_install_neither_reruns_nor_records_the_import
     marker written — after which every resume of this folder skips the missing
     world dump for good. So the state file is the assertion: `import` must not
     be in it, and the flagged phase must not have run.
+
+    The dump is laid by the clone hook, as the sources are: the probe reads it
+    at the import stage, which runs after the clone.
     """
     server_dir = tmp_path / "srv"
-    plan = half_built_plan()
+    plan = unfinished_world_plan()
     rec = ready_to_import()
-    server = half_built_databases()
-    engine = gated_on(plan, rec, server, world_running=a_world_that_is(False))
-    rec.on_clone = lay_sources(server_dir)
+    server = all_but_the_last_table()
+    engine = gated_on(plan, rec, server, server_dir, world_running=a_world_that_is(False))
+    sources = lay_sources(server_dir)
+
+    def on_clone(dest: Path) -> None:
+        sources(dest)
+        lay_world_dump(server_dir)
+
+    rec.on_clone = on_clone
 
     with pytest.raises(InstallerError) as refused:
         list(engine.run(InstallOptions(server_dir=server_dir, client_dir=client_folder(tmp_path))))
@@ -953,9 +977,31 @@ def test_an_ordinary_run_over_that_install_neither_reruns_nor_records_the_import
     # `stage_import()`'s own populated arm, so the run really reached the import
     # stage and was refused there rather than falling over earlier.
     assert "already hold data" in said and "but are not finished" in said, said
-    assert f"{WORLD} holds 3 tables" in said, said
+    assert f"{WORLD} is missing 1 of the {len(WORLD_TABLES)} tables" in said, said
     state = native.read_state(server_dir, valid=engine.stage_names())
     assert state is not None
     assert "import" not in state.completed, state.completed
     assert EVERY_PRESS not in rec.sql_calls, rec.sql_calls
+    assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls
+
+
+def test_the_press_reaches_the_flagged_phase_on_a_marker_less_install_that_is_finished(
+    tmp_path: Path,
+) -> None:
+    """The other side of the boundary, on the same route through the same real
+    gate: the world holds every table its dump creates, and the press that
+    refused the owner's install on 2026-09-09 applies the flagged phase."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    lay_world_dump(server_dir)
+    plan = unfinished_world_plan()
+    rec = ready_to_import()
+    server = all_but_the_last_table()
+    server.tables[WORLD] = set(WORLD_TABLES)
+    engine = gated_on(plan, rec, server, server_dir, world_running=a_world_that_is(False))
+
+    said = list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+
+    assert any("read as populated" in line for line in said), said
+    assert EVERY_PRESS in rec.sql_calls, rec.sql_calls
     assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls

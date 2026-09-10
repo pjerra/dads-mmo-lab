@@ -1197,11 +1197,6 @@
                   "db": "tw_world",
                   "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_world' AND table_name LIKE 'ai_playerbot%'",
                   "min": 10
-                },
-                {
-                  "db": "tw_char",
-                  "query": "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='tw_char'",
-                  "min": 50
                 }
               ],
               "player_data": [

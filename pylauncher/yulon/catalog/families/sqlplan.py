@@ -96,7 +96,8 @@ import stat as stat_module
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+import zlib
+from collections.abc import Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO, Protocol, cast
@@ -1143,24 +1144,10 @@ def _refuse_unquotable(value: str, what: str) -> None:
         )
 
 
-SCHEMA_TABLE_COUNT = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{schema}'"
-"""How many tables a schema holds — and the EXACT text a plan spells to declare it.
-
-Public, and exact rather than parsed, because it is a contract with
-`catalog.json`: a `verify` rule whose `query` is this string filled with the
-rule's own schema is a *probeable expectation*, which `MarkerGate.probe()` asks
-again on the `populated` branch to decide completeness (see its docstring). A
-rule spelled any other way is a rule about ROWS — `SELECT COUNT(*) FROM
-item_template` — and the probe never runs it: it is somebody's live server, the
-count can be a table scan, and the answer says nothing about whether the dumps
-landed. Matching is `==`, so a plan declares this deliberately or not at all;
-there is no SQL parser here and no rule half-recognised by a prefix.
-
-`_TABLE_EXISTS` is built from it below rather than beside it, so the probe's two
-`information_schema` questions cannot drift into two shapes.
-"""
-
-_TABLE_EXISTS = SCHEMA_TABLE_COUNT + " AND table_name='{table}'"
+_TABLE_EXISTS = (
+    "SELECT COUNT(*) FROM information_schema.tables "
+    "WHERE table_schema='{schema}' AND table_name='{table}'"
+)
 """Whether one table is there — ASKED, rather than inferred from a failing query.
 
 `SELECT ... FROM a_table_that_is_not_there` and "the client could not be
@@ -1168,6 +1155,54 @@ reached" both come back as a `DockerCommandError`, and the two answers lead to
 opposite branches: one to `partial`, which drops databases, the other to
 `unreadable`, which drops nothing. Asking `information_schema` keeps them apart:
 a table that is absent is a COUNT of 0, and an error is still an error.
+"""
+
+SCHEMA_TABLES = "SELECT table_name FROM information_schema.tables WHERE table_schema='{schema}'"
+"""The NAMES of a schema's tables, one row each — the reading completeness is decided on.
+
+One listing per schema and the comparison in Python, rather than one
+`_TABLE_EXISTS` per expected table: a world dump creates a few hundred, and
+this is asked of a live server. Not a COUNT, because a count was the evidence
+T19's round 2 offered and its reviewer showed what it cannot certify: a dump
+stopped after its 150th table holds 150 tables.
+
+An empty answer is an honest one here — a schema with no tables in it — and is
+read as such, where `_count()` would raise. The discipline `_count()` keeps
+protects `partial`, the branch that drops; this reading decides only
+`complete`, and misreading it can only refuse.
+"""
+
+_DDL = re.compile(rb"^\s*(CREATE|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(.*)", re.IGNORECASE)
+_USE = re.compile(rb"^\s*USE\s+(?:`([^`]+)`|([A-Za-z0-9_$]+))", re.IGNORECASE)
+_NAME = rb"(?:`([^`]+)`|([A-Za-z0-9_$]+))"
+_QUALIFIED = re.compile(rb"\s*" + _NAME + rb"(?:\s*\.\s*" + _NAME + rb")?\s*")
+"""The grammar `created_tables()` reads a streamed file with, and all of it.
+
+Three statements, each recognised at the START of a line (`^\\s*`), which is
+where `mysqldump` and every hand-written file in the shipped plans put them
+(`pyplan/phase8-reads/cmangos.md:283` quotes "CREATE TABLE `item_template` ("
+at `mangos.sql:2962`;
+the fork's own `character_updates` spell `CREATE TABLE IF NOT EXISTS ... LIKE`):
+
+* `CREATE TABLE [IF NOT EXISTS] [schema.]name` — the name goes into its
+  schema's set. Backticked or bare, any case, a `(` straight after the name.
+* `DROP TABLE [IF EXISTS] name[, name...]` — taken back out, so a table a later
+  file removes is not demanded of a finished install, and a dump's own
+  `DROP TABLE IF EXISTS` ahead of each `CREATE` is a no-op.
+* `USE schema` — every unprefixed name after it, in this file, belongs to that
+  schema. Each file starts in the phase's `into` schema (or in none: Tortoise's
+  `create_databases.sql` is streamed schema-less and, the plan's notes say,
+  creates `tw_char` tables), because each is its own client invocation.
+
+`CREATE TEMPORARY TABLE` does not match `CREATE\\s+TABLE` and is meant not to:
+no `information_schema` row ever comes of it. A schema name that is not one of
+the plan's is ignored with the table under it — the probe does not look there.
+A `--` comment does not start with `CREATE`; a `CREATE TABLE` inside an
+INSERT's string does not start a line. What this grammar does not read, and
+would then DEMAND wrongly, is a table renamed by a later file (`RENAME TABLE`,
+`ALTER TABLE ... RENAME`): it stays expected under its old name and the
+install reads incomplete, which is the direction that refuses rather than
+runs DDL. No shipped plan is known to do it; the m910q press is the check.
 """
 
 _MARKER_LOOKUP = "SELECT plan_hash FROM `{schema}`.`{table}` ORDER BY finished_unix DESC LIMIT 1"
@@ -1207,34 +1242,96 @@ def _plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _plan_expectations(plan: SqlPlan, schemas: Mapping[str, str]) -> dict[str, int]:
-    """Schema → the table count this plan's own `verify` rules require of it.
+class _Unreadable(Exception):
+    """The plan's files could not be read, with the sentence `probe()` answers `unreadable` with."""
 
-    The plan's completion evidence, read off the plan and never typed here. The
-    strictest rule wins when a plan declares two for one schema, so the answer
-    is one number per schema and the probe asks one query per schema.
 
-    Only the rules spelled exactly `SCHEMA_TABLE_COUNT` — see there for why the
-    row-count rules are left to `verify()`, which runs after an import rather
-    than over somebody's server.
+def created_tables(runs: Sequence[PhaseRun], schemas: Container[str]) -> dict[str, list[str]]:
+    """Schema → the tables `runs`' FILES leave behind, in creation order; statements are skipped.
+
+    The plan's own completion evidence, read off the dumps it streams rather
+    than declared anywhere: an install that finished every file holds every
+    one of these, and one whose dump stopped short holds a prefix of them.
+    Required in full by `MarkerGate.probe()` — not the last one per file, which
+    a dump applied with one table dropped would satisfy. `schemas` is the set
+    of server schema names the plan owns; a table created anywhere else is not
+    this probe's to look for. The grammar is `_DDL`'s, documented there.
+
+    Every file is read to its end, because a dump's `CREATE TABLE`s are spread
+    through it, each ahead of its own rows. That is the cost of this reading,
+    paid once per probe and only on the `populated` branch: a line scan over
+    the world dump, some seconds on a large one, against a `docker exec` per
+    expected table the alternative would have cost.
+
+    Raises:
+        _Unreadable: a file could not be opened or inflated, naming it and what
+            the OS or gzip actually said — the same three sentences `apply()`
+            keeps apart, because "download it again" answers a truncated file
+            and not an unreadable one.
     """
-    wanted: dict[str, int] = {}
-    for rule in plan.verify:
-        schema = schemas[rule.db]
-        if rule.query == SCHEMA_TABLE_COUNT.format(schema=schema):
-            wanted[schema] = max(wanted.get(schema, 0), rule.min)
-    return wanted
+    left: dict[str, dict[str, None]] = {}
+    for run in runs:
+        if run.path is None:
+            continue
+        current = run.schema
+        try:
+            with _open(run) as source:
+                for line in source:
+                    use = _USE.match(line)
+                    if use:
+                        current = _identifier(use.group(1) or use.group(2))
+                        continue
+                    ddl = _DDL.match(line)
+                    if ddl is None:
+                        continue
+                    dropping = ddl.group(1).upper() == b"DROP"
+                    for prefix, table in _names_after(ddl.group(2), many=dropping):
+                        schema = current if prefix is None else prefix
+                        if schema is None or schema not in schemas:
+                            continue
+                        if dropping:
+                            left.get(schema, {}).pop(table, None)
+                        else:
+                            left.setdefault(schema, {})[table] = None
+        except (OSError, EOFError, zlib.error) as exc:
+            raise _Unreadable(
+                f"{run.rel} could not be read ({_read_failure(exc)}), so the tables this "
+                "plan's files create could not be checked"
+            ) from exc
+    return {schema: list(tables) for schema, tables in left.items()}
+
+
+def _names_after(rest: bytes, *, many: bool) -> list[tuple[str | None, str]]:
+    """`(schema or None, table)` for the name(s) that open `rest`; a comma list when `many`."""
+    found: list[tuple[str | None, str]] = []
+    while True:
+        match = _QUALIFIED.match(rest)
+        if match is None:
+            return found
+        first = _identifier(match.group(1) or match.group(2))
+        second = match.group(3) or match.group(4)
+        found.append((None, first) if second is None else (first, _identifier(second)))
+        rest = rest[match.end() :]
+        if not many or not rest.startswith(b","):
+            return found
+        rest = rest[1:]
+
+
+def _identifier(name: bytes) -> str:
+    return name.decode("utf-8", errors="replace")
 
 
 def _filled_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     """Every schema this plan streams FILES into, in plan order.
 
-    "Filled" is what makes a schema's completeness this plan's business. A
-    `statements` phase is excluded because none of the shipped ones creates a
-    table — they `ALTER`, `GRANT` and `REPLACE INTO` — and a phase with no
-    `into`/`into_each` names no schema at all, so it declares nothing about any
-    (Tortoise's `schemas` phase streams `create_databases.sql`, which really does
-    create all four, and the plan has no way to say so).
+    "Filled" is what makes a schema's completeness this plan's business even
+    when its files turn out to create nothing there (a dump of rows only):
+    such a schema is reported as one a finished import cannot be recognised
+    in, rather than passed over. A `statements` phase is not "filling" —
+    none of the shipped ones creates a table; they `ALTER`, `GRANT` and
+    `REPLACE INTO` — and a phase with no `into`/`into_each` names no schema
+    here; what its files create is still read by `created_tables()`, which
+    follows the file's own `USE` and prefixes.
     """
     seen: dict[str, None] = {}
     for phase in plan.phases:
@@ -1286,8 +1383,10 @@ class MarkerGate:
         sql_query: SqlQuery,
         exec_stdin: ExecStdin,
         wsl_distro: str | None = None,
+        server_dir: Path | None = None,
     ) -> None:
         self._plan = plan
+        self._server_dir = server_dir
         self._container = container
         self._client = client
         self._password = password
@@ -1297,7 +1396,6 @@ class MarkerGate:
         self._wsl_distro = wsl_distro
         self._names = _plan_schemas(plan, schemas)
         self._filled = _filled_schemas(plan, schemas)
-        self._expected = _plan_expectations(plan, schemas)
         for data in plan.player_data:
             for name in data.exclude_usernames:
                 _refuse_unquotable(name, f"the seeded account name {name!r} in the SQL plan")
@@ -1327,46 +1425,50 @@ class MarkerGate:
         tortoise-updates-button-m910q-2026-09-09/`, finding 1).
 
         **The rule: complete when every schema the plan names EXISTS, holds
-        every table the plan's `player_data` names in it, and — for every schema
-        this plan streams FILES into — meets the table count the plan's own
-        `verify` rules declare for it.** All three, and the third is the one
-        that certifies the dumps: round 1 asked `player_data` alone, and
-        Tortoise names only `tw_char.characters` and `tw_logon.account` there,
-        so an install with accounts and characters and an EMPTY `tw_world` read
-        as a finished import (Codex on T19, round 1). That answer is not merely
-        wrong on the updates route, where it lands DDL on an unfinished install:
-        on the ordinary route `stage_import()` skips the import, the spine
-        records `import` completed, no marker is written, and every later resume
-        skips the missing world dump for good.
+        every table the plan's `player_data` names in it, and holds EVERY
+        table the plan's own streamed files create in it.** All three, and the
+        third is the one that certifies the dumps. It is read off the files at
+        probe time — `expand()` over the plan's file phases, the same
+        expansion the updates route performs, then `created_tables()` over
+        each file — and compared against one `information_schema` listing per
+        schema (`SCHEMA_TABLES`), in Python, as sets. No number is written
+        here and no threshold is read from the plan: the evidence has to be
+        something a stream cannot satisfy before its last `CREATE TABLE` ran.
 
-        The expectation is `SCHEMA_TABLE_COUNT` spelled by the plan, asked
-        verbatim — one query per filled schema, the same `information_schema`
-        reading `_table_exists()` makes, no number written here. **A schema this
-        plan's files fill and its `verify` rules say nothing probeable about
-        stays INCOMPLETE**, named as such: the alternative is to assume a schema
-        finished because the plan forgot to describe it, which is the assumption
-        this whole branch exists to stop making. `wow-tortoise` therefore
-        declares one for `tw_char` beside the one it already had for `tw_world`;
-        `wow-tbc` and `wow-vanilla` declare none, so a marker-less install of
-        those reads `populated` incomplete exactly as before — they offer no
-        updates button, and failing closed costs them nothing.
+        Two rounds found the two weaker rules. `player_data` alone: Tortoise
+        names only `tw_char.characters` and `tw_logon.account`, so accounts and
+        characters over an EMPTY `tw_world` read finished (Codex, round 1). The
+        plan's own table-COUNT rules: a dump stopped after its 150th table
+        holds 150 tables and read finished (Codex, round 2). Either answer is
+        not merely wrong on the updates route, where it lands DDL on an
+        unfinished install: on the ordinary route `stage_import()` skips the
+        import, the spine records `import` completed, no marker is written,
+        and every later resume skips the missing world dump for good.
 
-        What is NOT in the evidence: a table created inside a dump file,
-        conditionally (`CREATE TABLE IF NOT EXISTS`) or not, which is invisible
-        from the plan and would need the clone and a SQL parser to see; a
-        `statements` phase, which in the shipped plans creates no table; and the
-        plan's row-count `verify` rules, which `SCHEMA_TABLE_COUNT` deliberately
-        does not match.
+        **The bound, stated because it is real:** a dump interrupted inside
+        its final row inserts, after its last `CREATE TABLE`, still passes.
+        Completeness here is a claim about tables, not about rows, and that is
+        as far as a marker-less install can be read. What it opens —
+        `_rerun_on_marked()` — is limited to the phases that declare
+        themselves idempotent on their own terms, with no marker written and
+        no `verify` rule re-asked (T11's argument, unchanged).
 
-        **The bounded risk, stated because it is real:** a populated install a
-        person built by some other route can carry every expected table, reach
-        every declared count, and still differ in content from what these files
-        describe, and this branch will call it complete. Completeness here is a
-        claim about tables, not about rows. What that buys the one route it
-        opens — `_rerun_on_marked()` — is bounded by the same argument T11 made
-        for it: a phase carries `rerun_on_marked` only where its files are
-        idempotent on their own terms, no marker is written and no `verify` rule
-        is re-asked.
+        What is NOT evidence: `statements` phases (no shipped one creates a
+        table; `_filled_schemas`); the plan's `verify` rules of any shape,
+        which `verify()` asks after an import and this probe never runs; a
+        table created under a schema the plan does not own. A schema the plan
+        streams files into whose files create no table stays incomplete, named
+        as such — the alternative is to assume a schema finished because
+        nothing describes it, which is the assumption this branch exists to
+        stop making. A file that cannot be read, or a clone that no longer
+        holds it, answers `unreadable` with the reason: not complete, and not
+        the `partial` that drops. A gate built without `server_dir` — the
+        three `repair.py` status probes, which read `complete` nowhere — can
+        never read complete on this branch and says why.
+
+        The files are opened on this branch only. `absent`, `partial` and
+        `imported` are decided before them, so a fresh install and a marked
+        one pay nothing for this.
 
         The order is unchanged and the reason is unchanged: the state is decided
         first, by what a wrong answer costs, and completeness is computed
@@ -1383,9 +1485,12 @@ class MarkerGate:
             if marker is not None:
                 return docker.ImportState("imported", self._marker_detail(marker), complete=True)
             populated, absent_tables = self._player_rows(present)
-            # Only when it matters: the counts below are two more round trips on
-            # a live server, and every other branch answers without them.
-            short = self._short_schemas(present) if populated else ()
+            # Only when it matters: the files and the listings below are the
+            # probe's one expensive reading, and every other branch answers
+            # without them.
+            short, named = self._missing_tables(present) if populated else ((), frozenset())
+        except _Unreadable as exc:
+            return docker.ImportState("unreadable", str(exc))
         except docker.DockerCommandError as exc:
             # THE ENTRANCE for what the DAEMON said, `apply()`'s shape rather
             # than `_run_sql()`'s: redacted here, once, so the branch that
@@ -1398,7 +1503,7 @@ class MarkerGate:
                 f"({_redact(str(exc), self._password)}). {_VOLUME_NOTE}",
             )
         if populated:
-            unfinished = self._unfinished(present, absent_tables, short)
+            unfinished = self._unfinished(present, absent_tables, short, named)
             if unfinished:
                 return docker.ImportState(
                     "populated",
@@ -1612,52 +1717,109 @@ class MarkerGate:
                 said.append(f"{rows} rows in {schema}.{data.table}")
         return ", ".join(said), tuple(missing)
 
-    def _short_schemas(self, present: Sequence[str]) -> tuple[str, ...]:
-        """The filled schemas that do not show this plan's own completion evidence.
+    def _missing_tables(self, present: Sequence[str]) -> tuple[tuple[str, ...], frozenset[str]]:
+        """Per schema, why it does not hold what the plan's files create; and the tables so named.
 
-        One query per schema at most, and only for the schemas this plan's files
-        fill — the schema's own declared count, asked in the plan's own words.
-        A filled schema the plan declares nothing probeable about is reported
-        without asking anything, because there is no question to ask: see
-        `probe()` for why that is incomplete rather than assumed finished.
+        One sentence per schema that is short, naming the first three missing
+        tables and counting the rest, so a refusal over a 300-table dump is a
+        sentence and not a listing. The second half is every `schema.table`
+        those sentences already cover, so `_unfinished()` does not name a
+        `player_data` table twice when a dump also creates it.
 
-        A schema that is not there at all is skipped here; `probe()` names the
-        schema itself in that case and saying both would report one absence
-        twice.
+        One `SCHEMA_TABLES` listing per schema at most, and none for a schema
+        nothing reaches or one whose files create nothing (there is no
+        question to ask). A schema that is not there is skipped here;
+        `probe()` names the schema itself in that case.
+
+        Raises:
+            _Unreadable: from `_created()`.
+            docker.DockerCommandError: a listing could not be asked.
         """
+        if self._server_dir is None:
+            return (
+                (
+                    "the install folder was not given to this probe, so the tables this "
+                    "plan's files create could not be checked",
+                ),
+                frozenset(),
+            )
+        created = self._created()
         said: list[str] = []
-        for name in self._filled:
+        named: set[str] = set()
+        for name in self._names:
             if name not in present:
                 continue
-            wanted = self._expected.get(name)
-            if wanted is None:
-                said.append(
-                    f"this plan's files fill {name} but it declares no table count for it, "
-                    "so a finished import cannot be recognised there"
-                )
+            expected = created.get(name, [])
+            if not expected:
+                if name in self._filled:
+                    said.append(
+                        f"this plan's files fill {name} but create no table in it, so a "
+                        "finished import cannot be recognised there"
+                    )
                 continue
-            held = self._count(
-                name, SCHEMA_TABLE_COUNT.format(schema=name), f"the tables in {name}"
+            held = self._tables(name)
+            missing = [table for table in expected if table not in held]
+            if not missing:
+                continue
+            first = ", ".join(missing[:3])
+            if len(missing) > 3:
+                first += f" and {len(missing) - 3} more"
+            said.append(
+                f"{name} is missing {len(missing)} of the {len(expected)} tables this plan's "
+                f"files create ({first})"
             )
-            if held < wanted:
-                said.append(
-                    f"{name} holds {held} tables and this plan's own check requires {wanted}"
-                )
-        return tuple(said)
+            named.update(f"{name}.{table}" for table in missing)
+        return tuple(said), frozenset(named)
+
+    def _created(self) -> dict[str, list[str]]:
+        """`created_tables()` over this plan's file phases in this install's folder.
+
+        `expand()` over the file phases only, with no tokens: a `statements`
+        phase is not evidence and its tokens are not in reach here. Every
+        refusal `expand()` raises — a `fail` phase whose pattern matches
+        nothing, a folder that could not be listed — is a plan whose files
+        cannot be read, and `probe()` answers `unreadable` with its sentence.
+        """
+        assert self._server_dir is not None
+        phases = tuple(phase for phase in self._plan.phases if phase.files or phase.into_each)
+        if not phases:
+            return {}
+        try:
+            runs = expand(
+                self._plan.model_copy(update={"phases": phases}),
+                self._server_dir,
+                self._schemas,
+                {},
+            )
+        except InstallerError as exc:
+            raise _Unreadable(
+                f"the tables this plan's files create could not be checked: {exc}"
+            ) from exc
+        return created_tables(runs, self._names)
+
+    def _tables(self, schema: str) -> frozenset[str]:
+        """The names `information_schema` lists for one schema; empty for a schema with none."""
+        rows = self._query(schema, SCHEMA_TABLES.format(schema=schema)).splitlines()
+        return frozenset(row.strip() for row in rows if row.strip())
 
     def _unfinished(
-        self, present: Sequence[str], absent_tables: Sequence[str], short: Sequence[str]
+        self,
+        present: Sequence[str],
+        absent_tables: Sequence[str],
+        short: Sequence[str],
+        named: Container[str],
     ) -> tuple[str, ...]:
         """Why this populated install is not a finished import; `()` when it is.
 
         Schemas that are not there first and in the plan's own order, then the
-        schemas that are short, then the tables — largest fact first, and a
-        schema that was never created would otherwise have its tables named one
-        by one under it. Asks nothing itself: every reading was taken by
-        `probe()`, `_player_rows()` and `_short_schemas()` already.
+        schemas that are short of what their files create, then the named
+        tables not already covered by those — largest fact first, and a schema
+        that was never created would otherwise have its tables named one by
+        one under it. Asks nothing itself: every reading was taken by
+        `probe()`, `_player_rows()` and `_missing_tables()` already.
         """
         return (
             *(f"{name} does not exist" for name in self._names if name not in present),
             *short,
-            *(f"{table} is missing" for table in absent_tables),
+            *(f"{table} is missing" for table in absent_tables if table not in named),
         )

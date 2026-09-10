@@ -1579,6 +1579,10 @@ class CmangosInstaller(StagedInstaller):
             schemas=self._schemas(),
             sql_query=self._query_seam(),
             exec_stdin=self._seams.exec_stdin,
+            # The folder the plan's files are read from on the `populated`
+            # branch: without it the gate can never read a marker-less
+            # install as complete, and the updates press refuses it (T19).
+            server_dir=ctx.server_dir,
         )
 
     def _query_seam(self) -> sqlplan.SqlQuery:
