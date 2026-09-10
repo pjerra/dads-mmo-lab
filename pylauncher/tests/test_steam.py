@@ -8,7 +8,9 @@ tested against a hand-written fixture tests the fixture.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -34,13 +36,23 @@ def _captured_entries() -> list[dict[str, object]]:
     return [sc["vdf"] for sc in json.loads(CAPTURE.read_text(encoding="utf-8"))["shortcuts"]]
 
 
-def _profile(home: Path) -> Path:
-    """A single Steam profile under `home`, laid out the way the box's is."""
+def _profile(home: Path, config_vdf: bytes | None = None) -> Path:
+    """A single Steam profile under `home`, laid out the way the box's is.
+
+    `config_vdf` is bytes rather than text so a test can put a line ending or a
+    byte that is not UTF-8 into it and ask for it back unchanged.
+    """
     config = home / ".local/share/Steam/userdata/18347166/config"
     config.mkdir(parents=True)
     (home / ".local/share/Steam/config").mkdir(parents=True)
-    (home / ".local/share/Steam/config/config.vdf").write_text(_CONFIG_VDF, encoding="utf-8")
+    (home / ".local/share/Steam/config/config.vdf").write_bytes(
+        config_vdf if config_vdf is not None else _CONFIG_VDF.encode("utf-8")
+    )
     return config
+
+
+def _config_bytes(home: Path) -> bytes:
+    return (home / ".local/share/Steam/config/config.vdf").read_bytes()
 
 
 def _proton(home: Path, name: str = "GE-Proton11-6-x86_64") -> None:
@@ -238,6 +250,8 @@ def test_it_writes_two_entries_the_artwork_and_the_compat_tool(tmp_path: Path) -
     assert len(report.artwork) == 6
     assert all(path.exists() for path in report.artwork)
     assert report.compat_tool == "GE-Proton11-6-x86_64"
+    assert not list(config.rglob(f"*{steam.TMP_SUFFIX}"))
+    assert not list((tmp_path / ".local/share/Steam/config").glob(f"*{steam.TMP_SUFFIX}"))
     assert "CompatToolMapping" in (tmp_path / ".local/share/Steam/config/config.vdf").read_text(
         encoding="utf-8"
     )
@@ -479,7 +493,7 @@ def test_the_backup_exists_before_the_file_is_written(
         raise OSError("the disk went away")
 
     monkeypatch.setattr(steam, "_write_shortcuts", _explode)
-    with pytest.raises(OSError):
+    with pytest.raises(steam.SteamRefusal):
         _shortcuts(tmp_path, client_dir=client).add()
 
     backup = config / "shortcuts.vdf.yulon-bak-20260910-200500"
@@ -587,3 +601,182 @@ def test_the_confirmation_names_the_entries_the_file_the_backup_and_the_tool(
     assert "GE-Proton11-6-x86_64" in said
     assert "6 artwork files" in said
     assert "Restart Steam" in said
+
+
+# --------------------------------------------------------------------------
+# round 2 -- what an interrupted write, a stray byte and a read-only disk do
+# --------------------------------------------------------------------------
+
+
+def _no_rename(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop every `Path.replace`, the way ENOSPC or a SIGKILL would."""
+
+    def _die(self: Path, target: object) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(Path, "replace", _die)
+
+
+def test_an_interrupted_shortcuts_write_leaves_the_target_exactly_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write is a rename, so an interruption leaves the old file whole.
+
+    `write_bytes` truncates and then writes, and a TRUNCATED `shortcuts.vdf` is
+    the same damage as a missing terminator: Steam drops every non-Steam
+    shortcut in the library, including the ones the user made by hand. This
+    module already refuses to risk that over a byte; it should not risk it over
+    a full disk either.
+
+    The stale temp file is deliberate: whatever a previous interruption left
+    under that name is overwritten, not added to.
+    """
+    target = tmp_path / "shortcuts.vdf"
+    original = steam.vdf_dump({"shortcuts": {"0": dict(_captured_entries()[0])}})
+    target.write_bytes(original)
+    stale = tmp_path / f"shortcuts.vdf{steam.TMP_SUFFIX}"
+    stale.write_bytes(b"debris from an interrupted press last week")
+    _no_rename(monkeypatch)
+
+    with pytest.raises(OSError):
+        steam._write_shortcuts(target, b"the new document")
+
+    assert target.read_bytes() == original
+    assert stale.read_bytes() == b"the new document"
+
+
+def test_an_interrupted_compat_write_leaves_steams_global_config_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rename, and this file is Steam's whole global configuration."""
+    target = tmp_path / "config.vdf"
+    target.write_text(_CONFIG_VDF, encoding="utf-8")
+    _no_rename(monkeypatch)
+
+    with pytest.raises(OSError):
+        steam._write_compat(target, "something else entirely")
+
+    assert target.read_text(encoding="utf-8") == _CONFIG_VDF
+    assert (tmp_path / f"config.vdf{steam.TMP_SUFFIX}").exists()
+
+
+def test_a_config_vdf_with_a_byte_that_is_not_utf8_survives_the_edit(
+    tmp_path: Path,
+) -> None:
+    """Read with `surrogateescape`, so written with it too, or the file is lost.
+
+    A game name from a Windows code page is enough to put one such byte in
+    Steam's config. It decodes into a surrogate and a STRICT write raises
+    `UnicodeEncodeError` on the way back out — which, before the write became a
+    rename, arrived after the truncation, leaving the one file this app has no
+    business damaging empty.
+    """
+    grubby = _CONFIG_VDF.encode("utf-8").replace(b'"bad"', b'"b\xffd"')
+    config = _profile(tmp_path, grubby)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+
+    _shortcuts(tmp_path, client_dir=client).add()
+
+    after = _config_bytes(tmp_path)
+    assert b"\xff" in after
+    expected, _ = steam.compat_mapping(
+        grubby.decode("utf-8", "surrogateescape"),
+        appid=steam.gen_appid(f'"{client / "WoW.exe"}"', "Turtle WoW"),
+        tool="GE-Proton11-6-x86_64",
+    )
+    assert after == expected.encode("utf-8", "surrogateescape")
+    assert (config / "shortcuts.vdf").exists()
+
+
+def test_a_crlf_config_vdf_keeps_its_crlf(tmp_path: Path) -> None:
+    """Universal newlines would hand back `\n` and rewrite the file LF-only.
+
+    That is not a cosmetic difference: it is every line of a 17 KB file changed,
+    under a write-ledger row that says every other byte is preserved. Read with
+    `newline=""` the CRLF branch of `compat_mapping()` is reachable, and it is
+    the only thing that makes that row true on a profile carried over from
+    Windows.
+    """
+    crlf = _CONFIG_VDF.replace("\n", "\r\n").encode("utf-8")
+    _profile(tmp_path, crlf)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+
+    _shortcuts(tmp_path, client_dir=client).add()
+
+    after = _config_bytes(tmp_path)
+    assert b"\r\n" in after
+    assert b"\n" not in after.replace(b"\r\n", b"")
+    assert b'"CompatToolMapping"\r\n' in after
+
+
+def test_an_unreadable_shortcuts_file_is_refused_with_the_offset_and_a_remedy(
+    tmp_path: Path,
+) -> None:
+    """A type byte the codec has never seen is a refusal, not a traceback.
+
+    `vdf_parse` is right to raise rather than guess — the file holds shortcuts
+    somebody else made and a wrong guess loses them. It is not right for
+    "unknown VDF type 0x07 at offset 11" to be the whole of what a button says.
+    The offset survives into the sentence because it is the only thing anybody
+    holding `xxd` can use.
+    """
+    config = _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+    bad = b"\x00shortcuts\x00\x07x\x00\x08\x08"
+    (config / "shortcuts.vdf").write_bytes(bad)
+
+    with pytest.raises(steam.SteamRefusal) as caught:
+        _shortcuts(tmp_path, client_dir=client).add()
+
+    said = str(caught.value)
+    assert str(config / "shortcuts.vdf") in said
+    assert "offset 11" in said
+    assert "Nothing was written" in said
+    assert (config / "shortcuts.vdf").read_bytes() == bad
+    assert not (config / "grid").exists()
+
+
+def test_a_read_only_filesystem_says_so_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EROFS is `OSError` and NOT a `PermissionError`, which is the whole point.
+
+    "The writer must not need an unlock" is what 8.8's gate line asks the box to
+    record, so a read-only filesystem is the one failure this feature was always
+    going to be asked about — and it was the one that reached the panel as a
+    traceback. The sentence says so, and says the Deck's profile is not on the
+    read-only root anyway.
+    """
+    _profile(tmp_path)
+    _proton(tmp_path)
+    client = _client(tmp_path)
+
+    def _read_only(paths: object, payload: object) -> None:
+        raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+
+    monkeypatch.setattr(steam, "_write_artwork", _read_only)
+
+    with pytest.raises(steam.SteamRefusal) as caught:
+        _shortcuts(tmp_path, client_dir=client).add()
+
+    assert "Read-only file system" in str(caught.value)
+    assert "cannot be written" in str(caught.value)
+    assert "steamos-readonly disable" in str(caught.value)
+
+
+def test_the_newest_proton_in_compatibilitytools_d_wins_not_the_alphabetical_one(
+    tmp_path: Path,
+) -> None:
+    """`GE-Proton9-27` sorts above `GE-Proton11-6` one character at a time.
+
+    A box with both installed would have had its client launched under the older
+    Proton, silently — the mapping names a tool that exists, so nothing complains.
+    """
+    _proton(tmp_path, name="GE-Proton9-27")
+    _proton(tmp_path, name="GE-Proton11-6-x86_64")
+    _proton(tmp_path, name="GE-Proton11-2")
+
+    assert steam.find_compat_tool(tmp_path / ".local/share/Steam") == "GE-Proton11-6-x86_64"

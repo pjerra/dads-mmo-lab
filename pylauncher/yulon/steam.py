@@ -108,6 +108,11 @@ def vdf_parse(buf: bytes, i: int = 0) -> tuple[VdfMap, int]:
     out: VdfMap = {}
     while i < len(buf):
         kind = buf[i]
+        # Kept for the error below. The key is read BEFORE the type is dispatched,
+        # so `i` has already moved past it by the time an unknown type is noticed,
+        # and the offset the prior art reports is the one AFTER the name rather
+        # than the byte anybody would look for with `xxd`.
+        at = i
         i += 1
         if kind == END:
             return out, i
@@ -120,7 +125,7 @@ def vdf_parse(buf: bytes, i: int = 0) -> tuple[VdfMap, int]:
             out[key] = struct.unpack_from("<i", buf, i)[0]
             i += 4
         else:
-            raise ValueError(f"unknown VDF type 0x{kind:02x} at offset {i - 1}")
+            raise ValueError(f"unknown VDF type 0x{kind:02x} at offset {at}")
     return out, i
 
 
@@ -220,9 +225,18 @@ NO_PROTON = (
     "build into {tools}, then press Add to Steam… again."
 )
 
+UNREADABLE = (
+    "{path} is not a shortcuts file this can read: {problem}. Yu'lon will not guess "
+    "at bytes it does not understand in a file that also holds shortcuts somebody "
+    "else made — a wrong guess there loses them. Nothing was written. Close Steam, "
+    "move that file aside (Steam writes a fresh one), and press Add to Steam… again."
+)
+
 UNWRITABLE = (
-    "{path} cannot be written ({reason}). That folder belongs to the Steam "
-    "account signed in on this machine; nothing was changed."
+    "{path} cannot be written ({reason}). That folder belongs to the Steam account "
+    "signed in on this machine, and nothing was changed. On a Steam Deck this is NOT "
+    "the read-only root: the Steam profile lives under /home, which is a separate "
+    "writable partition, so no `steamos-readonly disable` belongs here."
 )
 
 
@@ -299,6 +313,31 @@ preferred over one of these.
 
 _PROTON_VERSION = re.compile(r"^Proton (\d+)\.")
 
+_TOOL_VERSION = re.compile(r"Proton[- ]?(\d+)")
+"""The major version out of a compatibility tool's folder name, official or not.
+
+`GE-Proton11-6-x86_64` -> 11, `GE-Proton9-27` -> 9, `Proton 9.0` -> 9.
+"""
+
+_DIGITS = re.compile(r"\d+")
+
+
+def _tool_order(name: str) -> tuple[int, list[int], str]:
+    """Sort key for a compatibility tool, newest first when reversed.
+
+    A plain lexicographic sort puts `GE-Proton9-27` above `GE-Proton11-6`, because
+    `9` > `1` one character at a time — so a box with both installed would have
+    its client launched under the older Proton, silently. This is the same
+    version-awareness `_PROTON_VERSION` gives the official builds, applied to the
+    folder names in `compatibilitytools.d`, which are not Valve's to shape.
+
+    The major version leads; the remaining numbers break ties (`11-6` above
+    `11-2`); the name settles the rest, so the order is total and stable.
+    """
+    match = _TOOL_VERSION.search(name)
+    major = int(match.group(1)) if match else -1
+    return (major, [int(n) for n in _DIGITS.findall(name)], name)
+
 
 def _tool_name_from_manifest(manifest: Path) -> str | None:
     """The internal name out of a `compatibilitytool.vdf`, comments stripped.
@@ -332,9 +371,12 @@ def find_compat_tool(steam_root: Path) -> str | None:
     """
     tools = steam_root / "compatibilitytools.d"
     if tools.is_dir():
-        for entry in sorted(tools.iterdir(), reverse=True):
-            if not entry.is_dir():
-                continue
+        installed = sorted(
+            (e for e in tools.iterdir() if e.is_dir()),
+            key=lambda e: _tool_order(e.name),
+            reverse=True,
+        )
+        for entry in installed:
             return _tool_name_from_manifest(entry / "compatibilitytool.vdf") or entry.name
     common = steam_root / "steamapps" / "common"
     if common.is_dir():
@@ -524,6 +566,11 @@ def compat_mapping(text: str, *, appid: int, tool: str) -> tuple[str, str]:
     (open one straight after the `"Steam"` map, which is where Steam puts it).
     On `yulon-arch`, 2026-09-10, the section did not exist: `grep -c` answered 0.
     """
+    # `text` reaches here through `open(..., newline="")`, so the line endings are
+    # the file's own. Read with universal newlines this branch is DEAD -- Python
+    # hands back `\n` whatever the file holds, a CRLF `config.vdf` is rewritten
+    # LF-only, and the ledger's "every other byte preserved" is a false claim
+    # about several hundred lines.
     newline = "\r\n" if "\r\n" in text else "\n"
     key = f'"{to_unsigned(appid)}"'
     ind = _STEAM_KEY_INDENT
@@ -602,7 +649,8 @@ Measured on `yulon-arch`, 2026-09-10: with a `_logo.png` present Steam draws it
 INSTEAD of the entry's name on the game page, so an entry whose logo is a mark
 with no wordmark in it loses its title altogether — and these two entries differ
 by exactly one word (`… Server`). The frame is
-`14-logo-slot-hides-the-name.png` in that gate folder: a page with a Play button,
+`pyplan/gates/8.8-steam-shortcuts-yulon-arch-2026-09-10/1-logo-slot-hid-the-name.png`:
+a page with a Play button,
 a jade Y and nothing to say which of the two it is. Leaving the slot empty makes
 Steam fall back to the name, which is the whole point of writing them.
 """
@@ -732,17 +780,57 @@ def _backup(path: Path, stamp: str) -> Path | None:
     return backup
 
 
+TMP_SUFFIX = ".yulon-tmp"
+"""The sibling a file is built in before it is moved onto its own name.
+
+`Path.write_bytes` opens for writing, which TRUNCATES, and then writes. Between
+those two the file exists and is empty or half a file, and for these two files
+that window is not academic:
+
+* a truncated `shortcuts.vdf` makes Steam drop **every** non-Steam shortcut in
+  the library, ours and the user's alike -- the same damage as a missing
+  terminator, which this module already refuses to risk;
+* a truncated `config/config.vdf` is Steam's whole global configuration.
+
+ENOSPC, a SIGKILL, a laptop lid: the write becomes a rename, which is atomic on
+every filesystem this app runs on, and an interruption leaves the target exactly
+as it was with the debris under a name nothing reads. `state.py:126-131` is the
+same pattern and made the same argument first.
+"""
+
+
 def _write_shortcuts(path: Path, payload: bytes) -> None:
-    path.write_bytes(payload)
+    """The whole document, through a sibling temp file and a rename."""
+    tmp = path.with_name(path.name + TMP_SUFFIX)
+    tmp.write_bytes(payload)
+    tmp.replace(path)
 
 
 def _write_artwork(paths: Sequence[Path], payload: bytes) -> None:
+    """The grid PNGs, in place.
+
+    NOT through a temp file, and the asymmetry is deliberate: a half-written PNG
+    is a tile that does not draw, which the next press replaces. Neither of the
+    other two files has a failure that small.
+    """
     for path in paths:
         path.write_bytes(payload)
 
 
 def _write_compat(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
+    """Steam's global config, through a sibling temp file and a rename.
+
+    `errors="surrogateescape"` because that is how it was READ. A file with one
+    byte that is not UTF-8 in it -- a game name from a Windows code page, say --
+    decodes into surrogates and a strict write raises `UnicodeEncodeError` on
+    them. Written in place that exception arrived AFTER the truncation, so the
+    one file this app has no business damaging was left empty by a writer that
+    only meant to add three lines. `newline=""` so the line endings written are
+    the ones `compat_mapping()` chose from the file's own.
+    """
+    tmp = path.with_name(path.name + TMP_SUFFIX)
+    tmp.write_text(text, encoding="utf-8", errors="surrogateescape", newline="")
+    tmp.replace(path)
 
 
 # --------------------------------------------------------------------------
@@ -846,7 +934,16 @@ class SteamShortcuts:
         path = config / "shortcuts.vdf"
         root: VdfMap = {"shortcuts": {}}
         if path.exists():
-            root, _ = vdf_parse(path.read_bytes())
+            # `vdf_parse` is right to raise on a type byte it has never seen — the
+            # alternative is guessing at a file full of somebody else's shortcuts.
+            # It is not right to let "unknown VDF type 0x07 at offset 24" reach a
+            # button, which is the one message this feature can produce with no
+            # remedy in it. The offset is kept: it is the only thing anybody
+            # looking at the file with `xxd` can use.
+            try:
+                root, _ = vdf_parse(path.read_bytes())
+            except ValueError as exc:
+                raise SteamRefusal(UNREADABLE.format(path=path, problem=exc)) from exc
             root.setdefault("shortcuts", {})
         shortcuts = root["shortcuts"]
         before = len(shortcuts)
@@ -872,11 +969,12 @@ class SteamShortcuts:
             )
 
         compat_path = steam_root / "config" / "config.vdf"
-        compat_text, _ = compat_mapping(
-            compat_path.read_text(encoding="utf-8", errors="surrogateescape"),
-            appid=int(client_entry["appid"]),
-            tool=tool,
-        )
+        # `newline=""` and not `read_text`: universal newlines hand back `\n`
+        # whatever the file holds, which would make `compat_mapping()`'s CRLF
+        # branch unreachable and rewrite a CRLF file LF-only — several hundred
+        # changed lines under a ledger row promising every other byte preserved.
+        with compat_path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+            compat_text, _ = compat_mapping(fh.read(), appid=int(client_entry["appid"]), tool=tool)
 
         stamp = self.now().strftime("%Y%m%d-%H%M%S")
         try:
@@ -891,8 +989,17 @@ class SteamShortcuts:
             _write_artwork(server_art, icon_png(SERVER_ACCENT))
             _write_compat(compat_path, compat_text)
             _write_shortcuts(path, payload)
-        except PermissionError as exc:
-            raise SteamRefusal(UNWRITABLE.format(path=path.parent, reason=exc.strerror)) from exc
+        except OSError as exc:
+            # `OSError` and not `PermissionError`: a read-only filesystem answers
+            # EROFS, which is `OSError` and not a subclass of `PermissionError`,
+            # so the one case the checklist's gate line asks about — "the writer
+            # must not need an unlock" — was the one that reached the panel as a
+            # traceback instead of as the sentence that answers it. ENOSPC and a
+            # vanished directory land here too, and with the writes atomic the
+            # files they interrupt are still whole.
+            raise SteamRefusal(
+                UNWRITABLE.format(path=path.parent, reason=exc.strerror or exc)
+            ) from exc
 
         logger.info(
             f"steam: wrote {len(reparsed['shortcuts'])} shortcut(s) to {path} "

@@ -21,6 +21,13 @@ live half calls `SteamShortcuts.add()` from a small driver on the box with **no 
 the real `platform.detect()`, the real `pgrep -x steam`, the real home directory. The
 driver's first three lines are in every press capture and say which of each it got.
 
+**The names in the frames are the driver's, not the button's.** The driver passed
+`game="Turtle WoW"`; the button passes `entry.name`, which for this game is
+**"WoW Tortoise"** (`catalog.json:949`). So a press through the app produces
+*WoW Tortoise* and *WoW Tortoise Server*, and different appids with them. Nothing
+else about the run changes — the appid is `crc32(Exe + AppName)` either way, and every
+claim below is about the mechanism rather than about those two strings.
+
 **The GUI was not driven.** Two reasons, and the first was measured rather than assumed:
 Qt could not initialise its `xcb` platform plugin on this box at all
 (*"This application failed to start because no Qt platform plugin could be
@@ -223,7 +230,7 @@ Same sha256 after the refusal as before it: **nothing was written.**
 
 ## 7. The tests, and each one's named mutation — `mutations.txt`
 
-Twelve mutations, each applied to the shipped source, the one test that should catch it
+Nineteen mutations, each applied to the shipped source, the one test that should catch it
 run, then the source restored and the test run again. `__pycache__` is purged **on both
 sides of every run** — a stale `.pyc` reports the unmutated module and every mutation
 "survives". Every one was caught; the file lists them with the test and the reasoning.
@@ -236,6 +243,27 @@ true of a truncated real file anyway — the last entry's empty `tags` map contr
 ENDs of its own. It is now caught by
 `test_the_empty_document_is_the_exact_bytes_steam_writes`, eleven bytes written out by
 hand from the format.
+
+### Round 2, 2026-09-10 — seven code fixes, and why no capture was re-taken
+
+The cold review accepted this evidence and asked for seven code changes. **None of them
+changes a byte that anything in this folder records**, so nothing here was re-run and
+nothing here was re-taken:
+
+* the two writes go through a `.yulon-tmp` sibling and a rename — same final bytes, and
+  the presses above were not interrupted;
+* `config.vdf` is now written with `surrogateescape` and read with `newline=""` — this
+  box's config is UTF-8 and LF, so both are no-ops on it (`press-1-on-disk.txt`'s
+  `IDENTICAL` diff is the proof it was already byte-exact here);
+* an unknown VDF type byte becomes a refusal — this box's file has never had one;
+* `add()` catches `OSError` rather than `PermissionError` — nothing here hit either;
+* `compatibilitytools.d` is ordered by version — this box has exactly one tool, and it
+  is the one every capture names, `GE-Proton11-6-x86_64`;
+* one docstring cited a frame by a name it does not have; it now cites
+  `1-logo-slot-hid-the-name.png`, which is in this folder.
+
+The mutation count in §7 went from twelve to nineteen, and `mutations.txt` is the
+re-run of all of them.
 
 ## 8. The gate — `checks-all-green.txt`
 

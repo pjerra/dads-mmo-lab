@@ -46,5 +46,33 @@ OK  the button is absent on Windows and macOS
       test     : test_controller_view.py::test_the_steam_seam_is_none_on_windows_and_macos
       mutation : build the seam on every platform, so the button is drawn on Windows and macOS
       green before / RED with the mutation / green after : green / RED / green
+OK  an interrupted shortcuts write leaves the target exactly as it was
+      test     : test_steam.py::test_an_interrupted_shortcuts_write_leaves_the_target_exactly_as_it_was
+      mutation : write shortcuts.vdf in place, so an interruption leaves it truncated -- the state that makes Steam drop every non-Steam shortcut
+      green before / RED with the mutation / green after : green / RED / green
+OK  an interrupted compat write leaves Steam's global config as it was
+      test     : test_steam.py::test_an_interrupted_compat_write_leaves_steams_global_config_as_it_was
+      mutation : write Steam's global config in place, so an interruption leaves it empty
+      green before / RED with the mutation / green after : green / RED / green
+OK  a config.vdf with a byte that is not UTF-8 survives the edit
+      test     : test_steam.py::test_a_config_vdf_with_a_byte_that_is_not_utf8_survives_the_edit
+      mutation : write strict after reading with surrogateescape, which raises on the surrogate
+      green before / RED with the mutation / green after : green / RED / green
+OK  a CRLF config.vdf keeps its CRLF
+      test     : test_steam.py::test_a_crlf_config_vdf_keeps_its_crlf
+      mutation : read with universal newlines, which hands back \n and rewrites a CRLF file LF-only
+      green before / RED with the mutation / green after : green / RED / green
+OK  an unreadable shortcuts file is refused with the offset and a remedy
+      test     : test_steam.py::test_an_unreadable_shortcuts_file_is_refused_with_the_offset_and_a_remedy
+      mutation : let `unknown VDF type 0x07 at offset 11` reach the button with no remedy in it
+      green before / RED with the mutation / green after : green / RED / green
+OK  a read-only filesystem says so rather than raising
+      test     : test_steam.py::test_a_read_only_filesystem_says_so_rather_than_raising
+      mutation : catch only PermissionError, so EROFS -- SteamOS's read-only root, the case the gate line asks about -- escapes
+      green before / RED with the mutation / green after : green / RED / green
+OK  the newest Proton in compatibilitytools.d wins, not the alphabetical one
+      test     : test_steam.py::test_the_newest_proton_in_compatibilitytools_d_wins_not_the_alphabetical_one
+      mutation : sort the folder names as text, which puts GE-Proton9-27 above GE-Proton11-6
+      green before / RED with the mutation / green after : green / RED / green
 
 every mutation was caught
