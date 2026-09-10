@@ -23,13 +23,21 @@ Pressed from `f31a1d2d` (T14 merged as `ed035e41` plus the lead's sentence edits
 
 ## The box, as found and as left
 
-Found at 14:16 CEST: **every Yu'lon container exited**, Tortoise cleanly
-(`Exited (0)`, 3 hours). Only `r6` (not this project's) was up. So the world was
-DOWN on arrival.
+Found with the world and auth exited: the earliest listing in this folder
+(`01-readings-before.txt:75-80`) reads `tortoise-mangosd` and `tortoise-realmd`
+`Exited (0) 3 hours ago` and every `vanilla-*` container exited 8 hours; by then
+`startdb.py` had already started `tortoise-db` for the before-readings
+(`Up 11 seconds (healthy)`), so the database's as-found state and the arrival
+clock have no capture of their own. `r6` (not this project's) was up. So the
+world was DOWN on arrival.
 
-Left at 14:24 CEST: **the same** — `tortoise-mangosd`, `tortoise-realmd`,
-`tortoise-db` all `Exited (0)`, nothing else of this project running, `r6`
-untouched (`08-stop-restore.txt`). The Start below was done to prove the world
+Left at 14:25 CEST (`stop_staged()` stamped 14:25:37): Stop through the app,
+`controller.stop() -> True`, `InstallStatus(db=False, auth=False, world=False)`,
+`world_running` False (`08-stop-restore.txt`). No container listing was taken
+after that Stop, so the exit codes, "nothing else of this project running" and
+`r6` untouched are proved through the press (`01-`, `07-`), not as-left.
+`09-containers-day-after.txt`, a read-only `docker ps -a` taken by the lead the
+next day, shows the Tortoise containers still exited since the 9th and `r6` up. The Start below was done to prove the world
 still comes up and was undone immediately after. No compile, no rebuild, no
 rollback restore, no account or character touched — every statement this capture
 issued of its own accord is a `SELECT` or a `SHOW`.
@@ -63,7 +71,7 @@ engine is the one `install_wiring.installer_for_app()` builds.
 | `frame-1b-button.png` | the button alone |
 | `frame-2-confirmation.png` | the confirmation: the three files, the marker clause, the stopped-world clause, the guild-bank clause, **No as the default** |
 | `frame-3-report.png` | the whole window after the press |
-| `frame-3b-report-panel.png` | the panel: the two log lines, and the FAILED header carrying the refusal |
+| `frame-3b-report-panel.png` | the panel: the header, the opening note, the two stage markers, the cancel note, and the FAILED header carrying the refusal. The ticket's two route lines ("These databases are imported already, but N SQL step(s) of …" and "…: applied. The import marker is unchanged.") are **not** in it: the press refused before either is reached |
 
 ## The two log lines, and one that should not be there
 
@@ -89,7 +97,8 @@ is false on this route.
 `sql-trace.txt` records every subprocess the press started, with its argv and —
 through a wrapper on `docker._pump`, which is where `exec_stdin()` writes — the
 **statements themselves**. The install's password is redacted; it never appears
-in an argv anyway (`docker exec -e MYSQL_PWD` forwards the name).
+in the press's argv (`docker exec -e MYSQL_PWD` forwards the name); the capture's own
+`readings.py` and `probe.py` pass it to their client at run time and are not in the trace.
 
 Eight statements reached the database, all of them one `probe()` call:
 
@@ -106,8 +115,10 @@ What is **not** in it: no `DROP DATABASE`, no `CREATE DATABASE`, no
 `CREATE USER`, no `INSERT` into `yulon_install`, no `verify` rule, no SQL file
 streamed, and no second probe. The only docker verbs besides `exec` are
 `inspect` (the world's state, read twice — once before the database was started
-and once after, which is the race T7 closed) and `compose up -d --no-deps
-tortoise-db` — the database alone. **The world server was never started by the
+and once after, which is the race T7 closed), `ps` (the names, once, before the
+start) and `compose up -d --no-deps tortoise-db` — the database alone; the one
+non-docker process is the `systemd-inhibit` sleep the stage spine holds
+(`sql-trace.txt:1-6`). **The world server was never started by the
 press.**
 
 ## Readings, before and after
@@ -138,10 +149,11 @@ untouched, so nothing about this install's resume changed.
 
 `06-start-after-press.txt`: Start through the app took the stack from
 `InstallStatus(db=True, auth=False, world=False)` to
-`(db=True, auth=True, world=True)`, `world_running` True. The worldserver
-printed this project's own ready marker once for this run (`World server is up
-and running`), its log shows live playerbot and group SQL against the real data,
-and `07-readings-world-up.txt` reads 903 characters with the world up. Then
+`(db=True, auth=True, world=True)`, `world_running` True. No worldserver log is
+committed in this folder (the app saved one to its own log directory on Stop,
+`08-stop-restore.txt:1`), so nothing here shows the ready marker or the world's
+SQL; what is captured is the status change above and
+`07-readings-world-up.txt`, which reads 903 characters with the world up. Then
 Stop, back to the found state.
 
 ## Findings
