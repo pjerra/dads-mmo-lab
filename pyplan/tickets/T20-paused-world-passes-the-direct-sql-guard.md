@@ -24,3 +24,11 @@
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the rule as written (quoted), the tests and their mutations, the other readers and whether they are affected, deviations, status DONE.
+
+## Report (hand, Sonnet, 2026-09-10 15:26 CEST)
+
+- `e4514902` on `hand-t20` (base `85853e17`); gate ALL GREEN on m910q; 3 files +69/-2 (`docker.py` +15/-1, `test_docker.py` +13/-1, `test_controller_view.py` +43).
+- The rule, inverted: only the terminal statuses `exited`, `dead`, `created` read as down; everything else -- `paused`, `removing`, an unknown word -- reads as running, so a status Docker adds later fails closed; `None` on an unreadable inspect unchanged. Docstring records the reason (Codex on `a6e2aff6`).
+- Tests: the three-valued docker test flipped (`paused: True`, `dead: False`, `removing: True`, a future status `True`), RED first, mutation (the old two-word table) RED; `test_a_paused_world_refuses_direct_sql_on_the_wotlk_modules_tab` patches `container_state` (not `world_running`) so the real mapping runs through the shipped wiring into `applier.install()`: `ApplyError` with the 8.7a sentence, zero `DockerSql` calls; mutation RED (the un-refused guard fell through to `start_database` and the conftest docker-CLI guard failed the run).
+- Other readers: the 8.7a applier guard on all four games and `native.py`'s updates guard -- affected as intended; Tortoise `autoupdate.GuardedApplier`'s restart-survivability check shares the same callable, so a paused Tortoise world now reads as up there too (side effect, outside the file set, flagged); My Party, observability, readiness polling and channel_setup read `container_state` fields or UI state, not affected.
+- Deviations: none; the first commit lacked the trailer and was amended before the report, one commit on the branch. Status DONE.
