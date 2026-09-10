@@ -2557,11 +2557,24 @@ def world_running(container: str, *, wsl_distro: str | None = None) -> bool | No
     `controller_wow_tortoise.autoupdate`'s own guard counts it: a container in
     restart backoff is on its way back up, and its next start is the one that
     would read these tables.
+
+    ONLY the terminal statuses read as down: `exited`, `dead`, `created` -- a
+    container with nothing running has nothing resident to hold these tables.
+    Everything else is `True`, `paused` included (Codex, T20, on `a6e2aff6`):
+    a paused worldserver still keeps its whole database-backed state resident
+    in memory and can be unpaused to write it straight back over whatever
+    direct SQL just changed underneath it, which is the gap `paused: False`
+    left open. Named the other way around -- listing every word that counts as
+    up -- the next status Docker adds (`removing` already exists; there will be
+    others) would fall through to `False` and reopen the same gap until
+    someone noticed and added it by hand. Inverted, an unrecognised status
+    reads as running and the guard is asked, which is what its own `None`
+    branch above already prefers to a silent downgrade.
     """
     status_text = container_state(container, wsl_distro=wsl_distro).status
     if not status_text:
         return None
-    return status_text in ("running", "restarting")
+    return status_text not in ("exited", "dead", "created")
 
 
 def started_at(container: str, *, wsl_distro: str | None = None) -> str:

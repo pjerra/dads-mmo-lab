@@ -5442,6 +5442,49 @@ def test_the_wotlk_modules_tab_refuses_when_it_cannot_tell_whether_the_world_run
     assert sent == []
 
 
+def test_a_paused_world_refuses_direct_sql_on_the_wotlk_modules_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T20 (Codex, on `a6e2aff6`): `paused` used to read as down through this guard.
+
+    `docker.container_state` is patched here, not `docker.world_running` as
+    the two tests above patch it -- this one has to travel THROUGH
+    `docker.world_running`'s own `paused`-to-`True` mapping, not around it, or
+    it would prove nothing about the table the finding was about. The view
+    still calls `docker.world_running()`, which still calls
+    `docker.container_state()`, so a real `docker inspect` reporting `paused`
+    reaches the guard exactly as it would on a live box.
+
+    Its mutation is the old table, `paused: False`: with that in place a
+    paused world reads as not running, the guard returns instead of refusing,
+    and the statement lands in `sent`.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    asked: list[str] = []
+
+    def container_state(container: str, *, wsl_distro: str | None = None) -> docker.ContainerState:
+        asked.append(container)
+        return docker.ContainerState("paused", "T", 0)
+
+    monkeypatch.setattr(docker, "container_state", container_state)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "the world server is running" in str(raised.value)
+    assert "sql inline → world" in str(raised.value)
+    assert sent == [], "the guard is a pre-pass: nothing reached the runner"
+    assert asked == [WOTLK.container_spec().world], "asked about THIS install's world container"
+
+
 # ------------------------------------ the pending-database-updates button (T14)
 #
 # T11 built the route that applies a phase declared `rerun_on_marked` to an

@@ -5878,13 +5878,24 @@ def test_world_running_is_three_valued_and_an_unreadable_inspect_is_not_a_no(
     reuse T2's press warned about: every assertion but the last would still
     pass, and a host whose Docker would not answer would be told its world was
     down and allowed to write.
+
+    `paused`, `removing` and an unknown status are all `True` (T20, Codex on
+    `a6e2aff6`): only the terminal statuses -- a container with nothing
+    resident to hold these tables -- read as down. A paused worldserver still
+    holds its whole database-backed state in memory and can be unpaused to
+    write it back over direct SQL, which is the gap the finding named; the
+    unknown status stands in for whatever word Docker adds next that nobody
+    here has taught this function about.
     """
     answers = {
         "running": True,
         "restarting": True,
         "exited": False,
+        "dead": False,
         "created": False,
-        "paused": False,
+        "paused": True,
+        "removing": True,
+        "some-future-docker-status": True,
     }
     for status_text, expected in answers.items():
         monkeypatch.setattr(
