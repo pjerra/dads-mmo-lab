@@ -1,6 +1,6 @@
 # T28 — The catalog's two tile columns take unequal widths, so the tiles come out different sizes
 
-**Status:** OPEN (waiting for a lane)
+**Status:** IN PROGRESS (Sonnet hand on `hand-t28` since 2026-09-10 23:20 CEST)
 **Filed:** 2026-09-10 23:20 CEST by the lead (Fable), from the owner looking at the Yu'lon window Steam opened on `yulon-arch` ("the different servers on catalog is wrong sizes")
 **Hand:** Sonnet (a layout rule and its test), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/ui/catalog_view.py` **only** at the grid built in `__init__` (`:320-323` at `da3fd899`) and `_tile_text` / `_tile` if a size policy is needed; its test file (name it). Not the Install button's wiring, not the tile's sentences.
