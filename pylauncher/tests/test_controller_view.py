@@ -2742,6 +2742,41 @@ def test_an_entry_with_no_scheme_is_refused_by_both_create_sites_not_defaulted(
     assert reached == [], "the writer was reached with a guessed scheme"
 
 
+def test_an_entry_with_no_scheme_is_refused_by_the_repair_seam_too_not_defaulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T22: the `create` fix left the `reset=` binding beside it untouched.
+
+    Both lambdas are built from the same `entry` two lines apart; `create`
+    passed `checked_scheme(entry.accounts.scheme, entry.id)` and `reset` passed
+    nothing, which reached `reset_own_password`'s own keyword default,
+    `scheme="azerothcore"`. An entry the create seam above refuses for
+    declaring no scheme could still reach the 401 repair path and write
+    AzerothCore's `salt`/`verifier` columns into a table that may not have
+    them, or that happens to and never authenticates. `channel_setup._reset` is
+    the seam under test, for the same reason `_create` was in the sibling test:
+    it is the only handle a caller outside this module has on the bound
+    callable.
+    """
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    services = ControllerServices.for_wotlk(unmeasured, tmp_path, None)
+    reached: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.wotlk_accounts,
+        "reset_own_password",
+        lambda *args, **kwargs: reached.append(kwargs),
+    )
+
+    with pytest.raises(NotImplementedError) as caught:
+        services.channel_setup._reset("YULON_AB", "hunter2")
+    assert "declares no account scheme" in str(caught.value), str(caught.value)
+    assert "worldserver console" in str(caught.value), str(caught.value)
+
+    assert reached == [], "the writer was reached with a guessed scheme"
+
+
 def test_for_wotlk_takes_its_import_gate_from_install_wiring(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
