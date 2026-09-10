@@ -395,9 +395,19 @@ def _on_a_mac(monkeypatch: pytest.MonkeyPatch) -> None:
     The probe gates on the tool being present before it spawns anything, so the
     constant is pointed at a file that is there rather than the Path object
     being patched — instance attributes on `Path` are read-only.
+
+    `in_wsl` is pinned False for the same reason the other two lines exist: a
+    Mac is not WSL, and saying so is part of describing the machine. Without it
+    the fixture only half-describes one, and `networking.plan()` reads the REAL
+    host through `platform.in_wsl()` for that half. On a developer running the
+    suite inside WSL — which is where Yu'lon is developed since 2026-09-10 —
+    the loopback warning then takes the WSL branch and offers a portproxy,
+    which is the one remedy the macOS copy exists to rule out. The test read as
+    a broken assertion on the message text and was a broken premise.
     """
     monkeypatch.setattr(platform.sys, "platform", "darwin")
     monkeypatch.setattr(platform, "_SOCKETFILTERFW", Path(platform.__file__))
+    monkeypatch.setattr(platform, "in_wsl", lambda: False)
 
 
 def test_macos_gets_its_own_backend_and_no_port_commands(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
 
 from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import JOB_PACE, process_events, pump_until, spelled_bounds, wait_for_panel
-from yulon import runner, wsl
+from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallOptions
@@ -425,6 +425,20 @@ def test_a_script_that_exits_0_without_installing_is_not_remembered(
     )
     warned: list[str] = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    # This install FAILS, so `_offer_restart()` runs, and its predicate
+    # `docker_group_reexec()` asks the machine two questions in order: does this
+    # process already carry the docker group, and if not, does the group
+    # database say the user has it? The second question is `id -nG <user>`, a
+    # subprocess — which lands in `ran` and refutes the assertion below.
+    #
+    # Which question the machine stops at is a property of the DEVELOPER'S box,
+    # not of the code under test. CI's runner and the Yu'lon VMs carry the
+    # docker group, so they stop at the first and never spawn anything; a box
+    # with no docker at all, such as the WSL tree Yu'lon moved into on
+    # 2026-09-10, does not, so it reaches the second and the test failed there
+    # and only there. Stating the premise makes every box answer alike.
+    monkeypatch.setattr(platform, "_process_group_names", lambda gids: {"docker"})
 
     panel = LogPanel()
     view = CatalogView(
