@@ -1,0 +1,28 @@
+# shortcuts.vdf, the whole of T29
+stamp: 2026-09-10T23:09:55+00:00
+
+sha256, three readings:
+  22:03:24 as found                      e4068f33648ee2ce87e7f6b74e659ec1ac52d8ed79833ec000cef8a6b7c0e8f0
+  22:43:25 after Half 1 launched the client 244a23edd0d2e9236a7a55f2c2f51c669fbba96953841f953cf1e98c6124cb6c
+  23:09:55 as left                        351bae71561078da484d1c0ee1cd0d0188dabd5fdefe3b2d647fc717f3fc58b3
+
+The sum moved twice and the ENTRIES never did. Steam writes LastPlayTime into this
+file whenever a shortcut is launched, and this ticket asked for both entries to be
+launched. Below is the file as left, read with the app own codec (yulon.steam.vdf_parse):
+the two entries, their exes, and the one field that moved each time.
+
+=== shortcuts.vdf: as left ===  2026-09-10 23:09:55 UTC
+path: /home/pk/.local/share/Steam/userdata/18347166/config/shortcuts.vdf
+bytes consumed: 681 of 681
+  [0]
+      AppName: 'Turtle WoW'
+      Exe: '"/home/pk/clients/TurtleWoW/WoW.exe"'
+      StartDir: '"/home/pk/clients/TurtleWoW"'
+      LaunchOptions: ''
+      LastPlayTime: 1789080330 -> 2026-09-10T22:45:30+00:00
+  [1]
+      AppName: 'Turtle WoW Server'
+      Exe: '"/home/pk/y8v313/bin/python"'
+      StartDir: '"/home/pk/y8v313/bin"'
+      LaunchOptions: '/home/pk/y8/pylauncher/main.py'
+      LastPlayTime: 1789081420 -> 2026-09-10T23:03:40+00:00
