@@ -97,9 +97,12 @@ app wrote is the file `sConfigMgr` opens.
 | the module's own words above them: `# AiPlayerbot.PremadeSpecName.<class>.<specno> = <name>  #Name of the talent specialisation`, `# 0 <= specno < 20, 1 <= level <= 80` | `01-ground.log:50`, `:54` |
 | the module reads them at `src/PlayerbotAIConfig.cpp:493` — `os << "AiPlayerbot.PremadeSpecName." << cls << "." << spec;` | `01-ground.log:69` |
 | and answers out of them at `src/Ai/Base/Actions/ChangeTalentsAction.cpp:130` — `out << "Total " << specFound << " specs found";` — and `:157` — `out << "Spec " << param << " not found";` | `01-ground.log:70-71` |
-| the clone those line numbers are from: `HEAD b949b50bfcdd4fab937781bac2d7765e39330e4b`, nothing modified | `01-ground.log:31-32` |
+| the clone those line numbers are from: `HEAD b949b50bfcdd4fab937781bac2d7765e39330e4b`, nothing modified | `01-ground.log:30-31` |
 
-Those are exactly the two lines `party.py:854-892` cites, re-read on the box.
+Of the lines `party.py:854-892` cites, the lane re-read `PlayerbotAIConfig.cpp:493` and
+`ChangeTalentsAction.cpp:130` and `:157` on the box (`01-ground.log:69-71`); the gap rule at
+`:138-142` and the `==` compare at `:144` were re-read by the lead after the evidence review,
+`13-changetalents-reread.txt`, and read as `party.py` says.
 
 ## 2. Step 2 — the activation, pressed through the app
 
@@ -130,7 +133,7 @@ That is `Applier._require_own_clone()`'s case 5 (`apply.py:1621-1641`): the clon
 no `.yulon-clone.json` (`01-ground.log:31-33`), and a **folder-derived manifest has no `source`**, so
 there is no repository for it to be a checkout OF and `_adoption_refusal` is never asked —
 `NO_RECORD`, by `apply.py:1633-1637`'s own comment. The server directory IS claimed
-(`.yulon-install.json`, `01-ground.log:35`), so adoption fact 2 was never the problem; fact 1 has
+(`.yulon-install.json`, `01-ground.log:34`), so adoption fact 2 was never the problem; fact 1 has
 nothing to compare against. **A second refusal was waiting behind it and never ran:**
 `module_source.copy_folder()` (`module_source.py:514-519`) refuses a source inside the destination's
 own `modules/` directory, which this one is — the applier's ownership guard simply gets there first.
@@ -301,8 +304,10 @@ narrower, and it is a fact about this module worth carrying:
 
 **The module's own confirmation of a chosen spec cannot be heard, even by a listener that hears its
 other replies.** `ChangeTalentsAction::Execute` calls `botAI->ResetStrategies()` BETWEEN
-`SpecPick(param)` and `botAI->TellMaster(out)` (`ChangeTalentsAction.cpp`, quoted from the box at
-`06b-readback.log:6-21`), and `ResetStrategies` puts the non-combat strategies back to the conf's own
+`SpecPick(param)` and `botAI->TellMaster(out)` — `ChangeTalentsAction.cpp:70` (`out << SpecPick(param)`),
+`:71` (`botAI->ResetStrategies()`), `:93` (`botAI->TellMaster(out)`), re-read on the box after the
+evidence review in `13-changetalents-reread.txt` (the lane's own capture `06b-readback.log:6-21`
+elided the `spec` branch at its line 17) — and `ResetStrategies` puts the non-combat strategies back to the conf's own
 list, which is empty — `AiPlayerbot.RandomBotNonCombatStrategies = ""`, line 1371 of the deployed
 file (`06b-readback.log:22`). So the one branch of `TellMasterNoFacing` a bot master can hear is
 switched off by the action's own reply path, and `Picking frost pve` is dropped exactly as
@@ -350,6 +355,13 @@ deployed conf needs a fix the press finds. It did not:
   deliberately not acted on: the module is already compiled into this image and a conf file needs no
   rebuild. The report says it because a folder-derived module manifest says it for every module.
 * **The db-import SQL.** 65 files were reported as pending and none was run (`03-activate.log:36`).
+* **A restart the app did not recommend.** The activation reported `restart_recommended = False`
+  (`03-activate.log:38`), and this folder shows the world did not read the conf until the restart of
+  step 04 (`03-activate.log:66`, "still the RUNNING world's old config"; `04-restart-and-list.log:27-32`).
+  `apply.py:2207-2212` derives that flag from `build.restart`, `npcs`, direct SQL and `server_dbc`
+  alone, so no conf activation on any route ever recommends a restart: a user pressing the Modules
+  tab's Install is told nothing further is needed, and the spec still cannot take effect. An app
+  defect this run measured and did not fix; filed as **T27** by the lead.
 * **A second install of any kind.** Nothing was installed, cloned, or copied; one file was copied
   into place by `_conf()` and that is the whole of what the activation wrote.
 
@@ -358,7 +370,7 @@ deployed conf needs a fix the press finds. It did not:
 | left | why | capture |
 |---|---|---|
 | `env/dist/etc/modules/playerbots.conf` | the app's own artefact — what the Modules tab's activation puts there, and the thing 8.6 needs. Removing it would put the box back to "a chosen spec cannot take effect" | `08-box-as-found.log:57`, `:69-70` (still md5 `bd8d55ae…`), `09b-cleanup-out.txt` |
-| `env/dist/etc/modules/lua_scripts/dml_botadd.lua` | the sixth bridge script, put there by `party.deploy` — the app's own seam — because without it the panel's own preconditions read `ready: False` | `01-ground.log:98`, `02-harness.log:9`, `08-box-as-found.log:59-67` |
+| `env/dist/etc/modules/lua_scripts/dml_botadd.lua` | **T26's** script (merged in T26's unit half, `b86e23b0`), not this ticket's; T26's live half is not gated by this folder. The sixth bridge script, put there by `party.deploy` — the app's own seam — because without it the panel's own preconditions read `ready: False` | `01-ground.log:98`, `02-harness.log:9`, `08-box-as-found.log:59-67` |
 | `~/.local/share/yulon/manifests/user/wow-wotlk/modules/mod-playerbots.json` | the app's own record of the activation, written by `wotlk_modules.complete()` (`modules.py:126-140`) — the same call the tab makes, in the same pass. **Named as a judgement call for the lead:** it puts a `mod-playerbots` row in the Modules tab's list, whose Install would repeat this activation harmlessly (the conf exists, so `_conf()` copies nothing) and whose Remove is refused by the same guard press 1 hit. `wotlk_modules.forget()` drops it in one line (`t18press.py`, verb `forget`) if the lead would rather it were not there; deleting it by hand would leave the conf on disk with no record of what put it there, which is why it was kept | `03-activate.log:99` |
 
 Taken away again: `t18_stage.lua` (removed, and the world restarted so it is not loaded — the count
@@ -386,12 +398,12 @@ Read in step 01 and read back in step 08, and identical in both:
 
 | thing | value | step 01 | step 08 |
 |---|---|---|---|
-| `PERZI.last_login` | `2026-09-08 23:24:16` | `01-ground.log:131` | `08-box-as-found.log:14` |
-| `Pakka` | level 6, offline | `01-ground.log:134` | `08-box-as-found.log:17` |
-| the realm row, all three columns | `100.99.204.5`, `100.99.204.5`, `255.255.255.0` | `01-ground.log:136` | `08-box-as-found.log:19` |
-| `LootPet2.lua` | 37 294 bytes, 2026-09-09 02:06 | `01-ground.log:137` | `08-box-as-found.log:20`, `:66` |
-| `Logger.ALE` | `706:Logger.ALE=4,Console Server` | `01-ground.log:138` | `08-box-as-found.log:21` |
-| characters on the server | 1001, of which 500 online | `01-ground.log:144` (500 online) | `08-box-as-found.log:36`, `:38` |
+| `PERZI.last_login` | `2026-09-08 23:24:16` | `01-ground.log:130` | `08-box-as-found.log:14` |
+| `Pakka` | level 6, offline | `01-ground.log:133` | `08-box-as-found.log:17` |
+| the realm row, all three columns | `100.99.204.5`, `100.99.204.5`, `255.255.255.0` | `01-ground.log:135` | `08-box-as-found.log:19` |
+| `LootPet2.lua` | 37 294 bytes, 2026-09-09 02:06 | `01-ground.log:136` | `08-box-as-found.log:20`, `:66` |
+| `Logger.ALE` | `706:Logger.ALE=4,Console Server` | `01-ground.log:137` | `08-box-as-found.log:21` |
+| characters on the server | 1001, of which 500 online | `01-ground.log:148` (500 online) | `08-box-as-found.log:36`, `:38` |
 | the module clone | `HEAD b949b50bfcdd4fab937781bac2d7765e39330e4b`, nothing modified | `01-ground.log:31-32` | `08-box-as-found.log:73-75` |
 
 The realm row was never edited, so no authserver restart was owed or made. The world was restarted
@@ -408,7 +420,7 @@ run against this worktree before the commit, and a grep over every file in this 
 password-shaped patterns found nothing: `11-no-secrets.txt`.
 
 `--checks` (pytest + mypy ×3 + ruff + black) was run on m910q from this worktree's `pylauncher/`
-before the commit and came back ALL GREEN — 4095 passed, 6 skipped, mypy ×3, ruff and black clean
+before the commit and came back ALL GREEN (`12-checks-m910q.txt`, whose tail carries the mypy ×3, ruff and black lines and the verdict; the pytest count line was not captured, so no count is claimed here)
 (`12-checks-m910q.txt`). No file under `pylauncher/` was changed by
 this ticket, so it is a check that the branch is still green rather than a check of anything this
 run wrote.
@@ -433,5 +445,9 @@ run wrote.
    `nc -debug` at the end. It changes one bot's strategy list, does not survive a relog, and is the
    only reason the replies in sections 3 and 5 exist at all.
 6. **`.saveall` was sent three times**, to flush `character_talent` before each database reading.
+7. **No account or character of the lane's own was made.** The definition of done says "own account
+   and character only, erased after"; the lane used two of the module's existing characters and
+   created nothing (`08-box-as-found.log:23-32`: 103 accounts, 0 orphaned `account_access` rows,
+   PERZI unused), so there was nothing to erase. Section 9 says the same; it belongs here too.
    It is the server's own console command and saves every online character, which is what the
    world does periodically anyway.
