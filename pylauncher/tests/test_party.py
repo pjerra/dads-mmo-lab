@@ -1628,9 +1628,9 @@ def test_a_mass_dismissal_where_every_bot_is_unreadable_says_so_not_stayed() -> 
     )
     assert not any(d.removed for d in result.dismissals)
     assert "None of 2 bots were confirmed to have left the party" in result.sentence
-    assert "None of 2 bots left the party" not in result.sentence, (
-        "two polls that never read the table cannot say nobody left; all two may have"
-    )
+    assert (
+        "None of 2 bots left the party" not in result.sentence
+    ), "two polls that never read the table cannot say nobody left; all two may have"
     assert "Still here" not in result.sentence
     assert "Could not be confirmed" in result.sentence
     assert "connection refused" in result.sentence
@@ -1662,9 +1662,9 @@ def test_a_mixed_mass_dismissal_names_each_bucket_in_its_own_words() -> None:
     )
     assert [d.removed for d in result.dismissals] == [True, False, False]
     sentence = result.sentence
-    assert "1 of 3 bots confirmed left the party: Anmi." in sentence, (
-        "one read never happened, so the count is of what was confirmed"
-    )
+    assert (
+        "1 of 3 bots confirmed left the party: Anmi." in sentence
+    ), "one read never happened, so the count is of what was confirmed"
     still_here = sentence.split("Still here — ")[1].split(" Could not be confirmed")[0]
     unreadable = sentence.split("Could not be confirmed — ")[1]
     assert "Jilsur" in still_here and "Newbot" not in still_here
