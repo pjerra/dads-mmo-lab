@@ -39,14 +39,15 @@ Phase 8: **27 of 29** boxes. 8.7a ticked 2026-09-09 (`8dad8eda`). 8.6 open with 
 
 Artifact "Phase 8 Closing Night": https://claude.ai/code/artifact/85d5b01e-a039-4160-8fcb-7c845cf8778f — still the night-before version; the 2026-09-09 daytime section is NOT in it yet. How to build it and what to add: `<scratchpad 5c3f610a…>/lead/REPORT-HOWTO.md` (template `closing-night.tmpl.html` + `shots-morning/*.png` in the old scratchpad `e6db1900…`, `{{IMG:name}}` → data URI, publish with the Artifact tool to the URL above). Frames to add: T5's `panel-5/6/9`, `client-4`; T7's three renderings; T3's `failrestore/restore.log:14,17,21`; T14's three widget grabs.
 
-## Open questions for the owner (also in `<old scratchpad>/morning-questions-2026-09-09.md`, 178 lines)
+## Open questions for the owner -- ANSWERED 2026-09-10 18:26 CEST (through the question tool)
 
-1. The m910q install has no import marker: teach the probe completeness (T19, my lean), or an "adopt as imported" press that writes the marker with your consent, or leave it hand-patched.
-2. 8.6: does it count as done for the release with T16 and T18 open?
-3. 8.8: a Steam login for the VM, or a captured `shortcuts.vdf` (T17).
-4. Release: version (0.6.60 vs 0.7.0) and branch (`yulon-phase8b`) for step 8.
-5. The redundant `idx_owner_bot_event` on m910q: drop it (`ALTER TABLE tw_char.ai_playerbot_random_bots DROP INDEX idx_owner_bot_event;`, world stopped) — note a future press of the T11 route re-creates it.
-6. The DML VM is live and needs an explicit yes before anything touches it.
+1. m910q marker: **teach the probe** (T19's first half goes ahead: completeness on a populated, unmarked install from per-schema table counts; no write to the owner's database).
+2. 8.6: **not ticked**. New requirement: My Party must let the player choose an existing character to join as a bot -- their own alts, characters on another account, friends' and family's characters (the AzerothCore playerbots alt-bot route; WotLK only). Filed as **T26**. 8.6 waits on T16, T18 and T26.
+3. 8.8: the owner gives a **throwaway Steam account later**; T17 stays blocked until then.
+4. Release: **upstream chooses the version when Baerthe merges the PR**; no tag or release is cut here. Step 8 becomes: mark PR 146 ready when the exit pass closes.
+5. `idx_owner_bot_event` on m910q: **drop it now** (the lead, world stopped, announced, recorded under `pyplan/gates/m910q-index-drop-2026-09-10/`).
+6. DML VM: no action pending; still needs an explicit yes per action.
+Also: the report goes out **without the login card**; `yulon-win11-gate`'s disk files move from D: to W: (the lead, on the host); T13's live half and T23 run on `yulon-ubuntu2` autonomously, frames saved for the report.
 
 ## Scratch paths (Windows; `/mnt/c/...` from WSL)
 

@@ -23,3 +23,8 @@ Either (a) the owner supplies a Steam login for the VM (a throwaway account is e
 ## Definition of done
 
 Half 1: the README with the layout and the captured files. Half 2: `--checks` ALL GREEN, the live captures above, `test_no_secrets_in_evidence.py` green. Commits per half, `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours.
+
+
+## Owner, 2026-09-10 18:26 CEST
+
+A throwaway Steam account will be given later; blocked until then.
