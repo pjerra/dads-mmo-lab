@@ -112,6 +112,41 @@ In this column it reads **no — the press refuses while the world is running,
 twice asked**. Closing the walk's blindness means teaching it `exec_stdin`, which
 is bigger than this ticket and is named rather than done.
 
+**T26's account link is the fourth shape this walk cannot see, and it is one
+this ticket CHOSE** (2026-09-10, round 2). "Link an account…" in My Party writes
+two rows into `acore_playerbots.playerbots_account_links` — `(master's account,
+the other account)` and the reverse — and it goes out through
+`apply.DockerSql.query`, the read half's own method, so the callee list above
+does not count it and there is no row below to find. The reason is the review
+that asked for it: the write has to be transactional AND read back, and
+`DockerSql` runs one statement per `docker exec`, i.e. one mysql session — so
+`START TRANSACTION`, the `INSERT IGNORE` of both rows, `SELECT ROW_COUNT()`, the
+readback of both directional rows and `COMMIT` are one script, and only the
+returning runner can carry its answer back. Sent through `run_statement()` the
+script would still write, and the app would have no way to tell "this press
+wrote them" from "somebody else's did" or from "neither row is there" — which
+is the false success the review found. A row here naming `run_statement` would
+now resolve to no call and fail this page's other direction, so the honest place
+is this paragraph.
+
+What is true of that write: it is refused before it starts unless the account
+name matches `party.ACCOUNT_SHAPE`, the master's own account resolves, the other
+account exists in `acore_auth.account`, and the two are not already linked in
+both directions (one row is repaired, not refused); it never updates and never
+deletes; the ids come from `acore_auth` and nothing the user typed reaches a
+query unescaped; and it is reported as linked only when the readback inside the
+transaction saw both rows. It arrives through `party.SqlWriter`, a seam of its
+own that one function holds — `dbreads.SqlReader`, which every read in `party.py`
+goes through, still cannot write, and that is what the split is for. **World may
+be running: yes**, and the argument is the module's own: the running world writes
+this same table through `.playerbots account link`
+(`mod-playerbots PlayerbotMgr.cpp:1840-1885`, the same `INSERT IGNORE` in both
+directions) and reads it back with a fresh `SELECT 1` on every add
+(`IsAccountLinked`, `:191-196`), so there is no cached copy for a row written
+beside it to fall out of step with. **Owner question**, left running as
+`acore_ale`'s is: does answer 7 extend to a `playerbots` table the server writes
+live through its own command?
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 
@@ -211,7 +246,6 @@ descriptions are written by hand.
 | `networking.py::record_network_intent::write_text` | the network-intent record, to a temp name | yes |
 | `networking.py::write_client_realmlist::write_text` | `realmlist.wtf` in the user's client folder | yes |
 | `party.py::deploy::shutil.copy2` | **new (8.6)** My Party's Lua bridge scripts, into `env/dist/etc/modules/lua_scripts` under the server folder. Six files the app ships since T26 added `dml_botadd.lua` (five before it); nothing of the user's is read or overwritten, since the destination is a directory only this feature writes | yes — and deliberately: the copy is safe while the world runs because the Lua engine reads that directory when it STARTS, which is why `deploy()` returns `changed` and the caller owes a restart |
-| `party.py::link_account::run_statement` | **new (T26)** two rows in `acore_playerbots.playerbots_account_links` — `(master's account, the other account)` and the reverse — through `INSERT IGNORE`, after three reads that refuse an account this server does not have, the master's own account, and a pair already linked. It is the friends-and-family route of `8.6`: the playerbots module then lets either account add every character of the other as a bot. Nothing is updated and nothing is deleted; the ids come from `acore_auth.account` and the account NAME the user typed is refused unless it matches `ACCOUNT_SHAPE` before it reaches a query. The write arrives through `party.SqlWriter`, a seam of its own — `dbreads.SqlReader` still cannot reach `run_statement` | **yes, and this row is where that is argued rather than assumed.** `playerbots` is in `apply.WORLD_HELD_DBS`, so the applier's bulk SQL is refused into it while the world runs. This table is not that case, in the three ways the argument turns on, all measured on `yulon-ubuntu2` 2026-09-10 (`pyplan/gates/8.6-altbot-measure-yulon-ubuntu2-2026-09-10/README.md` §2): **the running world writes this same table itself** through `.playerbots account link` (`PlayerbotMgr.cpp:1840-1885`, `INSERT IGNORE` in both directions — the same statement); **it is read back with a fresh `SELECT 1` on every add** (`IsAccountLinked`, `:191-196`), so there is no cached copy for a row written beside it to fall out of step with; and an `INSERT IGNORE` of two integer pairs into a two-column link table can neither overwrite nor delete anything anybody owns. **Owner question:** does answer 7 extend to a `playerbots` table the server writes live through its own command? Left running, as `acore_ale`'s is, rather than decided here |
 | `platform.py::_download_curl::unlink` | the `.part` file after a failed download | n/a |
 | `platform.py::download_verified::replace` | a verified download renamed onto its final name | n/a |
 | `purge.py::remove_tree::shutil.rmtree` | **new (8.9a)** the whole server folder of the install being uninstalled, and the largest single write in this table. Twice in one function is one row: the plain delete, then the retry after `_clear_read_only()`. It NEVER swallows a failure - the Rust prior art's `let _ = remove_dir_all(...)` reports a successful uninstall on Windows having deleted nothing | **no - the purge refuses while any container of the project is running**, asked of `docker.running_census().ours` before any command is issued |

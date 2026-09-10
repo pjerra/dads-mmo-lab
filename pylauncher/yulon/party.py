@@ -1764,6 +1764,27 @@ here from the DEPLOYED conf and never from the `.dist` -- `PLAYERBOTS_CONF`'s
 docstring records what reading a template as though it were configuration cost
 this feature once already."""
 
+ALLOW_ACCOUNT_KEY = "AiPlayerbot.AllowAccountBots"
+ALLOW_GUILD_KEY = "AiPlayerbot.AllowGuildBots"
+ALLOW_LINKED_KEY = "AiPlayerbot.AllowTrustedAccountBots"
+"""The three flags that switch three of the four rules off, and the round-1
+review's first finding (2026-09-10).
+
+`PlayerbotMgr.cpp:101-116` does not test membership on its own -- each arm is
+`sPlayerbotAIConfig.allow<X>Bots && <the membership test>`:
+
+    bool sameAccount = sPlayerbotAIConfig.allowAccountBots && accountId == masterAccountId;
+    bool sameGuild = sPlayerbotAIConfig.allowGuildBots && guild && guild->GetMember(playerGuid);
+    bool linkedAccount = sPlayerbotAIConfig.allowTrustedAccountBots && IsAccountLinked(…);
+
+so an install that sets one to 0 refuses a character this picker used to offer
+-- in the master's client alone (`:115`), where nothing this app can read sees
+it, after this app has already said the command was issued. The addclass pool
+(rule 3) has no flag and is not gated. All three ship `1` in
+`playerbots.conf.dist` on `yulon-ubuntu2` (`:155`, `:158`, `:161`, measured
+2026-09-10), which is exactly why they must be READ rather than assumed: the
+value that matters is the one this install deployed."""
+
 ADDCLASS_ACCOUNT_TYPE = 2
 """`playerbots_account_type.account_type` for the addclass pool.
 
@@ -1783,6 +1804,15 @@ ALLOWED_LINK = "on an account linked to this one"
 """The four rules of `PlayerbotMgr.cpp:101-116` in the app's voice, in the order
 the module evaluates them. Each row says which one let it in, because "why is
 this one offered and that one not" is the whole question a picker answers."""
+
+FLAG_OFF = "%s, but this server's %s is 0"
+FLAG_UNREADABLE = "%s, but this server's %s could not be read"
+"""Why a row that a rule WOULD have let in is greyed anyway -- the rule in the
+app's own words, then the key that decides it.
+
+The unreadable case is greyed and never offered (the lead's round-1 rejection):
+an arm whose flag nobody could read is indeterminate, and an indeterminate row
+offered is a press that may end in a refusal only the master's client sees."""
 
 REFUSED_NO_RULE = (
     "not on this character's account, not in its guild, not an addclass bot, and not on a "
@@ -1804,6 +1834,60 @@ def max_added_bots(server_dir: Path) -> int | None:
     """
     value = _conf_value(_conf_text(server_dir / PLAYERBOTS_CONF), MAX_ADDED_BOTS_KEY)
     return int(value) if value is not None and value.isdigit() else None
+
+
+@dataclass(frozen=True)
+class AllowFlags:
+    """The three allow-flags as this install's DEPLOYED conf has them.
+
+    Three-valued for the reason every reading in this module is: `None` is "the
+    key could not be read", which is neither on nor off. A `.dist`-only install
+    (which is what `yulon-ubuntu2` is) has said nothing about these keys, and
+    the compiled defaults behind them were never measured on this fork -- the
+    same trap `ALE.Enabled` set, where the shipped comment says one thing and
+    the compiled default says the other. So `None` greys the rows that arm
+    would have offered rather than offering or refusing them on a guess.
+    """
+
+    account: bool | None
+    guild: bool | None
+    linked: bool | None
+
+    @classmethod
+    def all_on(cls) -> AllowFlags:
+        """The three as `playerbots.conf.dist` ships them. Test-side only: the
+        app never assumes this, which is the whole point of the reader."""
+        return cls(True, True, True)
+
+
+def allow_flags(server_dir: Path) -> AllowFlags:
+    """The three keys out of the deployed `playerbots.conf`, `None` where absent.
+
+    The same reader `max_added_bots()` uses, on the same file, for the same
+    measured reason (`PLAYERBOTS_CONF`): `sConfigMgr` loads the deployed file,
+    a `.dist` beside it is a template, and this feature has already paid once
+    for reading one as though it were configuration.
+    """
+    text = _conf_text(server_dir / PLAYERBOTS_CONF)
+    return AllowFlags(
+        _flag(_conf_value(text, ALLOW_ACCOUNT_KEY)),
+        _flag(_conf_value(text, ALLOW_GUILD_KEY)),
+        _flag(_conf_value(text, ALLOW_LINKED_KEY)),
+    )
+
+
+def _flag(value: str | None) -> bool | None:
+    """`1` is on, `0` is off, and anything else is unread -- including absent.
+
+    A value this app cannot make sense of is not folded into off: the module
+    reads these through `sConfigMgr.GetOption<bool>`, whose handling of a
+    third spelling is not measured on this fork, and guessing it wrong is the
+    difference between a row greyed and a row offered into a silent refusal.
+    """
+    if value is None:
+        return None
+    text = value.strip().strip('"')
+    return True if text == "1" else False if text == "0" else None
 
 
 @dataclass(frozen=True)
@@ -1952,21 +2036,32 @@ def read_permissions(raw: str) -> tuple[frozenset[int], frozenset[int]]:
     return frozenset(pool), frozenset(linked)
 
 
-def _cap_refusal(added: int, max_added: int) -> str:
-    return (
-        f"{bots_word(added)} are already in this character's party, and this server's "
-        f"{MAX_ADDED_BOTS_KEY} is {max_added}"
-    )
+def _cap_note(master: str, max_added: int | None) -> str:
+    """What this app can and cannot say about the cap -- always said, never used.
 
-
-def _cap_note(max_added: int | None) -> str:
-    """Said beside the rows when the cap could not be read, and nowhere else."""
-    if max_added is not None:
-        return ""
+    Round 1's second finding is why this is a note and not a rule. The module
+    counts `mgr->GetPlayerbotsCount() + loadingForMaster` (`PlayerbotMgr.cpp:
+    125-135`), which is state inside the world process: bots it controls, plus
+    bots loading for that account. The group table cannot stand in for it --
+    a bot uninvited but still controlled counts there and not here, and another
+    player's bots in a shared group count here and not there -- and nothing in
+    the measurement record shows ALE exposing the manager or a count to Lua
+    (the record quotes exactly two ALE functions, `Player:RunCommand` at
+    `PlayerMethods.h:3531-3547` and the global `RunCommand` at
+    `GlobalMethods.h:1405-1417`; no step in it read mod-ale's method tables, and
+    nothing in this tree pins them). So the cap is not checkable from here, and
+    this says which of the two facts is missing.
+    """
+    if max_added is None:
+        return (
+            f"This install has no deployed {PLAYERBOTS_CONF}, so its own {MAX_ADDED_BOTS_KEY} "
+            "could not be read and no row here is greyed for it. The server still refuses an "
+            "add once whatever cap it has is reached, and it says so in the game window."
+        )
     return (
-        f"This install has no deployed {PLAYERBOTS_CONF}, so its own {MAX_ADDED_BOTS_KEY} "
-        "could not be read and no row here is greyed for it. The server still refuses an add "
-        "once whatever cap it has is reached, and it says so in the game window."
+        f"The server's added-bot cap ({max_added}) could not be checked from here: the module "
+        "counts the bots it controls, which is not what the group table holds. A refusal "
+        f"arrives in {master}'s game window."
     )
 
 
@@ -1983,8 +2078,7 @@ def candidates(
     accounts: dict[int, str],
     pool: frozenset[int],
     linked: frozenset[int],
-    added: int,
-    max_added: int | None,
+    flags: AllowFlags,
 ) -> tuple[Candidate, ...] | str:
     """Every character, with the rule that lets it in or the one that shuts it out.
 
@@ -2003,16 +2097,27 @@ def candidates(
        addclass pool, linked account (`:101-116`). The first that answers is the
        one the row names; a row that reaches none of them is greyed with all
        four named.
-    4. **The cap last**, `:132-135`. It refuses rows that a rule had already
-       allowed, which is what the module does -- so the row says the cap and not
-       "no rule reached it", and a person reads the truth about which of the two
-       to fix.
+    **Three of those four arms are gated on a conf key** and the gate is INSIDE
+    the arm, not in front of the loop -- round 1's first finding, and the shape
+    is the module's own: `sameAccount`, `sameGuild` and `linkedAccount` are each
+    `allow<X>Bots && <the membership test>`, and the four are then OR'd
+    (`:101-116`). So a character on the master's own account with
+    `AllowAccountBots = 0` is not refused outright: it falls through and the
+    addclass pool or a link may still let it in, exactly as the module lets it.
+    A row that reaches no arm says WHICH gate stopped it where one did --
+    "on this character's own account, but this server's
+    AiPlayerbot.AllowAccountBots is 0" is a different thing to fix from "no rule
+    reached it", and an unreadable key is a third thing again: indeterminate,
+    greyed, never offered.
 
-    All three allow-flags ship `1` on the measured install and this filter is
-    written for that; a fork that turns one off would offer a row the server
-    refuses in the game window. Reading those three keys is what would close it,
-    and it is named here rather than done because no install this app has seen
-    sets them.
+    **The cap is not here at all** (round 1's second finding). The module counts
+    `mgr->GetPlayerbotsCount() + loadingForMaster` (`:125-135`) -- bots it
+    controls, plus bots loading for that account, both of them state inside the
+    world process. The group table is a different number in both directions: a
+    bot uninvited but still controlled counts for the module and not for the
+    table, and another player's bots in a shared group count for the table and
+    not for the module. So no row here is allowed or refused on a cap this app
+    cannot read; `_cap_note` says so beside the list instead.
     """
     me = next((row for row in rows if row.name == master), None)
     if me is None:
@@ -2020,7 +2125,6 @@ def candidates(
             f"there is no character called {master} on this server, so which characters it "
             "could add as bots could not be worked out."
         )
-    capped = "" if max_added is None or added < max_added else _cap_refusal(added, max_added)
     out: list[Candidate] = []
     for row in rows:
         if row.guid == me.guid:
@@ -2031,25 +2135,53 @@ def candidates(
                 Candidate(row.name, row.level, row.klass, seat, refused_because=REFUSED_ONLINE)
             )
             continue
+        rule = ""
+        # The arms a membership test matched and a conf key then shut, in the
+        # module's own order. Collected rather than returned from, because the
+        # arms are OR'd: a flag that is off ends that arm and not the row.
+        gated: list[tuple[str, str, bool | None]] = []
         if row.account == me.account:
-            rule = ALLOWED_SAME_ACCOUNT
-        elif me.guild_id and row.guild_id == me.guild_id:
-            rule = ALLOWED_GUILD
-        elif row.account in pool:
+            if flags.account:
+                rule = ALLOWED_SAME_ACCOUNT
+            else:
+                gated.append((ALLOWED_SAME_ACCOUNT, ALLOW_ACCOUNT_KEY, flags.account))
+        if not rule and me.guild_id and row.guild_id == me.guild_id:
+            if flags.guild:
+                rule = ALLOWED_GUILD
+            else:
+                gated.append((ALLOWED_GUILD, ALLOW_GUILD_KEY, flags.guild))
+        if not rule and row.account in pool:
+            # Rule 3 has no flag: `IsAddclassBot` is pure cache membership
+            # (`RandomPlayerbotMgr.cpp:2154-2175`) and nothing gates it.
             rule = ALLOWED_POOL
-        elif row.account in linked:
-            rule = ALLOWED_LINK
-        else:
-            out.append(
-                Candidate(row.name, row.level, row.klass, seat, refused_because=REFUSED_NO_RULE)
-            )
+        if not rule and row.account in linked:
+            if flags.linked:
+                rule = ALLOWED_LINK
+            else:
+                gated.append((ALLOWED_LINK, ALLOW_LINKED_KEY, flags.linked))
+        if rule:
+            out.append(Candidate(row.name, row.level, row.klass, seat, allowed_by=rule))
             continue
         out.append(
-            Candidate(row.name, row.level, row.klass, seat, refused_because=capped)
-            if capped
-            else Candidate(row.name, row.level, row.klass, seat, allowed_by=rule)
+            Candidate(row.name, row.level, row.klass, seat, refused_because=_gated_reason(gated))
         )
     return tuple(out)
+
+
+def _gated_reason(gated: list[tuple[str, str, bool | None]]) -> str:
+    """Why a row no arm reached is greyed: the first gate that shut it, or none.
+
+    Unknown beats off. A row with one arm switched off and another whose key
+    could not be read is a row nobody can say anything certain about, and the
+    sentence that names the unreadable key is the one that sends a person to
+    the thing they can actually settle.
+    """
+    for rule, key, state in gated:
+        if state is None:
+            return FLAG_UNREADABLE % (rule, key)
+    for rule, key, _ in gated:
+        return FLAG_OFF % (rule, key)
+    return REFUSED_NO_RULE
 
 
 @dataclass(frozen=True)
@@ -2066,6 +2198,13 @@ class Picker:
 
     rows: tuple[Candidate, ...] = ()
     added: int = 0
+    """How many bots the GROUP TABLE holds for this master, and nothing decides
+    on it (round 1's second finding).
+
+    It is not the module's own added-bot count and cannot be made into one --
+    `_cap_note` says which number is missing. Kept because the read was made
+    and the panel's summary line is drawn from the same reading; used by no
+    rule, no gate and no sentence about the cap."""
     max_added: int | None = None
     note: str = ""
     problem: str = ""
@@ -2153,15 +2292,31 @@ def account_named_sql(entry: CatalogEntry, username: str) -> str:
 
 
 def account_link_read_sql(entry: CatalogEntry, *, master_account: int, other_account: int) -> str:
-    """Whether these two are already linked, in either direction."""
+    """Which of the two directional rows are there, if either.
+
+    Both columns and not `SELECT 1` (round 1's third finding): one row is a
+    third state, not "already linked". The module's own command writes both
+    (`PlayerbotMgr.cpp:1840-1885`), so a table holding one of them is a half
+    link -- and reading it as done is how a pair stays half linked for good.
+    """
     bots = entry.schema_map()["playerbots"]
     return (
-        f"SELECT 1 FROM {bots}.{LINKS_TABLE} "
+        f"SELECT account_id, linked_account_id FROM {bots}.{LINKS_TABLE} "
         f"WHERE (account_id = {int(master_account)} "
         f"AND linked_account_id = {int(other_account)}) "
         f"OR (account_id = {int(other_account)} "
-        f"AND linked_account_id = {int(master_account)}) LIMIT 1"
+        f"AND linked_account_id = {int(master_account)})"
     )
+
+
+def link_directions(raw: str, *, master_account: int, other_account: int) -> tuple[bool, bool]:
+    """That read folded into the two directions: (master->other, other->master)."""
+    pairs = set()
+    for line in raw.splitlines():
+        left, _, right = line.partition("\t")
+        if left.strip().isdigit() and right.strip().isdigit():
+            pairs.add((int(left), int(right)))
+    return (master_account, other_account) in pairs, (other_account, master_account) in pairs
 
 
 def link_account_sql(entry: CatalogEntry, *, master_account: int, other_account: int) -> str:
@@ -2184,6 +2339,81 @@ def link_account_sql(entry: CatalogEntry, *, master_account: int, other_account:
     )
 
 
+WROTE_TAG = "wrote"
+ROW_TAG = "row"
+"""The two result sets of the link transaction, each tagged by a literal first
+column so one stdout can be told apart into two answers.
+
+`mysql --batch --skip-column-names` concatenates result sets with nothing
+between them, and "how many rows did the insert write" and "which rows are
+there now" are both single-column-ish answers that would otherwise be
+indistinguishable lines."""
+
+
+def link_transaction_sql(entry: CatalogEntry, *, master_account: int, other_account: int) -> str:
+    """The whole write as one script: transaction, insert, count, readback, commit.
+
+    Round 2, must-fix 3. The old shape was check-then-write with no readback,
+    and it lied in two ways: a concurrent insert made `INSERT IGNORE` write
+    nothing while the press still said "are linked", and a table holding one of
+    the two rows was read as already linked and never repaired.
+
+    One script because one `DockerSql` call is one `docker exec` is one mysql
+    session, and a transaction that spans two of them is not a transaction. In
+    order:
+
+    * `START TRANSACTION` / `COMMIT` -- both rows or neither, so a press that
+      dies half way leaves nothing to repair;
+    * the `INSERT IGNORE` of both directions, which is the module's own
+      statement (`PlayerbotMgr.cpp:1840-1885`);
+    * `SELECT ROW_COUNT()` -- how many rows THIS insert actually wrote, which is
+      the only thing that can tell "this press wrote them" from "they were
+      already there by the time it ran". `ROW_COUNT()` is session state, so it
+      is readable here and nowhere else;
+    * the readback of both directional rows, inside the transaction, so
+      `linked=True` is a row that was seen and not an insert that was sent.
+    """
+    return (
+        "START TRANSACTION; "
+        + link_account_sql(entry, master_account=master_account, other_account=other_account)
+        + f" SELECT '{WROTE_TAG}', ROW_COUNT(); "
+        + f"SELECT '{ROW_TAG}', account_id, linked_account_id "
+        + f"FROM {entry.schema_map()['playerbots']}.{LINKS_TABLE} "
+        + f"WHERE (account_id = {int(master_account)} "
+        + f"AND linked_account_id = {int(other_account)}) "
+        + f"OR (account_id = {int(other_account)} "
+        + f"AND linked_account_id = {int(master_account)}); "
+        + "COMMIT;"
+    )
+
+
+def read_link_write(raw: str) -> tuple[int, frozenset[tuple[int, int]]] | str:
+    """The transaction's own output: rows written, and the rows there now.
+
+    A line that parses as neither is REPORTED rather than skipped -- the same
+    rule `read_members` and `read_characters` keep, and it matters more here
+    than anywhere else in this module: this output is the only evidence the
+    write happened, and dropping a line one is `linked=True` said over a
+    reading nobody understood.
+    """
+    wrote: int | None = None
+    pairs: set[tuple[int, int]] = set()
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        fields = [field.strip() for field in line.split("\t")]
+        if fields[0] == WROTE_TAG and len(fields) == 2 and fields[1].isdigit():
+            wrote = int(fields[1])
+            continue
+        if fields[0] == ROW_TAG and len(fields) == 3 and all(f.isdigit() for f in fields[1:]):
+            pairs.add((int(fields[1]), int(fields[2])))
+            continue
+        return f"the link write answered {line.strip()!r}, which is not what it was asked for"
+    if wrote is None:
+        return "the link write did not say how many rows it wrote, so nothing about it is known"
+    return wrote, frozenset(pairs)
+
+
 def _link_confirmation(master_account: str, other_account: str) -> str:
     return (
         f"This links the account {master_account} to the account {other_account}, both ways. "
@@ -2194,11 +2424,40 @@ def _link_confirmation(master_account: str, other_account: str) -> str:
     )
 
 
-def _link_written(master_account: str, other_account: str) -> str:
+def _link_written(master_account: str, other_account: str, wrote: int, half: bool) -> str:
+    """What the readback saw, and which press put it there.
+
+    Three endings and the row count decides between them (round 2's must-fix 3):
+    a press that wrote both rows, a press that wrote the ONE that was missing
+    from a half-linked pair, and a press whose insert wrote nothing because
+    somebody else's had already landed between this app's pre-read and its
+    write. All three end with the two rows in the table, and only the first may
+    say this press put them there.
+    """
+    if wrote == 0:
+        did = (
+            f"{master_account} and {other_account} were already linked by the time this press "
+            "ran: both rows were there and this one wrote neither."
+        )
+    elif half:
+        did = (
+            f"{master_account} and {other_account} were linked one way only, and this press "
+            f"wrote the missing row. A link the module trusts is both rows, and both are there "
+            "now."
+        )
+    else:
+        did = f"{master_account} and {other_account} are linked: this press wrote both rows."
     return (
-        f"{master_account} and {other_account} are linked. This server will now let either "
-        f"account add every character of the other as a bot -- two rows in {LINKS_TABLE}, and "
-        "nothing else about either account changed."
+        f"{did} This server will now let either account add every character of the other as a "
+        f"bot -- two rows in {LINKS_TABLE}, and nothing else about either account changed."
+    )
+
+
+def _link_unwritten(master_account: str, other_account: str, said: str) -> str:
+    return (
+        f"{master_account} and {other_account} are NOT linked: {said} The module trusts a link "
+        f"only when both rows of {LINKS_TABLE} are there, and this press could not show that "
+        "they are."
     )
 
 
@@ -2209,15 +2468,35 @@ class SqlWriter(Protocol):
     """The ONE write this feature makes, and a type that says exactly that.
 
     Not `dbreads.SqlReader` widened, and not `apply.DockerSql` imported: the
-    read seam is deliberately unable to reach `run_statement()` ("what is not in
+    read seam is deliberately unable to reach the write half ("what is not in
     the type cannot be called through it", `dbreads.SqlReader`), and widening it
     for a link table would take that guarantee away from every read in this
-    module. So the write arrives through a seam of its own, named for what it
-    is, `None` on an install that has no route to one -- and the write ledger's
-    row points at the one function that holds it.
+    module. So the write arrives through a seam of its own, held in its own
+    attribute, `None` on an install that has no route to one -- and exactly one
+    function in this module holds it.
+
+    **The method is `query` and that is round 2's change** (the lead's
+    rejection, must-fix 3). The write has to be transactional and read back in
+    the SAME database session -- `START TRANSACTION`, the `INSERT IGNORE`, the
+    row count, the readback, `COMMIT` -- and `apply.DockerSql` runs one
+    statement per `docker exec`, so the whole script goes out as one call and
+    the answer comes back on its stdout. `run_statement()` discards stdout and
+    could not carry the readback; `query()` is the returning runner the lead
+    asked for, and structural typing means it must be spelled the way the real
+    object spells it.
+
+    **The boundary still holds**, and it is worth saying how: it is not the
+    METHOD NAME that keeps this module's reads from writing, it is which object
+    each of them is called on. Every picker read goes through `self._sql`, whose
+    type is `dbreads.SqlReader`; nothing in this module can send a statement
+    through that seam and have it write, because `DockerSql.query` is one
+    statement and `SqlReader` is what the picker holds. The link script goes
+    through `self._link_writer`, which is `None` unless a caller wired one, is
+    used by one function, and is what the ledger's own paragraph is written
+    about.
     """
 
-    def run_statement(self, db: Db, statement: str) -> None: ...
+    def query(self, db: Db, statement: str) -> str: ...
 
 
 SqlReader = dbreads.SqlReader
@@ -2536,20 +2815,17 @@ class InstallParty:
     def candidates(self, master: str) -> Picker:
         """Which characters this server would let `master` add, and why not.
 
-        Four reads: the group table (which is also the added-bot count the cap
-        is measured against, and which refuses a master who is not logged in),
-        then the picker's own three. `problem` is any of them failing, and it
-        empties the list rather than shortening it -- a picker missing the rows
-        a failed read would have held is a picker that quietly offers less than
-        the server does.
+        Four reads: the group table (which also refuses a master who is not
+        logged in), then the picker's own three. `problem` is any of them
+        failing, and it empties the list rather than shortening it -- a picker
+        missing the rows a failed read would have held is a picker that quietly
+        offers less than the server does.
 
-        The added-bot count is the bots in the master's PARTY as
-        `group_rows_sql` reads them, not the module's own `GetPlayerBotsCount()`
-        -- that counter lives in the world process and nothing here can ask it.
-        The two agree while every added bot is in the party, which is what the
-        module does with one (`PlayerbotMgr.cpp:545-575` queues the invite
-        itself); they part company if a bot is added and then uninvited, and
-        then this is the smaller number.
+        Two conf readings ride with them, both off the DEPLOYED
+        `playerbots.conf` and both three-valued: the three allow-flags that gate
+        three of the four rules (`allow_flags`), and the cap (`max_added_bots`).
+        The flags decide rows; the cap decides nothing and is reported --
+        `_cap_note` says why.
         """
         rows = self.members(master)
         if isinstance(rows, str):
@@ -2580,12 +2856,11 @@ class InstallParty:
             accounts=read_account_names(named),
             pool=pool,
             linked=linked,
-            added=len(rows),
-            max_added=cap,
+            flags=allow_flags(self.server_dir),
         )
         if isinstance(offered, str):
             return Picker(problem=offered, added=len(rows), max_added=cap)
-        return Picker(offered, len(rows), cap, note=_cap_note(cap))
+        return Picker(offered, len(rows), cap, note=_cap_note(master, cap))
 
     def add_named(self, master: str, name: str) -> NamedAddition:
         """Add the existing character `name` to `master`'s party, over the channel.
@@ -2618,8 +2893,14 @@ class InstallParty:
         found = self._resolve_link(master, account)
         if isinstance(found, AccountLink):
             return found
-        (_, mine), (_, theirs) = found
-        return AccountLink(False, mine, theirs, _link_confirmation(mine, theirs))
+        (_, mine), (_, theirs), half = found
+        said = _link_confirmation(mine, theirs)
+        if half:
+            said = (
+                f"{mine} and {theirs} are linked one way only on this server, which is not a "
+                f"link the module trusts. " + said
+            )
+        return AccountLink(False, mine, theirs, said)
 
     def link_account(self, master: str, account: str) -> AccountLink:
         """Write the two link rows, after the three refusals that stand in front.
@@ -2647,20 +2928,48 @@ class InstallParty:
         found = self._resolve_link(master, account)
         if isinstance(found, AccountLink):
             return found
-        (my_id, mine), (their_id, theirs) = found
-        statement = link_account_sql(self.entry, master_account=my_id, other_account=their_id)
+        (my_id, mine), (their_id, theirs), half = found
+        script = link_transaction_sql(self.entry, master_account=my_id, other_account=their_id)
         try:
-            self._link_writer.run_statement("playerbots", statement)
+            answered = self._link_writer.query("playerbots", script)
         except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
             logger.warning(f"could not link {mine} and {theirs}: {exc}")
-            return AccountLink(False, mine, theirs, f"the two accounts were not linked: {exc}")
-        logger.info(f"linked accounts {mine} and {theirs} for playerbots")
-        return AccountLink(True, mine, theirs, _link_written(mine, theirs))
+            return AccountLink(
+                False,
+                mine,
+                theirs,
+                _link_unwritten(mine, theirs, f"the write could not be run ({exc})."),
+            )
+        read = read_link_write(answered)
+        if isinstance(read, str):
+            return AccountLink(False, mine, theirs, _link_unwritten(mine, theirs, f"{read}."))
+        wrote, pairs = read
+        if (my_id, their_id) not in pairs or (their_id, my_id) not in pairs:
+            # `linked` is the two rows read back inside the transaction, never
+            # the insert being sent -- round 2's must-fix. `INSERT IGNORE`
+            # cannot fail loudly, so "it did not raise" says nothing at all.
+            return AccountLink(
+                False,
+                mine,
+                theirs,
+                _link_unwritten(
+                    mine,
+                    theirs,
+                    f"the write ran and the readback found {len(pairs)} of the two rows.",
+                ),
+            )
+        logger.info(f"linked accounts {mine} and {theirs} for playerbots (rows written: {wrote})")
+        return AccountLink(True, mine, theirs, _link_written(mine, theirs, wrote, half))
 
     def _resolve_link(
         self, master: str, account: str
-    ) -> AccountLink | tuple[tuple[int, str], tuple[int, str]]:
-        """Both accounts by id and by name, or the refusal that stops the write.
+    ) -> AccountLink | tuple[tuple[int, str], tuple[int, str], bool]:
+        """Both accounts by id and by name and the ground under them, or the
+        refusal that stops the write.
+
+        The third element is "exactly one of the two rows is already there" --
+        a half-linked pair, which is a REPAIR and not a refusal (round 1's third
+        finding). Only both rows refuse.
 
         Shared by the confirmation and the write so the two cannot disagree
         about which accounts they are about -- and re-run by the write, because
@@ -2700,13 +3009,14 @@ class InstallParty:
             account_link_read_sql(self.entry, master_account=mine[0], other_account=theirs[0])
             + ";",
         )
-        if already.strip():
+        forward, back = link_directions(already, master_account=mine[0], other_account=theirs[0])
+        if forward and back:
             stop = (
                 f"{mine[1]} and {theirs[1]} are already linked on this server, so nothing was "
                 "written."
             )
             return AccountLink(False, mine[1], theirs[1], stop, blocker=stop)
-        return mine, theirs
+        return mine, theirs, forward or back
 
     def _one_account(self, statement: str) -> tuple[int, str] | None:
         """One `id\tusername` row, or `None` for "no such row, or no answer".

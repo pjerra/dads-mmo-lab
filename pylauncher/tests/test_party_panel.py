@@ -1107,3 +1107,29 @@ def test_an_empty_account_box_is_refused_here_and_nothing_is_asked(qapp: object)
 
     assert stub.planned == []
     assert panel.report.text() == NO_ACCOUNT_TYPED
+
+
+def test_the_cap_line_is_the_seams_sentence_and_not_the_panels_arithmetic(
+    qapp: object,
+) -> None:
+    """Round 1's second finding, at the widget end.
+
+    The panel knows two numbers -- the bots it drew and the cap the seam read --
+    and putting them beside each other would be the same false claim with a
+    label making it: the module counts the bots it controls, which is not what
+    the group table holds. So the note is the seam's own sentence, drawn
+    verbatim.
+
+    Mutation: rebuild the line here from `picked.added` and `picked.max_added`.
+    The panel says "1 of 40 used" over a number that means something else.
+    """
+    note = "The server's added-bot cap (40) could not be checked from here."
+    stub = _StubParty(
+        picker=party.Picker(rows=(_candidate("Nore"),), added=1, max_added=40, note=note)
+    )
+    panel = _panel(stub)
+    panel.character.setText("Pakka")
+
+    panel.show_candidates()
+
+    assert panel.candidate_note.text() == note

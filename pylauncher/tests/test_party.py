@@ -16,6 +16,7 @@ recognise the answer when a rebuild puts the engine in.
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -2050,17 +2051,20 @@ def _picked(
     accounts: dict[int, str] | None = None,
     pool: frozenset[int] = frozenset(),
     linked: frozenset[int] = frozenset(),
-    added: int = 0,
-    max_added: int | None = 40,
+    flags: party.AllowFlags | None = None,
 ) -> tuple[party.Candidate, ...]:
+    """The fold, with the three allow-flags ON unless a test says otherwise.
+
+    `all_on()` is what `playerbots.conf.dist` ships (`:155`, `:158`, `:161`) and
+    it is spelled here rather than defaulted inside the app: the tests about the
+    four rules are about the rules, and the tests about the flags say so."""
     out = party.candidates(
         rows,
         master=master,
         accounts={1: "PERZI", 2: "OTHER", 3: "FRIEND"} if accounts is None else accounts,
         pool=pool,
         linked=linked,
-        added=added,
-        max_added=max_added,
+        flags=flags or party.AllowFlags.all_on(),
     )
     assert not isinstance(out, str), out
     return out
@@ -2170,34 +2174,156 @@ def test_a_character_no_rule_reaches_is_refused_and_the_row_says_why() -> None:
     assert _row_for(rows, "Stranger").refused_because == party.REFUSED_NO_RULE
 
 
-def test_the_cap_refuses_every_row_and_names_both_numbers() -> None:
-    """`PlayerbotMgr.cpp:132-135`: `count >= maxAddedBots` -> "Failure: You have
-    added too many bots (more than 40)". `AiPlayerbot.MaxAddedBots` is 40 as
-    shipped, and it is read from the install's own conf rather than assumed.
+@pytest.mark.parametrize(
+    ("flags", "key", "rule"),
+    [
+        (party.AllowFlags(False, True, True), party.ALLOW_ACCOUNT_KEY, party.ALLOWED_SAME_ACCOUNT),
+        (party.AllowFlags(True, False, True), party.ALLOW_GUILD_KEY, party.ALLOWED_GUILD),
+        (party.AllowFlags(True, True, False), party.ALLOW_LINKED_KEY, party.ALLOWED_LINK),
+    ],
+)
+def test_a_rule_whose_conf_key_is_zero_does_not_let_a_row_in(
+    flags: party.AllowFlags, key: str, rule: str
+) -> None:
+    """Round 1's first finding. The module's arms are
+    `allow<X>Bots && <the membership test>` (`PlayerbotMgr.cpp:101-116`), so an
+    install that sets one to 0 refuses a character this picker used to offer --
+    in the master's client alone, after this app has said the command went out.
 
-    Mutation: drop the cap. The list offers presses this server refuses, again
-    in the game window only.
+    Mutation, one per arm: drop the gate (`if flags.account` -> `if True`). The
+    row is offered again and the press ends in a refusal nothing can hear.
+    """
+    rows = _picked(
+        _char("Pakka", guid=1, account=1, guild_id=12, guild="Violet Dawn"),
+        _char("Alt", guid=2, account=1),
+        _char("Mate", guid=3, account=3, guild_id=12, guild="Violet Dawn"),
+        _char("Friend", guid=4, account=2),
+        linked=frozenset({2}),
+        flags=flags,
+    )
+    shut = next(row for row in rows if row.refused_because.startswith(rule))
+    assert shut.allowed is False
+    assert shut.refused_because == party.FLAG_OFF % (rule, key)
+
+
+@pytest.mark.parametrize(
+    ("flags", "key", "rule"),
+    [
+        (party.AllowFlags(None, True, True), party.ALLOW_ACCOUNT_KEY, party.ALLOWED_SAME_ACCOUNT),
+        (party.AllowFlags(True, None, True), party.ALLOW_GUILD_KEY, party.ALLOWED_GUILD),
+        (party.AllowFlags(True, True, None), party.ALLOW_LINKED_KEY, party.ALLOWED_LINK),
+    ],
+)
+def test_a_rule_whose_conf_key_could_not_be_read_is_greyed_and_never_offered(
+    flags: party.AllowFlags, key: str, rule: str
+) -> None:
+    """Indeterminate, which is a third answer and not a quiet yes.
+
+    A `.dist`-only install -- which is what `yulon-ubuntu2` is -- has said
+    nothing about these keys, and the compiled defaults behind them were never
+    measured on this fork. Offering the row on the shipped template's value
+    would be this app asserting a fact about somebody's server: the mistake
+    `ALE.Enabled`'s own comment makes about ITS compiled default.
+
+    Mutation: read `None` as on (`if flags.account is not False`). The row is
+    offered on a key nobody read.
+    """
+    rows = _picked(
+        _char("Pakka", guid=1, account=1, guild_id=12, guild="Violet Dawn"),
+        _char("Alt", guid=2, account=1),
+        _char("Mate", guid=3, account=3, guild_id=12, guild="Violet Dawn"),
+        _char("Friend", guid=4, account=2),
+        linked=frozenset({2}),
+        flags=flags,
+    )
+    unknown = next(row for row in rows if row.refused_because.startswith(rule))
+    assert unknown.allowed is False
+    assert unknown.refused_because == party.FLAG_UNREADABLE % (rule, key)
+
+
+def test_a_flag_that_is_off_ends_its_own_arm_and_not_the_row() -> None:
+    """The four arms are OR'd (`:113`), so a gate shuts an ARM. A character on
+    the master's own account with `AllowAccountBots = 0` is still addable if it
+    is in the addclass pool, exactly as the module has it.
+
+    Mutation: refuse the row at the first gated arm instead of falling through.
+    Every addclass bot on an install with one flag off disappears from a list
+    the server would have accepted.
     """
     rows = _picked(
         _char("Pakka", guid=1, account=1),
-        _char("Nore", guid=2, account=1),
-        added=40,
-        max_added=40,
+        _char("Alt", guid=2, account=1),
+        pool=frozenset({1}),
+        flags=party.AllowFlags(False, True, True),
     )
-    row = _row_for(rows, "Nore")
-    assert row.allowed is False
-    assert "40" in row.refused_because
-    assert party.MAX_ADDED_BOTS_KEY in row.refused_because
+    assert _row_for(rows, "Alt").allowed_by == party.ALLOWED_POOL
 
 
-def test_an_unreadable_cap_is_not_a_cap_of_forty() -> None:
-    """The same refusal `max_player_level` makes: a key nobody could read is not
-    a number this app invents. The rows stay offered and the note says the cap
-    could not be read, because the server will still enforce whatever it has."""
+def test_an_unreadable_key_beats_one_that_is_merely_off() -> None:
+    """A row with one arm switched off and another whose key could not be read
+    is a row nobody can say anything certain about, and the sentence names the
+    key a person can actually settle."""
     rows = _picked(
-        _char("Pakka", guid=1, account=1), _char("Nore", guid=2, account=1), max_added=None
+        _char("Pakka", guid=1, account=1),
+        _char("Alt", guid=2, account=1),
+        linked=frozenset({1}),
+        flags=party.AllowFlags(False, True, None),
     )
-    assert _row_for(rows, "Nore").allowed is True
+    assert party.ALLOW_LINKED_KEY in _row_for(rows, "Alt").refused_because
+    assert "could not be read" in _row_for(rows, "Alt").refused_because
+
+
+def test_the_three_flags_are_read_off_the_deployed_conf_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """The same reader `max_added_bots()` uses, on the same deployed file --
+    column 0 only, the template never. A key that is absent, or spelled anything
+    but 0 or 1, reads as `None`."""
+    server = tmp_path / "wowserver"
+    (server / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
+    (server / party.PLAYERBOTS_CONF).write_text(
+        f"{party.ALLOW_ACCOUNT_KEY} = 1\n"
+        f"{party.ALLOW_GUILD_KEY} = 0\n"
+        f"# {party.ALLOW_LINKED_KEY} = 1\n"
+    )
+    read = party.allow_flags(server)
+    assert (read.account, read.guild, read.linked) == (True, False, None)
+    # A third spelling is unread, not on. The shipped file's own comments say
+    # "true"/"false" beside these keys, and how `sConfigMgr.GetOption<bool>`
+    # takes that word was never measured on this fork -- guessing it is the
+    # difference between a row greyed and a row offered into a silent refusal.
+    (server / party.PLAYERBOTS_CONF).write_text(f"{party.ALLOW_ACCOUNT_KEY} = true\n")
+    assert party.allow_flags(server).account is None
+    bare = tmp_path / "dist-only"
+    (bare / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
+    (bare / "env" / "dist" / "etc" / "modules" / "playerbots.conf.dist").write_text(
+        f"{party.ALLOW_ACCOUNT_KEY} = 1\n{party.ALLOW_GUILD_KEY} = 1\n"
+    )
+    assert party.allow_flags(bare) == party.AllowFlags(None, None, None)
+
+
+def test_no_row_is_decided_on_a_cap_this_app_cannot_check() -> None:
+    """Round 1's second finding: the module counts
+    `mgr->GetPlayerbotsCount() + loadingForMaster` (`PlayerbotMgr.cpp:125-135`),
+    which is state inside the world process. The group table is not that number
+    in either direction -- a bot uninvited but still controlled counts for the
+    module and not for the table, and another player's bots in a shared group
+    count for the table and not for the module.
+
+    So the fold cannot be handed a count at all: there is no argument for one.
+    """
+    taken = inspect.signature(party.candidates).parameters
+    assert "added" not in taken and "max_added" not in taken
+
+
+def test_the_cap_line_says_which_of_the_two_numbers_is_missing() -> None:
+    """Two different absences, two different sentences -- and neither of them
+    claims a row is allowed on the cap's account."""
+    unread = party._cap_note("Pakka", None)
+    assert party.MAX_ADDED_BOTS_KEY in unread and party.PLAYERBOTS_CONF in unread
+    checked = party._cap_note("Pakka", 40)
+    assert "(40) could not be checked from here" in checked
+    assert "Pakka's game window" in checked
 
 
 def test_a_master_that_is_not_on_this_server_is_a_sentence_and_not_an_empty_list() -> None:
@@ -2209,8 +2335,7 @@ def test_a_master_that_is_not_on_this_server_is_a_sentence_and_not_an_empty_list
         accounts={},
         pool=frozenset(),
         linked=frozenset(),
-        added=0,
-        max_added=40,
+        flags=party.AllowFlags.all_on(),
     )
     assert isinstance(out, str)
     assert "Nobody" in out
@@ -2252,25 +2377,45 @@ def test_a_character_row_that_does_not_parse_is_reported_and_not_skipped() -> No
 # write it itself (the measurement's §2, and its §10.4).
 
 
+BOTH_ROWS = f"{party.WROTE_TAG}\t2\n{party.ROW_TAG}\t1\t2\n{party.ROW_TAG}\t2\t1\n"
+"""What the link transaction says when this press wrote both rows: the row
+count, then the two directional rows the readback found."""
+
+
 class _WriteSql(_Sql):
     """The read seam of `_Sql` with the ONE write this feature makes recorded.
 
-    A recorder and not a database: what these tests are about is which statement
-    would go out and under which refusals, and a test that needed docker would
-    be a test of docker (the suite's own conftest guard refuses one anyway).
+    A recorder and not a database: what these tests are about is which script
+    would go out and what the app does with what comes back, and a test that
+    needed docker would be a test of docker (the suite's own conftest guard
+    refuses one anyway).
+
+    The write is told apart from the reads by its own text rather than by a
+    second method, because since round 2 it goes out through the returning
+    runner: it is one script carrying `START TRANSACTION`, the `INSERT IGNORE`,
+    `ROW_COUNT()` and the readback, and `wrote` is what that script answers.
     """
 
-    def __init__(self, *answers: str) -> None:
+    def __init__(self, *answers: str, wrote: str | Exception = BOTH_ROWS) -> None:
         super().__init__(*answers)
         self.written: list[tuple[str, str]] = []
+        self.wrote = wrote
 
-    def run_statement(self, db: str, statement: str) -> None:
+    def query(self, db: str, statement: str) -> str:
+        if "INSERT IGNORE" not in statement:
+            return super().query(db, statement)
         self.written.append((db, statement))
+        if isinstance(self.wrote, Exception):
+            raise self.wrote
+        return self.wrote
 
 
-def _linkable(tmp_path: Path, *answers: str) -> tuple[party.InstallParty, _WriteSql]:
-    """An install whose world is DOWN, with the link reads scripted in order."""
-    sql = _WriteSql(*answers)
+def _linkable(
+    tmp_path: Path, *answers: str, wrote: str | Exception = BOTH_ROWS
+) -> tuple[party.InstallParty, _WriteSql]:
+    """An install whose world is DOWN, with the link reads scripted in order and
+    the transaction's own answer scripted after them."""
+    sql = _WriteSql(*answers, wrote=wrote)
     return _install(_ready_install(tmp_path), sql, None, link_writer=sql), sql
 
 
@@ -2301,7 +2446,7 @@ def test_linking_refuses_the_masters_own_account(tmp_path: Path) -> None:
 def test_linking_refuses_a_pair_that_is_already_linked(tmp_path: Path) -> None:
     """`INSERT IGNORE` would report success over a row that was already there,
     and "linked" would then be said about a press that did nothing."""
-    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "1")
+    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "1\t2\n2\t1\n")
     result = seam.link_account("Pakka", "FRIEND")
     assert result.linked is False
     assert sql.written == []
@@ -2396,13 +2541,90 @@ def test_the_seam_folds_its_four_reads_into_the_rows_the_picker_shows(tmp_path: 
         "102\tPERZI\n",
         "",
     )
-    picked = _install(_ready_install(tmp_path), sql, chan).candidates("Pakka")
+    server = _with_playerbots_conf(_ready_install(tmp_path), account=1, guild=1, linked=1)
+    picked = _install(server, sql, chan).candidates("Pakka")
     assert picked.problem == ""
     assert picked.added == 1
     assert [row.name for row in picked.rows] == ["Nore"]
     assert picked.rows[0].allowed_by == party.ALLOWED_SAME_ACCOUNT
     assert picked.rows[0].account_or_guild == "PERZI"
-    assert picked.note, "this install has no deployed playerbots.conf, so the cap is unreadable"
+    assert picked.note, "the cap is reported beside the rows, never applied to them"
+
+
+def _with_playerbots_conf(
+    server: Path, *, account: int, guild: int, linked: int, cap: int | None = None
+) -> Path:
+    """A DEPLOYED `playerbots.conf` with the three allow-flags in it.
+
+    `_ready_install` deliberately has none -- which is what `yulon-ubuntu2` is,
+    a box with only the shipped template -- so every seam test that wants the
+    rules to decide has to say what this install's conf holds."""
+    text = (
+        f"{party.ALLOW_ACCOUNT_KEY} = {account}\n"
+        f"{party.ALLOW_GUILD_KEY} = {guild}\n"
+        f"{party.ALLOW_LINKED_KEY} = {linked}\n"
+    )
+    if cap is not None:
+        text += f"{party.MAX_ADDED_BOTS_KEY} = {cap}\n"
+    (server / party.PLAYERBOTS_CONF).write_text(text)
+    return server
+
+
+def test_an_install_with_no_deployed_conf_offers_nothing_on_the_three_gated_rules(
+    tmp_path: Path,
+) -> None:
+    """The measured box's own shape: `playerbots.conf.dist` and no
+    `playerbots.conf`. Nothing has said whether the three rules are on, so the
+    rows they would have offered are greyed with the key that could not be read
+    -- never offered, which is the lead's rejection in one assertion.
+
+    Mutation: default an unread flag to on. Every alt on that box is offered
+    again on a value nobody read.
+    """
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql(
+        "1001\n",
+        "",
+        "1001\tPakka\t6\t2\t102\t1\t0\t\n2\tNore\t60\t8\t102\t0\t0\t\n",
+        "102\tPERZI\n",
+        "",
+    )
+    picked = _install(_ready_install(tmp_path), sql, chan).candidates("Pakka")
+    assert [row.allowed for row in picked.rows] == [False]
+    assert party.ALLOW_ACCOUNT_KEY in picked.rows[0].refused_because
+    assert "could not be read" in picked.rows[0].refused_because
+
+
+def test_a_party_already_holding_the_caps_worth_of_bots_still_offers_its_rows(
+    tmp_path: Path,
+) -> None:
+    """Round 1's second finding, at the seam that used to do the arithmetic.
+
+    Two bots in the group table and `MaxAddedBots = 2`: the old code refused
+    every row on that comparison. The module's count is not this number -- it
+    counts the bots it controls, plus the ones loading for that account
+    (`PlayerbotMgr.cpp:125-135`) -- so the rows stay offered and the note says
+    the cap could not be checked from here.
+
+    Mutation: put the group-table count back as the decision (`offered = () if
+    cap is not None and len(rows) >= cap else …`). The picker empties itself on
+    a number that means something else.
+    """
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql(
+        "1001\n",
+        "Bottom\t777\t8\t1\nOther\t778\t8\t1\n",  # two bots in the party
+        "1001\tPakka\t6\t2\t102\t1\t0\t\n2\tNore\t60\t8\t102\t0\t0\t\n",
+        "102\tPERZI\n",
+        "",
+    )
+    server = _with_playerbots_conf(_ready_install(tmp_path), account=1, guild=1, linked=1, cap=2)
+    picked = _install(server, sql, chan).candidates("Pakka")
+    assert picked.added == 2
+    assert picked.max_added == 2
+    assert [row.name for row in picked.rows if row.allowed] == ["Nore"]
+    assert "(2) could not be checked from here" in picked.note
+    assert "Pakka's game window" in picked.note
 
 
 def test_the_seam_reports_a_picker_read_that_failed_instead_of_a_short_list(
@@ -2456,3 +2678,141 @@ def test_the_seam_refuses_a_named_add_for_a_master_who_is_not_logged_in(tmp_path
     assert result.added is False
     assert result.blocker
     assert chan.sent == ["dml_bridge_ping"]
+
+
+# -- T26 round 2: the link write is transactional and read back --------------
+
+
+def test_the_link_write_is_one_transaction_that_reads_itself_back(tmp_path: Path) -> None:
+    """Round 2, must-fix 3, on the wire: one script, in this order.
+
+    One script because one `DockerSql` call is one `docker exec` is one mysql
+    session, and a transaction spread over two of them is not a transaction --
+    which is also why `ROW_COUNT()`, session state, can only be read here.
+
+    Mutation: send the `INSERT IGNORE` on its own again (the old
+    check-then-write). The order assertions fail, and with them the only
+    evidence the app has that the rows are there.
+    """
+    seam, sql = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "")
+    assert seam.link_account("Pakka", "FRIEND").linked is True
+    script = sql.written[0][1]
+    order = [
+        script.index("START TRANSACTION"),
+        script.index("INSERT IGNORE"),
+        script.index("ROW_COUNT()"),
+        script.index("SELECT 'row'"),
+        script.index("COMMIT"),
+    ]
+    assert order == sorted(order), script
+    assert sql.written[0][0] == "playerbots"
+
+
+def test_a_concurrent_insert_is_not_reported_as_this_press_writing_the_rows(
+    tmp_path: Path,
+) -> None:
+    """The pre-read saw neither row, the insert wrote neither, and both are
+    there: somebody else's press landed in between.
+
+    `INSERT IGNORE` cannot say no, so before round 2 this press said "are
+    linked: this press wrote both rows" over a write that did nothing.
+    `ROW_COUNT()` is what tells them apart.
+
+    Mutation: report the row count as 2 whatever came back. The sentence claims
+    a write this press did not make.
+    """
+    seam, sql = _linkable(
+        tmp_path,
+        "1\tPERZI",
+        "2\tFRIEND",
+        "",  # the pre-read: neither row
+        wrote=f"{party.WROTE_TAG}\t0\n{party.ROW_TAG}\t1\t2\n{party.ROW_TAG}\t2\t1\n",
+    )
+    result = seam.link_account("Pakka", "FRIEND")
+    assert result.linked is True
+    assert "were already linked by the time this press ran" in result.sentence
+    assert "this press wrote both rows" not in result.sentence
+
+
+def test_a_half_linked_pair_is_repaired_and_the_report_says_which_row_it_wrote(
+    tmp_path: Path,
+) -> None:
+    """One row in the table is a third state, not "already linked".
+
+    The module's own command writes both directions, so a table holding one is a
+    link `IsAccountLinked` answers for one way round and not the other. Before
+    round 2 the pre-read refused it as already linked and the pair stayed half
+    linked for good.
+
+    Mutation: refuse on any row found (`if forward or back`). The repair never
+    happens and the refusal names a link that only half exists.
+    """
+    seam, sql = _linkable(
+        tmp_path,
+        "1\tPERZI",
+        "2\tFRIEND",
+        "1\t2\n",  # the pre-read: the master's direction only
+        wrote=f"{party.WROTE_TAG}\t1\n{party.ROW_TAG}\t1\t2\n{party.ROW_TAG}\t2\t1\n",
+    )
+    result = seam.link_account("Pakka", "FRIEND")
+    assert result.linked is True
+    assert "one way only" in result.sentence
+    assert "wrote the missing row" in result.sentence
+    assert len(sql.written) == 1
+
+
+def test_the_confirmation_says_a_half_linked_pair_would_be_repaired(tmp_path: Path) -> None:
+    """The first press has to name what the second one will do, and repairing a
+    half link is not the same thing as making one."""
+    seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "2\t1\n")
+    plan = seam.link_plan("Pakka", "FRIEND")
+    assert plan.blocker == ""
+    assert "one way only" in plan.sentence
+
+
+def test_a_write_that_could_not_be_read_back_is_never_reported_as_linked(
+    tmp_path: Path,
+) -> None:
+    """T21's rule on the write side: nothing is claimed on a read that did not
+    happen. The transaction may have committed -- the sentence says what is
+    known, which is that this press could not show both rows.
+
+    Mutation: return `linked=True` when the write raised nothing. A database
+    that answered nothing at all reads as a link the module will not honour.
+    """
+    seam, sql = _linkable(
+        tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote=RuntimeError("docker is not running")
+    )
+    result = seam.link_account("Pakka", "FRIEND")
+    assert result.linked is False
+    assert "NOT linked" in result.sentence
+    assert "docker is not running" in result.sentence
+    assert len(sql.written) == 1, "the script went out; what failed is knowing what it did"
+
+
+def test_a_readback_that_finds_one_row_is_not_a_link(tmp_path: Path) -> None:
+    """`linked` is both rows read back inside the transaction, never the insert
+    being sent. One row is what the module honours in one direction only."""
+    seam, _ = _linkable(
+        tmp_path,
+        "1\tPERZI",
+        "2\tFRIEND",
+        "",
+        wrote=f"{party.WROTE_TAG}\t1\n{party.ROW_TAG}\t1\t2\n",
+    )
+    result = seam.link_account("Pakka", "FRIEND")
+    assert result.linked is False
+    assert "found 1 of the two rows" in result.sentence
+
+
+def test_a_link_write_that_answers_something_else_is_reported_and_not_parsed_past(
+    tmp_path: Path,
+) -> None:
+    """`read_members`' rule on the one output that is this write's only evidence:
+    a line nobody understands is reported, never dropped."""
+    read = party.read_link_write("wrote\t2\nsomething else\n")
+    assert isinstance(read, str)
+    assert "something else" in read
+    assert isinstance(party.read_link_write("row\t1\t2\n"), str), "no row count is no answer"
+    seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote="what?\n")
+    assert seam.link_account("Pakka", "FRIEND").linked is False

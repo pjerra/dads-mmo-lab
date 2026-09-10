@@ -301,22 +301,6 @@ preconditions on every press and two adds in flight would poll each other's
 bots."""
 
 
-def _cap_line(picked: party.Picker) -> str:
-    """How many bots this character has, against the server's own cap.
-
-    Shown where the cap WAS read; `Picker.note` says what is missing where it
-    was not. The count is the bots in the party as the group table has them --
-    the module's own counter lives in the world process and nothing here can ask
-    it, which `InstallParty.candidates` records.
-    """
-    if picked.max_added is None:
-        return ""
-    return (
-        f"{party.bots_word(picked.added)} in this character's party, of the "
-        f"{picked.max_added} this server's {party.MAX_ADDED_BOTS_KEY} allows."
-    )
-
-
 class PartyPanel(QWidget):
     """My Party for one install: a character, a class, the group, and a dismissal.
 
@@ -755,7 +739,12 @@ class PartyPanel(QWidget):
                 # a row to press, and a disabled Add button under a selected
                 # refusal would say the same thing twice and less clearly.
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-        self.candidate_note.setText(picked.note or _cap_line(picked))
+        # `Picker.note` and nothing of this panel's own arithmetic: the count
+        # the seam read is the group table's, which is not the number the
+        # module caps (round 1's second finding), and a line here that put the
+        # two beside each other would be the same claim with a widget making
+        # it.
+        self.candidate_note.setText(picked.note)
 
     @staticmethod
     def _candidate_row(row: party.Candidate) -> str:
