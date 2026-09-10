@@ -543,6 +543,7 @@ def apply(
     sink: docker.OutputSink,
     cancel: threading.Event | None,
     wsl_distro: str | None = None,
+    cancel_note: str = IMPORT_CANCEL_NOTE,
 ) -> Iterator[str]:
     """Run every `PhaseRun` in order, streaming each file on the client's stdin.
 
@@ -565,7 +566,14 @@ def apply(
     redacted local rather than `proc`, so they inherit it.
 
     `cancel` is checked before each run and never mid-file: a half-applied file is exactly
-    the `partial` state `MarkerGate.reset()` exists to clear, and the cancel note says so.
+    the `partial` state `MarkerGate.reset()` exists to clear, and the cancel note says so —
+    for the caller that reset is true of. `cancel_note` defaults to `IMPORT_CANCEL_NOTE`
+    because that caller, `_import`'s own fresh-import path, is the one whose next
+    `stage_import()` really does call `gate.reset()` over a `partial` state. The other
+    caller, `_rerun_on_marked()`, runs only after the gate already reads a finished
+    import — a stop there changes neither the marker nor the gate's answer — and passes
+    its own truthful note rather than inheriting a promise this call cannot keep (T19,
+    round-1 rework).
 
     **Three ways a run can go wrong, and they are three different sentences.** `expand()`
     already keeps "nothing matched" apart from "could not look"; the same distinction has
@@ -596,7 +604,7 @@ def apply(
     """
     env = {"MYSQL_PWD": password}
     for run in runs:
-        _check_cancel(cancel)
+        _check_cancel(cancel, cancel_note)
         yield _describe(run)
         argv = _client_argv(client, run.schema)
         try:
@@ -698,10 +706,16 @@ def _last_line(lines: Sequence[str]) -> str:
     return ""
 
 
-def _check_cancel(cancel: threading.Event | None) -> None:
-    """Stop between runs, with the one wording every cancel in the app uses (A10)."""
+def _check_cancel(cancel: threading.Event | None, note: str) -> None:
+    """Stop between runs, with the one wording every cancel in the app uses (A10).
+
+    `note` names whatever THIS call really leaves behind — `apply()`'s own
+    `cancel_note`, passed through rather than read again from `IMPORT_CANCEL_NOTE`
+    here, so a caller whose reset promise does not hold cannot be overruled by
+    this function's own default.
+    """
     if cancel is not None and cancel.is_set():
-        raise InstallerError(f"The import was stopped. {IMPORT_CANCEL_NOTE}")
+        raise InstallerError(f"The import was stopped. {note}")
 
 
 def create_schemas(
