@@ -390,6 +390,14 @@ def import_reads_as_finished(state: docker.ImportState) -> bool:
     second because an install made by the shell scripts has no marker row at all
     and would otherwise be as exposed as before T11.
 
+    The second arm was DEAD through the CMaNGOS gate until T19: `MarkerGate`
+    answered `complete` on `imported` alone, so the owner's marker-less Tortoise
+    install — the one the whole T10 → T11 → T14 chain was built for — read
+    `populated` incomplete and the updates press refused it (`pyplan/gates/
+    tortoise-updates-button-m910q-2026-09-09/`, finding 1). `MarkerGate.probe()`
+    now answers it from the plan's own expected tables; see its docstring for
+    what completeness there does and does not claim.
+
     Written once because it is now asked from two places that must not disagree.
     `_import` asks it to decide whether the ordinary import runs, and the
     updates press asks it as a PRECONDITION — and if the precondition were even

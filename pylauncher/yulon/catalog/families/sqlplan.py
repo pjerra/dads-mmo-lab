@@ -1262,11 +1262,44 @@ class MarkerGate:
         older plan: logged, reported as imported, never re-run — an app upgrade
         must not `DROP realmd` on a server with accounts.
 
-        `imported` is the only branch that reports `complete`. `populated` says
-        nothing about whether the schemas are finished (it short-circuits on the
-        first row), and `stage_import()` skips a `populated` database only when
-        it is complete — so claiming completeness here would let an import that
-        died half way read as done.
+        **`imported` and `populated` both report `complete`, and they answer it
+        differently.** A marker row is proof and is taken as one; on
+        `populated` the question is asked, because until T19 it was not asked at
+        all and the second arm of `native.import_reads_as_finished()` was
+        therefore dead through this gate. An install made by the fork's own
+        shell scripts carries no marker row, so the owner's m910q Tortoise
+        install — 903 characters, 110 accounts, no `yulon_install` in any schema
+        — read `populated` incomplete, the updates button refused it, and T11's
+        route never reached it either (`pyplan/gates/
+        tortoise-updates-button-m910q-2026-09-09/`, finding 1).
+
+        **The rule: complete when every schema the plan names EXISTS and holds
+        every table the plan names in it.** The expected set is the plan's own
+        `player_data` — `(schemas[db], table)` — because that is the only place
+        a `SqlPlan` names a table rather than a file, and it is asked with the
+        `information_schema` count `_player_rows()` already makes, so this costs
+        no extra round trip. What the set deliberately does NOT contain: a table
+        created inside a dump file, conditionally (`CREATE TABLE IF NOT EXISTS`)
+        or not, which is invisible from the plan and would need the clone and a
+        SQL parser to see; and anything from a `statements` phase, which in the
+        shipped plans alters, grants and replaces rows but creates no table. No
+        count of tables is compared against a number, for the reason the
+        AzerothCore probe records beside `IMPORT_MARKERS`: a number needs a new
+        value every time upstream adds a table.
+
+        **The bounded risk, stated because it is real:** a populated install a
+        person built by some other route can carry every expected table and
+        still differ in content from what these files describe, and this branch
+        will call it complete. Completeness here is a claim about tables, not
+        about rows. What that buys the one route it opens — `_rerun_on_marked()`
+        — is bounded by the same argument T11 made for it: a phase carries
+        `rerun_on_marked` only where its files are idempotent on their own
+        terms, no marker is written and no `verify` rule is re-asked.
+
+        The order is unchanged and the reason is unchanged: the state is decided
+        first, by what a wrong answer costs, and completeness is computed
+        afterwards over the same readings — `controller_wow_wotlk/repair.py`
+        does it in that order for the same reason.
         """
         try:
             present = [name for name in self._names if name in self._databases()]
@@ -1277,7 +1310,7 @@ class MarkerGate:
             marker = self._marker(present)
             if marker is not None:
                 return docker.ImportState("imported", self._marker_detail(marker), complete=True)
-            populated = self._player_rows(present)
+            populated, absent_tables = self._player_rows(present)
         except docker.DockerCommandError as exc:
             # THE ENTRANCE for what the DAEMON said, `apply()`'s shape rather
             # than `_run_sql()`'s: redacted here, once, so the branch that
@@ -1290,7 +1323,13 @@ class MarkerGate:
                 f"({_redact(str(exc), self._password)}). {_VOLUME_NOTE}",
             )
         if populated:
-            return docker.ImportState("populated", populated)
+            unfinished = self._unfinished(present, absent_tables)
+            if unfinished:
+                return docker.ImportState(
+                    "populated",
+                    f"{populated}, but {', '.join(unfinished)}, so this is not a finished import",
+                )
+            return docker.ImportState("populated", populated, complete=True)
         return docker.ImportState(
             "partial",
             f"{', '.join(present)} exist{'s' if len(present) == 1 else ''} but there is no "
@@ -1456,22 +1495,38 @@ class MarkerGate:
             logger.info(detail)
         return detail
 
-    def _player_rows(self, present: Sequence[str]) -> str:
-        """`"3 rows in characters.characters"` for what a person made; `""` for none.
+    def _player_rows(self, present: Sequence[str]) -> tuple[str, tuple[str, ...]]:
+        """`"3 rows in characters.characters"` for what a person made, and what is missing.
 
         Every `player_data` table is asked, not only until the first one answers,
         so the refusal names all of them. A table whose schema is not there, or
         which has not been created yet, is skipped rather than counted — its
         absence is what `partial` is about, not evidence of a player.
 
+        **The second half of the answer is that same absence, kept rather than
+        thrown away**: these tables are `probe()`'s expected set, and the
+        `information_schema` count that decides whether to count rows in one is
+        the same question completeness asks of it. Returned from here so it is
+        asked ONCE — a separate pass would double this gate's round trips for a
+        reading it already had (`repair.py` records the same measurement: a
+        second `docker exec` costs about 0.3s).
+
+        Only for a schema that is present. A table in a schema that does not
+        exist is not named here, because `probe()` names the SCHEMA in that
+        case and saying both would report one absence twice.
+
         The excluded usernames go into `NOT IN ('...')` with no escaping around
         them; `__init__` refused any that could break out, before a statement
         was built.
         """
         said: list[str] = []
+        missing: list[str] = []
         for data in self._plan.player_data:
             schema = self._schemas[data.db]
-            if schema not in present or not self._table_exists(schema, data.table):
+            if schema not in present:
+                continue
+            if not self._table_exists(schema, data.table):
+                missing.append(f"{schema}.{data.table}")
                 continue
             statement = f"SELECT COUNT(*) FROM `{schema}`.`{data.table}`"
             if data.exclude_usernames:
@@ -1480,4 +1535,17 @@ class MarkerGate:
             rows = self._count(schema, statement, f"{schema}.{data.table}")
             if rows:
                 said.append(f"{rows} rows in {schema}.{data.table}")
-        return ", ".join(said)
+        return ", ".join(said), tuple(missing)
+
+    def _unfinished(self, present: Sequence[str], absent_tables: Sequence[str]) -> tuple[str, ...]:
+        """Why this populated install is not a finished import; `()` when it is.
+
+        Schemas first and in the plan's own order, then the tables, because a
+        schema that was never created is the larger fact and its tables would
+        otherwise be named one by one under it. Asks nothing: both readings were
+        taken by `probe()` and `_player_rows()` already.
+        """
+        return (
+            *(f"{name} does not exist" for name in self._names if name not in present),
+            *(f"{table} is missing" for table in absent_tables),
+        )

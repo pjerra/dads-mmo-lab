@@ -2491,21 +2491,120 @@ def test_probe_is_unreadable_when_the_marker_lookup_answers_more_than_one_row() 
     assert state.state == "unreadable" and "LIMIT 1" in state.detail
 
 
-def test_probe_calls_only_imported_complete() -> None:
-    """`stage_import()` skips on `imported` OR on `populated` that is complete;
-    a populated database this gate has not finished must still be refused."""
-    imported = _gate(_Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())).probe()
-    populated = _gate(
-        _Server(
-            databases=ALL,
-            tables={"characters": ["characters"]},
-            rows={("characters", "characters"): 2},
-        )
-    ).probe()
-    partial = _gate(_Server(databases=["mangos"])).probe()
-    absent = _gate(_Server()).probe()
-    assert imported.complete is True
-    assert (populated.complete, partial.complete, absent.complete) == (False, False, False)
+# -- completeness on the `populated` branch (T19) ------------------------------
+#
+# `import_reads_as_finished()` accepts two answers and this gate could only
+# give one of them, so an install made by the shell scripts - no marker row,
+# every schema full - was refused by the updates button and by `_import`'s
+# re-run route alike (the owner's m910q Tortoise install: 903 characters, 110
+# accounts, no `yulon_install` in any schema, `pyplan/gates/
+# tortoise-updates-button-m910q-2026-09-09/`). The expected set below is read
+# off the plan, so these tests build the plan they measure against rather than
+# naming tables of their own.
+
+
+def test_probe_imported_is_complete_without_asking_which_tables_are_there() -> None:
+    """The `imported` branch is untouched by the completeness rule: a marker row
+    is proof, and a plan whose `player_data` moved must not turn a finished
+    import into an unfinished one."""
+    server = _Server(databases=ALL, marker_hash=GATE_PLAN.plan_hash())
+    state = _gate(server).probe()
+    assert (state.state, state.complete) == ("imported", True)
+    assert not any(
+        f"table_name='{data.table}'" in question
+        for _schema, question in server.asked
+        for data in GATE_PLAN.player_data
+    )
+
+
+def test_probe_populated_is_complete_when_every_table_the_plan_names_is_there() -> None:
+    """The m910q install, which is the one this branch exists for."""
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    )
+    state = _gate(server).probe()
+    assert (state.state, state.complete) == ("populated", True)
+    assert state.detail == "903 rows in characters.characters, 110 rows in realmd.account"
+
+
+def test_probe_populated_stays_incomplete_when_a_table_the_plan_names_is_missing() -> None:
+    """And the detail says WHICH: a refusal a user cannot act on is the thing
+    `ImportState.detail` exists to prevent."""
+    absent = GATE_PLAN.player_data[1]
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        rows={("characters", "characters"): 903},
+    )
+    state = _gate(server).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert f"{SCHEMAS[absent.db]}.{absent.table} is missing" in state.detail
+    assert "903 rows in characters.characters" in state.detail
+
+
+def test_probe_populated_stays_incomplete_when_a_schema_the_plan_names_is_not_there() -> None:
+    """A schema the import never created is not a finished import, whatever the
+    schemas beside it hold."""
+    server = _Server(
+        databases=["mangos", "realmd", "characters"],
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903},
+    )
+    state = _gate(server).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert "logs does not exist" in state.detail
+
+
+def test_the_expected_set_is_read_off_the_plans_own_player_data() -> None:
+    """Not a list written into this module: a plan naming a third table demands
+    the third table, with nothing in `sqlplan` edited."""
+    plan = GATE_PLAN.model_copy(
+        update={"player_data": (*GATE_PLAN.player_data, PlayerData(db="logs", table="logs"))}
+    )
+    server = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903},
+    )
+    assert _gate(server).probe().complete is True
+    state = _gate(server, plan=plan).probe()
+    assert (state.state, state.complete) == ("populated", False)
+    assert "logs.logs is missing" in state.detail
+
+
+def test_probe_partial_is_never_complete() -> None:
+    server = _Server(databases=["mangos", "realmd"], tables={"realmd": ["account"]})
+    state = _gate(server).probe()
+    assert (state.state, state.complete) == ("partial", False)
+
+
+def test_probe_absent_is_never_complete() -> None:
+    state = _gate(_Server()).probe()
+    assert (state.state, state.complete) == ("absent", False)
+
+
+def test_probe_unreadable_is_never_complete() -> None:
+    state = _gate(_Server(down="No such container: tbc-db")).probe()
+    assert (state.state, state.complete) == ("unreadable", False)
+
+
+def test_a_marker_less_install_reads_as_finished_through_the_real_gate() -> None:
+    """`native.import_reads_as_finished()`'s second arm, which was unreachable
+    through this gate until T19 - the whole of finding 1."""
+    finished = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"], "realmd": ["account"]},
+        rows={("characters", "characters"): 903, ("realmd", "account"): 110},
+    )
+    half = _Server(
+        databases=ALL,
+        tables={"characters": ["characters"]},
+        rows={("characters", "characters"): 903},
+    )
+    assert native.import_reads_as_finished(_gate(finished).probe()) is True
+    assert native.import_reads_as_finished(_gate(half).probe()) is False
 
 
 def test_probe_asks_the_daemon_that_holds_the_container() -> None:
