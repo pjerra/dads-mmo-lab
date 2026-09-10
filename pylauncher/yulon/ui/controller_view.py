@@ -969,7 +969,17 @@ def _for_wotlk(
         # exists, because silently changing an owner's password is worse than
         # refusing. `reset_own_password` refuses every name that is not this
         # app's own, so the one account it can rewrite is the one it made.
-        reset=lambda name, pw: wotlk_accounts.reset_own_password(sql, name, pw),
+        # `scheme` is bound the same way `create` binds it two lines above --
+        # an entry with no declared scheme is refused by `checked_scheme`
+        # rather than falling through to the writer's own AzerothCore default
+        # (T22; the create= binding refused this same entry, the reset= one
+        # next to it did not).
+        reset=lambda name, pw: wotlk_accounts.reset_own_password(
+            sql,
+            name,
+            pw,
+            scheme=wotlk_accounts.checked_scheme(entry.accounts.scheme, entry.id),
+        ),
         channel_for=lambda endpoint: channel_module.SoapChannel(
             endpoint=endpoint,
             state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
