@@ -1,6 +1,6 @@
 # T23 — The 7.10 clause-35 runner has two fail-open paths (restart window, firewall backup)
 
-**Status:** OPEN, BLOCKED on `yulon-ubuntu2` (the Hyper-V host is down); the script edits can be made and reviewed before the box is back
+**Status:** IN PROGRESS (Opus hand on `hand-t23` since 2026-09-10 18:59 CEST; the host is back, the box free after T13's live half)
 **Filed:** 2026-09-10 15:06 CEST by the lead (Fable), from the owed Codex adversarial pass on T3 round 4 (`a4454ec0`), two high findings
 **Hand:** Opus (a live-box runner; both fixes are argued against a running server), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pyplan/gates/7.10-clause35-ubuntu2-2026-09-09/run-t3.sh` and the folder's README, plus a NEW capture folder `pyplan/gates/7.10-clause35-ubuntu2-<date>/` for the reruns. Nothing under `pylauncher/`.
