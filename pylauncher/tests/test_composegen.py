@@ -521,6 +521,77 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         )
 
 
+# -- is_marker_line: the exact banners, not a separator rule (T25) -----------
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["-custom", " (modified)", " - my note", " — my note"],
+    ids=["glued-suffix", "parenthetical", "hyphen-note", "em-dash-note"],
+)
+def test_a_mark_that_only_looks_like_the_marker_is_not_ours(suffix: str) -> None:
+    """A user marking a file they took over must not read back as ours.
+
+    `is_ours()` used to decide OURS by `startswith(GENERATED_MARKER)`, so any of these
+    four first lines -- a person's own note on a file they took over, sharing nothing with
+    this engine but the words -- passed the check, and the file was replaced whole on the
+    next `generate-compose` or rebuild. Round 1's fix (T25) closed the first two with a
+    separator rule (the marker, a space, then a hyphen or em dash) and reopened exactly
+    this shape: `... - my note` and `... — my note` reuse the same punctuation this
+    engine's own banners do, so a rule about the SEPARATOR still answered True for both.
+    `is_marker_line()` now checks the banner itself, not its first character.
+    """
+    assert composegen.is_marker_line(f"{composegen.GENERATED_MARKER}{suffix}\nFROM x\n") is False
+
+
+def test_the_markers_own_banners_are_still_ours() -> None:
+    """The bare marker, and the marker with each of `MARKER_BANNERS`, all answer True.
+
+    Driven off the constant rather than retyped, so a banner added there is covered here
+    for free and a banner REMOVED there is caught here rather than only by the shipped-
+    template test below (which would simply stop exercising the line nothing renders with
+    any more).
+    """
+    assert composegen.is_marker_line(f"{composegen.GENERATED_MARKER}\nFROM x\n") is True
+    for banner in composegen.MARKER_BANNERS:
+        text = f"{composegen.GENERATED_MARKER}{banner}\nFROM x\n"
+        assert composegen.is_marker_line(text) is True, banner
+
+
+def test_every_shipped_templates_first_line_is_ours() -> None:
+    """Read every `.tmpl` this project ships and check its actual first line, not a copy of it.
+
+    The tripwire `MARKER_BANNERS`' own docstring promises: a new template, or an edited
+    banner, that drifts past the enumerated set fails HERE, in a test that reads the real
+    files, rather than at the next rebuild of whichever install rendered it.
+    """
+    templates = sorted(TEMPLATES.rglob("*.tmpl"))
+    assert templates, "the glob found nothing -- this test is checking zero files"
+    for path in templates:
+        first_line = path.read_text(encoding="utf-8").split("\n", 1)[0]
+        assert composegen.is_marker_line(first_line + "\n"), path
+
+
+@pytest.mark.parametrize("suffix", ["-custom", " - my note"], ids=["glued", "hyphen-note"])
+def test_write_plan_refuses_a_file_whose_first_line_only_looks_like_the_marker(
+    tmp_path: Path, suffix: str
+) -> None:
+    """End to end: the same look-alike mark stops `write_plan()` rather than being overwritten.
+
+    The mutation this guards against is `is_marker_line()` collapsing back to a separator
+    rule (round 1) or a bare `startswith(GENERATED_MARKER)` (round 0): under either, the
+    file below reads as ours and `write_plan()` compiles right over it instead of refusing.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    theirs = f"{composegen.GENERATED_MARKER}{suffix}\nservices: {{}}\n"
+    (server_dir / composegen.BASE_FILE).write_text(theirs, encoding="utf-8")
+    assert composegen.is_ours(server_dir / composegen.BASE_FILE) is False
+    with pytest.raises(composegen.ComposeGenError, match="not written by Yu'lon"):
+        composegen.write_plan(render(server_dir), server_dir)
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == theirs
+
+
 def test_merge_dotenv_replaces_in_place_and_appends_the_rest() -> None:
     """A merge, not a rewrite: this file is shared with SOAP setup and the port remedy."""
     existing = "# theirs\nDOCKER_DB_EXTERNAL_PORT=13306\nSOMETHING_ELSE=keep me\n"

@@ -2359,7 +2359,9 @@ class StagedInstaller:
             f"on its own for it, and the world server stays down."
         )
 
-    def stage_recreate(self, ctx: StageContext) -> Iterator[str]:
+    def stage_recreate(
+        self, ctx: StageContext, *, before_replace: Callable[[], None] | None = None
+    ) -> Iterator[str]:
         """Replace the long-running containers so the binary just built is the one running.
 
         The stage the whole feature turns on. Everything above it can be
@@ -2367,10 +2369,37 @@ class StagedInstaller:
         containers created before the rebuild keep running, the user logs back
         in to exactly what they had, which is the report this control exists to
         answer.
+
+        **The preflight is split off in front of the destructive command (T25 round 2).**
+        `docker_ready()` is the one question this method can answer with certainty before
+        doing anything: not reachable means the daemon was never asked to replace anything,
+        so refusing HERE, before the first yield, is the one place left where "nothing was
+        touched" is still true rather than assumed. Past it, `self._seams.recreate()` is
+        ONE `compose up --force-recreate` for every service this install has, and a
+        `DockerCommandError` from it does not say which of them it got to before failing --
+        compose can recreate two services and fail the third, or recreate all three and
+        then fail the running-container check. `before_replace` is the boundary the
+        wrapper in `rebuild()` needs: it is called synchronously, after every argument is
+        prepared and immediately before the compose command is issued, so a failure
+        anywhere in front of it -- the readiness probe, the progress yield the caller is
+        suspended at, `container_spec()` -- is still "nothing was touched", and only a
+        failure from the command itself is not. (Round 2 read the first yield as that
+        boundary; the round-2 review pointed out the daemon can go away between the
+        probe and the call, and a consumer can stop at the yield, so the flag moved to
+        the call.)
         """
+        if not self._seams.docker_ready():
+            raise InstallerError(
+                "Docker is not answering, so the containers were not replaced -- the server "
+                "you have is still the one that was running before this rebuild. Nothing was "
+                "touched. Check the docker daemon is up, then press Rebuild again."
+            )
         yield "Replacing the running containers so the new build is what starts."
+        spec = self.entry.container_spec()
+        if before_replace is not None:
+            before_replace()
         try:
-            self._seams.recreate(self.entry.container_spec(), ctx.server_dir)
+            self._seams.recreate(spec, ctx.server_dir)
         except docker.DockerCommandError as exc:
             raise InstallerError(
                 f"The server was rebuilt, but its containers could not be replaced, so the "
@@ -2454,6 +2483,30 @@ class StagedInstaller:
         # and whether the containers were TOUCHED (from then on the old build
         # is not what is running). Read off the stages as they pass rather
         # than guessed from the exception's wording.
+        #
+        # `touched` was set on ENTRY to `recreate()` until T25 round 1 found what
+        # that costs: `stage_recreate()` can raise before `_seams.recreate()` ever
+        # runs (the daemon unreachable) or before it returns, and with `touched`
+        # already True the `except` below in `rebuild()` skipped
+        # `_put_recipe_back()` -- the recipe just re-rendered stayed on disk
+        # though no container had moved -- and `_restore_rollback` took its
+        # second `stage_recreate()` call for a server nothing had touched the
+        # first time. Round 1 moved the assignment to AFTER `stage_recreate()`
+        # returns, beside `built` -- which round 2's review then found the other
+        # side of: `self._seams.recreate()` is one `compose up --force-recreate`
+        # for every service, and a `DockerCommandError` from it does not say
+        # whether it recreated two of three containers before failing the
+        # third. Waiting for a clean RETURN to believe anything moved reads a
+        # partial replacement as untouched, exactly backwards.
+        #
+        # The boundary that survives both is `stage_recreate()`'s own: its
+        # `docker_ready()` preflight is the one question answerable BEFORE the
+        # destructive call, so `touched` is set once its generator reaches the
+        # first thing IT yields past that check -- not on entry to the wrapper,
+        # and not on a clean return, but at the point past which `stage_recreate`
+        # can no longer fail having changed nothing. `next()` rather than `yield
+        # from` because splitting the first yield from the rest is the only way
+        # to observe that point from here.
         built = False
         touched = False
 
@@ -2463,9 +2516,15 @@ class StagedInstaller:
             built = True
 
         def recreate(stage_ctx: StageContext) -> Iterator[str]:
-            nonlocal touched
-            touched = True
-            yield from self.stage_recreate(stage_ctx)
+            def mark_touched() -> None:
+                nonlocal touched
+                touched = True
+
+            # `touched` flips inside `stage_recreate()`, synchronously, immediately
+            # before the compose command is issued -- not at the stage's first yield
+            # (round 2), which left a window between the readiness probe and the
+            # command where a failure read as a partial replacement.
+            yield from self.stage_recreate(stage_ctx, before_replace=mark_touched)
 
         # BY NAME, and it was positional (`first, second, *rest`) until
         # 2026-09-09. That was true of a tuple beginning with `build`, and T8
