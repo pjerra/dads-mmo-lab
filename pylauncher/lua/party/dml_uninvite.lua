@@ -90,6 +90,19 @@ local function OnUninviteCommand(event, player, command, handler)
         return refuse(string.format("%s not found or offline", bname))
     end
 
+    -- Round 2's review, note 4: `dml_uninvite <master> <master>` resolves
+    -- p and b to the SAME player, passes IsMember (a player is a member of
+    -- his own group) and removes the master from his own party. The app
+    -- itself cannot ask for it -- `group_rows_sql`'s `bot_clause` never
+    -- returns the master, so the panel can neither list nor confirm him --
+    -- but this command is console/SOAP-callable by anything holding the
+    -- admin account, and the refusal costs one comparison. Proved live
+    -- rather than reasoned: the gate folder this guard ships with whispers
+    -- it and captures the refusal.
+    if b == p then
+        return refuse(string.format("%s is the master, not a bot in the party", bname))
+    end
+
     local g = b:GetGroup()
     if g == nil then
         return refuse(string.format("%s is not grouped with anyone", bname))
