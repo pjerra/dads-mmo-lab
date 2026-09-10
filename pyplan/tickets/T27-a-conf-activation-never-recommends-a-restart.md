@@ -1,0 +1,20 @@
+# T27 — Activating a module's conf never recommends a restart, though the world reads it only after one
+
+**Status:** OPEN (waiting for a lane)
+**Filed:** 2026-09-10 22:37 CEST by the lead (Fable), from T18's live half and its evidence reviewer
+**Hand:** Sonnet (one rule and its tests), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
+**File set (yours alone):** `pylauncher/yulon/apply.py` **only** where `restart_recommended` is derived (`:2207-2212` at `c0386f9f`) and the report's sentence for it; its tests (name them). Not the Modules tab, not `module_source.py`.
+**Box:** none; unit only. The live measurement is T18's folder.
+
+## The fact (T18, `pyplan/gates/8.6-spec-takes-effect-yulon-ubuntu2-2026-09-10/`)
+
+The activation of `mod-playerbots`' conf through the app's own seam reported `restart_recommended = False` (`03-activate.log:38`); the same folder shows the running world did not read the conf until the restart of step 04 (`03-activate.log:66`, `04-restart-and-list.log:27-32`: "Config::LoadFile: Failed open file" before, "Loading TalentSpecs" after). `apply.py:2207-2212` derives the flag from `build.restart`, `npcs`, direct SQL and `server_dbc` only, so no conf activation on any route ever recommends a restart: a user pressing the Modules tab's Install is told nothing further is needed, and the spec still cannot take effect.
+
+## What to build
+
+- A conf step that wrote or replaced a file the running world would read (`_conf()`'s `done: activate …` outcome, and a `set N key(s)` outcome) sets `restart_recommended`; a conf that was already identical (nothing written) does not. The report's sentence names the file and says the world reads it at its next start.
+- TDD: an activation that writes -> recommended, with the file named; an activation that writes nothing -> not recommended; a module with no conf -> unchanged; the mutation for each (the clause dropped; the identical case folded into the written one).
+
+## Definition of done
+
+`--checks` ALL GREEN from your worktree's `pylauncher/` (announce on the gate box first); the tests red first. One commit, `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` only; no push; the ticket file is not yours. Scratch under `<scratchpad>/T27/`.
