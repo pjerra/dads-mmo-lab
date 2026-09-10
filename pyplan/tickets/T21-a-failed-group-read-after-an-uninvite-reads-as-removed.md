@@ -48,3 +48,11 @@ The ticket's file set caused finding 1; it is widened above. Must-fixes: (1) `re
 - Must-fix 1: `remove` and `remove_all` (and `dismiss_all`'s widened `members`) hand `dismiss()` the unfolded answer; no `_rows_only` on the dismiss direction. Must-fix 2: `Dismissal.unreadable: bool = False` (a structural signal, not sentence sniffing); `_mass_sentence` buckets left / stayed / could not be confirmed, the third rendered as "Could not be confirmed — <bot>: <sentence>; ..." beside "Still here — ..." when both are non-empty.
 - Tests, each RED first and each mutation RED: `test_the_seam_does_not_report_removed_when_every_poll_read_fails` (fold restored on `remove`), `test_the_batch_seam_does_not_report_removed_when_every_poll_read_fails` (fold restored on `remove_all`), `test_a_mass_dismissal_where_every_bot_is_unreadable_says_so_not_stayed` and `test_a_mixed_mass_dismissal_names_each_bucket_in_its_own_words` (unknown folded into stayed).
 - Deviations: rebased instead of ff; the new field; the seam tests silence the poll's wait through `dismiss.__kwdefaults__["sleep"]` / `dismiss_all.__kwdefaults__["sleep"]` because `InstallParty.remove`/`remove_all` expose no `sleep`. Status DONE.
+
+## Review, round 2 (Codex adversarial, 2026-09-10 15:46 CEST) -- REWORK, one
+
+Polling routes fixed on both seams; `monkeypatch.setitem` restores the `__kwdefaults__` write even on a failed assertion; no positional `Dismissal` consumer breaks on the new field. One medium: `party.py:1495-1500`, with `gone` empty the head says "None of N left the party" even when every dismissal is unreadable -- an outcome no read established (after successful uninvites in an outage, all may have left); the all-unknown test locked it in.
+
+## Closed by the lead's hand (round cap, 2026-09-10 15:46 CEST)
+
+When the could-not-be-confirmed bucket is non-empty the head reads "N of M confirmed left the party: ..." or "None of M were confirmed to have left the party."; with no unreadable poll the old wording stands. The all-unreadable test now rejects "None of 2 bots left the party"; the mixed test reads "1 of 3 bots confirmed left". Mutation (the confirmed branch disabled): 2 failed. `test_party.py` 127 passed locally; gate on m910q behind the commit, then merge.
