@@ -135,3 +135,7 @@ The probe route is dropped; its three commits stay on the local branch `record/t
 ## Closed by the lead's hand (2026-09-10 21:28 CEST)
 
 `_refuse_writes_into_a_running_world(ADOPT_BUTTON_LABEL)` now sits immediately before `write_import_marker()`, after the "Writing one row" line (T25's boundary rule); `test_a_world_started_at_the_pre_write_line_is_refused_before_the_row` brings the world up at exactly that line (three readings: down, down, up) and sees no marker statement; mutation (the reading deleted): red. `d0c5ab01`, gate ALL GREEN on m910q. Merged behind a gate next; then the m910q press on the owner's yes.
+
+## Owner (2026-09-10 21:33 CEST, through the question tool): "Yes, press both"
+
+The adopt press and then the updates press on the m910q install, the world stopped, captured as T14's live half was; the lead's press, carried out by an Opus hand on `hand-t19-press`.
