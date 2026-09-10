@@ -1,6 +1,6 @@
 # T13 — `dml_uninvite` removes a bot only from the party of the master that asked
 
-**Status:** code half MERGED `1a446392`; live half DONE by the hand `d4bf2a0e` (2026-09-10 18:59 CEST), under one cold evidence review
+**Status:** CLOSED (code half `1a446392`, live half merged `99269c8b` 2026-09-10 19:07 CEST; gate ALL GREEN on m910q behind it; worktree and branch removed)
 **Filed:** 2026-09-09 17:05 by the lead (Fable), from T5's round-3 Codex review
 **Hand:** Sonnet (budget rule 2026-09-09; the trailer says Sonnet), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** the bridge script `dml_uninvite.lua` where the app ships it (find it: `git grep -l dml_uninvite -- '*.lua'`; the deploy list in `pylauncher/yulon/party.py` names the five), `pylauncher/yulon/party.py` **only** at `uninvite_command()` and the seam sentence for a refusal (T5's round-3 `remove_all` and its tests are merged and must keep passing), `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-uninvite-contract-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not `controller_view.py`, not `pyplan/checklist.md`.
