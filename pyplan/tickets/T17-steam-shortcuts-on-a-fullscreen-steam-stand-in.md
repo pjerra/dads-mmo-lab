@@ -1,6 +1,6 @@
 # T17 — 8.8 Steam integration, gated on fullscreen Steam on a Linux VM as the Deck stand-in
 
-**Status:** BLOCKED on the owner (a Steam login for the VM, or a `shortcuts.vdf` captured from a real profile) — spec filed 2026-09-09 14:20 CEST by the lead (Fable)
+**Status:** UNBLOCKED 2026-09-10 21:40 CEST: Steam installed on `yulon-arch` (Arch multilib, `steam 1.0.0.87-3`, `lib32-mesa`) and the owner signed in at the VM's console in Big Picture; an Opus hand on `hand-t17`
 **Hand:** Opus, worktree branched from `yulon-phase8b`; two halves, the read first
 **File set:** to be fixed when the read half lands — expected `pylauncher/yulon/steam.py` (new), `pylauncher/yulon/platform.py` only at the SteamOS read-only helpers already there (`:132`, `:434-439`), a Steam group in `pylauncher/yulon/ui/controller_view.py` (declared before the code half starts; T14/T5/T7/T12 sites untouched), `pylauncher/yulon/catalog/catalog.json` only for artwork paths if the entries carry them, their tests, `pyplan/write-ledger.md`, and `pyplan/gates/8.8-steam-<box>-<date>/`.
 **Box:** a Linux VM with Steam installed and logged in, run in fullscreen (Big Picture) mode as the Deck stand-in — the owner's answer of 2026-09-09 ("we can use full screen steam to emulate steam deck"). `yulon-arch` (Y: drive, docker, internet through the host) is the candidate; installing Steam there is a VM action, allowed; a Steam **login** is not something a hand can supply.
@@ -37,3 +37,7 @@ A throwaway Steam account will be given later; blocked until then.
 - Two entries per game: the client (`WoW.exe`, Proton) and the server (`/usr/bin/konsole`, `--hold -e bash ~/<game>-launcher.sh`, Proton off). Gaming Mode needs nothing else (README `origin/main:283-296`).
 - NOT automated upstream: the compatibility tool ("must be set on the shortcut after restore, since the appid carries no CompatToolMapping entry" -- that lives in `config/config.vdf`, text VDF, `CompatToolMapping/<appid>`), the artwork, and replace-on-second-press (upstream is add-only).
 - Still owed by the owner: a Steam login on `yulon-arch` for the live proof only (Big Picture showing the two entries after the press); a throwaway account serves.
+
+## The box, ready (2026-09-10 21:40 CEST)
+
+`yulon-arch` (XFCE, lightdm, the `pk` desktop session on `:0`), sized to 12 GB for the evening (the idle `yulon-win11-gate` stopped to make room). Steam installed by the lead from Arch's `[multilib]` with `lib32-mesa`, `lib32-vulkan-swrast`, `ttf-liberation`; launched `steam -bigpicture` into the session; the owner signed in at the console. Steam's userdata for that account is `~/.local/share/Steam/userdata/18347166/config/` (`localconfig.vdf`, `compat.vdf`, no `shortcuts.vdf` yet -- the writer creates it). The account is the owner's; it is referred to by its userdata id in every record, never by name.
