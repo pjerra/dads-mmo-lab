@@ -1,6 +1,6 @@
 # T16 — A chosen level sent at join time is accepted and does not hold
 
-**Status:** OPEN (waiting for a lane)
+**Status:** IN PROGRESS (Opus hand on `hand-t16` since 2026-09-10 22:28 CEST, live measurement first on `yulon-ubuntu2`)
 **Filed:** 2026-09-09 13:50 CEST by the lead (Fable), from T5's live half (finding, not fixed) and its reviewer
 **Hand:** Opus, worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/party.py` **only** at `add_bot()`'s join poll and the level step that follows it (T5's `_level_note`, the `set_level` call and its `characters.level` readback), `pylauncher/yulon/play.py` only if `InstallPlay.set_level` must learn a readback-and-resend, `pylauncher/tests/test_party.py`, and a NEW `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-09/` for the live half. Not `party_panel.py`, not the Lua bridge (T13's), not `pyplan/checklist.md`. **Start only after T5's live half and T13 have merged** (both edit `party.py`/`test_party.py`).
