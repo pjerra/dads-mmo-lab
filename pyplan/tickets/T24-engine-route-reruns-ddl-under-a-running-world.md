@@ -23,3 +23,10 @@ On the ordinary install route, `_import` on an install the probe reads as finish
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the guard as written (quoted), the sentence, the tests and their mutations, deviations, status DONE.
+
+## Report (hand, Sonnet, 2026-09-10 15:56 CEST)
+
+- `732292b4` on `hand-t24` (base `92ca092f`); gate ALL GREEN on m910q (3944 passed); 2 files +268/-10 (`families/cmangos.py` +86, `test_families_cmangos.py` +178/-9). `native.py` untouched: `self._seams.ask_world_running(container)` (T7's seam via `StagedInstaller`) was reachable from `cmangos.py` directly.
+- The guard: `_refuse_rerun_into_a_running_world()` called immediately before `yield from self._rerun_on_marked(ctx, plan)` in `_import`'s finished-install branch; `False` returns, `None` raises `InstallerError` naming Docker first, `True` raises "…world server is running, and it holds these databases in memory and writes back over whatever it finds in them. Nothing was applied, nothing was imported and nothing was cleared. Press Stop, then press Install again — the database is started on its own for it, and the world server stays down until you start it."; a seam that raises is logged and read as `None`. `_only_the_rerunnable_phases` (T14's route) left alone, it carries T14's guard already.
+- Tests: refuses before `up` on True/None through a full `run()` (no SQL, no `up`, no reset); the sentence; Docker named on None; proceeds on False; the seam raising -> refusal. Mutation "guard deleted": 5 red; "None widened to allow": 3 red. Nine existing tests that reach the branch now pin `world_running=a_world_that_is(False)` (two rebuild tests had started shelling to the real docker CLI and tripped the conftest guard). T14's one-probe test and the 25 in `test_database_updates.py` unaffected.
+- Deviations: none. Status DONE.
