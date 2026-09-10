@@ -2087,17 +2087,17 @@ def _shipped_all() -> list[Any]:
 
 
 def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
-    """`restart_recommended` was DERIVED, and the derivation cannot see a conf change.
+    """`restart_recommended` also has a declared half, independent of the derived one.
 
-    It answers yes for NPCs, direct SQL and server DBCs — three things that all
-    reach the database or the data volume. A manifest whose whole content is
-    `conf[].keys` reaches neither, so it reported "nothing further needed"
-    while the change it had just written sat in a file the emulator reads only
-    at startup. That is the whole of a CMaNGOS "module" (roadmap 8.7b), so the
-    fact has to be declarable rather than guessed at.
-
-    `False` by default, so every manifest written before this field keeps the
-    answer it had; declaring it never SUPPRESSES a derived yes, only adds one.
+    Before T27 the derivation answered yes for NPCs, direct SQL and server DBCs
+    only — three things that all reach the database or the data volume — so a
+    manifest whose whole content is `conf[].keys` reported "nothing further
+    needed" while the change it had just written sat in a file the emulator
+    reads only at startup. T27 (`test_a_conf_write_recommends_a_restart_the_
+    world_reads_it_at_its_next_start`, below) taught the derivation to see a
+    conf write directly. `build.restart` stays for the shape that still is not
+    one — a Lua/DB-table "conf", patched or prompted rather than key-written
+    (`apply.py:2121`) — and it only ADDS a yes, never takes one away.
     """
     conf = tmp_path / "etc"
     conf.mkdir()
@@ -2111,9 +2111,9 @@ def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
         "conf": [{"file": "etc/mangosd.conf", "keys": [{"key": "Motd", "default": '"new"'}]}],
     }
 
-    silent = Applier(tmp_path).install(parse_manifest(body))
-    assert silent.rebuild_required is False
-    assert silent.restart_recommended is False, "the derivation cannot see a conf write"
+    derived = Applier(tmp_path).install(parse_manifest(body))
+    assert derived.rebuild_required is False
+    assert derived.restart_recommended is True, "T27: writing the key is visible on its own"
 
     asked = Applier(tmp_path).install(
         parse_manifest({**body, "build": {"rebuild": False, "restart": True}})
@@ -2136,6 +2136,116 @@ def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
     lopsided = parse_manifest({**body, "build": {"restart": True}})
     assert lopsided.build.rebuild is True
     assert parse_manifest(body).build.rebuild is False
+
+
+_THING_MODULE: dict[str, Any] = {
+    "schema_version": 1,
+    "id": "mod-thing",
+    "name": "Thing",
+    "type": "module",
+    "game": "wow-wotlk",
+    "source": {"repo": "azerothcore/mod-thing"},
+    "conf": [
+        {
+            "file": "env/dist/etc/modules/thing.conf",
+            "template": "conf/thing.conf.dist",
+        }
+    ],
+}
+
+
+def test_a_conf_write_recommends_a_restart_the_world_reads_it_at_its_next_start(
+    tmp_path: Path,
+) -> None:
+    """T27 (`pyplan/tickets/T27-...md`, evidence in `pyplan/gates/8.6-spec-takes-effect-
+    yulon-ubuntu2-2026-09-10/`): activating `mod-playerbots`' conf through the app's own
+    seam reported `restart_recommended = False` (`03-activate.log:38`) while the running
+    world went on reading its OLD config until the restart of step 04 ("Config::LoadFile:
+    Failed open file" before, "Loading TalentSpecs" after — `04-restart-and-list.log:27-32`).
+
+    `_conf()`'s own `done: activate ...` outcome IS the fact the old derivation could not
+    see. The sentence it writes names the file and says the world reads it at its next
+    start, so a user pressing Install is told the one thing this app cannot do for them.
+    """
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    assert deployed.read_text(encoding="utf-8") == "Thing.Enabled = 1\n"
+    sentence = next(step for step in report.done if step.startswith("activate "))
+    assert "env/dist/etc/modules/thing.conf" in sentence
+    assert "the world reads" in sentence and "next start" in sentence
+    assert report.rebuild_required is False  # not conflating the two questions
+    assert report.restart_recommended is True
+
+
+def test_a_conf_that_writes_nothing_does_not_recommend_a_restart(tmp_path: Path) -> None:
+    """The other half of the same fact: nothing written is nothing to restart for.
+
+    The deployed file already exists — `_conf()` never re-copies over one that is
+    already there (`apply.py:2124`) — so this install's own conf step does nothing at
+    all, and none of the other three derived causes (NPCs, direct SQL, server DBCs)
+    apply either.
+    """
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_text("Thing.Enabled = 1\n", encoding="utf-8")
+
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+
+    assert not any(step.startswith("activate ") for step in report.done)
+    assert report.restart_recommended is False
+
+
+def test_a_module_with_no_conf_leaves_restart_recommended_unchanged(tmp_path: Path) -> None:
+    """A manifest with no `conf` at all takes neither branch T27 touched.
+
+    `restart_recommended` is still exactly the four-way OR it always was for such a
+    manifest — False here because none of the four apply, unaffected by the new conf
+    clause because there is no conf step to run.
+    """
+    body = {**_THING_MODULE, "conf": ()}
+    git = _FakeGit({"README.md": "upstream\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(body))
+
+    assert not any("conf" in step or "activate" in step for step in report.done)
+    assert report.restart_recommended is False
+
+
+_THING_MODULE_WITH_KEY: dict[str, Any] = {
+    **_THING_MODULE,
+    "conf": [
+        {
+            "file": "env/dist/etc/modules/thing.conf",
+            "template": "conf/thing.conf.dist",
+            "keys": [{"key": "Thing.Level", "default": "5"}],
+        }
+    ],
+}
+
+
+def test_reapplying_an_identical_keyed_conf_does_not_recommend_a_restart(
+    tmp_path: Path,
+) -> None:
+    """T27 round 2 (Codex adversarial review): `_set_conf_key`'s replace path wrote
+    on every call regardless of whether the value actually changed, so re-applying
+    an already-identical keyed conf still reported `set N key(s) ... the world
+    reads ... at its next start` and recommended a restart though nothing on disk
+    changed. The first `_conf()` mutation test only isolated the template-copy
+    `target.exists()` skip; this isolates the keyed-write half of the same clause.
+    """
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    applier = Applier(tmp_path, git=git)
+    m = parse_manifest(_THING_MODULE_WITH_KEY)
+
+    first = applier.install(m)
+    assert any(step.startswith("set 1 key(s)") for step in first.done)
+    assert first.restart_recommended is True
+
+    second = applier.configure(m)  # same manifest, same values, file already matches
+    assert not any(step.startswith("set ") for step in second.done)
+    assert second.restart_recommended is False
 
 
 def test_configuring_ale_asks_for_the_restart_the_engine_needs() -> None:
