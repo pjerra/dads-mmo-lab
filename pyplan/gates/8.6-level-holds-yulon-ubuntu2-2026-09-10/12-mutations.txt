@@ -1,0 +1,29 @@
+party.py sha256 before: 7150796f3cfc438d
+M1 the save is not sent before the row is read
+    mutated -> died: 1 failed in 0.23s
+    restored -> green: 1 passed in 0.20s
+M2 the readback is the level that was asked for, not characters.level
+    mutated -> died: 1 failed in 0.23s
+    restored -> green: 1 passed in 0.20s
+M3 the level is resent whether or not the written row disagrees
+    mutated -> died: 1 failed in 0.23s
+    restored -> green: 1 passed in 0.20s
+M4 a press that needed a second send does not say so
+    mutated -> died: 1 failed in 0.23s
+    restored -> green: 1 passed in 0.19s
+M5 the did-NOT-take sentence is replaced by the one that says it landed
+    mutated -> died: 1 failed in 0.24s
+    restored -> green: 1 passed in 0.20s
+M6 a bot that left the group is treated as a level that disagreed
+    mutated -> died: 1 failed in 0.23s
+    restored -> green: 1 passed in 0.19s
+party.py sha256 after:  7150796f3cfc438d
+
+| # | mutation | test | mutated | restored |
+|---|---|---|---|---|
+| M1 | the save is not sent before the row is read | `test_the_level_readback_is_the_row_the_server_wrote_and_not_the_commands_own_yes` | died: 1 failed in 0.23s | green: 1 passed in 0.20s |
+| M2 | the readback is the level that was asked for, not characters.level | `test_the_level_readback_is_the_row_the_server_wrote_and_not_the_commands_own_yes` | died: 1 failed in 0.23s | green: 1 passed in 0.20s |
+| M3 | the level is resent whether or not the written row disagrees | `test_a_level_the_written_row_agrees_with_is_never_sent_a_second_time` | died: 1 failed in 0.23s | green: 1 passed in 0.20s |
+| M4 | a press that needed a second send does not say so | `test_a_level_that_needed_a_second_send_says_so_in_the_panels_own_sentence` | died: 1 failed in 0.23s | green: 1 passed in 0.19s |
+| M5 | the did-NOT-take sentence is replaced by the one that says it landed | `test_a_level_the_written_row_still_disagrees_with_is_not_reported_as_set` | died: 1 failed in 0.24s | green: 1 passed in 0.20s |
+| M6 | a bot that left the group is treated as a level that disagreed | `test_a_bot_that_left_the_group_before_the_row_was_read_is_not_sent_the_level_again` | died: 1 failed in 0.23s | green: 1 passed in 0.19s |
