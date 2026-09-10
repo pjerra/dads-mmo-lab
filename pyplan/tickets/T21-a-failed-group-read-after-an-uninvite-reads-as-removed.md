@@ -23,3 +23,11 @@
 ## Report format (final message)
 
 `## Report` — sha, gate last line, diff stat, the poll rule as written (quoted), the sentence, the tests and their mutations, deviations, status DONE.
+
+## Report (hand, Sonnet, 2026-09-10 15:27 CEST)
+
+- `80bd2998` on `hand-t21` (base `78db5c87` after the ff-merge); gate ALL GREEN on m910q (3938 passed, 6 skipped, mypy x3, ruff, black); 2 files +85/-4 (`party.py` +50/-4, `test_party.py` +39).
+- The poll rule: "`removed` is the group table read AFTER, never the uninvite's own `yes`... A failed read here neither confirms nor denies, so it keeps the poll going the same as an unchanged row would; only the LAST read decides what expiry reports." `dismiss()`'s `members` widened to `tuple[Member, ...] | str`; `InstallParty.remove` hands it the unfolded `self.members(master)`; `add_bot` and `remove_all` untouched, still through `_rows_only`.
+- The sentence: `"<bot> may or may not have left: the group table could not be read (<the string>)"`, `removed=False`.
+- Tests: `test_a_group_read_that_keeps_failing_is_reported_as_unknown_not_removed` -- mutation (fold each read through `_rows_only`, the old path) RED with `removed=True`; `test_a_group_read_that_fails_once_does_not_fail_the_dismiss` -- mutation (`continue` -> `break`) RED; both RED first against the old code.
+- Deviations: none. Status DONE.
