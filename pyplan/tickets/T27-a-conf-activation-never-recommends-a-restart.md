@@ -22,3 +22,7 @@ The activation of `mod-playerbots`' conf through the app's own seam reported `re
 ## Hand's report (Sonnet, 2026-09-11 04:05 CEST, `hand-t27` at `ccd26fb5`)
 
 Gate `=== --checks: ALL GREEN ===` (4152 passed). `_Log.conf_restart` set only at the two sites in `_conf()` that write bytes (the template copy on activate, the key write), read into `restart_recommended` as a fifth clause of the OR; both `done` lines now end "— the world reads <file> at its next start". Three tests plus one rewritten (`test_a_manifest_can_declare_the_restart_it_needs` had pinned the bug: "the derivation cannot see a conf write"); mutations: the clause dropped → red on the two write tests; the identical case folded into the written one → red on the nothing-written test only. Diff +120/−22 in `apply.py` and `tests/test_apply.py`. No deviations. Status DONE. One Codex review running.
+
+## Review, round 1 (Codex adversarial, 2026-09-11 04:20 CEST): needs-attention, one high
+
+`apply.py:2162-2168` sets `conf_restart` for every nonempty `writes` list, and `_set_conf_key` writes on its replace path without comparing bytes, so an already-identical keyed conf still reports a write and recommends a restart; the no-write test covers only the template-copy skip, so the "identical folded into written" mutation is not isolated for the keyed path. Round 2 sent: report whether any key changed the file, set the flag and the sentence only then, a test for the identical keyed apply.
