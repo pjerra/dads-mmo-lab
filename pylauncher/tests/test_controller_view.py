@@ -24,6 +24,7 @@ from yulon import (
     party,
     purge,
     runner,
+    steam,
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
@@ -6095,3 +6096,114 @@ def test_the_tortoise_adopt_confirmation_names_the_row_through_the_shipped_wirin
     assert native.ADOPT_CONSEQUENCE in said
     assert sqlplan.MARKER_TABLE in said
     assert str(server_dir) in said
+
+
+# --------------------------------------------------------------------------
+# 8.8 -- Add to Steam...
+# --------------------------------------------------------------------------
+
+
+class _FakeSteam:
+    """The 8.8 seam, standing in for the thing that writes the user's profile.
+
+    A fake and not the real `SteamShortcuts` for `Uninstall`'s reason: a view
+    test that reached the real one would be a view test that edits the Steam
+    library of whoever is running it.
+    """
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.presses = 0
+
+    def add(self) -> object:
+        self.presses += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _report(tmp_path: Path) -> steam.AddReport:
+    config = tmp_path / "userdata/18347166/config"
+    return steam.AddReport(
+        entries=("Turtle WoW", "Turtle WoW Server"),
+        path=config / "shortcuts.vdf",
+        backup=config / "shortcuts.vdf.yulon-bak-20260910-200500",
+        replaced=False,
+        artwork=tuple(config / "grid" / f"{i}.png" for i in range(6)),
+        compat_tool="GE-Proton11-6-x86_64",
+        compat_path=tmp_path / "config/config.vdf",
+        compat_backup=None,
+    )
+
+
+def test_the_add_to_steam_button_says_what_it_wrote(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The confirmation names both entries, the file, the backup and the tool."""
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(_report(tmp_path))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.steam_button is not None
+    view.steam_button.click()
+
+    said = view.steam_label.text()
+    assert "Turtle WoW" in said and "Turtle WoW Server" in said
+    assert "shortcuts.vdf" in said and "yulon-bak-20260910-200500" in said
+    assert "GE-Proton11-6-x86_64" in said
+    assert view.steam_button.isEnabled()
+
+
+def test_a_refused_add_to_steam_is_readable_on_screen_not_just_emitted(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Steam running is the refusal 8.8's definition of done names by hand.
+
+    On the label as well as on the signal, and the button comes back enabled:
+    the remedy is to close Steam and press it again, and a control that stayed
+    grey would be telling the user to do something they then cannot do.
+    """
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(steam.SteamRefusal(steam.RUNNING))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    refused: list[str] = []
+    view.action_failed.connect(refused.append)
+
+    assert view.steam_button is not None
+    view.steam_button.click()
+
+    assert "Steam is running" in view.steam_label.text()
+    assert refused == [steam.RUNNING]
+    assert view.steam_button.isEnabled()
+
+
+def test_there_is_no_add_to_steam_button_at_all_without_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Absent, not disabled -- what `_steam_seam()` answers off Linux."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.services.steam is None
+    assert view.steam_button is None
+    assert not view.steam_label.isVisible()
+
+
+@pytest.mark.parametrize("platform_id", ["windows", "macos"])
+def test_the_steam_seam_is_none_on_windows_and_macos(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform_id: str
+) -> None:
+    """The one platform question in this file, asked in one place."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: platform_id)
+
+    assert controller_view_module._steam_seam(WOTLK, tmp_path, tmp_path / "client") is None
+
+
+def test_the_steam_seam_is_built_on_linux_and_carries_the_client_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The client entry is a path into the folder the user picked, from `state.json`."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+
+    seam = controller_view_module._steam_seam(WOTLK, tmp_path, tmp_path / "client")
+
+    assert seam is not None
+    assert seam.client_dir == tmp_path / "client"
+    assert seam.game == WOTLK.name

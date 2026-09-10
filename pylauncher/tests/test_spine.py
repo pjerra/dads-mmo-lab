@@ -2316,6 +2316,22 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("steam.py", "find_profile"): (
+        "8.8. Lists `userdata/` to count Steam profiles. It decides a REFUSAL and never a "
+        "write: zero and two are both named refusals, so a listing that came back short "
+        "stops the press rather than picking a library to write into"
+    ),
+    ("steam.py", "find_compat_tool"): (
+        "8.8. Lists `compatibilitytools.d/` and `steamapps/common/` for a Proton. Same "
+        "shape: nothing found is the `NO_PROTON` refusal, which names what to install"
+    ),
+    ("steam.py", "client_executable"): (
+        "8.8. Globs a client folder the user already chose and Yu'lon already validated, "
+        "to pick `WoW.exe` out of the three executables such a folder holds. Nothing is "
+        "written there - the answer becomes a path INSIDE a Steam entry - and a folder "
+        "that lists as empty falls back to the conventional name in the folder the user "
+        "named, which is a path they can see and correct"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
