@@ -1222,14 +1222,24 @@ class _Level:
     two of these tests are about and two separate lists cannot show it.
     """
 
-    def __init__(self, log: list[str], outcome: Outcome | None = None) -> None:
+    def __init__(
+        self, log: list[str], outcome: Outcome | None = None, *, then: Outcome | None = None
+    ) -> None:
         self.log = log
         self.outcome = outcome or Outcome(True, "level changed")
+        self.then = then
+        """What the SECOND send answers, where a test is about the resend (T16
+        round 2). One stand-in that answers the same thing twice cannot tell a
+        first send that failed apart from a second one that did, and a test that
+        cannot tell them apart passes against code that confuses them — which is
+        what happened to the first version of the resend-refused test."""
         self.asked: list[tuple[str, int]] = []
 
     def __call__(self, character: str, level: int) -> Outcome:
         self.asked.append((character, level))
         self.log.append(f"set_level {character} {level}")
+        if self.then is not None and len(self.asked) > 1:
+            return self.then
         return self.outcome
 
 
@@ -1587,6 +1597,134 @@ def test_a_level_that_needed_a_second_send_says_so_in_the_panels_own_sentence() 
     assert result.level_resent is True
     assert (result.level_before, result.level_after) == (1, 60)
     assert "had to be sent a second time to get there" in result.sentence
+
+
+def test_a_saveall_the_server_refused_is_its_own_sentence_and_not_a_verdict_on_the_level() -> None:
+    """T16 round 2's must-fix 1. The save is a SEND, and its answer is read.
+
+    Thrown away — which is what the first version of the level step did — a
+    `saveall` the server refused bought thirty seconds of polling a row nobody
+    had written, then a resend, then a second ignored save, and then a sentence
+    saying the row HAD been written and the level had been sent twice. All four
+    are wrong and the last one is a lie in the panel's own words.
+
+    So a refused save ends the step: no poll, no resend, and a sentence that says
+    what happened instead of ruling on the level.
+    """
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log)
+    chan = _LoggedChan(log, {party.SAVE_COMMAND: Answer("no", text="Server is shutting down")})
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=chan.send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=30,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)], "no resend: nothing was read that could disagree"
+    assert log.count(party.SAVE_COMMAND) == 1, "and no second save either"
+    assert result.level_resent is False
+    assert f"the server did not run {party.SAVE_COMMAND}" in result.sentence
+    assert "Server is shutting down" in result.sentence
+    assert "nothing here says whether the level took" in result.sentence
+    assert "still reads 1, not 60" not in result.sentence, "not a verdict on the level"
+    assert "Take the level as not set." not in result.sentence
+
+
+def test_a_saveall_that_never_came_back_is_not_reported_as_one_the_server_refused() -> None:
+    """`indeterminate` is its own arm: a SOAP timeout means the command was sent
+    and the answer never came (`channel.Answer`), so the rows may be written and
+    may not. "The server did not run it" is a claim nothing here can make, and
+    `add_bot` has no business retrying a write it cannot see."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log)
+    chan = _LoggedChan(
+        log,
+        {party.SAVE_COMMAND: Answer("unknown", reason="the reply never came", indeterminate=True)},
+    )
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=chan.send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=30,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60)]
+    assert log.count(party.SAVE_COMMAND) == 1
+    assert "did not come back" in result.sentence
+    assert "may have run and may not" in result.sentence
+    assert f"the server did not run {party.SAVE_COMMAND}" not in result.sentence
+
+
+def test_a_bot_already_at_the_chosen_level_whose_written_row_disagrees_is_told_the_row() -> None:
+    """Round 2's reviewer, on the order of the arms. "Nothing about the level
+    changed" was tested BEFORE the readback, so a bot that was already at 60 and
+    whose WRITTEN row came back at 1 was told nothing had changed — off the one
+    reading that says something did."""
+    log: list[str] = []
+    already = party.Member("Newbot", 777, 8, 60)
+    moved = party.Member("Newbot", 777, 8, 1)
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=_Level(log),
+        send=_LoggedChan(log).send,
+        members=_Rows((), (already,), (moved,)),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert (result.level_before, result.level_after) == (60, 1)
+    assert "still reads 1, not 60" in result.sentence
+    assert "already read" not in result.sentence
+
+
+def test_a_refused_second_send_says_the_first_one_was_taken() -> None:
+    """Round 2's reviewer: the resend-failed path used to open "The level was not
+    set", which is false — the first send was accepted and the row was written.
+    What failed is the second send, and the sentence has to say which.
+
+    `then=` is what makes this test able to fail: the first send succeeds and the
+    SECOND is refused. Written with one outcome for both, the first arm fires and
+    the test passes against code that opens either sentence."""
+    log: list[str] = []
+    low = party.Member("Newbot", 777, 8, 1)
+    level = _Level(log, then=Outcome(False, problem="There is no such subcommand"))
+    result = party.add_bot(
+        facts=_facts(),
+        player="Pakka",
+        klass="mage",
+        level=60,
+        max_level=80,
+        set_level=level,
+        send=_LoggedChan(log).send,
+        members=_Rows((), (low,), (low,)),
+        level_tries=2,
+        level_pause=0.0,
+        sleep=lambda _s: None,
+    )
+    assert level.asked == [("Newbot", 60), ("Newbot", 60)], "the second send is the one refused"
+    assert result.level_resent is True
+    assert "The server took the level and characters.level read 1, not 60" in result.sentence
+    assert "The second send was refused: There is no such subcommand" in result.sentence
+    assert "The level was not set" not in result.sentence
 
 
 def test_a_bot_that_left_the_group_before_the_row_was_read_is_not_sent_the_level_again() -> None:
