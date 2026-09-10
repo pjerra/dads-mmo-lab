@@ -1,6 +1,6 @@
 # T18 — A chosen spec can take effect once the install has a deployed `playerbots.conf`
 
-**Status:** MERGING (hand DONE `bc5cdd71`, evidence review REWORK on wording, closed by the lead's hand; gate behind the merge on m910q)
+**Status:** CLOSED (merged `c7c3f8d4`, gate ALL GREEN on m910q behind it, 2026-09-10 22:39 CEST; the README edits landed in `ce571253` after the merge; the deployed conf and the derived manifest left on the box on purpose; worktree and branch removed)
 **Filed:** 2026-09-09 14:30 CEST by the lead (Fable), from T5's live half (chosen spec unreachable) and its reviewer
 **Hand:** Opus (live box, a client seat), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** a NEW `pyplan/gates/8.6-spec-takes-effect-yulon-ubuntu2-2026-09-09/`; `pylauncher/yulon/party.py` **only** if the picker's reading of the deployed conf needs a fix the press finds (say so; T16 will also touch `add_bot`, so coordinate through the lead — if T16 has started, `party.py` is not yours); `pylauncher/tests/test_party.py` the same. Not `party_panel.py`, not the Lua bridge, not `pyplan/checklist.md`.
