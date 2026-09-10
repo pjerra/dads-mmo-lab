@@ -2,12 +2,20 @@
 
 Written by the lead (Fable) at 2026-09-10 22:47 CEST, WSL session, tip `c2141397` on `origin/yulon-phase8b` (everything pushed, the tree clean but for the two hand worktrees below). Supersedes `STATE-2026-09-10-morning.md` for the board; the process, budget rules and gate command there still hold, with two amendments: the gate box is **m910q** (`YULON_TEST_BOX=m910q`) — `yulon-fedora` is shut down on the owner's word; and every finished Codex review leaves a `codex` process behind, `pkill -f codex-linux-x64/vendor` after each (memory `background-waiters-pile-up`). Reviews that outrun the foreground window die when moved to the background: launch them with `run_in_background` from the start, no trailing `pkill` in the same chain.
 
+## Amendment 2026-09-10 23:30 CEST, before the compaction
+
+- **8.8 is TICKED** (T17 merged `33f9a4ff`, the tick on the stand-in in `pyplan/checklist.md`; Phase 8 at **28 of 29**). Only 8.6 is open: T16 (running) and T26's live half.
+- **T28** filed and running: the catalog's two tile columns are unequal (the owner's frame from `yulon-arch`); a Sonnet hand on `.claude/worktrees/t28`, `hand-t28`; on its report one Codex review, merge behind a gate, push, then `git -C ~/y8 pull` on `yulon-arch` so the Steam entry shows the fix.
+- `~/y8` on `yulon-arch` was moved to the branch tip (`803a686`) on the owner's word; its four local edits from the 8th are kept as `~/y8-local-edits-20260910-212210.patch` and `stash@{0}` in that tree.
+- T27 filed (a conf activation never recommends a restart), open, Sonnet, unit only.
+
 ## Two hands are running right now — their reports arrive as task notifications
 
 | Worktree / branch | Ticket | State | On the report |
 |---|---|---|---|
 | ~~`.claude/worktrees/t17`~~ (removed) | T17 / 8.8 Steam | CLOSED, merged; round 2's two last findings closed by the lead's hand | (done) |
 | (was) | | round 2: five code fixes (atomic write, surrogateescape on the write, an unknown VDF byte as a refusal, CRLF preserved, a frame name) plus `OSError` at `add()` and version-aware Proton ordering; no box re-run | one Codex review of the round-2 diff (code only); ACCEPT -> merge, gate on m910q, push, close, **tick 8.8** in `pyplan/checklist.md` citing `8.8-steam-shortcuts-yulon-arch-2026-09-10/` and `8.8-steam-read-…`; REWORK -> the lead fixes by hand (the cap) |
+| `.claude/worktrees/t28`, `hand-t28` (Sonnet) | T28 (equal catalog columns) | the failing test written, the layout change next | one Codex review -> merge, gate, push, pull the tree on `yulon-arch` |
 | `.claude/worktrees/t16`, `hand-t16` (Opus) | T16 (chosen level does not hold at join) | live measurement first on `yulon-ubuntu2` (the timing table, the module's source), then the code in `party.py` at `add_bot()`'s level step, then a second press | one cold review (Opus, it touches the box) -> merge behind a gate; with T16 in, 8.6 still needs T26's live half |
 
 Ticket status lines and the reports/reviews are on the tickets themselves; the lead records each report, review and close there, in the shape every ticket already shows.
