@@ -1304,6 +1304,12 @@ class Dismissal:
 
     Defaulted rather than positional so the field could be added without moving
     the three that were already there."""
+    unreadable: bool = False
+    """`removed` is False, but not because a row was seen and it was still
+    there — the poll's last read never confirmed either answer (T21, round 2's
+    must-fix 2). `_mass_sentence` needs this to keep "the group table could
+    not be read" out of "Still here", which asserts a row somebody actually
+    saw."""
 
 
 def dismiss(
@@ -1311,7 +1317,7 @@ def dismiss(
     player: str,
     bot: str,
     send: Callable[[str], Answer],
-    members: Callable[[], tuple[Member, ...]],
+    members: Callable[[], tuple[Member, ...] | str],
     tries: int = POLL_TRIES,
     pause: float = POLL_SLEEP,
     sleep: Callable[[float], None] = time.sleep,
@@ -1339,6 +1345,21 @@ def dismiss(
     is bounded to what the server actually said — round 1 cut the earlier
     "the group table moved it" wording, which was this app inventing a
     mechanism the bridge never reported.
+
+    **T21** (T13 round 2 review, note 5). `members` answers `tuple[Member,
+    ...] | str` here, the group read's own shape, rather than the folded
+    `tuple[Member, ...]` `add_bot` polls with. The two polls are not the same
+    question: `add_bot` watches for a guid to APPEAR, so a read that could not
+    be done and a read that found nothing both mean "not yet" — `_rows_only`
+    folding a failure into `()` is correct there. This poll watches for a guid
+    to VANISH, so `()` cannot mean both "the row is gone" and "the row could
+    not be read" — round 2 of T13 closed the one route that made a failed
+    read look like silence (the Lua no longer answers an empty SOAP reply),
+    so what is left on a failed read here is a genuine uninvite whose
+    follow-up read errored, and folding it to `()` would report `removed`
+    on a read that never happened. A failed read here neither confirms nor
+    denies, so it keeps the poll going the same as an unchanged row would;
+    only the LAST read decides what expiry reports.
     """
     answer = send(uninvite_command(player, bot))
     if answer.outcome != "yes":
@@ -1353,16 +1374,31 @@ def dismiss(
             bot=bot,
         )
     logged_out = send(logout_command(player, bot)).outcome == "yes"
+    unreadable = ""
     for attempt in range(tries):
         if attempt:
             sleep(pause)
-        if all(member.name != bot for member in members()):
+        rows = members()
+        if isinstance(rows, str):
+            unreadable = rows
+            continue
+        unreadable = ""
+        if all(member.name != bot for member in rows):
             return Dismissal(
                 True,
                 logged_out,
                 f"{bot} left the party" + ("." if logged_out else ", and is still logged in."),
                 bot=bot,
             )
+    if unreadable:
+        return Dismissal(
+            False,
+            logged_out,
+            f"{bot} may or may not have left: the group table could not be read "
+            f"({unreadable.strip()})",
+            bot=bot,
+            unreadable=True,
+        )
     window = tries * pause
     return Dismissal(
         False,
@@ -1395,7 +1431,7 @@ def dismiss_all(
     player: str,
     bots: tuple[str, ...],
     send: Callable[[str], Answer],
-    members: Callable[[], tuple[Member, ...]],
+    members: Callable[[], tuple[Member, ...] | str],
     tries: int = POLL_TRIES,
     pause: float = POLL_SLEEP,
     sleep: Callable[[float], None] = time.sleep,
@@ -1411,6 +1447,13 @@ def dismiss_all(
 
     It costs what that readback costs: a bot whose row does not clear polls for
     the full window before it is reported as still there.
+
+    **T21, round 2.** `members` is `tuple[Member, ...] | str` here too, forwarded
+    to each `dismiss()` call unfolded: round 1 fixed `InstallParty.remove` but
+    left `InstallParty.remove_all` handing this the `_rows_only`-folded read, so
+    a database outage during a batch dismiss still reported every bot in it
+    `removed=True` — the whole finding, on the one path a batch press actually
+    takes.
     """
     if not bots:
         stop = (
@@ -1434,18 +1477,47 @@ def dismiss_all(
 
 
 def _mass_sentence(done: tuple[Dismissal, ...]) -> str:
+    """Three buckets, not two (T21, round 2's must-fix 2).
+
+    A bot the poll actually saw stay (the bridge refused it, or its row was
+    still there at the deadline) is not the same finding as one whose table
+    could not be read at all — "Still here" asserts a row somebody looked at,
+    and a read that never happened cannot say that. Folding `unreadable` into
+    `stayed` is the same false-confidence `_rows_only` was fixed out of the
+    poll itself; this is the summary line making the same mistake back in.
+    """
     gone = [one.bot for one in done if one.removed]
-    stayed = [one for one in done if not one.removed]
-    if not stayed:
+    stayed = [one for one in done if not one.removed and not one.unreadable]
+    unread = [one for one in done if not one.removed and one.unreadable]
+    if not stayed and not unread:
         return f"{bots_word(len(done))} left the party: {', '.join(gone)}."
-    head = (
-        f"{len(gone)} of {bots_word(len(done))} left the party: {', '.join(gone)}. "
-        if gone
-        else f"None of {bots_word(len(done))} left the party. "
-    )
-    # Every refusal in its own words. Summarising them ("2 failed") is how one
-    # bot that is simply logged out reads the same as a channel that is down.
-    return head + "Still here — " + "; ".join(f"{one.bot}: {one.sentence}" for one in stayed)
+    if unread:
+        # A count over a batch some of whose reads never happened is a count
+        # of what was CONFIRMED, and the head says so (Codex, round 2): "None
+        # of 2 bots left" over two unreadable polls asserted an outcome no
+        # read established, when all two may have left.
+        head = (
+            f"{len(gone)} of {bots_word(len(done))} confirmed left the party: {', '.join(gone)}. "
+            if gone
+            else f"None of {bots_word(len(done))} were confirmed to have left the party. "
+        )
+    else:
+        head = (
+            f"{len(gone)} of {bots_word(len(done))} left the party: {', '.join(gone)}. "
+            if gone
+            else f"None of {bots_word(len(done))} left the party. "
+        )
+    tail = []
+    if stayed:
+        # Every refusal in its own words. Summarising them ("2 failed") is how
+        # one bot that is simply logged out reads the same as a channel that
+        # is down.
+        tail.append("Still here — " + "; ".join(f"{one.bot}: {one.sentence}" for one in stayed))
+    if unread:
+        tail.append(
+            "Could not be confirmed — " + "; ".join(f"{one.bot}: {one.sentence}" for one in unread)
+        )
+    return head + " ".join(tail)
 
 
 def bots_word(count: int) -> str:
@@ -1721,6 +1793,14 @@ class InstallParty:
         bot manager logs bots in and out on a timer, and acting on a list read
         minutes ago is 8.4d's finding again. What the caller supplies is what it
         is allowed to act on, not what is there.
+
+        **T21, round 2's must-fix 1.** Round 1 unfolded `InstallParty.remove`
+        but left this one wired through `_rows_only`, so a database outage
+        during a batch dismiss still folded every failed post-uninvite read
+        into `()` and reported the whole batch `removed=True` — the false
+        success this ticket exists to delete, surviving on the one path a
+        batch press actually takes. `dismiss_all` gets the unfolded read here
+        too.
         """
         send = self._send_or_none()
         if send is None:
@@ -1735,11 +1815,17 @@ class InstallParty:
             player=master,
             bots=tuple(row.name for row in rows),
             send=send,
-            members=lambda: _rows_only(self.members(master)),
+            members=lambda: self.members(master),
         )
 
     def remove(self, master: str, bot: str) -> Dismissal:
-        """Uninvite `bot` from `master`'s party and read the group table back."""
+        """Uninvite `bot` from `master`'s party and read the group table back.
+
+        Unfolded — `self.members(master)` reaches `dismiss()`'s poll as the
+        `tuple[Member, ...] | str` it actually is, not `_rows_only`'s "empty
+        party" reading of a failure (T21): this poll needs to tell a row that
+        cleared apart from a table it could not read.
+        """
         send = self._send_or_none()
         if send is None:
             return Dismissal(False, False, _no_channel())
@@ -1747,7 +1833,7 @@ class InstallParty:
             player=master,
             bot=bot,
             send=send,
-            members=lambda: _rows_only(self.members(master)),
+            members=lambda: self.members(master),
         )
 
     def _send_or_none(self) -> Callable[[str], Answer] | None:
@@ -1764,6 +1850,14 @@ def _rows_only(answer: tuple[Member, ...] | str) -> tuple[Member, ...]:
     not be done adds nothing to either side of that comparison, and treating it
     as "the bot is not here yet" makes the press time out and say so rather
     than announce a bot it never saw.
+
+    For `add_bot`'s poll only — it is watching for a guid to APPEAR, so a read
+    that could not be done and one that found nothing both mean "not yet".
+    `dismiss()`'s own poll (`InstallParty.remove` and, since round 2,
+    `InstallParty.remove_all`) watches for a guid to VANISH, where `()` already
+    means "gone"; folding a failure into it there would report a row as
+    removed on a read that never happened, so both hand it the unfolded answer
+    instead (T21).
     """
     return () if isinstance(answer, str) else answer
 
