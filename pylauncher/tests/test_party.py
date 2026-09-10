@@ -2292,8 +2292,18 @@ def test_the_three_flags_are_read_off_the_deployed_conf_and_nothing_else(
     # "true"/"false" beside these keys, and how `sConfigMgr.GetOption<bool>`
     # takes that word was never measured on this fork -- guessing it is the
     # difference between a row greyed and a row offered into a silent refusal.
-    (server / party.PLAYERBOTS_CONF).write_text(f"{party.ALLOW_ACCOUNT_KEY} = true\n")
-    assert party.allow_flags(server).account is None
+    # The core's own grammar (`StringConvert.h:110-121` on the pinned tree): the
+    # words on either side, case-insensitively, and nothing else. Round 2 read
+    # `true` as unread and greyed rows the module allows (Codex, round 2).
+    for spelling in ("true", "TRUE", "yes", "y", "on", "1"):
+        (server / party.PLAYERBOTS_CONF).write_text(f"{party.ALLOW_ACCOUNT_KEY} = {spelling}\n")
+        assert party.allow_flags(server).account is True, spelling
+    for spelling in ("false", "False", "no", "n", "off", "0"):
+        (server / party.PLAYERBOTS_CONF).write_text(f"{party.ALLOW_ACCOUNT_KEY} = {spelling}\n")
+        assert party.allow_flags(server).account is False, spelling
+    for spelling in ("maybe", "2", "", "enabled"):
+        (server / party.PLAYERBOTS_CONF).write_text(f"{party.ALLOW_ACCOUNT_KEY} = {spelling}\n")
+        assert party.allow_flags(server).account is None, spelling
     bare = tmp_path / "dist-only"
     (bare / "env" / "dist" / "etc" / "modules").mkdir(parents=True)
     (bare / "env" / "dist" / "etc" / "modules" / "playerbots.conf.dist").write_text(

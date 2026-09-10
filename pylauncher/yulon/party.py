@@ -1876,18 +1876,30 @@ def allow_flags(server_dir: Path) -> AllowFlags:
     )
 
 
-def _flag(value: str | None) -> bool | None:
-    """`1` is on, `0` is off, and anything else is unread -- including absent.
+_FLAG_ON = ("1", "y", "on", "yes", "true")
+_FLAG_OFF = ("0", "n", "off", "no", "false")
 
-    A value this app cannot make sense of is not folded into off: the module
-    reads these through `sConfigMgr.GetOption<bool>`, whose handling of a
-    third spelling is not measured on this fork, and guessing it wrong is the
-    difference between a row greyed and a row offered into a silent refusal.
+
+def _flag(value: str | None) -> bool | None:
+    """The core's own boolean grammar, read off the pinned tree; anything else is unread.
+
+    The module reads these keys through `sConfigMgr.GetOption<bool>`, whose
+    non-strict `StringTo<bool>` (`src/common/Utilities/StringConvert.h:110-121`
+    on `yulon-ubuntu2`, read 2026-09-10) takes `1`, `y`, `on`, `yes`, `true` as
+    on and `0`, `n`, `off`, `no`, `false` as off, the words case-insensitively,
+    and answers nothing for any other text. Round 2 read `1`/`0` alone and
+    called `true` unmeasured, which greyed rows the module allows (Codex on
+    T26, round 2); this is the measured grammar. Absent stays absent: a key the
+    deployed file does not carry is not folded into off.
     """
     if value is None:
         return None
     text = value.strip().strip('"')
-    return True if text == "1" else False if text == "0" else None
+    if text == "1" or text.lower() in _FLAG_ON:
+        return True
+    if text == "0" or text.lower() in _FLAG_OFF:
+        return False
+    return None
 
 
 @dataclass(frozen=True)
