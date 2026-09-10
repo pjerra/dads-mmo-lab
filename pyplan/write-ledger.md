@@ -112,6 +112,25 @@ In this column it reads **no — the press refuses while the world is running,
 twice asked**. Closing the walk's blindness means teaching it `exec_stdin`, which
 is bigger than this ticket and is named rather than done.
 
+**A third button reached the same seam on 2026-09-10, and this one HAS a row.**
+T19 wired the Modules tab's *"Adopt as imported…"* to
+`native.StagedInstaller.adopt_as_imported()`, which writes the install's
+completion marker through `sqlplan.write_marker()` — the same `docker exec` with
+SQL on its stdin, and so the same blind spot. The difference is what the write
+IS. The paragraph above is about a press that streams whatever files a plan
+names, and teaching the walk to see that means teaching it the whole seam. This
+one is a single function with a single spelling, and what it writes is the row
+every later press reads as *this import finished* — written here on a person's
+word rather than after an import. A ledger claiming "every place" while missing
+the one write a user can now ask for by name would be claiming the wrong thing
+about the most consequential row in the app. So `tests/write_sites.py` learned
+the name `write_marker`, exactly as it learned `docker volume rm` by its argv,
+and `catalog/families/cmangos.py::write_import_marker::write_marker` is below.
+One row and not two, because both routes that record a finished import — the
+ordinary one and the adopt press — go through that one function; a second call
+site would be a second spelling of a row the probe reads in one shape only. The
+rest of `exec_stdin` stays open and stays named.
+
 Generated rows are checked against the tree by the test, not by hand. The
 descriptions are written by hand.
 
@@ -148,6 +167,7 @@ descriptions are written by hand.
 | `catalog/composegen.py::write_plan::write_text` | the rendered compose files in the server dir | install time; a running stack keeps what it started with |
 | `catalog/families/conf.py::_clear::shutil.rmtree` | a staging directory being cleared | install time |
 | `catalog/families/conf.py::_clear::unlink` | a staged file being cleared | install time |
+| `catalog/families/cmangos.py::write_import_marker::write_marker` | **new (T19)** the install's COMPLETION MARKER: one row in `<marker_db>.yulon_install`, carrying this install plan's hash and the time, plus the `CREATE TABLE IF NOT EXISTS` that makes the table on an install that has none. Two callers and one spelling: the ordinary import writes it at the end of a successful one, after `verify()` passed; the Modules tab's *"Adopt as imported…"* press writes it on the person's word, for a server this app did not install. It is the smallest write in this table and the furthest-reaching after `console.py`'s -- every later press reads it as *this import finished*, and nothing removes it. **Invisible to this walk until T19**, for the reason the page's own prose gives: it leaves this process as an argv with SQL on its stdin. The walk was taught this one function's name rather than the whole `exec_stdin` seam, which is bigger than one ticket; the rest of that seam is still open and still recorded above | **no -- both callers refuse while the world is running.** The import route reaches it at install time, before `up`; the adopt press reads `docker.world_running()` twice, before the database is started and again immediately before the row goes out, and refuses on anything but an explicit `False` |
 | `catalog/families/cmangos.py::_write_secret::os.open` | **the install's generated database password**, into `<server_dir>/.env`'s companion file, owner-only at creation. Invisible to this ledger until 2026-09-07, when the walk widened | install time |
 | `catalog/families/conf.py::_write::os.open` | the replacement conf, to a temporary file beside it, owner-only at creation — the rename is the row below | yes |
 | `catalog/families/conf.py::_write::os.replace` | a conf file renamed into place | yes |

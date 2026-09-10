@@ -29,6 +29,7 @@ from yulon import (
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog import native
 from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
+from yulon.catalog.families import sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
@@ -5731,3 +5732,366 @@ def test_the_tortoise_updates_button_refuses_when_it_cannot_tell_whether_the_wor
         list(services.updates.press(None))
 
     assert "could not tell whether" in str(raised.value)
+
+
+# ---------------------------------------------- the adopt-as-imported button (T19)
+#
+# T14's button refuses an install with no marker row, and the install it was
+# built for is exactly that. The probe cannot prove such an import finished --
+# three rounds tried -- so this button asks the person instead. What the tests
+# below are about is the greying, because that is where this control differs
+# from every other one on the tab: it is offered on a READING of the databases
+# and not on a fact about the catalog, and the reading is taken once per time
+# the database comes up rather than on every poll or every paint.
+
+POPULATED = docker.ImportState("populated", "903 rows in tw_char.characters")
+ADOPT_ANSWERS = {
+    "populated": POPULATED,
+    "imported": docker.ImportState("imported", "tw_world.yulon_install records it", complete=True),
+    "absent": docker.ImportState("absent", "no schema exists yet"),
+    "partial": docker.ImportState("partial", "tw_char exists, no marker"),
+    "unreadable": docker.ImportState("unreadable", "the databases would not answer"),
+}
+
+
+def _adopt_services(
+    ps: _Ps,
+    tmp_path: Path,
+    answer: docker.ImportState = POPULATED,
+    lines: Sequence[str] = ("--- adopt", "the row is written"),
+) -> tuple[ControllerServices, list[object], list[str], list[str]]:
+    """Services whose adopt route records every question put to it and every press taken."""
+    started: list[object] = []
+    asked: list[str] = []
+    probed: list[str] = []
+    services = _services(ps, tmp_path, [])
+
+    def state() -> docker.ImportState:
+        probed.append("state")
+        return answer
+
+    def confirmation() -> str:
+        asked.append("confirmation")
+        return "write one row?"
+
+    def press(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.adopt = native.AdoptRoute(state=state, confirmation=confirmation, press=press)
+    return services, started, asked, probed
+
+
+@pytest.mark.parametrize("named", sorted(ADOPT_ANSWERS))
+def test_the_adopt_button_is_live_for_populated_databases_and_no_others(
+    qapp: object, ps: _Ps, tmp_path: Path, named: str
+) -> None:
+    """The enabling rule, one test per answer the probe can give.
+
+    `populated` and nothing else. `imported` means the row is already there and
+    the press would refuse; `absent` and `partial` mean there is no import to
+    make a claim about; `unreadable` means nobody could look -- including the
+    ordinary case where the database is simply down, which must never arm a
+    control that writes a marker row.
+
+    Enumerated rather than sampled because the danger is per answer: a rule
+    written as `!= "imported"` passes a sampled test and arms this press on a
+    database that answered nothing.
+
+    Catches the rule widened to "not imported", written as truthiness of the
+    reading (every answer is truthy), or dropped so the button follows
+    `services.adopt` alone.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path, ADOPT_ANSWERS[named])
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.adopt_button.isEnabled(), "nothing has been asked yet"
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert probed == ["state"], probed
+    assert view.adopt_button.isEnabled() is (named == "populated")
+
+
+def test_the_adopt_reading_is_taken_once_per_time_the_database_comes_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Not on every poll, and not on every paint. The probe costs `docker exec`s.
+
+    The five-second poll runs forever on every tab the app has open, and this
+    reading is `MarkerGate.probe()` — several `docker exec … mariadb` calls
+    against the install's database. Taken on the poll it would be several of
+    those every five seconds; taken at tab build time it would be paid for by
+    every install that opens a controller view, most of which will never press
+    this. Once per time the database comes up is the rule the import question
+    beside it already keeps.
+
+    And it is DROPPED when the database goes down, rather than kept: the answer
+    was taken from a database nothing can now renew it against, and a control
+    that writes a marker row must not stay lit on one.
+
+    Catches the reading taken in `_status_ready` unguarded, taken in
+    `_build_modules_tab`, and remembered across a database that went away.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    view.refresh_status()
+    view.refresh_status()
+    assert probed == ["state"], probed
+    assert view.adopt_button.isEnabled()
+
+    ps.names = ""
+    view.refresh_status()
+    assert not view.adopt_button.isEnabled(), "the database went away and the reading with it"
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert probed == ["state", "state"], probed
+
+
+def test_a_probe_that_raises_leaves_the_adopt_button_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The one outcome that must never follow from a question nobody answered.
+
+    `AdoptRoute.state` is documented not to raise; this is the boundary that
+    holds if some future gate forgets, and what it would otherwise arm is a
+    press that writes a completion marker on a database that could not be read.
+
+    Catches the failure slot left off the `_run` call, and a slot that keeps the
+    last good reading.
+    """
+    services, _, _, _ = _adopt_services(ps, tmp_path)
+
+    def angry() -> docker.ImportState:
+        raise RuntimeError("the daemon is not there")
+
+    route = services.adopt
+    assert route is not None
+    services.adopt = native.AdoptRoute(
+        state=angry, confirmation=route.confirmation, press=route.press
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert not view.adopt_button.isEnabled()
+
+
+def test_a_tab_with_no_adopt_route_has_a_dead_button_that_is_harmless_to_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.adopt is None` greys it, and pressing it anyway does nothing.
+
+    Catches the button enabled unconditionally, and `adopt_as_imported()`
+    reaching for a route it was never given.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert not view.adopt_button.isEnabled()
+    assert view.adopt_as_imported() is False
+
+
+def test_the_adopt_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase(
+    tmp_path: Path,
+) -> None:
+    """The catalog half of the greying, over every game the app can manage.
+
+    Adopting buys nothing where no later press would then do anything it cannot
+    do now, and the row it writes is a claim nothing takes back — so it is
+    refused there rather than allowed as harmless.
+
+    Catches the route wired for every entry, and the reader hard-coded to an id.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").adopt is not None
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+        entry = load_catalog().get(game)
+        assert ControllerServices.for_entry(entry, tmp_path / game).adopt is None, game
+
+
+def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_adopt_button(
+    tmp_path: Path,
+) -> None:
+    """`native.Seams` addresses the local daemon and erases `wsl_distro`.
+
+    A press against a server living inside a distro would ask THIS Docker about
+    a container it has never heard of; withholding the control says the true
+    thing where refusing would say the wrong one.
+
+    Catches the `wsl_distro` test dropped from the wiring.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
+    assert inside.adopt is None
+
+
+def test_declining_the_adopt_confirmation_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is real, and this is the press where it matters most.
+
+    `is ... Yes` and not `is not ... No`, because Escape and the window's close
+    button both answer `NoButton` — and Yes here is a person saying something
+    about their databases that nothing takes back.
+
+    Catches the confirmation skipped, and the verdict read as `is not No`.
+    """
+    seen: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        seen.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, asked, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+
+    assert view.adopt_button.isEnabled()
+    assert view.adopt_as_imported() is False
+    assert seen == ["write one row?"], seen
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    assert started == [], "declined, and the press ran anyway"
+    assert view.rebuild_log.running is False
+
+
+def test_the_adopt_press_runs_the_routes_own_generator_into_the_panel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes starts the engine's own press, with the panel's Stop wired to its cancel.
+
+    Catches the handler running something other than `route.press`, and a press
+    started without an event the panel's Stop can set.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started, _, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert view.adopt_as_imported() is True
+    # The press runs on the panel's worker thread and its lines cross back by a
+    # queued connection, so the handler returning is not the press having run;
+    # `pump_until` is what makes the difference (the rebuild's own tests say so
+    # in the same words).
+    pump_until(
+        lambda: "the row is written" in view.rebuild_log.text(),
+        "the adopt press's output reached the panel",
+    )
+    assert len(started) == 1, started
+    assert started[0] is not None, "the panel's Stop button has nothing to set"
+    assert "--- adopt" in view.rebuild_log.text()
+
+
+def test_the_adopt_button_greys_itself_once_its_own_press_has_finished(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The press changes the answer, so the answer is asked again.
+
+    A button still lit after the row it writes has been written would offer a
+    press whose only outcome is the refusal "these databases already carry
+    Yu'lon's marker". The reading is dropped when any job on this tab finishes
+    and re-taken on the next poll — which is also why a rebuild or an updates
+    press drops it: both can change what the databases read as.
+
+    Catches the reading kept across a finished job.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert view.adopt_button.isEnabled()
+
+    view._rebuild_finished(True, "")
+    assert not view.adopt_button.isEnabled(), "the reading survived the press that changed it"
+    view.refresh_status()
+    assert probed == ["state", "state"], probed
+
+
+def test_the_tortoise_adopt_press_refuses_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal on the route `for_entry()` really builds, with nothing attached by hand.
+
+    `docker.world_running` is patched — the function the engine's own seam
+    resolves on the call — so the refusal has to travel the whole shipped path
+    to arrive: the tab's wiring, `install_wiring.installer_for_app()` and
+    `adopt_as_imported()`'s guard. And the sentence has to name THIS button: a
+    refusal from the adopt press telling the user to press "Apply pending
+    database updates…" again is an instruction that does the wrong thing when
+    followed.
+
+    Catches the guard deleted, the seam bound to `container_state(...).settled`
+    (which answers `False` here and would let the press through), and the
+    guard's button label left hard-coded to the updates one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.adopt.press(None))
+
+    assert "world server is running" in str(raised.value)
+    assert native.ADOPT_BUTTON_LABEL in str(raised.value)
+    assert native.UPDATES_BUTTON_LABEL not in str(raised.value)
+    assert asked == [tortoise.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_tortoise_adopt_press_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` is not "no", on this button too, and the remedy names Docker.
+
+    Nothing reaches the daemon: `conftest`'s guard fails any test whose argv
+    gets to the docker CLI, so a press that got past this refusal would be red
+    here for a second reason.
+
+    Catches the `None` branch folded into the `False` one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.adopt.press(None))
+
+    assert "could not tell whether" in str(raised.value)
+    assert "check that Docker is running" in str(raised.value)
+
+
+def test_the_tortoise_adopt_confirmation_names_the_row_through_the_shipped_wiring(
+    tmp_path: Path,
+) -> None:
+    """The dialog a user really meets, composed through `for_entry()` and nothing else.
+
+    It asks the databases nothing — every reading this press makes is in the
+    press — so it can be composed here with no daemon at all, which is also why
+    a clone this app has never touched still gets a truthful dialog.
+
+    Catches the confirmation reaching for a database, and a row named from
+    anything but the plan the writer reads.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+    said = services.adopt.confirmation()
+    assert native.ADOPT_CONSEQUENCE in said
+    assert sqlplan.MARKER_TABLE in said
+    assert str(server_dir) in said

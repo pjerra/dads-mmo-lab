@@ -83,6 +83,7 @@ from yulon.catalog.native import (
     RERUN_CANCEL_NOTE,
     UPDATES_BUTTON_LABEL,
     ImportGate,
+    MarkerRow,
     Secrets,
     Stage,
     StageContext,
@@ -1295,13 +1296,7 @@ class CmangosInstaller(StagedInstaller):
                 )
             )
         try:
-            sqlplan.write_marker(
-                plan,
-                container=container,
-                client=db.client,
-                password=password,
-                exec_stdin=self._seams.exec_stdin,
-            )
+            self.write_import_marker(ctx)
         except InstallerError:
             # `write_marker()` goes through `sqlplan._run_sql()`, which turns
             # both of its failures into an `InstallerError` already naming the
@@ -1325,14 +1320,14 @@ class CmangosInstaller(StagedInstaller):
         only proves the DATABASE container is up, and `up` is three stages
         later and never before this one. T14 closed the same gap on the
         Modules-tab button's route (`native.StagedInstaller.
-        _refuse_updates_into_a_running_world`); this is the OTHER caller of
+        _refuse_writes_into_a_running_world`); this is the OTHER caller of
         `_rerun_on_marked()` — the ordinary spine, reached through
         `engine.run()` (the CLI harness, `install_wiring.py:342`, and any
         "Use existing..." folder whose world happens to be running) — and that
         function's own sentence names the button that pressed it, which is not
         what got THIS call made. So the fact and the "Press Stop" clause are
         the same rule, said again with the remedy this route can follow:
-        `self._refuse_updates_into_a_running_world` above is one stanza too far
+        `self._refuse_writes_into_a_running_world` above is one stanza too far
         to reuse verbatim, so the reading is shared and the words are not.
 
         Reused, not re-derived: `self._seams.ask_world_running` is `StagedInstaller`'s
@@ -1560,6 +1555,74 @@ class CmangosInstaller(StagedInstaller):
         if not rerunnable_phases(plan):
             return ()
         return tuple(run.rel for run in self._rerunnable_runs(plan, ctx))
+
+    # -- adopting an install this app did not make (T19) ----------------------
+
+    def adopt_gate(self, ctx: StageContext) -> ImportGate:
+        """`_gate()`, under the spine's name for it. The SAME gate the import stage drives.
+
+        Not a second gate and not a second question: the reading that offers the
+        adopt button, the reading its press refuses on, and the reading
+        `_import` branches on all come out of `MarkerGate.probe()` over this
+        plan. A separate probe here would be a second implementation of "is this
+        imported?", which is the drift `import_reads_as_finished()` exists to
+        prevent one layer up.
+
+        Not `_Remembering`: this press probes twice on purpose — once before the
+        row is written and once after — and a gate that answered the second
+        question from the first reading could not tell the write landed.
+        """
+        return self._gate(ctx)
+
+    def marker_row(self) -> MarkerRow:
+        """The row an adopt press writes, read off the plan the writer reads it off.
+
+        `plan.marker_db` and not `self._schemas()[plan.marker_db]`, because
+        `sqlplan.write_marker()` spells the schema exactly that way — the
+        mapping is the identity for this family (`_schemas()` says why), so the
+        two agree today, and naming the writer's own spelling is what keeps them
+        agreeing if it ever stops being the identity.
+
+        `plan.plan_hash()` is asked here rather than remembered, so the
+        confirmation names the hash the write will use even when an app upgrade
+        moved it between the dialog opening and the press.
+        """
+        plan = self._data().sql
+        return MarkerRow(
+            schema=plan.marker_db,
+            table=sqlplan.MARKER_TABLE,
+            plan_hash=plan.plan_hash(),
+            databases=sqlplan.plan_schemas(plan, self._schemas()),
+        )
+
+    def write_import_marker(self, ctx: StageContext) -> None:
+        """`sqlplan.write_marker()` for this install. The ONE spelling of the row.
+
+        Both routes that record a finished import come through here: the
+        ordinary import, at the end of a successful one after `verify()` passed,
+        and the adopt press, on the person's word. A second call site would be a
+        second spelling of the row — a different schema, a different hash, a
+        `CREATE TABLE` that differed by a column — and the probe reads one shape
+        only.
+
+        It is also the ledger's single row for this write
+        (`pyplan/write-ledger.md`): the write leaves this process as an argv
+        with SQL on its stdin, which the ledger's walk sees only because it was
+        taught this function's name.
+
+        Raises:
+            InstallerError: the client refused the statements, or could not be
+                reached. `sqlplan._run_sql()` has already named the marker in
+                the sentence.
+        """
+        db = self._native().db
+        sqlplan.write_marker(
+            self._data().sql,
+            container=self.entry.container_spec().db,
+            client=db.client,
+            password=ctx.secrets.db_password,
+            exec_stdin=self._seams.exec_stdin,
+        )
 
     def _gate(self, ctx: StageContext) -> ImportGate:
         """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.
@@ -2055,6 +2118,15 @@ class _Remembering:
 
     def reset(self) -> tuple[str, ...]:
         return self.inner.reset()
+
+    def adoption_gaps(self) -> tuple[str, ...]:
+        """Straight through: there is nothing to remember, and it is not a state.
+
+        `last` is about the five-branch table, which this question is not part
+        of. Caching it would make a gate that answers "nothing is missing" from
+        a reading taken before a stage that could have changed the answer.
+        """
+        return self.inner.adoption_gaps()
 
 
 def _write_secret(path: Path, value: str) -> None:

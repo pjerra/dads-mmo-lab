@@ -14,6 +14,18 @@ call spellings here were chosen against a specific way of being wrong:
   ledger full of string operations is a ledger nobody reads.
 * `run_statement`/`run_file` are the SQL seam's write half. `query()` is
   deliberately absent: it is the read half, and `dbreads` is allowed to call it.
+* `write_marker` is the fourth SQL write and the narrowest widening this list
+  has had (T19). The install engine does not reach a database through the
+  `sql` seam at all: `sqlplan` execs the client with the SQL on its stdin, the
+  third shape the 2026-09-08 audit found this walk blind to, and the ledger has
+  said so in prose since T14 rather than in a row. Teaching the walk that whole
+  seam is a bigger change than one ticket -- `apply()` streams whatever a plan
+  names -- but the marker row is one function with one spelling, and T19 put a
+  BUTTON on it: a press that writes a completion marker on a person's word, and
+  a ledger that says "every place" while missing it would be missing the one
+  write a user can now ask for by name. So the function is named, exactly as
+  `docker volume rm` is named by its argv, and the rest of the seam stays
+  recorded in the page's prose as open.
 
 `os.open` counts without its flags being inspected. It is how a file gets a
 private mode at creation time, and over-inclusive is the safe direction for a
@@ -41,7 +53,7 @@ _PATH_METHODS = {
     "symlink_to",
     "chmod",
 }
-_SQL_WRITE_METHODS = {"run_statement", "run_file"}
+_SQL_WRITE_METHODS = {"run_statement", "run_file", "write_marker"}
 _QUALIFIED = {
     ("os", "open"),
     ("os", "write"),

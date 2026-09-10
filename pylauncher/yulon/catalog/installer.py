@@ -826,6 +826,29 @@ class InstallEngine(Protocol):
         cancel: threading.Event | None = None,
     ) -> Iterator[str]: ...
 
+    def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...
+
+    def adopt_confirmation(self, options: InstallOptions | None = None) -> str: ...
+
+    def adopt_as_imported(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Record that these databases are a finished import, on the person's word (T19).
+
+    Three and not two, because this control is offered on a READING and not on
+    a fact about the catalog: `adopt_state()` is that reading, and the tab greys
+    the button on anything but `populated`. It never raises — a status path has
+    nowhere to put an exception, and the one thing that must not follow from a
+    question nobody answered is a control that writes a marker row appearing.
+
+    Here rather than only on `native.StagedInstaller` for `update_databases`'s
+    reason: the tab drives them through this Protocol and nothing else.
+    """
+
     """Apply the install plan's re-runnable phases to a server that already exists.
 
     The pair T14 put a button on: the sentence a user agrees to, then the press.

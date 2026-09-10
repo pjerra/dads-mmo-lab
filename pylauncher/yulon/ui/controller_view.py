@@ -586,6 +586,20 @@ class ControllerServices:
     `native.UpdateRoute` for why the halves must not be able to arrive apart.
     """
 
+    adopt: native.AdoptRoute | None = None
+    """Record these databases as a finished import, on the person's word; None when it cannot.
+
+    The third optional seam, greyed on `None` for the same reason as the two
+    above, and offered to exactly the installs `updates` is offered to: adopting
+    buys nothing where no later press would then do anything it cannot do now.
+
+    `None` is only half the greying here, and that is what makes this control
+    different from the two above it. The other half is a READING — the databases
+    have to say `populated` — and it is not in this dataclass because it is not
+    a fact about the wiring: `AdoptRoute.state` is the question, and the tab
+    decides when to put it.
+    """
+
     @classmethod
     def for_entry(
         cls,
@@ -874,6 +888,11 @@ def _assemble(
         # installs: the phases exist or they do not, and that is a fact about
         # `catalog.json` which every game's tab reads the same way.
         updates=_updates_route(entry, server_dir, wsl_distro=wsl_distro),
+        # Beside the updates route and gated on the same two facts, because it
+        # exists for the install that route refuses: a server made by the shell
+        # scripts, which carries no marker row and which T14's button therefore
+        # cannot reach (T19).
+        adopt=_adopt_route(entry, server_dir, wsl_distro=wsl_distro),
     )
 
 
@@ -905,6 +924,40 @@ def _updates_route(
     return native.UpdateRoute(
         confirmation=lambda: install_wiring.installer_for_app(entry).update_confirmation(options),
         press=lambda cancel: install_wiring.installer_for_app(entry).update_databases(
+            options, cancel=cancel
+        ),
+    )
+
+
+def _adopt_route(
+    entry: CatalogEntry, server_dir: Path, *, wsl_distro: str | None
+) -> native.AdoptRoute | None:
+    """The adopt control's three parts for this install, or None when it has none.
+
+    The same two refusals `_updates_route()` makes, read the same way and for
+    the same reasons — the plan declares no re-runnable phase, or the server
+    lives inside a WSL distro whose daemon `native.Seams` cannot address. They
+    are asked twice rather than once because they are two controls: a future
+    entry that gained a marker but no flagged phase would want the answer to
+    differ, and reading `services.updates is not None` here would make one
+    control's wiring a fact about the other's.
+
+    Adopting where no phase is flagged is refused rather than allowed as
+    harmless: the row it writes is a claim about the databases that nothing
+    takes back, and a press whose only effect is that claim is a cost with
+    nothing on the other side of it.
+
+    The engine is built inside each callable, per call, for
+    `install_wiring.rebuild_for_app()`'s reason — including inside `state`,
+    which the tab asks each time the database comes up.
+    """
+    if wsl_distro is not None or not native.update_phases(entry):
+        return None
+    options = InstallOptions(server_dir=server_dir)
+    return native.AdoptRoute(
+        state=lambda: install_wiring.installer_for_app(entry).adopt_state(options),
+        confirmation=lambda: install_wiring.installer_for_app(entry).adopt_confirmation(options),
+        press=lambda cancel: install_wiring.installer_for_app(entry).adopt_as_imported(
             options, cancel=cancel
         ),
     )
@@ -2116,6 +2169,14 @@ class ControllerView(QWidget):
         # this action exists for is one the user reaches by pressing Stop.
         self._import_state: docker.ImportState | None = None
         self._import_asked = False
+        # And what the ADOPT route's own gate says, which for three of the four
+        # games is a different question from the one above: `Controller.import_state()`
+        # answers `unreadable` for every CMaNGOS install (`controller_for()` hands
+        # it no probe on purpose, because the Repair button's only action can
+        # refuse there), while the adopt button's rule needs `populated`. Asked
+        # at the same moment and remembered the same way -- once per time the
+        # database comes up, never on the five-second poll and never on a paint.
+        self._adopt_state: docker.ImportState | None = None
         # The import talks from a worker thread; this is how what it says gets
         # onto the GUI thread. See `LineRelay` — handing `_import_line` itself
         # down as the sink would call it on the worker thread instead.
@@ -2567,6 +2628,11 @@ class ControllerView(QWidget):
         """
         if not status.db:
             self._import_asked = False
+            # The reading is DROPPED and not kept, which is what makes the adopt
+            # button's rule true rather than merely once-true: the answer was
+            # taken from a database that is now down, and a control that writes
+            # a marker row must not stay lit on a reading nothing can renew.
+            self._forget_the_adopt_reading()
             return
         if self._import_asked:
             return
@@ -2574,6 +2640,17 @@ class ControllerView(QWidget):
         self._run(
             self.services.controller.import_state, self._import_state_ready, self._import_failed
         )
+        # The SECOND question, put at the same moment and under the same
+        # once-per-database-start rule: `AdoptRoute.state` is `MarkerGate.probe()`
+        # over this install's plan, which is several `docker exec ... mariadb`
+        # calls. Asked on the five-second poll it would be several of those
+        # every five seconds, forever, on every tab the app has open; asked at
+        # tab build time it would be paid for by every install that opens a
+        # controller view, most of which will never press this. Once, when the
+        # database comes up, is the same rule the import question above already
+        # keeps and the same reason `_ask_about_the_import` is named for it.
+        if self.services.adopt is not None:
+            self._run(self.services.adopt.state, self._adopt_state_ready, self._adopt_state_failed)
 
     @Slot(object)
     def _import_state_ready(self, result: object) -> None:
@@ -2581,6 +2658,60 @@ class ControllerView(QWidget):
             return
         self._import_state = result
         self._show_repair()
+
+    @Slot(object)
+    def _adopt_state_ready(self, result: object) -> None:
+        if not isinstance(result, docker.ImportState):
+            return
+        self._adopt_state = result
+        self._set_adopt_button()
+
+    @Slot(object)
+    def _adopt_state_failed(self, exc: object) -> None:
+        """A probe that raised says nothing about the databases, so nothing is offered.
+
+        `AdoptRoute.state` is documented not to raise; this is the boundary that
+        holds even if some future gate forgets, for `_import_failed()`'s reason
+        and one this control has of its own — what it would arm is a press that
+        writes a completion marker on a database nobody could read.
+        """
+        logger.warning(f"could not ask the databases whether they can be adopted: {exc}")
+        self._forget_the_adopt_reading()
+
+    def _forget_the_adopt_reading(self) -> None:
+        """Drop the remembered reading and grey the control with it."""
+        self._adopt_state = None
+        self._set_adopt_button()
+
+    def _set_adopt_button(self) -> None:
+        """Offer the adopt press only while BOTH halves say so, and never while busy.
+
+        Two facts, and the second is not the first — `_show_repair()`'s own
+        shape. `services.adopt` is about the CATALOG: this game's plan declares
+        a phase meant to be re-applied to a server that already exists, so
+        adopting buys something. `_adopt_state` is about these DATABASES: they
+        read `populated`, which is the one answer this press can act on.
+
+        Every other answer greys it, and each for its own reason. `imported`
+        means the row is already there and the press would refuse. `absent` and
+        `partial` mean there is no import to make a claim about. `unreadable`
+        means nobody could look — including the ordinary case where the database
+        is simply down, which is why the reading is dropped rather than kept
+        when the status poll says so.
+
+        The busy gates are the same two the updates button carries, for the same
+        reason: this press starts the database and writes to it, so one while
+        another action of ours is live is two writers.
+        """
+        state = self._adopt_state
+        offered = (
+            self.services.adopt is not None
+            and state is not None
+            and state.state == "populated"
+            and not self._busy
+            and not self.rebuild_log.running
+        )
+        self.adopt_button.setEnabled(offered)
 
     @Slot(object)
     def _import_failed(self, exc: object) -> None:
@@ -2675,6 +2806,9 @@ class ControllerView(QWidget):
             # for symmetry: it reaches the same `import` stage against the same
             # databases, so one while another action is live is two writers.
             self.updates_button.setEnabled(False)
+            # And the adopt press, which starts the database and writes a row
+            # into it -- the same rule again, one size smaller.
+            self.adopt_button.setEnabled(False)
             # Refresh too, and this one is not symmetry. `recheck()` blanks
             # `problem_label` — which during an import is the live output the
             # user is watching — and then fires `Controller.import_state()`,
@@ -2724,6 +2858,11 @@ class ControllerView(QWidget):
             # the four games have no such phase and must not be handed a live
             # button by any job of their own finishing.
             self.updates_button.setEnabled(self.services.updates is not None)
+            # Back to what this install can do AND what its databases last said,
+            # which is why this one goes through the rule rather than repeating
+            # half of it: a job of ours finishing must not hand back a control
+            # that the reading never armed.
+            self._set_adopt_button()
 
     @Slot()
     def start_server(self) -> None:
@@ -4493,6 +4632,19 @@ class ControllerView(QWidget):
             "Apply the SQL this server's install plan has gained since it was installed. "
             "Asks first, names every file, and refuses while the server is running."
         )
+        # Beside the button it exists for, and dead for almost every install --
+        # by design, and not the same "dead" the updates button carries. That
+        # one is greyed on the CATALOG; this one is greyed until the databases
+        # themselves say `populated`, which is the state of an install this app
+        # did not make. On a server Yu'lon installed it never lights up at all,
+        # because that server already carries the row (T19).
+        self.adopt_button = QPushButton(native.ADOPT_BUTTON_LABEL, tab)
+        self.adopt_button.clicked.connect(self.adopt_as_imported)
+        self.adopt_button.setToolTip(
+            "Say that these databases are a finished import, for a server this app did not "
+            "install. Asks first, names the one row it writes, and refuses while the server "
+            "is running. Yu'lon cannot check the import finished -- you are saying so."
+        )
         # Its own panel, not the report box above it. `module_report` is a
         # `setPlainText` field that shows the LAST action's result, and a
         # multi-hour job written into it would show one line and then look
@@ -4524,6 +4676,7 @@ class ControllerView(QWidget):
         row.addWidget(self.module_sql_button)
         row.addWidget(self.module_updates_button)
         row.addStretch(1)
+        row.addWidget(self.adopt_button)
         row.addWidget(self.updates_button)
         row.addWidget(self.rebuild_button)
         box.addWidget(self.module_list, 2)
@@ -4565,6 +4718,12 @@ class ControllerView(QWidget):
         # checkout. It is live for the one game whose plan declares a phase to
         # be re-applied to a server that already exists.
         self.updates_button.setEnabled(self.services.updates is not None)
+        # A fourth gate, and the only one in this method that is not settled
+        # here: the reading it also needs has not been taken yet, so the button
+        # starts dead and lights up (or does not) the first time the status poll
+        # finds the database up. Set through the one method so build time and
+        # every later moment cannot disagree about the rule.
+        self._set_adopt_button()
 
     def reload_modules(self) -> None:
         """Fill the list from the store (every family), newest store contents first."""
@@ -5025,6 +5184,73 @@ class ControllerView(QWidget):
             cancel=cancel,
         )
 
+    def adopt_as_imported(self) -> bool:
+        """Ask, then record these databases as a finished import. False if nothing started.
+
+        The press the owner chose after three rounds of the alternative. T14's
+        updates button refuses an install with no marker row, and the install it
+        was built for is exactly that — a Tortoise server made by the shell
+        scripts, complete in every way a person can see and unmarked. Three
+        rounds tried to teach the probe to prove such an import finished; each
+        found the next layer of inference underneath. This button stops
+        inferring: the person says so, and the row is written.
+
+        **The reading is not re-taken here**, and that is deliberate rather than
+        a shortcut. `_adopt_state` decides whether this button was live at all,
+        and the press asks the databases again itself — twice, in fact, before
+        and after the write. A third reading here would be one more chance for
+        the answer to change between the question and the act, and the press's
+        own refusals are the sentences a user should meet when it has.
+
+        Everything else follows `apply_database_updates()` exactly: the
+        confirmation composed before it is shown, Yes/No with No as the default
+        so Enter declines, `is ... Yes` so Escape and the close button decline
+        too, and the same panel — one long job on this tab at a time.
+        """
+        route = self.services.adopt
+        if route is None:
+            return False
+        if self.rebuild_log.running:
+            QMessageBox.information(
+                self,
+                "Already running",
+                "This server already has a job running on this tab. Wait for it to finish.",
+            )
+            return False
+        if self._busy:
+            QMessageBox.information(
+                self,
+                "Something else is running",
+                "This server is busy with another action — wait for it to finish on the "
+                "Server tab, then press this again. Nothing was started.",
+            )
+            return False
+        try:
+            text = route.confirmation()
+        except InstallerError as exc:
+            logger.info(f"adopting {self.entry.id} could not be described: {exc}")
+            self.action_failed.emit(str(exc))
+            QMessageBox.warning(self, f"{self.entry.name}", str(exc))
+            return False
+        if (
+            QMessageBox.question(
+                self,
+                f"Adopt {self.entry.name}'s databases as a finished import?",
+                text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            is not QMessageBox.StandardButton.Yes
+        ):
+            logger.info(f"adopting {self.entry.id} declined at the confirmation")
+            return False
+        cancel = threading.Event()
+        return self.rebuild_log.run(
+            lambda: route.press(cancel),
+            title=f"Adopting {self.entry.name}'s databases as a finished import",
+            cancel=cancel,
+        )
+
     @Slot()
     def _rebuild_started(self) -> None:
         self._set_busy(True)
@@ -5042,6 +5268,14 @@ class ControllerView(QWidget):
         report.
         """
         self._set_busy(False)
+        # Whatever just ran on this tab -- a rebuild, an updates press, an adopt
+        # press -- may have changed what the databases read as, and one of them
+        # changes it on purpose. So the remembered reading is dropped and the
+        # question is put again the next time the poll finds the database up,
+        # which is how the adopt button greys itself the moment its own press
+        # has written the row it exists to write.
+        self._import_asked = False
+        self._forget_the_adopt_reading()
         if not ok:
             self.action_failed.emit(message)
 

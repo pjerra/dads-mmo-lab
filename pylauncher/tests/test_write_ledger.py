@@ -203,6 +203,40 @@ def test_deleting_a_docker_volume_is_a_write_and_the_ledger_is_the_place_it_is_n
     assert _sites_in(source) == {"f::docker volume rm"}
 
 
+def test_writing_the_import_marker_is_a_write_even_though_it_is_not_the_sql_seam() -> None:
+    """`sqlplan.write_marker()` -- the row every later press reads as "this import finished".
+
+    The install engine reaches a database through `exec_stdin`, not through the
+    `sql` seam, so every SQL write it makes is an argv with SQL on its stdin --
+    the third shape the 2026-09-08 audit found this walk blind to, and the one
+    the page has recorded in prose rather than in rows since T14. Teaching the
+    walk that whole seam is bigger than one ticket, because `apply()` streams
+    whatever a plan names.
+
+    This one function is different and was named for it (T19): one spelling of
+    one row, and a BUTTON on it -- an adopt press that records a finished
+    import on a person's word, for a server this app did not install. A ledger
+    saying "every place" while missing the write a user can now ask for by name
+    would be missing the most consequential row in the app.
+
+    Catches `write_marker` dropped from `_SQL_WRITE_METHODS`, which takes the
+    ledger's only row about a completion marker out with it.
+    """
+    source = "from x import sqlplan\ndef f(plan):\n    sqlplan.write_marker(plan)\n"
+    assert _sites_in(source) == {"f::write_marker"}
+
+
+def test_reading_the_marker_back_is_not_a_write() -> None:
+    """The other direction, for `query()`'s reason: the probe reads this row constantly.
+
+    `MarkerGate.probe()` is `SELECT plan_hash ...` through the read seam, and a
+    walk that matched on the marker's noun rather than on the writer's name
+    would put every probe in a table about what can be lost.
+    """
+    source = "def f(gate):\n    return gate.probe()\n"
+    assert _sites_in(source) == set()
+
+
 def test_the_docker_verbs_that_only_make_things_are_not_writes_here() -> None:
     """Named rather than omitted, the way `mkdir` is.
 
