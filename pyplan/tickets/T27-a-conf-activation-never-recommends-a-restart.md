@@ -1,6 +1,6 @@
 # T27 — Activating a module's conf never recommends a restart, though the world reads it only after one
 
-**Status:** OPEN (waiting for a lane)
+**Status:** CLOSED (merged `5981acb5`, 2026-09-11)
 **Filed:** 2026-09-10 22:37 CEST by the lead (Fable), from T18's live half and its evidence reviewer
 **Hand:** Sonnet (one rule and its tests), worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** `pylauncher/yulon/apply.py` **only** where `restart_recommended` is derived (`:2207-2212` at `c0386f9f`) and the report's sentence for it; its tests (name them). Not the Modules tab, not `module_source.py`.
@@ -30,3 +30,7 @@ Gate `=== --checks: ALL GREEN ===` (4152 passed). `_Log.conf_restart` set only a
 ## Round 2 and the lead's check (2026-09-11 04:45 CEST)
 
 `b5f2d00c` (the one commit amended): `_set_conf_key` answers `unchanged` when the substituted text equals the file's, the caller sets `conf_restart` and the sentence only when some key changed the file; new test `test_reapplying_an_identical_keyed_conf_does_not_recommend_a_restart`; three mutations red on their own tests, green restored; gate ALL GREEN (4153). Lead's check in the worktree: 136 apply tests green; the identical-key guard removed → exactly 1 failed; restored → 136. ACCEPT.
+
+## Closed (lead, 2026-09-11 05:00 CEST)
+
+Merged `--no-ff` as `5981acb5`; gate on m910q behind the merge `=== --checks: ALL GREEN ===`; pushed. Worktree and branch removed.

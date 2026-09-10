@@ -3,6 +3,7 @@
 Every release of Yu'lon, newest first. The **Unreleased** section is titled by the lead when a release is cut; until then it collects what has landed on the working branch since the last tag. Entries say what a player or operator can now do, and cite the gate folder under `pyplan/gates/` that proved it on a real machine — a line here without a folder behind it is a claim, not a change.
 
 ## Unreleased
+- Activating a module's conf that wrote or replaced a file the running world reads now recommends the restart and says the world reads it at its next start; an identical conf recommends nothing (T27).
 - The catalog's two tile columns come out equal at every width the window allows; the tab and splitter are built by one function the app and its tests share (T28).
 - The chosen level holds at join: AzerothCore's online `.character level` writes no row, so the level step is now send, `saveall`, read the row, resend once on disagreement, with the save's answer read like every other send; the panel's sentence names what happened (T16, `pyplan/gates/8.6-level-holds-yulon-ubuntu2-2026-09-10/`).
 
