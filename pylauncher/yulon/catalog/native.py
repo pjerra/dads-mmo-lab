@@ -395,8 +395,10 @@ def import_reads_as_finished(state: docker.ImportState) -> bool:
     install — the one the whole T10 → T11 → T14 chain was built for — read
     `populated` incomplete and the updates press refused it (`pyplan/gates/
     tortoise-updates-button-m910q-2026-09-09/`, finding 1). `MarkerGate.probe()`
-    now answers it from the plan's own expected tables; see its docstring for
-    what completeness there does and does not claim.
+    now answers it from the plan's own completion evidence — the tables the plan
+    names and the table counts its `verify` rules declare for the schemas its
+    files fill; see its docstring for what completeness there does and does not
+    claim, and why a plan that declares nothing about such a schema fails closed.
 
     Written once because it is now asked from two places that must not disagree.
     `_import` asks it to decide whether the ordinary import runs, and the

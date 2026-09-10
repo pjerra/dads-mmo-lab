@@ -30,6 +30,7 @@ exists the m910q evidence for this route is T11's, through the CLI harness.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
@@ -45,14 +46,18 @@ from tests.test_families_cmangos import (
     IMPORTED_OLDER_PLAN,
     MARKED_ONLY,
     POPULATED_AND_COMPLETE,
+    REAL_GATE,
+    client_folder,
+    context,
     engine_with_sql,
     entry_with_sql,
+    lay_sources,
     ready_to_import,
     rerun_plan,
 )
 from yulon import docker
 from yulon.catalog import native
-from yulon.catalog.catalog import SqlPhase, load_catalog
+from yulon.catalog.catalog import PlayerData, SqlPhase, SqlPlan, VerifyRule, load_catalog
 from yulon.catalog.families import sqlplan
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, InstallOptions, installer_for
@@ -786,3 +791,171 @@ def test_a_press_can_be_stopped_before_it_reaches_the_first_statement(tmp_path: 
     with pytest.raises(InstallerError):
         list(engine.update_databases(InstallOptions(server_dir=server_dir), cancel=stop))
     assert rec.sql_calls == [], rec.sql_calls
+
+
+# -- the half-built world, through both routes (T19 round 2) -------------------
+#
+# The round-1 probe read `populated` + complete from `player_data` alone, and
+# Tortoise's `player_data` names a table in `tw_char` and one in `tw_logon` and
+# none at all in the world schema its dumps fill. So an install with accounts
+# and characters and an empty world read as a finished import. These two tests
+# drive the REAL `MarkerGate` — built by the family's own `_gate()` over the
+# engine's seams — because that is the object the finding was about; every other
+# test in this file answers the probe from a canned `ImportState`, which could
+# not have caught it and cannot pin the fix.
+
+
+class _Databases:
+    """A server the real `MarkerGate` can be asked about: schemas, tables, counts, rows.
+
+    Small and local rather than `test_sqlplan._Server` imported: what these two
+    tests need is the four statements the gate issues and nothing else, and the
+    other file's double carries the drop/undroppable machinery `reset()` needs.
+    """
+
+    def __init__(
+        self,
+        databases: Sequence[str],
+        tables: Mapping[str, Sequence[str]],
+        counts: Mapping[str, int],
+        rows: Mapping[tuple[str, str], int],
+    ) -> None:
+        self.databases = list(databases)
+        self.tables = {name: set(names) for name, names in tables.items()}
+        self.counts = dict(counts)
+        self.rows = dict(rows)
+        self.asked: list[str] = []
+
+    def query(
+        self,
+        container: str,
+        client: str,
+        password: str,
+        schema: str | None,
+        statement: str,
+        *,
+        wsl_distro: str | None = None,
+    ) -> str:
+        self.asked.append(statement)
+        if statement == "SHOW DATABASES":
+            return "\n".join(["information_schema", *self.databases]) + "\n"
+        exists = re.search(r"table_schema='([^']+)' AND table_name='([^']+)'", statement)
+        if exists:
+            return "1\n" if exists.group(2) in self.tables.get(exists.group(1), set()) else "0\n"
+        whole = re.fullmatch(
+            r"SELECT COUNT\(\*\) FROM information_schema\.tables WHERE table_schema='([^']+)'",
+            statement,
+        )
+        if whole:
+            name = whole.group(1)
+            return f"{self.counts.get(name, len(self.tables.get(name, ())))}\n"
+        count = re.search(r"SELECT COUNT\(\*\) FROM `([^`]+)`\.`([^`]+)`", statement)
+        if count:
+            return f"{self.rows.get((count.group(1), count.group(2)), 0)}\n"
+        raise AssertionError(f"unexpected query: {statement}")
+
+
+WORLD = CM_ENTRY.databases.world
+AUTH = CM_ENTRY.databases.auth
+CHARS = CM_ENTRY.databases.characters
+
+
+def half_built_plan() -> SqlPlan:
+    """`rerun_plan()` with a dump phase filling the world schema and the count for it.
+
+    The shape the finding is about: files reach ONE schema, the plan declares
+    what a finished one holds, and `player_data` names tables in two other
+    schemas entirely.
+    """
+    plan = rerun_plan()
+    return plan.model_copy(
+        update={
+            "phases": (
+                SqlPhase(name="world base", into=WORLD, files=("src/world/*.sql",)),
+                *plan.phases,
+            ),
+            "verify": (
+                VerifyRule(
+                    db=WORLD, query=sqlplan.SCHEMA_TABLE_COUNT.format(schema=WORLD), min=150
+                ),
+            ),
+            "player_data": (
+                PlayerData(db=CHARS, table="characters"),
+                PlayerData(db=AUTH, table="account"),
+            ),
+        }
+    )
+
+
+def half_built_databases(world_tables: int = 3) -> _Databases:
+    """Every schema there, 903 characters, 110 accounts, and a world that never finished."""
+    return _Databases(
+        databases=[WORLD, AUTH, CHARS, "logs"],
+        tables={CHARS: ["characters"], AUTH: ["account"]},
+        counts={WORLD: world_tables},
+        rows={(CHARS, "characters"): 903, (AUTH, "account"): 110},
+    )
+
+
+def gated_on(plan: SqlPlan, rec: Recorder, server: _Databases, **overrides: object) -> object:
+    """An engine whose import gate is the REAL `MarkerGate`, over `server`."""
+    engine = engine_with_sql(plan, rec, sql_query=server.query, **overrides)
+    engine._test_gate = REAL_GATE(engine, context(Path("/nonexistent")))  # type: ignore[attr-defined]
+    return engine
+
+
+def test_the_press_refuses_a_world_that_never_finished_and_applies_nothing(
+    tmp_path: Path,
+) -> None:
+    """Round 1's hole on the route it was found on. The refusal names the state,
+    the schema and both numbers, and no statement of the flagged phase reaches
+    the database — the whole point being that this install's world is missing a
+    dump, so its character DDL is not the thing to apply to it."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    plan = half_built_plan()
+    rec = ready_to_import()
+    server = half_built_databases()
+    engine = gated_on(plan, rec, server, world_running=a_world_that_is(False))
+
+    with pytest.raises(InstallerError) as refused:
+        list(engine.update_databases(InstallOptions(server_dir=server_dir)))
+
+    said = str(refused.value)
+    assert "populated" in said and WORLD in said, said
+    assert "3 tables" in said and "150" in said, said
+    assert rec.sql_calls == [], rec.sql_calls
+    assert EVERY_PRESS not in rec.sql_calls
+
+
+def test_an_ordinary_run_over_that_install_neither_reruns_nor_records_the_import(
+    tmp_path: Path,
+) -> None:
+    """The larger half of the finding, and the one no button is involved in.
+
+    Read as finished, `stage_import()` skips the import, `_rerun_on_marked()`
+    applies the flagged phase, and the SPINE records `import` completed with no
+    marker written — after which every resume of this folder skips the missing
+    world dump for good. So the state file is the assertion: `import` must not
+    be in it, and the flagged phase must not have run.
+    """
+    server_dir = tmp_path / "srv"
+    plan = half_built_plan()
+    rec = ready_to_import()
+    server = half_built_databases()
+    engine = gated_on(plan, rec, server, world_running=a_world_that_is(False))
+    rec.on_clone = lay_sources(server_dir)
+
+    with pytest.raises(InstallerError) as refused:
+        list(engine.run(InstallOptions(server_dir=server_dir, client_dir=client_folder(tmp_path))))
+
+    said = str(refused.value)
+    # `stage_import()`'s own populated arm, so the run really reached the import
+    # stage and was refused there rather than falling over earlier.
+    assert "already hold data" in said and "but are not finished" in said, said
+    assert f"{WORLD} holds 3 tables" in said, said
+    state = native.read_state(server_dir, valid=engine.stage_names())
+    assert state is not None
+    assert "import" not in state.completed, state.completed
+    assert EVERY_PRESS not in rec.sql_calls, rec.sql_calls
+    assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls

@@ -1143,10 +1143,24 @@ def _refuse_unquotable(value: str, what: str) -> None:
         )
 
 
-_TABLE_EXISTS = (
-    "SELECT COUNT(*) FROM information_schema.tables "
-    "WHERE table_schema='{schema}' AND table_name='{table}'"
-)
+SCHEMA_TABLE_COUNT = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{schema}'"
+"""How many tables a schema holds — and the EXACT text a plan spells to declare it.
+
+Public, and exact rather than parsed, because it is a contract with
+`catalog.json`: a `verify` rule whose `query` is this string filled with the
+rule's own schema is a *probeable expectation*, which `MarkerGate.probe()` asks
+again on the `populated` branch to decide completeness (see its docstring). A
+rule spelled any other way is a rule about ROWS — `SELECT COUNT(*) FROM
+item_template` — and the probe never runs it: it is somebody's live server, the
+count can be a table scan, and the answer says nothing about whether the dumps
+landed. Matching is `==`, so a plan declares this deliberately or not at all;
+there is no SQL parser here and no rule half-recognised by a prefix.
+
+`_TABLE_EXISTS` is built from it below rather than beside it, so the probe's two
+`information_schema` questions cannot drift into two shapes.
+"""
+
+_TABLE_EXISTS = SCHEMA_TABLE_COUNT + " AND table_name='{table}'"
 """Whether one table is there — ASKED, rather than inferred from a failing query.
 
 `SELECT ... FROM a_table_that_is_not_there` and "the client could not be
@@ -1189,6 +1203,43 @@ def _plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     for phase in plan.phases:
         for schema, _patterns in _targets(phase, schemas):
             if schema is not None:
+                seen.setdefault(schema, None)
+    return tuple(seen)
+
+
+def _plan_expectations(plan: SqlPlan, schemas: Mapping[str, str]) -> dict[str, int]:
+    """Schema → the table count this plan's own `verify` rules require of it.
+
+    The plan's completion evidence, read off the plan and never typed here. The
+    strictest rule wins when a plan declares two for one schema, so the answer
+    is one number per schema and the probe asks one query per schema.
+
+    Only the rules spelled exactly `SCHEMA_TABLE_COUNT` — see there for why the
+    row-count rules are left to `verify()`, which runs after an import rather
+    than over somebody's server.
+    """
+    wanted: dict[str, int] = {}
+    for rule in plan.verify:
+        schema = schemas[rule.db]
+        if rule.query == SCHEMA_TABLE_COUNT.format(schema=schema):
+            wanted[schema] = max(wanted.get(schema, 0), rule.min)
+    return wanted
+
+
+def _filled_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
+    """Every schema this plan streams FILES into, in plan order.
+
+    "Filled" is what makes a schema's completeness this plan's business. A
+    `statements` phase is excluded because none of the shipped ones creates a
+    table — they `ALTER`, `GRANT` and `REPLACE INTO` — and a phase with no
+    `into`/`into_each` names no schema at all, so it declares nothing about any
+    (Tortoise's `schemas` phase streams `create_databases.sql`, which really does
+    create all four, and the plan has no way to say so).
+    """
+    seen: dict[str, None] = {}
+    for phase in plan.phases:
+        for schema, patterns in _targets(phase, schemas):
+            if schema is not None and patterns:
                 seen.setdefault(schema, None)
     return tuple(seen)
 
@@ -1245,6 +1296,8 @@ class MarkerGate:
         self._exec_stdin = exec_stdin
         self._wsl_distro = wsl_distro
         self._names = _plan_schemas(plan, schemas)
+        self._filled = _filled_schemas(plan, schemas)
+        self._expected = _plan_expectations(plan, schemas)
         for data in plan.player_data:
             for name in data.exclude_usernames:
                 _refuse_unquotable(name, f"the seeded account name {name!r} in the SQL plan")
@@ -1273,28 +1326,47 @@ class MarkerGate:
         route never reached it either (`pyplan/gates/
         tortoise-updates-button-m910q-2026-09-09/`, finding 1).
 
-        **The rule: complete when every schema the plan names EXISTS and holds
-        every table the plan names in it.** The expected set is the plan's own
-        `player_data` — `(schemas[db], table)` — because that is the only place
-        a `SqlPlan` names a table rather than a file, and it is asked with the
-        `information_schema` count `_player_rows()` already makes, so this costs
-        no extra round trip. What the set deliberately does NOT contain: a table
-        created inside a dump file, conditionally (`CREATE TABLE IF NOT EXISTS`)
-        or not, which is invisible from the plan and would need the clone and a
-        SQL parser to see; and anything from a `statements` phase, which in the
-        shipped plans alters, grants and replaces rows but creates no table. No
-        count of tables is compared against a number, for the reason the
-        AzerothCore probe records beside `IMPORT_MARKERS`: a number needs a new
-        value every time upstream adds a table.
+        **The rule: complete when every schema the plan names EXISTS, holds
+        every table the plan's `player_data` names in it, and — for every schema
+        this plan streams FILES into — meets the table count the plan's own
+        `verify` rules declare for it.** All three, and the third is the one
+        that certifies the dumps: round 1 asked `player_data` alone, and
+        Tortoise names only `tw_char.characters` and `tw_logon.account` there,
+        so an install with accounts and characters and an EMPTY `tw_world` read
+        as a finished import (Codex on T19, round 1). That answer is not merely
+        wrong on the updates route, where it lands DDL on an unfinished install:
+        on the ordinary route `stage_import()` skips the import, the spine
+        records `import` completed, no marker is written, and every later resume
+        skips the missing world dump for good.
+
+        The expectation is `SCHEMA_TABLE_COUNT` spelled by the plan, asked
+        verbatim — one query per filled schema, the same `information_schema`
+        reading `_table_exists()` makes, no number written here. **A schema this
+        plan's files fill and its `verify` rules say nothing probeable about
+        stays INCOMPLETE**, named as such: the alternative is to assume a schema
+        finished because the plan forgot to describe it, which is the assumption
+        this whole branch exists to stop making. `wow-tortoise` therefore
+        declares one for `tw_char` beside the one it already had for `tw_world`;
+        `wow-tbc` and `wow-vanilla` declare none, so a marker-less install of
+        those reads `populated` incomplete exactly as before — they offer no
+        updates button, and failing closed costs them nothing.
+
+        What is NOT in the evidence: a table created inside a dump file,
+        conditionally (`CREATE TABLE IF NOT EXISTS`) or not, which is invisible
+        from the plan and would need the clone and a SQL parser to see; a
+        `statements` phase, which in the shipped plans creates no table; and the
+        plan's row-count `verify` rules, which `SCHEMA_TABLE_COUNT` deliberately
+        does not match.
 
         **The bounded risk, stated because it is real:** a populated install a
-        person built by some other route can carry every expected table and
-        still differ in content from what these files describe, and this branch
-        will call it complete. Completeness here is a claim about tables, not
-        about rows. What that buys the one route it opens — `_rerun_on_marked()`
-        — is bounded by the same argument T11 made for it: a phase carries
-        `rerun_on_marked` only where its files are idempotent on their own
-        terms, no marker is written and no `verify` rule is re-asked.
+        person built by some other route can carry every expected table, reach
+        every declared count, and still differ in content from what these files
+        describe, and this branch will call it complete. Completeness here is a
+        claim about tables, not about rows. What that buys the one route it
+        opens — `_rerun_on_marked()` — is bounded by the same argument T11 made
+        for it: a phase carries `rerun_on_marked` only where its files are
+        idempotent on their own terms, no marker is written and no `verify` rule
+        is re-asked.
 
         The order is unchanged and the reason is unchanged: the state is decided
         first, by what a wrong answer costs, and completeness is computed
@@ -1311,6 +1383,9 @@ class MarkerGate:
             if marker is not None:
                 return docker.ImportState("imported", self._marker_detail(marker), complete=True)
             populated, absent_tables = self._player_rows(present)
+            # Only when it matters: the counts below are two more round trips on
+            # a live server, and every other branch answers without them.
+            short = self._short_schemas(present) if populated else ()
         except docker.DockerCommandError as exc:
             # THE ENTRANCE for what the DAEMON said, `apply()`'s shape rather
             # than `_run_sql()`'s: redacted here, once, so the branch that
@@ -1323,7 +1398,7 @@ class MarkerGate:
                 f"({_redact(str(exc), self._password)}). {_VOLUME_NOTE}",
             )
         if populated:
-            unfinished = self._unfinished(present, absent_tables)
+            unfinished = self._unfinished(present, absent_tables, short)
             if unfinished:
                 return docker.ImportState(
                     "populated",
@@ -1537,15 +1612,52 @@ class MarkerGate:
                 said.append(f"{rows} rows in {schema}.{data.table}")
         return ", ".join(said), tuple(missing)
 
-    def _unfinished(self, present: Sequence[str], absent_tables: Sequence[str]) -> tuple[str, ...]:
+    def _short_schemas(self, present: Sequence[str]) -> tuple[str, ...]:
+        """The filled schemas that do not show this plan's own completion evidence.
+
+        One query per schema at most, and only for the schemas this plan's files
+        fill — the schema's own declared count, asked in the plan's own words.
+        A filled schema the plan declares nothing probeable about is reported
+        without asking anything, because there is no question to ask: see
+        `probe()` for why that is incomplete rather than assumed finished.
+
+        A schema that is not there at all is skipped here; `probe()` names the
+        schema itself in that case and saying both would report one absence
+        twice.
+        """
+        said: list[str] = []
+        for name in self._filled:
+            if name not in present:
+                continue
+            wanted = self._expected.get(name)
+            if wanted is None:
+                said.append(
+                    f"this plan's files fill {name} but it declares no table count for it, "
+                    "so a finished import cannot be recognised there"
+                )
+                continue
+            held = self._count(
+                name, SCHEMA_TABLE_COUNT.format(schema=name), f"the tables in {name}"
+            )
+            if held < wanted:
+                said.append(
+                    f"{name} holds {held} tables and this plan's own check requires {wanted}"
+                )
+        return tuple(said)
+
+    def _unfinished(
+        self, present: Sequence[str], absent_tables: Sequence[str], short: Sequence[str]
+    ) -> tuple[str, ...]:
         """Why this populated install is not a finished import; `()` when it is.
 
-        Schemas first and in the plan's own order, then the tables, because a
-        schema that was never created is the larger fact and its tables would
-        otherwise be named one by one under it. Asks nothing: both readings were
-        taken by `probe()` and `_player_rows()` already.
+        Schemas that are not there first and in the plan's own order, then the
+        schemas that are short, then the tables — largest fact first, and a
+        schema that was never created would otherwise have its tables named one
+        by one under it. Asks nothing itself: every reading was taken by
+        `probe()`, `_player_rows()` and `_short_schemas()` already.
         """
         return (
             *(f"{name} does not exist" for name in self._names if name not in present),
+            *short,
             *(f"{table} is missing" for table in absent_tables),
         )
