@@ -22,3 +22,7 @@
 ## Hand's reports, reviews and the lead's check (2026-09-11)
 
 Round 1 (`2e4ea723`, Sonnet): `grid.setColumnStretch(0, 1)` / `(1, 1)` on the catalog grid; two tests measuring the tiles through a bare `QSplitter` at 1100x750 (before: 224/451, after: 338/337); gate ALL GREEN. Codex round 1: needs-attention — the fixture was not `build_window()`'s geometry (no tab frame, no `setCollapsible`, no stretch factors, no `_CATALOG_MIN_WIDTH`), so it proved one synthetic allocation. Round 2 (`88c840af`): `main.build_catalog_tab(window, catalog_view, log_panel)` extracted so `build_window()` and the tests share the production tab/splitter code; width matrix at the minimum (400 px viewport: 188/188), the default allocation (502: 239/239) and wide (880: 428/428); three focused tests red under the mutation (125/353) and green restored; gate ALL GREEN (4141 passed). Codex round 2: **approve**, no material findings (it could not run the suite in its sandbox). Lead's check in the worktree: 58 catalog-view tests green; both `setColumnStretch` lines removed → exactly 3 failed, 55 passed; restored → 58 passed. ACCEPT.
+
+## Closed (lead, 2026-09-11 02:20 CEST)
+
+Merged `--no-ff` as `1853a254`; gate on m910q behind the merge `=== --checks: ALL GREEN ===`; pushed. Worktree and branch removed. Owed: `git -C ~/y8 pull --ff-only` on `yulon-arch` once T29's hand is off the box, so the Steam server entry runs the fix (the owner's frame was taken from that tree).
