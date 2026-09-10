@@ -34,3 +34,7 @@ On the ordinary install route, `_import` on an install the probe reads as finish
 ## Review (Codex adversarial, 2026-09-10 15:57 CEST) -- REWORK, one
 
 The guard is correctly placed. One medium: `cmangos.py:1376-1381` -- the route explicitly includes installs adopted through "Use existing…", whose catalog tile is greyed "Installed" (`catalog_view.py:432-439`), so "press Install again" cannot be followed there; the same unfollowable-remedy defect T14's reviewer caught. Recommendation: a reachable remedy (Stop, then the Modules tab's database-updates action, which is enabled exactly for the plans this route fires on), CLI guidance distinguished, and a test grounded in the remedy rather than the words "Install again". Closed by the lead's hand (one sentence and its test).
+
+## Closed by the lead's hand (2026-09-10 15:58 CEST)
+
+Both refusals now end "Press Stop on the Server tab, then apply these files with \"Apply pending database updates…\" on the Modules tab — it starts the database on its own and keeps the world server down — or run the install again from the command line", the label imported from `native.UPDATES_BUTTON_LABEL` so it cannot drift; the None arm the same after "check that Docker is running". The sentence test asserts the label and rejects "press Install again"; mutation (the old remedy back): 1 failed. `test_families_cmangos.py` 166 passed locally; gate on m910q behind the commit, then merge.
