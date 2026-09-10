@@ -1,6 +1,6 @@
 # T19 — The updates button cannot reach a marker-less install, and prints the install's cancel note
 
-**Status:** second half IN PROGRESS (Sonnet hand on `hand-t19` since 2026-09-10 16:38 CEST); the first half waits on the owner's answer (open question 1 on the 2026-09-10 STATE page)
+**Status:** second half REWORK round 1 of 2 (rejected by the lead 2026-09-10 16:47 CEST); the first half waits on the owner's answer (open question 1 on the 2026-09-10 STATE page)
 **Filed:** 2026-09-10 15:14 CEST by the lead (Fable), from T14's live half (findings 1-2, confirmed by the evidence reviewer against the source)
 **Hand:** Sonnet for the second half alone; Opus if the first half becomes a probe change (it touches the import gate every CMaNGOS install goes through). Worktree branched from `yulon-phase8b` (ff-merge `origin/yulon-phase8b` first; report the sha)
 **File set (yours alone):** second half: `pylauncher/yulon/catalog/native.py` **only** at `update_stages()` (`:2165-2168` at `1f44a995`) and its test file. First half, once decided: `pylauncher/yulon/catalog/sqlplan.py` at `MarkerGate.probe` (`:1251-1279`) and `pylauncher/yulon/catalog/native.py` at `import_reads_as_finished` (`:401`), or a new adopt action beside the updates button in `controller_view.py` — not both; their tests; the T11 ticket's claim corrected by the lead, not the hand.
@@ -26,3 +26,11 @@
 - `replace(self.stage_named("import"), recorded=False, cancel_note="")` in `update_stages()`, the docstring extended with why.
 - Test `test_an_updates_press_never_prints_the_import_stage_cancel_note`: `update_databases()` on a finished-import fixture, `IMPORT_CANCEL_NOTE` in no yielded line, `--- start-db` and `--- import` both present. RED against the old code; mutation (the old `replace` without `cancel_note=""`) RED; restored GREEN, 26 in the file; T14's one-probe test green.
 - Deviations: none. Status DONE (second half).
+
+## Review, second half (Codex adversarial, 2026-09-10 16:47 CEST) -- REWORK, one high
+
+The stage heading is fixed; a Stop during the updates press is not: `_rerun_on_marked()` passes the cancel event into `sqlplan.apply()`, whose between-run check raises "The import was stopped. {IMPORT_CANCEL_NOTE}" -- the same clearing promise, and false here since `gate.reset()` is unreachable on this route: completed statements or a partially executed file stay and are not cleared before a retry. Clearing the stage note also removed the only advance warning of that cost. Must-fix: route-aware cancellation wording -- `sqlplan.apply()` takes the note to append (the install route keeps its clearing promise; the updates route says truthfully that finished statements stay and the flagged phase is re-run whole on the next press), and a test that sets the event between re-runnable SQL runs on the updates route and asserts `IMPORT_CANCEL_NOTE` is absent from the yielded lines AND the raised error, with the truthful sentence present.
+
+## Rejection (lead, round 1)
+
+File set widened to `sqlplan.apply()`'s cancellation wording (one parameter, the install route's default unchanged) and `_rerun_on_marked()`'s call into it in `families/cmangos.py`. Must-fix as the reviewer states it; keep the successful-press test. Consider giving the updates stage a truthful `cancel_note` of its own instead of the empty string, said once by the spine as every other note is. Add a commit (do not amend); gate; report in the same format. Round 2 is the last under the cap.
