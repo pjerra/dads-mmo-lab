@@ -28,3 +28,12 @@ Half 1: the README with the layout and the captured files. Half 2: `--checks` AL
 ## Owner, 2026-09-10 18:26 CEST
 
 A throwaway Steam account will be given later; blocked until then.
+
+## Prior art read (the lead, 2026-09-10 21:21 CEST): `rust-main`'s `docs/reference/dmlpack/dmlpack.py`
+
+- The format is already captured: `docs/reference/dmlpack/TurtleV2-manifest.json` (packed from a real Steam Deck, account `28006437`) carries two verbatim `shortcuts.vdf` entries with every field (`appid`, `AppName`, `Exe` quoted, `StartDir`, `icon`, `ShortcutPath`, `LaunchOptions`, `IsHidden`, `AllowDesktopConfig`, `AllowOverlay`, `OpenVR`, `Devkit`, `DevkitGameID`, `DevkitOverrideAppID`, `LastPlayTime`, `FlatpakAppID`, `sortas`, `tags`). Half 1's "captured `shortcuts.vdf`" ask is answered from the tree.
+- The codec (`dmlpack.py:245-295`): types 0x00 map / 0x01 string / 0x02 int32 LE / 0x08 end; the document ends `08 08`, and a file missing the second byte makes Steam drop every non-Steam shortcut. `gen_appid` (`:297`): `crc32(quoted_exe + appname) | 0x80000000`, so grid art `<appid>*.png` follows without lookup; never rename.
+- `register_shortcuts` (`:1558-1645`): refuses while `pgrep -x steam` finds Steam (it rewrites the file on exit and discards outside edits); detects the account (`steam_config_dir`, the `userdata/<id>/config` with a `shortcuts.vdf`, most recent wins); add-only by `AppName`; backup `shortcuts.vdf.backup-<stamp>`; round-trips the payload through its own parser and checks the terminator before writing.
+- Two entries per game: the client (`WoW.exe`, Proton) and the server (`/usr/bin/konsole`, `--hold -e bash ~/<game>-launcher.sh`, Proton off). Gaming Mode needs nothing else (README `origin/main:283-296`).
+- NOT automated upstream: the compatibility tool ("must be set on the shortcut after restore, since the appid carries no CompatToolMapping entry" -- that lives in `config/config.vdf`, text VDF, `CompatToolMapping/<appid>`), the artwork, and replace-on-second-press (upstream is add-only).
+- Still owed by the owner: a Steam login on `yulon-arch` for the live proof only (Big Picture showing the two entries after the press); a throwaway account serves.
