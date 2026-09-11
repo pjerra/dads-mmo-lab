@@ -1,6 +1,6 @@
 # T33 — a Yes on a question dialog reads as No: the static `QMessageBox.question()` returns an `int`
 
-**Status:** OPEN
+**Status:** CLOSED 2026-09-11 22:54 CEST — merged `8dc5204a`, gate green on m910q, pushed
 **Filed:** 2026-09-11 22:23 CEST by the lead (Fable), from the owner's report on Windows (pressing Install: "Install WoW WotLK into this new folder? … Yes/No" opens the folder picker whichever button is pressed) and the macOS user's "server rebuild does nothing". Both are one bug.
 **Hand:** Sonnet. Worktree `.claude/worktrees/t33`, branch `hand-t33` from `yulon-phase8b`. Reviewer: Codex adversarial (or a cold Opus). Unit only; no box.
 
@@ -35,3 +35,19 @@ Why nothing caught it: every test of these presses monkeypatches `QMessageBox.qu
 5. `--checks` ALL GREEN on m910q; black/ruff; every test with its named mutation; CHANGELOG line is the lead's; `write-ledger.md` untouched. Commit on `hand-t33`, trailer `Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>` alone, no push.
 
 Report on the final message: sha, the helper's location, the six sites, each test with its mutation, the real-dialog test's timing, the gate's last line, deviations, Status.
+
+## Reproduced on two boxes (lead, 2026-09-11 22:35 CEST)
+
+The app's own `_qt_suggestion_asker()` with a `QTimer` pressing the real button: `yulon-arch` (display `:0`, xcb, Python 3.13, `~/y8` at `124c9a7`) and `m910q` (offscreen, the gate venv, Python 3.11, `~/dads-mmo-lab` at `a13a5def`) — both PySide6 6.11.2, both `False` on Yes and `False` on No. Evidence `pyplan/gates/t33-yes-reads-as-no-2026-09-11/` (`01-`, `02-`, `live_probe.py`, README).
+
+## Report (hand, Sonnet, 2026-09-11 22:48 CEST, `hand-t33` at `9229baf3`)
+
+`yulon/ui/answers.py::said_yes()` (`answer == StandardButton.Yes`); the six sites switched (`catalog_view.py:137`, `:666`, `:890`; `controller_view.py:5304`, `:5377`, `:5443`); `tests/test_answers.py` (seven tests: `int(Yes)`, the member, `int(No)`, `No`, `NoButton`, `0`, and a repo-wide AST test that no `is`/`is not` against a `StandardButton` remains — it listed all six before the switch); the real-dialog tests `test_a_real_yes_on_the_suggestion_dialog_reads_as_yes` (FAILED on the old code: `assert False is True`; passes now) and `…_no_…`; one int-returning fake per remaining site (`…still_adopts_an_unverified_folder`, `…still_offers_and_takes_the_restart` — the first tests ever on `_offer_a_restart_instead`, `…still_starts_the_rebuild`, `…the_database_updates`, `…the_adopt_press`), each mutation (`==`→`is`, or the site back to `is`) watched failing. Stale prose naming the old spelling updated in three places. Gate `=== --checks: ALL GREEN ===` (4205 passed, 6 skipped; mypy ×3, ruff, black clean) — the real-dialog test ran on m910q inside it. Status DONE → Codex adversarial review.
+
+## Codex review (2026-09-11 22:50 CEST): ACCEPT
+
+Non-blocking: the AST guard scans the shipped package only (as the ticket asked); `True`, `1`, `NoButton`, `0` and `Yes | No` none equal `Yes` — explicit tests for `True`, `1` and the combination would add coverage; the real-dialog test's poller stops at its deadline and its timer closes an open box, so a broken run cannot hang or leak a modal; all five per-site fakes return `int(...)`; one section comment could go; Codex could not run the suite in its sandbox and reviewed by reading. Lead's hand before the merge: the probe is cited at `pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py` instead of the session scratchpad (five docstrings).
+
+## Closed (lead, 2026-09-11 22:54 CEST)
+
+Merged `--no-ff` as `8dc5204a` (+ `be09d1ec`, four docstring lines wrapped after the lead's citation fix took ruff over the limit — the first gate behind the merge was RED on that alone); gate `=== --checks: ALL GREEN ===` (4211 passed, 6 skipped); pushed. Evidence `pyplan/gates/t33-yes-reads-as-no-2026-09-11/` committed with the close. Worktree and `hand-t33` removed. CHANGELOG: one line under Fixed. To upstream with T32 and T34 in one PR; `v0.8.0-Public` carries the bug on every platform.
