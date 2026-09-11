@@ -1,6 +1,6 @@
 # T34 — a tab whose server folder is gone can be forgotten, and a missing folder is not "Docker could not be found"
 
-**Status:** OPEN
+**Status:** CLOSED 2026-09-11 23:58 CEST — merged `3d045d2b`, gate green, pushed; the live press on `yulon-win11` recorded
 **Filed:** 2026-09-11 22:46 CEST by the lead (Fable), from the owner on `yulon-win11` with `v0.8.0-Public`: "can't remove server tabs on the win11 vm even when the server is deleted/not to be found". Two WotLK install records from 2026-08-28 (`C:\Users\pk\wow-server-playerbots`, `C:\Users\pk\wow test install\wow-server-playerbots`) whose folders and containers no longer exist open as tabs; nothing on those tabs can drop them.
 **Hand:** Sonnet. Worktree `.claude/worktrees/t34`, branch `hand-t34` from `yulon-phase8b`. Reviewer: Codex adversarial (or a cold Opus). Unit; the live press on `yulon-win11` is the lead's (the two stale tabs are there).
 
@@ -30,3 +30,7 @@ Four must-fixes, all accepted by the lead: (1) `forget_install()` does not re-ch
 ## Round 2 (hand, `hand-t34` at `7e67dd67`) and the lead's check (2026-09-11 23:45 CEST)
 
 (1) `_forget_is_eligible()` asked before the confirmation and again after Yes; a folder back in between → `{server_dir} is back; nothing was forgotten.` (two tests, each check's mutation). (2) `refusal_for(wsl_distro=…)`, the clause only for native installs (test: a distro install's missing host path gets no clause). (3) `main.py::_forget_live_record()` finds the `KnownInstall` first and `remember()`s it back when `save_state()` raises (test in `test_main.py`). (4) `platform.folder_is_gone()` — True only on `os.stat` raising `FileNotFoundError` (a broken symlink counts), False for a file, a directory or any other `OSError` — at all three sites (tests: file, broken symlink, `PermissionError`; mutation `not is_dir()` → the file case fails). Gate `=== --checks: ALL GREEN ===` (4214 passed). Lead's check: merged `--no-ff` as `3d045d2b`; the Forget confirmation's `!= Yes` switched to `said_yes()` by the lead's hand (T33 merged after this branch was cut); ACCEPT by the two-round rule; gate behind the merge, push and the fork's Actions build follow.
+
+## Closed (lead, 2026-09-11 23:58 CEST)
+
+Merged `--no-ff` as `3d045d2b` (+ `3a124f40`, the confirmation through `said_yes()`); `=== --checks: ALL GREEN ===` on m910q (4214 passed); pushed. **Live on `yulon-win11`** (`pyplan/gates/t34-forget-press-yulon-win11-2026-09-11/`): the fork's Actions build of `3a124f40` swapped in for `v0.8.0-Public`; both stale WotLK tabs pressed through UI Automation's `InvokePattern` (a synthetic mouse click at the button's own rectangle did nothing — a driver deviation, recorded) — the confirmation with the ticket's text and No as the default, Yes, `state.json` read back with one install and then `"installs": []`, the tabs gone, the Catalog alone. Not pressed live: the Uninstall refusal's clause and the missing-folder Docker sentence (unit-proven). Worktree and `hand-t34` removed. CHANGELOG: one line under Fixed. To upstream with T32 and T33.
