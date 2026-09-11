@@ -1044,6 +1044,46 @@ def group_rows_sql(entry: CatalogEntry, marker: dbreads.Marker, *, master_guid: 
     )
 
 
+def party_rows_sql(entry: CatalogEntry, *, master_guid: int) -> str:
+    """EVERY member of the group `master_guid` is in, except the master.
+
+    **The same query as `group_rows_sql` with the bot marker's clause taken
+    out**, and it exists because of what the live half measured on
+    `yulon-ubuntu2` on 2026-09-11 (`pyplan/gates/8.6-altbot-live-yulon-ubuntu2-
+    2026-09-11/`, §4): `add_named`'s poll could not see the character it had
+    just added.
+
+    `dbreads.bot_clause` asks "is this row on an account the bot marker
+    recognises" -- a registry entry, or a username beginning with
+    `RandomBotAccountPrefix`. For `add_bot` that is exactly right: `addclass`
+    logs in a character out of the module's own pool and those characters live
+    on `RNDBOT*` accounts. For THIS route it is exactly wrong: the characters it
+    adds are the owner's own alt, a guild mate's, a friend's -- every one of them
+    on a PERSON's account, which no bot marker will ever match. Pressed live,
+    `Tsixalt` came online, the module answered `add: Tsixalt - ok` and
+    `Tsixalt joins the party.` in the master's own client, `group_member` held
+    the master and the alt in one group -- and this app said "no bot by that name
+    joined the party within 6 seconds", because the row was filtered out of the
+    read it was polling.
+
+    The master's own row is what the marker was keeping out on this path
+    (`group_rows_sql`'s docstring says so), so it is dropped by guid instead.
+    That is the whole difference: no clause about accounts, one clause about the
+    master.
+    """
+    schemas = entry.schema_map()
+    chars = schemas["characters"]
+    return (
+        "SELECT c.name, c.guid, c.class, c.level "
+        f"FROM {chars}.group_member gm "
+        f"JOIN {chars}.characters c ON c.guid = gm.memberGuid "
+        f"WHERE gm.guid = (SELECT guid FROM {chars}.group_member "
+        f"WHERE memberGuid = {int(master_guid)} LIMIT 1) "
+        f"AND gm.memberGuid <> {int(master_guid)} "
+        "ORDER BY c.name"
+    )
+
+
 def read_members(raw: str) -> tuple[Member, ...] | str:
     """The group read's rows, or the sentence saying why they are not rows.
 
@@ -2975,6 +3015,28 @@ class InstallParty:
             return f"could not read this character's party: {exc}"
         return read_members(raw)
 
+    def party_members(self, master: str) -> tuple[Member, ...] | str:
+        """Everyone in `master`'s party except `master`, bot marker or not.
+
+        The read `add_named` polls, and `members()`'s docstring says why it is
+        not that one: this route adds characters on people's accounts, which the
+        bot marker cannot recognise and must not have to. `members()` stays as
+        it is -- it is what the panel draws and what `remove_all` confirms, and a
+        party list that offered to dismiss a real person's character would be a
+        worse defect than the one this fixes.
+        """
+        guid = self.online_guid(master)
+        if guid is None:
+            return _not_online(master)
+        try:
+            raw = self._sql.query(
+                "characters", party_rows_sql(self.entry, master_guid=guid) + ";"
+            )
+        except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
+            logger.warning(f"could not read {master}'s party: {exc}")
+            return f"could not read this character's party: {exc}"
+        return read_members(raw)
+
     # -- writes --------------------------------------------------------------
 
     def specs(self, klass: str) -> tuple[str, ...]:
@@ -3169,7 +3231,10 @@ class InstallParty:
             master=master,
             name=name,
             send=send,
-            members=lambda: self.members(master),
+            # `party_members`, not `members`: the bot marker cannot see the
+            # characters this route adds. The live half of 2026-09-11 measured
+            # what that costs -- `party_rows_sql`'s docstring carries it.
+            members=lambda: self.party_members(master),
         )
 
     def link_plan(self, master: str, account: str) -> AccountLink:

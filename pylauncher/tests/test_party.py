@@ -3130,3 +3130,84 @@ def test_a_link_write_that_answers_something_else_is_reported_and_not_parsed_pas
     assert isinstance(party.read_link_write("row\t1\t2\n"), str), "no row count is no answer"
     seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote="what?\n")
     assert seam.link_account("Pakka", "FRIEND").linked is False
+
+
+# -- T26 live half: the named route reads the party WITHOUT the bot marker ----
+
+
+def test_the_named_routes_party_read_does_not_filter_by_the_bot_marker() -> None:
+    """Measured on `yulon-ubuntu2`, 2026-09-11 02:04:38, and it is the whole
+    defect the live half found.
+
+    `group_rows_sql` keeps only rows the BOT MARKER recognises, which is right
+    for `add_bot`: `addclass` logs in a character out of the module's own pool,
+    on an account whose username begins with `RandomBotAccountPrefix`. This
+    route's characters are the opposite by definition -- somebody's own alt, a
+    guild mate's character, a friend's -- and every one of them is on a PERSON's
+    account. Pressed live, `Tsixalt` logged in and stood in the party (the
+    module's own `add: Tsixalt - ok` / `Tsixalt joins the party.` in the
+    master's client, and `group_member` holding group 2 with both guids), and
+    this app said "no bot by that name joined the party within 6 seconds"
+    because the poll could not see it. So the named route reads the party with
+    the marker's clause left out, and drops the master by guid instead -- which
+    is the only row the marker was keeping out on this path.
+    """
+    sql = party.party_rows_sql(WOTLK, master_guid=1001)
+    assert dbreads.bot_clause(WOTLK, RNDBOT) not in sql
+    assert "RNDBOT" not in sql.upper()
+    assert "memberGuid=1001" in sql.replace(" ", "")
+    assert "memberGuid<>1001" in sql.replace(" ", "")
+    assert "ORDER BY" in sql.upper()
+
+
+def test_the_named_routes_party_read_is_anchored_on_the_masters_own_group() -> None:
+    """The same sub-select `group_rows_sql` is anchored on: `group_member.guid`
+    is the GROUP and `memberGuid` is the member, so without it this reads every
+    group on the server."""
+    sql = party.party_rows_sql(WOTLK, master_guid=1001)
+    assert "group_member" in sql
+    # Three, and each of them is a different job: the JOIN onto `characters`,
+    # the sub-select that turns the master's guid into his GROUP's id, and the
+    # one clause this read has instead of the bot marker's.
+    assert sql.count("memberGuid") == 3
+    assert "LIMIT 1" in sql
+    assert "c.guid = gm.memberGuid" in sql
+
+
+def test_the_seam_polls_the_named_add_with_the_unfiltered_party_read(tmp_path: Path) -> None:
+    """The press, end to end, with the poll's own statement read back out of the
+    seam: a character on an account the bot marker does NOT recognise is the
+    case this route is for, and the statement the poll sends must not carry the
+    marker's clause."""
+    chan = _Chan(
+        {
+            "dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping"),
+            "dml_botadd": _issued("Pakka", "Nore"),
+        }
+    )
+    sql = _Sql(
+        "1001\n",  # the precondition read: Pakka is online
+        "1001\n",  # the ground read's own guid lookup
+        "",  # the party is empty before the press
+        "1001\n",
+        "Nore\t2\t8\t60\n",  # and holds Nore after it
+    )
+    result = _install(_ready_install(tmp_path), sql, chan).add_named("Pakka", "Nore")
+    assert result.joined is True
+    party_reads = [asked for asked in sql.asked if "group_member" in asked]
+    assert party_reads, "the named add never read the group table"
+    for asked in party_reads:
+        assert "RNDBOT" not in asked.upper()
+        assert "memberGuid <> 1001" in asked
+
+
+def test_the_bot_routes_party_read_still_filters_by_the_bot_marker(tmp_path: Path) -> None:
+    """The other half of the same change, so the fix cannot be "drop the clause
+    everywhere": `members()` is what the panel draws and what `remove_all`
+    confirms, and a party list that offered to dismiss a real person's character
+    would be a worse defect than the one being fixed."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Bottom\t777\t8\t1\n")
+    seam = _install(_ready_install(tmp_path), sql, chan)
+    assert seam.members("Pakka") == (party.Member("Bottom", 777, 8, 1),)
+    assert "RNDBOT" in sql.asked[1].upper()
