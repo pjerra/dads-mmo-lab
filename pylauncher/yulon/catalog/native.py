@@ -4346,7 +4346,7 @@ class StagedInstaller:
             yield f"Cloning {source.repo} into {source.dest}"
             if existing is not None:
                 yield "A previous run of this install left it part-way through; finishing it off."
-            self._clone(
+            yield from self._clone_lines(
                 git.CloneSpec(
                     url=source.url,
                     dest=dest,
@@ -4354,7 +4354,8 @@ class StagedInstaller:
                     sparse_path=source.sparse_path,
                     depth=source.depth,
                     rev=source.rev,
-                )
+                ),
+                recorded_as,
             )
         yield "Sources are in place."
 
@@ -5137,9 +5138,23 @@ class StagedInstaller:
             return (composegen.BASE_FILE,)
         return ()
 
-    def _clone(self, spec: git.CloneSpec) -> None:
+    def _clone_lines(self, spec: git.CloneSpec, stage: str) -> Iterator[str]:
+        """Clone through the seam, relaying whatever git says while it works (T35).
+
+        A generator rather than the plain call it replaced, because the clone is
+        the first stage of an install that takes minutes on a large repository
+        and said one sentence for the whole of it. `git.clone_lines()` decides
+        whether the seam behind this can talk — a plain function cannot, and
+        every test's clone double is one, so those runs are exactly as silent as
+        they were.
+
+        `stage` is this stage's own name, which the body cannot know: it is
+        bound by the FAMILY in its `Stage` tuple, and it rides into the progress
+        line so the header strip attributes the reading to the stage the user
+        can see in `--- <name>`.
+        """
         try:
-            self._seams.clone(spec)
+            yield from git.clone_lines(self._seams.clone, spec, stage=stage)
         except git.GitError as exc:
             raise InstallerError(f"Cloning {spec.url} failed: {exc}") from exc
 
