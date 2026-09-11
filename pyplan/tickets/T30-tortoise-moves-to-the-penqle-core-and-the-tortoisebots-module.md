@@ -52,3 +52,7 @@ Replace the entry: one `wow-tortoise` on the new stack (existing installs from t
 10. `--checks` ALL GREEN on m910q; black/ruff; every test with its named mutation; the CHANGELOG line is the lead's.
 
 Report on the final message as usual. Two rounds; the reviewer is a cold Opus (live + code).
+
+## Owner, 2026-09-11 12:40 CEST — SOAP comes back
+
+"The soap update is not yet in the penqle repo, but I have asked him to add it; it will probably be added soon." So point 5 is a temporary switch: attach for the pinned rev, nothing SOAP-shaped deleted, the way back one edit (the four `operations` keys and the three `SOAP.*` conf keys), named in the hand's report. Follow-up when the SOAP rev lands: re-pin the core, flip the channel back, press the same surfaces once — filed as T31 when the rev exists.
