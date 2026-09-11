@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
@@ -4785,6 +4786,7 @@ class _FakeUninstall:
         failure: str = "",
         report: object | None = None,
         while_running: object | None = None,
+        forget_error: OSError | None = None,
     ) -> None:
         self.server_dir = server_dir
         self.refusal = refusal
@@ -4792,8 +4794,16 @@ class _FakeUninstall:
         self.plans = 0
         self.runs: list[bool] = []
         self.busy_seen: list[object] = []
+        self.forgets = 0
         self._report = report
         self._while_running = while_running
+        self._forget_error = forget_error
+
+    def forget(self) -> None:
+        """`Uninstall.forget` (T34): the same attribute `main.py` replaces in the app."""
+        self.forgets += 1
+        if self._forget_error is not None:
+            raise self._forget_error
 
     def plan(self) -> purge.PurgePlan:
         self.plans += 1
@@ -5054,6 +5064,193 @@ def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
     assert view.uninstall_button is None
 
 
+# -- "Forget this install…", for a folder that is gone (T34) -------------------
+
+
+def test_the_forget_button_is_hidden_while_the_folder_exists_and_appears_once_gone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Re-checked on the same poll as the status line, not only at tab-build time.
+
+    The owner's box had two stale tabs open with their folders already gone —
+    the folder can disappear under a tab that has been open for a while, and
+    the button has to notice without a restart.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.forget_install_button is not None
+    view.refresh_status()
+    assert view.forget_install_button.isHidden()
+
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert not view.forget_install_button.isHidden()
+    # Mutation: negate `_update_forget_visibility()`'s `is_dir()` check (or
+    # drop it) and this assertion is what catches it — the button would then
+    # be shown for the folder that exists and hidden for the one that is gone.
+
+
+def test_the_forget_button_stays_hidden_for_a_wsl_install_with_no_folder_here(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`server_dir.is_dir()` asks THIS process, which is right for a native
+    install and wrong for one inside a WSL distro — the folder lives in the
+    distro's own filesystem, not this one's. Out of scope for T34, and the
+    button must not offer a wrong answer instead of no answer.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.services.controller.wsl_distro = "dml-arch"
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert view.forget_install_button is not None
+    assert view.forget_install_button.isHidden()
+    # Mutation: drop the `wsl_distro is None` clause from
+    # `_update_forget_visibility()` and this fails — the button would show for
+    # a distro path this process cannot evaluate.
+
+
+def test_answering_yes_forgets_the_record_and_emits_uninstalled(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The confirm must compare with `==`, not `is` (T33's bug): this PySide6's
+    static `QMessageBox.question()` returns a plain `int`, and the fake below
+    returns exactly that — not the enum member — to prove the comparison
+    survives it.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[tuple[str, object]] = []
+    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
+
+    view.forget_install()
+
+    assert fake.forgets == 1
+    assert seen == [("wow-wotlk", tmp_path)]
+    # Mutation: change `forget_install()`'s `answer == QMessageBox.StandardButton.Yes`
+    # to `answer is QMessageBox.StandardButton.Yes` and this fails — the bare
+    # `int` the fake returns is never `is` the enum member, so a real Yes reads
+    # as a No and nothing is forgotten.
+
+
+def test_answering_no_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_no_modal_dialogs` already answers No; this asserts what that means here."""
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.No),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+
+
+def test_a_forget_that_raises_oserror_shows_the_error_and_keeps_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`forget_record()`'s own docstring: `OSError` is not caught there because
+    `purge.run()` catches it for the uninstall path — this is the OTHER caller
+    of the same live-`AppState` seam, and it has to catch its own.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    fake = _FakeUninstall(tmp_path, forget_error=OSError("config dir is read-only"))
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    failures: list[str] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    view.action_failed.connect(failures.append)
+
+    view.forget_install()
+
+    assert seen == [], "the tab was dropped over a forget that never happened"
+    assert "config dir is read-only" in view.uninstall_label.text()
+    assert failures and "config dir is read-only" in failures[0]
+
+
+def test_the_folder_reappearing_before_the_press_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The visibility poll is not trusted at press time (review, T34 round 2).
+
+    A restore, or simply undoing an accidental delete, can put the folder back
+    in the gap between the five-second poll that showed the button and the
+    click that reached it.
+    """
+    asked: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(1),
+    )
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    assert not view.forget_install_button.isHidden()
+    tmp_path.mkdir()  # back before the press
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+    assert asked == [], "the confirmation must not open for a folder that is back"
+    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+
+
+def test_the_folder_reappearing_during_the_confirmation_forgets_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second re-check (review, T34 round 2): the gap between Yes and the write is real too.
+
+    Mutation: drop the second `_forget_is_eligible()` call in
+    `forget_install()` — the first call still sees the folder gone, so only
+    the second one stands between this press and a forgotten record.
+    """
+
+    def question(*a: object, **k: object) -> object:
+        tmp_path.mkdir()
+        return int(controller_view_module.QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    shutil.rmtree(tmp_path)
+    view.refresh_status()
+    seen: list[object] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+
+    view.forget_install()
+
+    assert fake.forgets == 0
+    assert seen == []
+    assert view.uninstall_label.text() == f"{tmp_path} is back; nothing was forgotten."
+
+
 # -- the rebuild control (the action `_format_report` has always named) --------
 
 
@@ -5151,6 +5348,33 @@ def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     text = view.rebuild_log.text()
     assert "--- build" in text and "compiling" in text, text
+
+
+def test_a_real_static_ints_yes_still_starts_the_rebuild(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    The test above answers with the `QMessageBox.StandardButton` member, which
+    is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    # `started` crosses from the panel's worker thread, so the handler returning
+    # is not the press having actually run yet — `pump_until` is what makes the
+    # difference (`test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel`
+    # says so in the same words).
+    pump_until(lambda: "done" in view.rebuild_log.text(), "the rebuild's output reached the panel")
+    assert len(started) == 1, "an int Yes from the static question() did not start the rebuild"
 
 
 def test_the_rebuild_confirmation_offers_yes_and_no_and_defaults_to_refusing(
@@ -5646,11 +5870,11 @@ def test_declining_the_updates_confirmation_starts_nothing(
 ) -> None:
     """The gate is real: the question is asked, and No means nothing ran.
 
-    `is ... Yes` and not `is not ... No`, because Escape and the window's close
-    button both answer `NoButton` — and this press writes DDL into a database
-    with somebody's characters in it.
+    `said_yes(...)` rather than a check for No, because Escape and the window's
+    close button both answer `NoButton` — and this press writes DDL into a
+    database with somebody's characters in it.
 
-    Catches the confirmation skipped, and the verdict read as `is not No`.
+    Catches the confirmation skipped, and the verdict read as `== No`.
     """
     seen: list[str] = []
 
@@ -5705,6 +5929,34 @@ def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_sta
     assert started == [], "refused, and the press ran anyway"
     assert asked == [], "the user was asked to confirm a press that could not be described"
     assert failures and "found no file matching" in failures[0], failures
+
+
+def test_a_real_static_ints_yes_still_starts_the_database_updates(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    Every other test of this confirm answers with the `QMessageBox.StandardButton`
+    member, which is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started, asked = _updates_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.apply_database_updates() is True
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    # `started` crosses from the panel's worker thread; see the rebuild version
+    # of this test for why the wait is needed before it can be read.
+    pump_until(
+        lambda: "applied" in view.rebuild_log.text(), "the update's output reached the panel"
+    )
+    assert len(started) == 1, "an int Yes from the static question() did not start the press"
 
 
 def test_the_tortoise_updates_button_refuses_while_the_world_runs(
@@ -5963,11 +6215,11 @@ def test_declining_the_adopt_confirmation_writes_nothing(
 ) -> None:
     """The gate is real, and this is the press where it matters most.
 
-    `is ... Yes` and not `is not ... No`, because Escape and the window's close
-    button both answer `NoButton` — and Yes here is a person saying something
-    about their databases that nothing takes back.
+    `said_yes(...)` rather than a check for No, because Escape and the window's
+    close button both answer `NoButton` — and Yes here is a person saying
+    something about their databases that nothing takes back.
 
-    Catches the confirmation skipped, and the verdict read as `is not No`.
+    Catches the confirmation skipped, and the verdict read as `== No`.
     """
     seen: list[str] = []
 
@@ -6018,6 +6270,36 @@ def test_the_adopt_press_runs_the_routes_own_generator_into_the_panel(
     assert len(started) == 1, started
     assert started[0] is not None, "the panel's Stop button has nothing to set"
     assert "--- adopt" in view.rebuild_log.text()
+
+
+def test_a_real_static_ints_yes_still_starts_the_adopt_press(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T33's other shape at this site: PySide6's real static `question()` return, not the enum.
+
+    The test above answers with the `QMessageBox.StandardButton` member, which
+    is exactly the shape that hid the bug: PySide6 6.11.2's static
+    `QMessageBox.question()` returns the plain `int` used here instead
+    (`pyplan/gates/t33-yes-reads-as-no-2026-09-11/static_probe.py`).
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: int(controller_view_module.QMessageBox.StandardButton.Yes),
+    )
+    services, started, _, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+
+    assert view.adopt_as_imported() is True
+    # `started` crosses from the panel's worker thread; see the rebuild version
+    # of this test for why the wait is needed before it can be read.
+    pump_until(
+        lambda: "the row is written" in view.rebuild_log.text(),
+        "the adopt press's output reached the panel",
+    )
+    assert len(started) == 1, "an int Yes from the static question() did not start the press"
 
 
 def test_the_adopt_button_greys_itself_once_its_own_press_has_finished(

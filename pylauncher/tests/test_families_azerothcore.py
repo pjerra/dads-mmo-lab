@@ -758,7 +758,91 @@ def test_a_directory_holding_only_our_state_file_counts_as_empty(tmp_path: Path)
 
 def test_a_container_owned_by_another_project_is_refused_by_name(tmp_path: Path) -> None:
     rec = Recorder(containers={"ac-worldserver": "somebody-elses-project"})
-    with pytest.raises(InstallerError, match="belongs to another install"):
+    with pytest.raises(InstallerError, match="belongs to another Docker Compose project"):
+        install(rec, tmp_path / "wow")
+
+
+def test_a_container_owned_by_another_yulon_install_names_its_folder(tmp_path: Path) -> None:
+    """T32: the folder is what a reporter can act on, a project id is not.
+
+    The screenshot the ticket was filed from named
+    `yulon-wow-wotlk-db937032` and nothing else, and a reporter cannot open a
+    tab for a hash. `container_working_dir()` reads the working-dir sibling of
+    the same compose label `container_project()` already reads, so the
+    refusal can name where to go instead.
+    """
+    other = str(tmp_path / "wow-other")
+    rec = Recorder(
+        containers={"ac-database": "yulon-wow-wotlk-db937032"},
+        working_dirs={"ac-database": other},
+    )
+    with pytest.raises(InstallerError) as excinfo:
+        install(rec, tmp_path / "wow")
+    assert str(excinfo.value) == (
+        "A container called ac-database already exists and belongs to another "
+        f"install this app made, brought up from {other} when it was created (if "
+        "that folder has moved since, its own tab still knows it). Two servers "
+        "cannot share that name. Open that install's tab and stop and remove its "
+        "containers, then try again."
+    )
+
+
+def test_a_foreign_yulon_install_with_no_readable_working_dir_still_names_the_project(
+    tmp_path: Path,
+) -> None:
+    """`None` (label absent) and `UNREADABLE` (daemon would not say) read the same to a user."""
+    for working_dir in (None, docker.UNREADABLE):
+        rec = Recorder(containers={"ac-database": "yulon-wow-wotlk-db937032"})
+        if working_dir is not None:
+            rec.working_dirs["ac-database"] = working_dir
+        with pytest.raises(InstallerError) as excinfo:
+            install(rec, tmp_path / "wow")
+        assert str(excinfo.value) == (
+            "A container called ac-database already exists and belongs to another "
+            "install this app made (yulon-wow-wotlk-db937032), but this app could "
+            "not read which folder that install used. Two servers cannot share "
+            "that name. Open that install's tab and stop and remove its "
+            "containers, then try again."
+        ), working_dir
+
+
+def test_a_foreign_compose_project_names_its_working_dir(tmp_path: Path) -> None:
+    other = str(tmp_path / "elsewhere")
+    rec = Recorder(
+        containers={"ac-worldserver": "somebody-elses-project"},
+        working_dirs={"ac-worldserver": other},
+    )
+    with pytest.raises(InstallerError) as excinfo:
+        install(rec, tmp_path / "wow")
+    assert str(excinfo.value) == (
+        "A container called ac-worldserver already exists and belongs to another "
+        f"Docker Compose project (somebody-elses-project), brought up from {other} "
+        "when it was created (if that folder has moved since, its own tab still "
+        "knows it). Two servers cannot share that name. Remove the other install's "
+        "containers from its own tab first, then try again."
+    )
+
+
+def test_the_yulon_prefix_the_refusal_uses_is_project_names_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One constant, not two hand-typed copies of `"yulon-"` (T32).
+
+    Patching `composegen.PROJECT_PREFIX` and checking only the refusal's
+    branch would prove nothing about `project_name()` itself: a
+    `project_name()` that still built `f"yulon-{...}"` by hand, ignoring the
+    constant entirely, would pass that check every time, since the test then
+    supplies the owner string itself. So this asserts BOTH halves of the
+    binding follow the patch -- `project_name()`'s own output, and the
+    refusal's branch for an owner shaped like what `project_name()` would
+    now produce (review, Codex, 2026-09-11).
+    """
+    assert composegen.PROJECT_PREFIX == "yulon-"
+    monkeypatch.setattr(composegen, "PROJECT_PREFIX", "custom-")
+    assert composegen.project_name(ENTRY.id, tmp_path / "wow").startswith("custom-")
+    owner = "custom-wow-wotlk-deadbeef"
+    rec = Recorder(containers={"ac-database": owner}, working_dirs={"ac-database": None})
+    with pytest.raises(InstallerError, match="this app made"):
         install(rec, tmp_path / "wow")
 
 
