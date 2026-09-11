@@ -3029,9 +3029,7 @@ class InstallParty:
         if guid is None:
             return _not_online(master)
         try:
-            raw = self._sql.query(
-                "characters", party_rows_sql(self.entry, master_guid=guid) + ";"
-            )
+            raw = self._sql.query("characters", party_rows_sql(self.entry, master_guid=guid) + ";")
         except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
             logger.warning(f"could not read {master}'s party: {exc}")
             return f"could not read this character's party: {exc}"
