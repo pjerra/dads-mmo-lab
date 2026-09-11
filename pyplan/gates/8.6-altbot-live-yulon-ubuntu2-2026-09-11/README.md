@@ -723,7 +723,15 @@ on the join; `InstallParty.remove()` — the ground read; and one wiring line in
 `controller_view.py` so the file outlives the panel.
 
 **Eleven mutations, 11/11 caught** (`12-mutations.txt`), and the table's own
-`sha256 before` / `after` are the committed file's. M5 is the union arm, M6 the
+`sha256 before` / `after` are the committed file's. `--checks` on m910q for the
+review round: **ALL GREEN**, 4165 passed, 6 skipped, mypy on three platforms,
+ruff and black clean, taken with **nothing uncommitted** — its first line reads
+`==> syncing hand-t26 (f6905f91) to m910q` and there is no `overlaying` line
+(`28-checks-m910q.txt`). Two earlier runs of that gate were RED and are named
+rather than smoothed over: one on black alone (two lines of the new tests), and
+one on `tests/test_write_ledger.py`, which refuses a write site the ledger does
+not name — `AltbotMemory._save` writes `party-altbots.json`, and its row is now
+in `pyplan/write-ledger.md`. M5 is the union arm, M6 the
 master's exclusion from it, M7 the name check on the one value that reaches a
 quoted literal off disk, M8 remembering on the join, M9 the prune, M10 pruning
 on a read that did NOT answer, M11 the dismissal's ground read — the mutation
