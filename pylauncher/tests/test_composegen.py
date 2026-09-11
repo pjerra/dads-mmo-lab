@@ -521,6 +521,77 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         )
 
 
+# -- is_marker_line: the exact banners, not a separator rule (T25) -----------
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["-custom", " (modified)", " - my note", " — my note"],
+    ids=["glued-suffix", "parenthetical", "hyphen-note", "em-dash-note"],
+)
+def test_a_mark_that_only_looks_like_the_marker_is_not_ours(suffix: str) -> None:
+    """A user marking a file they took over must not read back as ours.
+
+    `is_ours()` used to decide OURS by `startswith(GENERATED_MARKER)`, so any of these
+    four first lines -- a person's own note on a file they took over, sharing nothing with
+    this engine but the words -- passed the check, and the file was replaced whole on the
+    next `generate-compose` or rebuild. Round 1's fix (T25) closed the first two with a
+    separator rule (the marker, a space, then a hyphen or em dash) and reopened exactly
+    this shape: `... - my note` and `... — my note` reuse the same punctuation this
+    engine's own banners do, so a rule about the SEPARATOR still answered True for both.
+    `is_marker_line()` now checks the banner itself, not its first character.
+    """
+    assert composegen.is_marker_line(f"{composegen.GENERATED_MARKER}{suffix}\nFROM x\n") is False
+
+
+def test_the_markers_own_banners_are_still_ours() -> None:
+    """The bare marker, and the marker with each of `MARKER_BANNERS`, all answer True.
+
+    Driven off the constant rather than retyped, so a banner added there is covered here
+    for free and a banner REMOVED there is caught here rather than only by the shipped-
+    template test below (which would simply stop exercising the line nothing renders with
+    any more).
+    """
+    assert composegen.is_marker_line(f"{composegen.GENERATED_MARKER}\nFROM x\n") is True
+    for banner in composegen.MARKER_BANNERS:
+        text = f"{composegen.GENERATED_MARKER}{banner}\nFROM x\n"
+        assert composegen.is_marker_line(text) is True, banner
+
+
+def test_every_shipped_templates_first_line_is_ours() -> None:
+    """Read every `.tmpl` this project ships and check its actual first line, not a copy of it.
+
+    The tripwire `MARKER_BANNERS`' own docstring promises: a new template, or an edited
+    banner, that drifts past the enumerated set fails HERE, in a test that reads the real
+    files, rather than at the next rebuild of whichever install rendered it.
+    """
+    templates = sorted(TEMPLATES.rglob("*.tmpl"))
+    assert templates, "the glob found nothing -- this test is checking zero files"
+    for path in templates:
+        first_line = path.read_text(encoding="utf-8").split("\n", 1)[0]
+        assert composegen.is_marker_line(first_line + "\n"), path
+
+
+@pytest.mark.parametrize("suffix", ["-custom", " - my note"], ids=["glued", "hyphen-note"])
+def test_write_plan_refuses_a_file_whose_first_line_only_looks_like_the_marker(
+    tmp_path: Path, suffix: str
+) -> None:
+    """End to end: the same look-alike mark stops `write_plan()` rather than being overwritten.
+
+    The mutation this guards against is `is_marker_line()` collapsing back to a separator
+    rule (round 1) or a bare `startswith(GENERATED_MARKER)` (round 0): under either, the
+    file below reads as ours and `write_plan()` compiles right over it instead of refusing.
+    """
+    server_dir = tmp_path / "wow"
+    server_dir.mkdir()
+    theirs = f"{composegen.GENERATED_MARKER}{suffix}\nservices: {{}}\n"
+    (server_dir / composegen.BASE_FILE).write_text(theirs, encoding="utf-8")
+    assert composegen.is_ours(server_dir / composegen.BASE_FILE) is False
+    with pytest.raises(composegen.ComposeGenError, match="not written by Yu'lon"):
+        composegen.write_plan(render(server_dir), server_dir)
+    assert (server_dir / composegen.BASE_FILE).read_text(encoding="utf-8") == theirs
+
+
 def test_merge_dotenv_replaces_in_place_and_appends_the_rest() -> None:
     """A merge, not a rewrite: this file is shared with SOAP setup and the port remedy."""
     existing = "# theirs\nDOCKER_DB_EXTERNAL_PORT=13306\nSOMETHING_ELSE=keep me\n"
@@ -1785,6 +1856,51 @@ def test_the_tortoise_dockerfile_keeps_every_flag_and_library_its_script_proved(
             assert str(PurePosixPath(argument).parent) in dockerfile, argument
 
 
+def test_the_tortoise_image_makes_their_self_colliding_migration_idempotent() -> None:
+    """One file, named, with the reason -- not the 173 the owner refused to patch.
+
+    Measured on m910q 2026-09-08 on a byte copy of the live volume
+    (`pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/`): with
+    `tw_world` imported from their `sql/base` at head, their updater applied 157
+    world migrations and cancelled the server on `20260903063722_world` --
+    `Duplicate entry '44070' for key 'PRIMARY'` in `spell_proc_event`, a row
+    their base does not hold. The file collides with itself or a sibling, so a
+    FRESH install at their head cannot start either; the incident of the night
+    before had looked like an existing install being too far behind, and it was
+    not only that.
+
+    The image copies `sql/` out of the clone; this rewrites that one file's
+    `INSERT INTO` to `INSERT IGNORE INTO` in the copy the updater reads, and
+    nothing else. The updater is hash-keyed (SHA1 of the file, `AutoUpdater.cpp`),
+    so the rewritten file is a new migration to it, applied once and recorded
+    under its own hash; an install that already recorded the original is not
+    touched by this, because its rows are already there and IGNORE skips them.
+    The owner rejected patching all 173 (answer 1, 2026-09-08); this is the one
+    that is measured broken, named here so the day upstream fixes it the line
+    can go.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    dockerfile = dockerfile_text(entry)
+    core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
+    # A `RUN` may continue over lines; read it as the shell will.
+    joined = dockerfile.replace("\\\n", " ")
+    line = next(
+        (
+            ln
+            for ln in joined.splitlines()
+            if "20260903063722_world.sql" in ln and "INSERT IGNORE" in ln
+        ),
+        None,
+    )
+    assert line is not None, "the self-colliding migration is not made idempotent in the image"
+    assert f"{core_dir}/sql/database_updates/world/20260903063722_world.sql" in line
+    assert dockerfile.count("INSERT IGNORE") == 1, "exactly one file, not a blanket rewrite"
+    # And the reason travels with the line: a reader of the rendered Dockerfile
+    # must find the incident named, not a bare sed.
+    idx = joined.index(line)
+    assert "44070" in joined[max(0, idx - 1200) : idx], "the comment above it names the duplicate"
+
+
 @pytest.mark.parametrize("entry", CMANGOS_ENTRIES, ids=lambda e: e.id)
 def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
     entry: CatalogEntry,
@@ -1801,6 +1917,53 @@ def test_the_cmangos_runtime_stage_carries_the_tools_the_extract_stage_runs(
     dockerfile = dockerfile_text(entry)
     core_dir = composegen.entry_tokens(entry)["CORE_DIR"]
     assert f"COPY --from=builder {core_dir} {core_dir}" in dockerfile
-    assert dockerfile.count("FROM ubuntu:22.04") == 2, "a builder stage and a slim runtime"
+    # Two stages ON THE SAME BASE, rather than two stages on a version spelled
+    # here. The invariant is that the runtime can run what the builder built --
+    # a builder-only bump produces a binary whose glibc the runtime does not
+    # have, which is exactly the trap Tortoise walked into on 2026-09-08 when
+    # its vendored gsoap archive forced a move to ubuntu:24.04 while its
+    # siblings stayed on 22.04. Pinning the version here would have made this
+    # test the thing that had to be edited, rather than the thing that caught a
+    # half-done bump.
+    bases = re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE)
+    assert len(bases) == 2, f"a builder stage and a slim runtime, not {bases}"
+    assert bases[0] == bases[1], f"the runtime must be the builder's base: {bases}"
     for tool in native.cmangos.extract.tools:
         assert tool.argv[0].startswith(f"{core_dir}/bin/"), tool.argv[0]
+
+
+# -- which modules the generated importer is allowed to apply -------------------
+
+
+def test_the_importer_reads_its_module_list_from_the_environment(tmp_path: Path) -> None:
+    """`"all"` is upstream's default and it does NOT mean the modules on disk.
+
+    `Updates.AllowedModules = "all"` passes `AC_MODULES_LIST` — a macro
+    `modules/CMakeLists.txt:371` bakes from a glob at CMake time — so a module
+    cloned into `modules/` after the image was built is invisible to the
+    importer for ever. Measured twice on yulon-ubuntu 2026-09-07 against the
+    same files and database: the unchanged one-shot logged `Loading modules:
+    all` and applied nothing (`acore_world.updates` stayed at 2967); the same
+    container with `AC_UPDATES_ALLOWED_MODULES=mod-aoe-loot` logged `>> Applying
+    update aoe_loot_module_string.sql` and left it at 2968.
+
+    So the service carries the variable rather than nothing, interpolated from
+    the project's `.env` and defaulting to `all` — which renders exactly what
+    upstream would have done when nothing sets it, so no existing install
+    changes behaviour by acquiring this line.
+    """
+    plan = render(tmp_path)
+    assert 'AC_UPDATES_ALLOWED_MODULES: "${AC_UPDATES_ALLOWED_MODULES:-all}"' in plan.base
+    # The KEY once, counted as a key rather than as a substring: the comment
+    # above it names the variable three times, and a count of the string would
+    # pass on a file that set the option twice with different values.
+    keys = [
+        line.strip()
+        for line in plan.base.splitlines()
+        if line.strip().startswith("AC_UPDATES_ALLOWED_MODULES:")
+    ]
+    assert len(keys) == 1, keys
+    # Never an empty default. `src/tools/dbimport/Main.cpp:114-118` reads an
+    # empty value as a third meaning — allow NO modules — measured on the real
+    # image 2026-09-07 as `Loading modules: none`.
+    assert "${AC_UPDATES_ALLOWED_MODULES:-}" not in plan.base

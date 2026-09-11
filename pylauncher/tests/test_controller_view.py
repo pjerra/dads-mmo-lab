@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import pump_until
+from yulon import apply as apply_module
 from yulon import (
     botlist,
     channel,
@@ -19,11 +21,17 @@ from yulon import (
     docker,
     logsnap,
     networking,
+    party,
+    purge,
     runner,
+    steam,
     useraccounts,
 )
 from yulon.apply import Applier, ApplyReport, DockerSql
-from yulon.catalog.catalog import CatalogEntry, load_catalog
+from yulon.catalog import native
+from yulon.catalog.catalog import CatalogEntry, Operations, load_catalog
+from yulon.catalog.families import sqlplan
+from yulon.catalog.installer import InstallerError
 from yulon.controller import Controller
 from yulon.controller_wow_tbc import controller as tbc_controller
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -41,6 +49,8 @@ from yulon.controller_wow_wotlk.maintenance import (
     RestorePlan,
     RestoreReport,
 )
+from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
+from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
@@ -103,11 +113,24 @@ class _FakeApplier(Applier):
     def __init__(self) -> None:
         super().__init__(Path("/srv"), git=None)  # type: ignore[arg-type]
         self.installed: list[str] = []
+        # What the tab handed down as the `values` argument, per call. Recorded
+        # because for two of the 41 shipped manifests that argument WAS the
+        # defect: the tab called the applier without one at all, and the two
+        # modules whose prompts have no default could only fail (2026-09-07).
+        self.values: list[object] = []
+        self.removed: list[str] = []
 
     def install(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
         item_id = str(manifest.id)  # type: ignore[attr-defined]
         self.installed.append(item_id)
+        self.values.append(values)
         return ApplyReport("install", item_id, done=("clone",), rebuild_required=True)
+
+    def remove(self, manifest: object, values: object = None) -> ApplyReport:  # type: ignore[override]
+        item_id = str(manifest.id)  # type: ignore[attr-defined]
+        self.removed.append(item_id)
+        self.values.append(values)
+        return ApplyReport("remove", item_id, done=("rm -r",))
 
 
 class _FakeMaintenance:
@@ -508,7 +531,16 @@ def test_backing_up_says_where_it_went(qapp: object, ps: _Ps, tmp_path: Path) ->
 def test_modules_tab_lists_manifests_and_installs_selected(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    # The asker is injected because `mod-ah-bot` is one of the two manifests
+    # that now HAS a question: with the real one this test would sit on a modal
+    # dialog forever, which is exactly what it did when the seam was added and
+    # this line was not (2026-09-07).
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
     assert view.module_list.count() >= 40
     for i in range(view.module_list.count()):
         if view.module_list.item(i).data(256) == "mod-ah-bot":
@@ -518,7 +550,943 @@ def test_modules_tab_lists_manifests_and_installs_selected(
     view._module_action("install")
     applier = view.services.applier
     assert isinstance(applier, _FakeApplier) and applier.installed == ["mod-ah-bot"]
-    assert "REBUILD required" in view.module_report.toPlainText()
+    # It used to say "worldserver REBUILD required before this takes effect",
+    # which sent the reader hunting for a button no tab has (FACT 4, 2026-09-07).
+    assert "C++ module" in view.module_report.toPlainText()
+
+
+def test_the_report_says_which_kind_of_module_this_is() -> None:
+    """21 of the 41 shipped manifests need no recompile; 20 do. Different sentences.
+
+    Counted 2026-09-07 through `parse_manifest`: `build.rebuild` is true for 20
+    manifests, all of type `module`, and false for the other 21 (7 ale, 2 keg,
+    11 mod, and `mod-arac`). "No module works until someone rebuilds" would be
+    false for half of them, which is why the kind is on the report rather than
+    in the sentence.
+    """
+    cpp = controller_view_module._format_report(
+        ApplyReport("install", "mod-solocraft", rebuild_required=True)
+    )
+    data_only = controller_view_module._format_report(
+        ApplyReport("install", "sitmeanrest", restart_recommended=True)
+    )
+    assert "C++ module" in cpp and "C++ module" not in data_only
+    assert "Stop" in data_only and "Server tab" in data_only
+
+
+def test_removing_a_cpp_module_is_not_told_it_is_inert_on_disk() -> None:
+    """The same flag, the opposite situation: the binary may still HAVE it.
+
+    "may": the live run on yulon-ubuntu 2026-09-07 removed two modules that had
+    been installed minutes earlier and never built, and a draft that said "its
+    code was compiled into the worldserver" asserted of both something that was
+    false of both. The app cannot know what went into the last build — that is
+    the same ignorance `REBUILD_HISTORY` records — so it says which case
+    would be bad rather than claiming to know which case this is.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport("remove", "mod-solocraft", done=("rm -r",), rebuild_required=True)
+    )
+    assert "If mod-solocraft was in the last build it is still in there" in text
+    assert "is on disk and inert" not in text
+
+
+def test_pending_sql_is_drawn_as_not_applied_with_the_file_count() -> None:
+    """The line the user reads in place of the tick that was a lie.
+
+    The real report from the live applier, yulon-ubuntu 2026-09-07, read
+    `DONE: sql data/sql/db-world/*.sql -> world: left to ac-db-import on next
+    start` — with nothing run and nothing checked.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport(
+            "install",
+            "mod-aoe-loot",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql(
+                    db="world",
+                    path="data/sql/db-world/*.sql",
+                    files=("data/sql/db-world/aoe_loot_module_string.sql",),
+                ),
+            ),
+        )
+    )
+    assert "NOT applied" in text
+    assert "1 file" in text
+    assert "left to ac-db-import" not in text
+    assert "has not been applied" in text
+    assert controller_view_module.MODULE_SQL_BUTTON_LABEL in text, (
+        "the line tells the user to press something whose name is not on the tab: " f"{text!r}"
+    )
+
+
+def test_a_glob_that_matched_nothing_is_not_drawn_as_a_module_with_no_sql() -> None:
+    """Measured live, yulon-ubuntu 2026-09-07, on the first run of this code.
+
+    The real applier installed `mod-aoe-loot` into `/home/pk/wowserver` and its
+    manifest glob `data/sql/db-world/*.sql` resolved to nothing — while that
+    clone carries `data/sql/db-world/base/aoe_loot_module_string.sql`, the file
+    FACT 1 had watched the importer apply an hour earlier. The draft said
+    "nothing to apply". Two sibling modules cloned the same minute keep theirs
+    directly in `db-world/` (mod-solocraft 1 file, mod-transmog 3), so the
+    layout is per-repository and a zero match is this app failing to count.
+    """
+    text = controller_view_module._format_report(
+        ApplyReport(
+            "install",
+            "mod-aoe-loot",
+            rebuild_required=True,
+            pending_sql=(
+                apply_module.PendingSql(db="world", path="data/sql/db-world/*.sql", files=()),
+            ),
+        )
+    )
+    assert "nothing to apply" not in text
+    assert "NOT applied" in text
+    assert "has not been applied" in text
+    assert controller_view_module.MODULE_SQL_BUTTON_LABEL in text, (
+        "the line tells the user to press something whose name is not on the tab: " f"{text!r}"
+    )
+
+
+def _select_module(view: ControllerView, item_id: str) -> None:
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) == item_id:
+            view.module_list.setCurrentRow(i)
+            return
+    raise AssertionError(f"{item_id} is not in the Modules list")
+
+
+def test_installing_a_module_whose_prompt_has_no_default_asks_first(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """FACT 3, 2026-09-07: the tab called the applier with no `values` at all.
+
+    `mod-ah-bot` and `mod-ah-bot-plus` are the only two shipped manifests with a
+    prompt carrying no default, so pressing Install on either of them could only
+    ever produce `conf AuctionHouseBot.GUIDs: no value for {bot_guid}` — and
+    they are exactly the two the owner could test.
+    """
+    asked: list[tuple[str, tuple[str, ...]]] = []
+
+    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+        asked.append(
+            (str(manifest.id), tuple(p.key for p in prompts))  # type: ignore[attr-defined]
+        )
+        return {"bot_guid": "42", "bot_account": "7"}
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    _select_module(view, "mod-ah-bot")
+    view._module_action("install")
+
+    assert asked == [("mod-ah-bot", ("bot_guid", "bot_account"))]
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == ["mod-ah-bot"]
+    assert applier.values == [{"bot_guid": "42", "bot_account": "7"}]
+
+
+def test_cancelling_the_questions_installs_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: None,
+    )
+    _select_module(view, "mod-ah-bot-plus")
+    view._module_action("install")
+
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert applier.installed == [] and applier.values == []
+    assert "cancelled" in view.module_report.toPlainText().lower()
+
+
+def test_only_the_two_ah_bot_modules_are_asked_about(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """39 of the 41 must behave exactly as they did — no new dialog at all."""
+    asked: list[str] = []
+
+    def asker(parent: object, manifest: object, prompts: object) -> dict[str, str]:
+        asked.append(str(manifest.id))  # type: ignore[attr-defined]
+        return {p.key: "1" for p in prompts}  # type: ignore[attr-defined]
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, prompt_asker=asker)
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) not in view._manifests:
+            continue
+        view.module_list.setCurrentRow(i)
+        view._module_action("install")
+
+    assert sorted(asked) == ["mod-ah-bot", "mod-ah-bot-plus"], asked
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier)
+    assert len(applier.installed) == view.module_list.count()
+    unasked = [v for m, v in zip(applier.installed, applier.values, strict=True) if m not in asked]
+    assert all(v is None for v in unasked), "a manifest with no question was given values"
+
+
+def test_removing_the_ah_bot_asks_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Remove renders no template on either manifest, so it must not interrogate."""
+    asked: list[str] = []
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: asked.append(manifest.id) or {},
+    )
+    _select_module(view, "mod-ah-bot")
+    view._module_action("remove")
+
+    assert asked == []
+    applier = view.services.applier
+    assert isinstance(applier, _FakeApplier) and applier.removed == ["mod-ah-bot"]
+
+
+# ------------------------------- the module SQL that no other button reaches
+#
+# `docker.apply_module_sql()` and its per-game binding were measured working on
+# yulon-ubuntu (2026-09-07) and had NO caller in `yulon/ui/` at all — a route
+# with no button on it, which is the same thing as no route for anyone who is
+# not reading the source. These tests are that button.
+
+
+class _FakeImporter:
+    """Stands in for `controller_wow_wotlk.modules.apply_module_sql`.
+
+    Records what the view handed down and what the tab looked like WHILE the
+    run was in flight — the second one is the only way to see a lock that a
+    synchronous job runner puts back before the next line of the test.
+    """
+
+    def __init__(
+        self, says: Sequence[str] = (), refusal: Exception | None = None, returncode: int = 0
+    ) -> None:
+        self.says = tuple(says)
+        self.refusal = refusal
+        self.returncode = returncode
+        self.sinks: list[object] = []
+        self.enabled_in_flight: list[bool] = []
+        self.view: ControllerView | None = None
+        self.during: Callable[[], object] | None = None
+
+    def __call__(self, output: object = None) -> docker.AttachedRun:
+        self.sinks.append(output)
+        if self.view is not None:
+            self.enabled_in_flight.append(self.view.module_sql_button.isEnabled())
+        if self.during is not None:
+            self.during()
+        for line in self.says:
+            if callable(output):
+                output(line)
+        if self.refusal is not None:
+            raise self.refusal
+        return docker.AttachedRun(self.returncode, self.says)
+
+
+def _importer_view(
+    ps: _Ps, tmp_path: Path, importer: _FakeImporter | None
+) -> tuple[ControllerView, _FakeImporter | None]:
+    services = _services(ps, tmp_path, [])
+    services.module_sql = importer
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    if importer is not None:
+        importer.view = view
+    return view, importer
+
+
+def test_the_modules_tab_can_apply_the_module_sql_nothing_else_applies(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole box in one press: the route exists, and now something reaches it.
+
+    The line asserted here is the importer's own evidence that a module's SQL
+    was applied — `>> Applying update <file>.sql`, measured on yulon-ubuntu
+    2026-09-07 while `acore_world.updates` went 2967 → 2968. The tab shows what
+    the importer said rather than a sentence of its own, because the run's
+    output is the only thing that knows whether anything was applied.
+    """
+    view, importer = _importer_view(
+        ps, tmp_path, _FakeImporter(says=(">> Applying update aoe_loot_module_string.sql",))
+    )
+    assert importer is not None
+    view.apply_module_sql()
+
+    assert len(importer.sinks) == 1
+    assert ">> Applying update aoe_loot_module_string.sql" in view.module_report.toPlainText()
+
+
+def test_the_refusal_that_makes_this_not_a_button_that_always_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A running world refuses, and the refusal is what the user reads.
+
+    Checklist 8.7a's rule lives in `docker.apply_module_sql()` — one guard,
+    inside the step every caller passes through — so the tab must NOT spell a
+    second copy of it. What the tab owes is that the refusal arrives on screen
+    intact and that nothing is claimed to have been applied.
+    """
+    refusal = docker.DockerCommandError(
+        "ac-worldserver is running. The importer writes to the databases underneath them, and "
+        "a running worldserver holds characters in memory and saves them back over whatever it "
+        "finds. Press Stop first, then try again."
+    )
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(refusal=refusal))
+    assert importer is not None
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.apply_module_sql()
+
+    report = view.module_report.toPlainText()
+    assert "Press Stop first" in report
+    assert "FAILED" in report
+    assert "applied" not in report.lower(), report
+    assert failures and "Press Stop first" in failures[0]
+
+
+def test_the_importer_talks_through_a_relay_because_it_talks_from_a_worker_thread(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sink handed down must be the relay's emitter, never a bound slot of the view.
+
+    Same reason the repair's sink is: this call runs on a worker thread and
+    everything it invokes runs there too, so a bound `@Slot(str)` would write
+    into a widget from off the GUI thread. Running inline, as these tests do,
+    the wrong version behaves identically — only the identity of what was
+    passed down can tell them apart.
+    """
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(says=("one",)))
+    assert importer is not None
+    view.apply_module_sql()
+
+    sink = importer.sinks[0]
+    assert getattr(sink, "__self__", None) is view._module_sql_relay, (
+        "the importer was handed something that is not the relay, so its lines "
+        "would reach a widget on the worker thread"
+    )
+
+
+def test_the_module_sql_button_is_locked_while_the_importer_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The button is dead for the length of the run, and alive again after it.
+
+    `run_one_shot(allowed_modules=...)` is `compose run --rm`, which starts a
+    NEW container each time rather than refusing because one is already up, so
+    nothing below this tab would stop a second press from racing the first —
+    the disabled button is the whole of that defence.
+
+    Two presses here are two runs, and that is the test being honest rather
+    than the lock failing: these tests run their jobs inline, so the first has
+    already finished by the second line. What is asserted is what the tab
+    looked like WHILE each one ran.
+    """
+    view, importer = _importer_view(ps, tmp_path, _FakeImporter(says=("one",)))
+    assert importer is not None
+    view.apply_module_sql()
+    view.apply_module_sql()
+
+    assert importer.enabled_in_flight == [False, False], importer.enabled_in_flight
+    assert view.module_sql_button.isEnabled(), "the button never came back"
+
+
+def test_the_window_will_not_close_while_the_module_importer_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same one-shot service, so the same close guard — which it did not have.
+
+    `busy_reason()` covered the repair alone and said so ("Only the import"),
+    because until this tab had a second button that runs `ac-db-import` that
+    was true. `_JobWorker.run()` calls its work synchronously, `quit()` cannot
+    preempt a blocking `subprocess`, and a QThread destroyed while running
+    aborts the process (0xC0000409) — so a close during a module import that
+    outlives the join is the recorded crash, not a slow exit.
+
+    Shorter than a full import, and that is not a defence: how many pending
+    files a module set has is not something this tab gets to assume.
+    """
+    reasons: list[str | None] = []
+    importer = _FakeImporter(says=("one",))
+    view, _ = _importer_view(ps, tmp_path, importer)
+    assert view.busy_reason() is None, "a quiet tab refused to close"
+
+    importer.during = lambda: reasons.append(view.busy_reason())
+    view.apply_module_sql()
+
+    assert reasons and reasons[0], "the close guard had nothing to say mid-run"
+    assert "importer" in reasons[0]
+    assert view.busy_reason() is None, "the tab stayed unclosable afterwards"
+
+
+def test_a_game_with_no_importer_is_offered_no_module_sql_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`module_sql` is None for the three CMaNGOS games, and the tab says so rather than fails.
+
+    The disabled button is the honest shape: pressing it would reach
+    `docker.apply_module_sql()`'s first refusal ("this game does not say which
+    compose service imports its databases"), which is a true sentence delivered
+    after a click that could never have worked.
+    """
+    view, _ = _importer_view(ps, tmp_path, None)
+
+    assert view.module_sql_button.isEnabled() is False
+    assert "no" in view.module_sql_button.toolTip().lower()
+    view.apply_module_sql()  # a press that gets through must not raise
+    assert view.module_report.toPlainText() == ""
+
+
+def test_only_the_game_that_names_an_importer_is_wired_a_module_sql_route(
+    tmp_path: Path,
+) -> None:
+    """The wiring, not the tab: which games really get the route, asked of the factories.
+
+    A defaulted `None` field is exactly the shape that can be forgotten — the
+    tab would then be permanently disabled on the game that HAS an importer and
+    no test of the view would notice, because the view was handed a fake.
+    """
+    assert ControllerServices.for_entry(WOTLK, tmp_path).module_sql is not None
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        entry = load_catalog().get(game)
+        assert entry.container_spec().import_service == "", f"{game} now names an importer"
+        assert ControllerServices.for_entry(entry, tmp_path).module_sql is None, game
+
+    # And the same question asked of the WotLK factory itself, so that what the
+    # route is conditional on is `import_service` and not the game's name.
+    without = WOTLK.model_copy(
+        update={"containers": WOTLK.containers.model_copy(update={"db_import": None})}
+    )
+    assert ControllerServices.for_entry(without, tmp_path).module_sql is None
+
+
+def test_an_importer_that_is_running_locks_the_other_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Repair and Apply module SQL run the SAME one-shot service against the same databases.
+
+    So the tab's busy lock has to cover both, in both directions, and it has to
+    put back what this install really has rather than unconditionally: a
+    CMaNGOS install whose Stop has just finished must not be handed a live
+    Apply module SQL button it can only be refused for.
+    """
+    view, _ = _importer_view(ps, tmp_path, _FakeImporter())
+    view._set_busy(True)
+    assert not view.module_sql_button.isEnabled()
+    view._set_busy(False)
+    assert view.module_sql_button.isEnabled()
+
+    without, _ = _importer_view(ps, tmp_path, None)
+    without._set_busy(True)
+    without._set_busy(False)
+    assert not without.module_sql_button.isEnabled(), "a game with no importer got a live button"
+
+
+def test_the_module_sql_route_reaches_this_games_own_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the wired lambda really calls: the per-game binding, with THIS install's folder.
+
+    The seam under it (`docker.apply_module_sql`) takes a spec and a directory,
+    so a call site that passed the wrong directory would run the importer
+    against somebody else's install and look identical from the tab.
+    """
+    seen: dict[str, object] = {}
+
+    def fake(server_dir: Path, **kwargs: object) -> docker.AttachedRun:
+        seen["server_dir"] = server_dir
+        seen.update(kwargs)
+        return docker.AttachedRun(0, ())
+
+    monkeypatch.setattr(modules, "apply_module_sql", fake)
+    route = ControllerServices.for_entry(WOTLK, tmp_path).module_sql
+    assert route is not None
+    route(print)
+    assert seen["server_dir"] == tmp_path
+    assert seen["output"] is print
+
+
+# ------------------------------- how far behind each installed module is (8.7a)
+
+
+def test_the_modules_tab_shows_how_far_behind_each_installed_module_is(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.7a's first clause, at the control the user presses.
+
+    The figure comes up from `apply.module_updates()` already formatted — the
+    view never builds the sentence — because the one thing this clause is about
+    is that the number on screen equals the same range run by hand.
+    """
+    rows = (
+        apply_module.ModuleUpdate(
+            key="mod-aoe-loot", path=tmp_path / "mod-aoe-loot", is_checkout=True, behind=3
+        ),
+        apply_module.ModuleUpdate(
+            key="mod-playerbots", path=tmp_path / "mod-playerbots", is_checkout=True, behind=0
+        ),
+    )
+    services = _services(ps, tmp_path, [])
+    services.module_updates = lambda: rows
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.module_updates_button.isEnabled()
+
+    view.check_module_updates()
+
+    text = view.module_report.toPlainText()
+    assert "mod-aoe-loot: 3 commits behind" in text
+    assert "mod-playerbots: 0 commits behind" in text
+
+
+# --------------------------------------------- a module from a link or a folder
+#
+# Lane C of `pyplan/phase8-designs/module-from-link-or-folder.md`: the two
+# buttons, the two dialog seams, and what the tab does with what they answer.
+# Every service below is a fake, which is the whole point of the seam -- the
+# real ones are lane A's (`module_source.py`, absent from this branch) and the
+# install route behind them is lane B's.
+#
+# Prior art, `origin/rust-main`: the same control is
+# `launcher/src/lib/pages/ModuleManager.svelte:1473-1491` -- an "Install from
+# URL" card with a `mod-* repos only` hint and a button dead while the field is
+# empty -- and its handler at `:447-455` clears the field on success, after the
+# `await refresh()` at `:439` that re-reads the list.
+
+
+def _custom_manifest(item_id: str, description: str) -> Manifest:
+    """A manifest of the shape lane A's `derive_link`/`derive_folder` return."""
+    return Manifest(
+        id=item_id,
+        name=item_id,
+        type="module",
+        game="wow-wotlk",
+        description=description,
+        source=Source(repo=f"https://github.com/you/{item_id}"),
+        build=Build(rebuild=True),
+    )
+
+
+CUSTOM_LINK_DESC = "Custom module (cloned from a URL you provided)."
+"""Verbatim `origin/rust-main:crates/dml-wow/src/modules.rs:38`."""
+
+CUSTOM_FOLDER_DESC = "Custom module (copied from a folder you provided)."
+"""No prior art: `origin/rust-main` had no folder route at all."""
+
+
+class _LayeredStore(ManifestStore):
+    """The bundled store with a user layer over it, which is lane A's §2.3 shape.
+
+    The row a custom install adds to the list does NOT come from the view
+    remembering it: it comes from the store, because lane A persists the
+    derived manifest under `config_dir()/manifests/user/<game>/` and reads that
+    layer back after the bundled index. Modelled here rather than asserted
+    against a view-held dict, so a view that quietly kept its own copy would
+    still fail these tests -- its row would survive a `reload_modules()` that
+    the real store answers without it.
+
+    User items follow bundled items, and a user id that is shipped never
+    shadows the shipped one, both of which are lane A's rules.
+    """
+
+    def __init__(self, root: Path, game: str) -> None:
+        super().__init__(root, game)
+        self.user: dict[str, Manifest] = {}
+
+    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
+        shipped = list(super().load_all(kind))
+        yield from shipped
+        ids = {m.id for m in shipped}
+        for manifest in self.user.values():
+            if manifest.type == kind and manifest.id not in ids:
+                yield manifest
+
+
+class _FakeCustomRoute:
+    """Lane A's bindings and lane B's install, as one recording fake."""
+
+    def __init__(self, store: _LayeredStore, refusal: str | None = None) -> None:
+        self.store = store
+        self.refusal = refusal
+        self.derived_from: list[object] = []
+        self.installed: list[tuple[str, Path | None]] = []
+        self.forgotten: list[str] = []
+        self.custom_ids: set[str] = set()
+
+    def derive_link(self, text: str) -> Manifest:
+        if self.refusal is not None:
+            raise ValueError(self.refusal)
+        self.derived_from.append(text)
+        item_id = text.rstrip("/").rsplit("/", 1)[-1]
+        self.custom_ids.add(item_id)
+        return _custom_manifest(item_id, CUSTOM_LINK_DESC)
+
+    def derive_folder(self, path: Path) -> Manifest:
+        if self.refusal is not None:
+            raise ValueError(self.refusal)
+        self.derived_from.append(path)
+        self.custom_ids.add(path.name)
+        return _custom_manifest(path.name, CUSTOM_FOLDER_DESC)
+
+    def install(self, manifest: Manifest, folder: Path | None) -> ApplyReport:
+        self.installed.append((manifest.id, folder))
+        # Lane A's `complete()` persists inside the install pass, so the row is
+        # in the store by the time the report comes back.
+        self.store.user[manifest.id] = manifest
+        return ApplyReport("install", manifest.id, done=("clone",), rebuild_required=True)
+
+    def forget(self, manifest: Manifest) -> bool:
+        self.forgotten.append(manifest.id)
+        return self.store.user.pop(manifest.id, None) is not None
+
+
+def _with_custom_route(
+    services: ControllerServices, refusal: str | None = None
+) -> _FakeCustomRoute:
+    """Put a layered store and the five custom-module seams on `services`."""
+    store = _LayeredStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME)
+    route = _FakeCustomRoute(store, refusal=refusal)
+    services.store = store
+    services.module_from_link = route.derive_link
+    services.module_from_folder = route.derive_folder
+    services.module_install_custom = route.install
+    services.module_forget = route.forget
+    return route
+
+
+def _listed(view: ControllerView) -> list[str]:
+    return [view.module_list.item(i).text() for i in range(view.module_list.count())]
+
+
+def _rows_for(view: ControllerView, item_id: str) -> list[int]:
+    """Every row whose manifest id is `item_id` -- the id, not the visible text.
+
+    A shipped manifest's row reads `[module] AoE Loot — ...`: the id is the
+    row's `Qt.UserRole` data and appears nowhere in the line, so a search over
+    the text finds a custom module (whose name IS its id) and silently misses
+    every shipped one.
+    """
+    return [
+        i for i in range(view.module_list.count()) if view.module_list.item(i).data(256) == item_id
+    ]
+
+
+def _row_for(view: ControllerView, item_id: str) -> int:
+    rows = _rows_for(view, item_id)
+    assert rows, f"{item_id!r} is in no row of the modules list"
+    return rows[0]
+
+
+def test_the_link_button_derives_installs_and_relists_as_a_custom_module(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The whole link clause: derive, install through the seam, then re-list.
+
+    The re-list is the half that is easy to drop and hard to notice from the
+    report alone: without it the module is on disk, the report says so, and the
+    list the user selects Remove from does not carry it until the next start.
+
+    The ground is read first and asserted absent, because a list that already
+    held the row would make the assertion below true before the press.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    assert not any("mod-my-thing" in line for line in _listed(view))
+
+    view.install_module_from_link()
+
+    assert route.derived_from == ["https://github.com/you/mod-my-thing"]
+    assert route.installed == [("mod-my-thing", None)]
+    assert "install mod-my-thing:" in view.module_report.toPlainText()
+    assert f"[module] mod-my-thing — {CUSTOM_LINK_DESC}" in _listed(view)
+    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    chosen = view.selected_manifest()
+    assert chosen is not None and chosen.id == "mod-my-thing"
+
+
+def test_a_refused_link_says_the_sentence_and_installs_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A refusal is lane A's sentence, shown verbatim, with no job queued."""
+    refusal = (
+        "The repository is named 'tools', and a custom module must be named "
+        "mod-<something> in lowercase letters, digits and hyphens. "
+        "Nothing on this machine was changed."
+    )
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services, refusal=refusal)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/tools",
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.install_module_from_link()
+
+    assert view.module_report.toPlainText() == refusal
+    assert failures == [refusal]
+    assert route.installed == []
+
+
+def test_cancelling_the_link_dialog_changes_nothing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Cancel is not empty text: nothing is derived and nothing is installed."""
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, link_asker=lambda parent, title: None)
+
+    view.install_module_from_link()
+
+    assert route.derived_from == [] and route.installed == []
+    assert view.module_report.toPlainText() == (
+        "install from link: cancelled — nothing on this machine was changed."
+    )
+
+
+def test_the_folder_button_hands_the_install_route_the_folder_it_was_given(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The folder is derived from and then carried into the install call.
+
+    The design has the view build lane B's `FolderSource` and hand it the
+    copier; lanes A and B are not on this branch, so the view hands the route
+    the path alone and the route (lane A's binding) owns the copier. Recorded
+    as deviation D1 in the gate README.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    source = tmp_path / "mod-hand-made"
+    source.mkdir()
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        folder_asker=lambda parent, title: source,
+    )
+    assert not any("mod-hand-made" in line for line in _listed(view))
+
+    view.install_module_from_folder()
+
+    assert route.derived_from == [source]
+    assert route.installed == [("mod-hand-made", source)]
+    assert f"[module] mod-hand-made — {CUSTOM_FOLDER_DESC}" in _listed(view)
+
+
+def test_a_game_with_no_custom_module_route_gets_dead_buttons_that_do_nothing_when_pressed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games, and this branch's WotLK: no route, dead controls.
+
+    Same rule as `module_sql` and the update check -- a control that is visibly
+    unavailable beats one that is pressed and then explains itself. Both
+    presses must still be harmless, because the slot is reachable by more than
+    the button, and neither may open a dialog it cannot act on.
+    """
+    services = _services(ps, tmp_path, [])
+    services.module_from_link = None
+    services.module_from_folder = None
+    services.module_install_custom = None
+    asked: list[str] = []
+
+    def refuse_link(parent: object, title: str) -> str | None:
+        asked.append(title)
+        return None
+
+    def refuse_folder(parent: object, title: str) -> Path | None:
+        asked.append(title)
+        return None
+
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=refuse_link,
+        folder_asker=refuse_folder,
+    )
+
+    assert not view.module_link_button.isEnabled()
+    assert not view.module_folder_button.isEnabled()
+    view.install_module_from_link()  # must not raise
+    view.install_module_from_folder()  # must not raise
+    assert asked == []  # not even the dialog opens
+
+
+def test_removing_a_custom_module_forgets_it_and_removing_a_shipped_one_keeps_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The record follows the folder, and only for the record this app wrote.
+
+    The view never reads a manifest field to tell the two apart: it asks the
+    forget seam after the remove returned, and the seam's answer is what
+    decides whether the list is re-read. The ordering matters -- a forget
+    before the remove would drop the record of a remove that then failed,
+    leaving a folder on disk and nothing in the list to try again with.
+    """
+    services = _services(ps, tmp_path, [])
+    route = _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+    view.install_module_from_link()
+    applier = services.applier
+    assert isinstance(applier, _FakeApplier)
+
+    view.module_list.setCurrentRow(_row_for(view, "mod-my-thing"))
+    view._module_action("remove")
+
+    assert route.forgotten == ["mod-my-thing"]
+    assert applier.removed == ["mod-my-thing"]
+    assert _rows_for(view, "mod-my-thing") == []
+
+    view.module_list.setCurrentRow(_row_for(view, "mod-aoe-loot"))
+    view._module_action("remove")
+
+    assert route.forgotten == ["mod-my-thing", "mod-aoe-loot"]
+    assert _rows_for(view, "mod-aoe-loot") != []
+
+
+def test_the_custom_install_report_is_the_one_install_selected_prints(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """One formatter, so the rebuild sentence and the pending-SQL lines are the same.
+
+    A second report builder for this route is the mutation this catches: the
+    sentence a C++ module gets is the longest piece of copy on the tab and the
+    one an operator acts on.
+    """
+    services = _services(ps, tmp_path, [])
+    _with_custom_route(services)
+    view = ControllerView(
+        WOTLK,
+        services,
+        status_poll_ms=0,
+        link_asker=lambda parent, title: "https://github.com/you/mod-my-thing",
+    )
+
+    view.install_module_from_link()
+
+    expected = controller_view_module._format_report(
+        ApplyReport("install", "mod-my-thing", done=("clone",), rebuild_required=True)
+    )
+    assert view.module_report.toPlainText() == expected
+    assert "worldserver REBUILD required" in expected
+
+
+def test_the_wotlk_tab_is_wired_to_derive_install_list_and_forget_a_module_from_a_folder(
+    tmp_path: Path,
+) -> None:
+    """The real bindings behind the two buttons, driven end to end on a scratch install.
+
+    Everything above this test is fake-driven, which proves what the VIEW does
+    with the seams and nothing about what `for_entry()` hands it. This one
+    takes the services `_for_wotlk()` really builds and walks the folder route
+    with no fake in it: lane A's `derive_folder`, lane B's `install(folder=,
+    complete=)` over lane A's `copy_folder` and `complete`, the persist under
+    `config_dir()/manifests/user/`, the merged store listing it, and `forget`.
+    The link seam is asserted to derive only -- installing it would clone.
+
+    The ground is read first: no user layer exists, and the store lists no
+    such module, so nothing below is true before the press.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    source = tmp_path / "mod-hand-made"
+    (source / "src").mkdir(parents=True)
+    (source / "conf").mkdir()
+    (source / "conf" / "mod_hand_made.conf.dist").write_text(
+        "[worldserver]\nHandMade.Enable = 1\n", encoding="utf-8"
+    )
+    (source / ".git").mkdir()
+    (source / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.module_from_link is not None
+    assert services.module_from_folder is not None
+    assert services.module_install_custom is not None
+    assert services.module_forget is not None
+    assert services.store is not None
+    user_dir = modules.user_manifests_dir()
+    assert not user_dir.exists(), "the ground: no user layer before the first persist"
+    assert "mod-hand-made" not in {m.id for m in services.store.load_all("module")}
+    assert services.module_from_link("https://github.com/you/mod-linked").id == "mod-linked"
+
+    manifest = services.module_from_folder(source)
+    report = services.module_install_custom(manifest, source)
+
+    clone = server_dir / "modules" / "mod-hand-made"
+    assert (clone / "src").is_dir()
+    assert not (clone / ".git").exists(), "a copy carries no .git"
+    assert (server_dir / "env" / "dist" / "etc" / "modules" / "mod_hand_made.conf").is_file()
+    assert report.rebuild_required is True
+    assert any(line.startswith("copy ") for line in report.done), report.done
+    persisted = user_dir / "wow-wotlk" / "modules" / "mod-hand-made.json"
+    assert persisted.is_file()
+    listed = {m.id: m for m in services.store.load_all("module")}
+    assert listed["mod-hand-made"].conf[0].template == "conf/mod_hand_made.conf.dist"
+    assert listed["mod-hand-made"].origin is not None
+    assert listed["mod-hand-made"].origin.kind == "folder"
+
+    assert services.module_forget(manifest) is True
+    assert not persisted.exists()
+    assert "mod-hand-made" not in {m.id for m in services.store.load_all("module")}
+    assert services.module_forget(services.store.load("module", "mod-aoe-loot")) is False
+
+
+def test_a_game_with_no_module_checkouts_gets_no_update_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games have no `modules/` folder, so the control is dead.
+
+    Same rule as `module_sql`: a control that is visibly unavailable beats one
+    that is pressed and then explains itself. A press with nothing wired must
+    still be harmless, because `_set_busy(False)` re-enables from the seam.
+    """
+    services = _services(ps, tmp_path, [])
+    services.module_updates = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.module_updates_button.isEnabled()
+    view.check_module_updates()  # must not raise
+
+
+def test_an_install_with_nothing_installed_says_so_rather_than_printing_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An empty answer and a failed read look identical in a blank box."""
+    services = _services(ps, tmp_path, [])
+    services.module_updates = lambda: ()
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.check_module_updates()
+    assert "No modules are installed" in view.module_report.toPlainText()
+
+
+def test_the_update_check_route_reaches_this_games_own_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wired callable asks about THIS install's folder, like the SQL route."""
+    seen: dict[str, object] = {}
+
+    def fake(server_dir: Path, **kwargs: object) -> tuple[object, ...]:
+        seen["server_dir"] = server_dir
+        return ()
+
+    monkeypatch.setattr(modules, "module_updates", fake)
+    route = ControllerServices.for_entry(WOTLK, tmp_path).module_updates
+    assert route is not None
+    route()
+    assert seen["server_dir"] == tmp_path
 
 
 def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -1305,6 +2273,21 @@ def test_for_wotlk_wires_the_distro_into_every_seam_that_talks_to_docker(
     services.network_plan("lan")
     assert asked == ["dml-arch"], f"the port scan addressed the wrong daemon: {asked}"
 
+    # The Modules tab's importer, which is three docker calls in a row — the
+    # `compose config` mount probe, the database start, and the one-shot itself.
+    # Added when the route got its first call site; the seam scan below found
+    # this exact gap the same day, in the binding this lambda goes through.
+    ran: dict[str, object] = {}
+    monkeypatch.setattr(
+        modules,
+        "apply_module_sql",
+        lambda server_dir, **kw: ran.update(kw) or docker.AttachedRun(0, ()),
+    )
+    route = services.module_sql
+    assert route is not None, "wotlk has an import service and must have the route"
+    route(print)
+    assert ran.get("wsl_distro") == "dml-arch", f"the importer addressed the wrong daemon: {ran}"
+
 
 def test_the_maintenance_tab_asks_the_distro_s_docker_what_is_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1721,6 +2704,81 @@ def test_a_tortoise_account_is_created_with_that_core_s_own_scheme(
     assert seen.get("scheme") == "mangos_sha", seen
 
 
+def test_an_entry_with_no_scheme_is_refused_by_both_create_sites_not_defaulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both wotlk `create_account` call sites passed `entry.accounts.scheme or "azerothcore"`.
+
+    The Accounts tab and the channel's own account are the two seams that create
+    a row from this wiring, and both defaulted an entry that declares no scheme
+    to AzerothCore's columns — the guess `controller_wow_tortoise.accounts`
+    refuses by name, made silently one package over. The tab already disables its
+    button for such an entry; this is the layer underneath it, which is what the
+    channel presses through.
+
+    The channel's seam is read off the object as `_create` because that is the
+    only handle on it: `InstallChannel` takes it as a constructor argument and
+    keeps it. It is one of the two call sites this test exists for, so testing
+    only the tab's would leave half the fix unpinned.
+    """
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    services = ControllerServices.for_wotlk(unmeasured, tmp_path, None)
+    reached: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.wotlk_accounts,
+        "create_account",
+        lambda *args, **kwargs: reached.append(kwargs),
+    )
+
+    for create in (
+        lambda: services.create_account("bob", "hunter2", 0),
+        lambda: services.channel_setup._create("YULON_AB", "hunter2", 0),
+    ):
+        with pytest.raises(NotImplementedError) as caught:
+            create()
+        assert "declares no account scheme" in str(caught.value), str(caught.value)
+        assert "worldserver console" in str(caught.value), str(caught.value)
+
+    assert reached == [], "the writer was reached with a guessed scheme"
+
+
+def test_an_entry_with_no_scheme_is_refused_by_the_repair_seam_too_not_defaulted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T22: the `create` fix left the `reset=` binding beside it untouched.
+
+    Both lambdas are built from the same `entry` two lines apart; `create`
+    passed `checked_scheme(entry.accounts.scheme, entry.id)` and `reset` passed
+    nothing, which reached `reset_own_password`'s own keyword default,
+    `scheme="azerothcore"`. An entry the create seam above refuses for
+    declaring no scheme could still reach the 401 repair path and write
+    AzerothCore's `salt`/`verifier` columns into a table that may not have
+    them, or that happens to and never authenticates. `channel_setup._reset` is
+    the seam under test, for the same reason `_create` was in the sibling test:
+    it is the only handle a caller outside this module has on the bound
+    callable.
+    """
+    unmeasured = WOTLK.model_copy(
+        update={"accounts": WOTLK.accounts.model_copy(update={"scheme": None})}
+    )
+    services = ControllerServices.for_wotlk(unmeasured, tmp_path, None)
+    reached: list[object] = []
+    monkeypatch.setattr(
+        controller_view_module.wotlk_accounts,
+        "reset_own_password",
+        lambda *args, **kwargs: reached.append(kwargs),
+    )
+
+    with pytest.raises(NotImplementedError) as caught:
+        services.channel_setup._reset("YULON_AB", "hunter2")
+    assert "declares no account scheme" in str(caught.value), str(caught.value)
+    assert "worldserver console" in str(caught.value), str(caught.value)
+
+    assert reached == [], "the writer was reached with a guessed scheme"
+
+
 def test_for_wotlk_takes_its_import_gate_from_install_wiring(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2092,15 +3150,33 @@ def test_each_game_s_restore_plan_censuses_its_own_containers(
             assert "ac-database" not in refusals, (entry.id, refusals)
 
 
-def test_a_cmangos_tab_has_no_manifest_store_and_says_so(tmp_path: Path) -> None:
-    """`manifests/` holds `wow-wotlk` only, and only that package has a `modules.py`."""
+def test_a_tab_gets_a_manifest_store_exactly_when_the_catalog_says_it_has_one(
+    tmp_path: Path,
+) -> None:
+    """`has_manifests` is the whole gate, in both directions, and the store must be its OWN.
+
+    `manifests/` held `wow-wotlk` alone until 8.7b added `manifests/wow-tbc/`
+    (a CMaNGOS "module" is a conf activation or a SQL mod — there is nothing to
+    compile), so this test can no longer say "CMaNGOS means no store". It asks
+    the catalog instead, which is what `_no_manifest_store()` warns about when
+    the two drift apart.
+
+    The second assertion is the one with teeth. `is not None` would be satisfied
+    by a tab handed `wotlk_modules.store()`, which would offer a CMaNGOS server
+    twenty-one AzerothCore C++ modules, every one of which would fail at the
+    clone or the rebuild. So the store is required to answer with THIS game's
+    id, and the ids it serves are required to be disjoint from the other's.
+    """
     for entry in _every_game():
         services = ControllerServices.for_entry(entry, tmp_path / entry.id)
-        if entry.id in CMANGOS_GAMES:
-            assert entry.has_manifests is False, f"{entry.id} gained manifests; wire it a store"
+        if not entry.has_manifests:
             assert services.store is None and services.applier is None, entry.id
-        else:
-            assert services.store is not None and services.applier is not None, entry.id
+            continue
+        assert services.store is not None and services.applier is not None, entry.id
+        assert (
+            services.store.game == entry.id
+        ), f"{entry.id}'s tab was handed {services.store.game}'s manifests"
+        assert services.store.game_dir.is_dir(), f"{entry.id} has no manifests/<game>/ on disk"
 
 
 def test_a_game_that_names_no_import_service_is_offered_no_repair_button(
@@ -3175,6 +4251,173 @@ def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: 
     assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
 
 
+# -- 8.6: My Party's surface -------------------------------------------------
+
+
+class _StubParty:
+    """Stands in for `party.InstallParty` — the seam the 8.6 gate script drove.
+
+    The panel's own behaviour is `test_party_panel.py`'s subject; what these
+    tests are about is that the tab really hands the panel the seam
+    `ControllerServices.my_party` holds, and that a game without one says why.
+    """
+
+    def __init__(self) -> None:
+        self.added: list[tuple[str, str, str, int | None]] = []
+        self.dismissed_all: list[tuple[str, tuple[int, ...]]] = []
+        self.members: tuple[party.Member, ...] = ()
+
+    def state(self, master: str) -> party.PartyState:
+        return party.PartyState(
+            True, "", (party.Precondition("bridge_answered", True, ""),), members=self.members
+        )
+
+    def specs(self, klass: str) -> tuple[str, ...]:
+        return ("fire pve",) if klass == "mage" else ()
+
+    def max_level(self) -> int | None:
+        return 80
+
+    def add(
+        self,
+        master: str,
+        klass: str,
+        *,
+        gender: str = "",
+        spec: str = "",
+        level: int | None = None,
+    ) -> party.Addition:
+        self.added.append((master, klass, spec, level))
+        return party.Addition(True, True, "Jilsur", True, True, "Jilsur joined the party.")
+
+    def remove(self, master: str, bot: str) -> party.Dismissal:
+        return party.Dismissal(True, True, f"{bot} left the party.", bot=bot)
+
+    def remove_all(self, master: str, confirmed: tuple[int, ...]) -> party.MassDismissal:
+        self.dismissed_all.append((master, confirmed))
+        return party.MassDismissal(
+            1,
+            (party.Dismissal(True, True, "Jilsur left the party.", bot="Jilsur"),),
+            "1 bot left the party: Jilsur.",
+        )
+
+
+def _with_party(ps: _Ps, tmp_path: Path, seam: _StubParty) -> ControllerServices:
+    services = _with_bots(ps, tmp_path, _StubBots())
+    services.my_party = seam
+    return services
+
+
+def test_my_party_is_on_the_bots_tab_and_a_press_reaches_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause this box exists for: not reachable only from a script.
+
+    Every press in `pyplan/gates/8.6-wotlk-yulon-ubuntu2-2026-09-09/` went
+    through `gate86b.py`, which is what the exit review calls out
+    (`pyplan/phase8-exit-review-2026-09-09.md`, clause 3). This is the same seam
+    with a button on it.
+    """
+    seam = _StubParty()
+    view = ControllerView(
+        WOTLK, _with_party(ps, tmp_path, seam), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert "Bots" in [view._tabs.tabText(i) for i in range(view._tabs.count())]
+    assert view.party_panel is not None
+    assert seam.added == [], "the ground: nothing has been asked of the server yet"
+    view.party_panel.character.setText("Pakka")
+    view.party_panel.klass.setCurrentText("mage")
+    view.party_panel.add_bot()
+
+    assert seam.added == [("Pakka", "mage", "", None)]
+    # The seam's own sentence, read back off the panel. Without this the test
+    # passes on a press that RAISED: `run_inline` routes any exception to the
+    # panel's report, and the stub has already recorded the call by then. It
+    # passed exactly that way once — `party` was not imported in this file, so
+    # the stub's own return value was a `NameError` and nothing said so.
+    assert view.party_panel.report.text() == "Jilsur joined the party."
+
+
+def test_the_spec_the_level_and_dismiss_all_reach_the_tabs_own_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T5's three controls, through the object `ControllerServices.my_party` holds.
+
+    The panel's own behaviour is `test_party_panel.py`'s subject; what this is
+    about is that all three really are wired to the tab's seam and not to
+    something the panel made for itself — the spec list and the level bound are
+    readings of an INSTALL, and a panel that produced either on its own would be
+    a widget that had gone looking for a server folder.
+    """
+    seam = _StubParty()
+    seam.members = (party.Member("Jilsur", 948, 8, 1),)
+    view = ControllerView(
+        WOTLK, _with_party(ps, tmp_path, seam), status_poll_ms=0, job_runner=run_inline
+    )
+    assert view.party_panel is not None
+    view.party_panel.character.setText("Pakka")
+    view.party_panel.klass.setCurrentText("mage")
+    view.party_panel.spec.setCurrentText("fire pve")
+    view.party_panel.level.setValue(60)
+
+    view.party_panel.add_bot()
+
+    assert seam.added == [("Pakka", "mage", "fire pve", 60)], "the spec picker read the seam's list"
+    assert view.party_panel.level.maximum() == 80, "the bound is the seam's, not this panel's"
+    view.party_panel.refresh_party()
+    view.party_panel.dismiss_all()
+    assert seam.dismissed_all == [], "the ground: the first press only arms"
+
+    view.party_panel.dismiss_all()
+
+    assert seam.dismissed_all == [("Pakka", (948,))], "the confirmed guid reached the tab's seam"
+    assert view.party_panel.report.text() == "1 bot left the party: Jilsur."
+
+
+def test_a_game_with_no_party_route_says_why_rather_than_showing_a_dead_panel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The three CMaNGOS games get the reason, which is the whole surface there.
+
+    Owner decision, 2026-09-06 (`pyplan/phase8-parity-decisions.md:41`): the
+    route is `mod-ale` plus `mod-playerbots`' `addclass`, both AzerothCore, so
+    there is nothing to wire — and a control that sent those commands at a
+    server that has never heard of them would be worse than none.
+    """
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, _StubBots()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert view.party_panel is None
+    assert "WoW WotLK only" in view.my_party_absent.text()
+
+
+def test_a_finished_party_press_re_reads_the_bot_list(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A bot that just joined a party is a row the Browse list has not got yet.
+
+    The cross-link the users-surface design names
+    (`pyplan/phase8-designs/b-users-surface.md:111`).
+    """
+    bots = _StubBots()
+    services = _with_bots(ps, tmp_path, bots)
+    services.my_party = _StubParty()
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    assert view.party_panel is not None
+    view.party_panel.character.setText("Pakka")
+    asked_before = len(bots.asked)
+
+    view.party_panel.add_bot()
+
+    assert len(bots.asked) == asked_before + 1
+    assert view.party_panel.report.text() == "Jilsur joined the party.", (
+        "the press must have SUCCEEDED: `party_changed` fires on a failure too, so "
+        "without this the re-read is proved by a press that raised"
+    )
+
+
 def test_one_bot_is_a_bot_and_not_one_bots(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """A filter that matched one row said "1 bots" on the live gate."""
     stub = _StubBots(
@@ -3227,16 +4470,30 @@ def test_a_change_whose_result_is_unknown_is_not_announced_as_a_failure(
 # -- 8.2e: the tree with no listener to set up -------------------------------
 
 
+def _attach_only() -> CatalogEntry:
+    """A tree whose entry says `attach`: the shape Tortoise had until 2026-09-08.
+
+    Tortoise was the real example while its mangosd had no SOAP (8.2e). The fork
+    re-added the interface and the pin moved onto it, so no shipped entry is
+    attach-only any more -- and a test asserting the console-only shape against
+    a real entry would start asserting that the channel is missing from the tree
+    it was just added to. The same move `test_channel_enable.py` made for the
+    no-block refusal: pin the shape against a synthetic entry.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    return tortoise.model_copy(update={"operations": Operations(channel="attach")})
+
+
 def test_a_console_channel_says_so_instead_of_offering_a_button(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """Tortoise links neither gsoap nor RASocket: there is nothing to switch on.
+    """A core with no listener: there is nothing to switch on.
 
     A greyed-out "Turn on the command channel" would be the worst of both --
     it says the feature exists and refuses to explain. The tab carries the
-    reason instead, and the button does not exist on this entry at all.
+    reason instead, and the button does not exist on such an entry at all.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     services = _services(ps, tmp_path, [])
     view = ControllerView(tortoise, services, status_poll_ms=0, job_runner=run_inline)
 
@@ -3255,6 +4512,11 @@ def test_a_console_channel_says_so_instead_of_offering_a_button(
 def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The control, without which the test above would pass on a build with no buttons."""
     services = _with_channel(ps, tmp_path, _StubSetup())
+    for game in ("wow-tbc", "wow-vanilla", "wow-tortoise"):
+        soap = ControllerView(
+            load_catalog().get(game), services, status_poll_ms=0, job_runner=run_inline
+        )
+        assert soap.enable_channel_button.isVisibleTo(soap) is True, game
     view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
 
     assert view.enable_channel_button.isVisibleTo(view) is True
@@ -3287,7 +4549,7 @@ def test_the_console_probe_button_belongs_to_the_console_trees_alone(
     on it. The console trees have no such line to show, which is what this
     button is for.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1"))
 
     console = ControllerView(
@@ -3303,7 +4565,7 @@ def test_the_console_probe_button_belongs_to_the_console_trees_alone(
 
 def test_the_probe_shows_what_the_console_answered(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """The visible effect this box asks for: a real reply, on the Server tab."""
-    tortoise = load_catalog().get("wow-tortoise")
+    tortoise = _attach_only()
     probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1\nOnline players: 0"))
     view = ControllerView(
         tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
@@ -3501,3 +4763,1447 @@ def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lack
             f"{entry.id}: registry {'declared' if registry else 'absent'}, "
             f"table {'named' if named else 'not named'} in {counting}"
         )
+
+
+# ------------------------------------------------------- 8.9a: the uninstall
+#
+# The view's half of the box: the plan has to be on screen before the button
+# will act, the checkbox is what reaches `run()`, and the removal is signalled
+# UP so the window can drop the tab and the Catalog tile can go back to
+# "Install". Driven through the same run seam as everything else on this tab.
+
+
+class _FakeUninstall:
+    """A `purge.Uninstaller` double: records what it was asked, answers what it was told."""
+
+    def __init__(
+        self,
+        server_dir: Path,
+        *,
+        refusal: str = "",
+        failure: str = "",
+        report: object | None = None,
+        while_running: object | None = None,
+    ) -> None:
+        self.server_dir = server_dir
+        self.refusal = refusal
+        self.failure = failure
+        self.plans = 0
+        self.runs: list[bool] = []
+        self.busy_seen: list[object] = []
+        self._report = report
+        self._while_running = while_running
+
+    def plan(self) -> purge.PurgePlan:
+        self.plans += 1
+        if self.refusal:
+            return purge.PurgePlan(
+                game="wow-wotlk", server_dir=self.server_dir, refusal=self.refusal
+            )
+        return purge.PurgePlan(
+            game="wow-wotlk",
+            server_dir=self.server_dir,
+            project="yulon-wow-wotlk-deadbeef",
+            containers=("ac-worldserver", "ac-database"),
+            volumes=(
+                "yulon-wow-wotlk-deadbeef_db-data",
+                "yulon-wow-wotlk-deadbeef_client-data",
+            ),
+            character_volume="yulon-wow-wotlk-deadbeef_db-data",
+            client_volume="yulon-wow-wotlk-deadbeef_client-data",
+            images=("yulon.local/ac-wotlk-worldserver:native-deadbeef",),
+            folder_bytes=2_300_000_000,
+        )
+
+    def run(self, *, keep_characters: bool) -> purge.PurgeReport:
+        self.runs.append(keep_characters)
+        if self._while_running is not None:
+            self.busy_seen.append(self._while_running())
+        if self.failure:
+            raise purge.PurgeError(self.failure)
+        return self._report or purge.PurgeReport(
+            removed_containers=True,
+            removed_volumes=("yulon-wow-wotlk-deadbeef_client-data",),
+            kept_volumes=("yulon-wow-wotlk-deadbeef_db-data",) if keep_characters else (),
+            folder_removed=True,
+            record_forgotten=True,
+        )
+
+
+def _uninstall_view(ps: _Ps, tmp_path: Path, fake: _FakeUninstall) -> ControllerView:
+    services = _services(ps, tmp_path, [])
+    services.uninstall = fake
+    return ControllerView(WOTLK, services, status_poll_ms=0)
+
+
+def test_the_uninstall_button_will_not_act_until_its_plan_is_on_screen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The restore action's gate, not the typed-name box the decisions doc assumed.
+
+    `phase8-decisions.md`:172 says the typed confirmation "is the same pattern
+    the restore action already uses" — and it is not: restore's gate is that the
+    PLAN must be on screen first (`run_restore()` refuses with "Show the restore
+    plan first."). Uninstall has a `plan()` too, so it inherits the gate this
+    tab actually has rather than inventing a second confirmation idiom.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.run_uninstall()
+    assert fake.runs == [], "it removed a server nobody had been shown a plan for"
+    assert "Show the uninstall plan first" in view.uninstall_label.text()
+
+
+def test_a_plan_that_refuses_shows_the_refusal_and_offers_no_uninstall(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A refusal is the whole answer, and there must be nothing left to press."""
+    fake = _FakeUninstall(tmp_path, refusal="ac-worldserver: still running. Stop the server first.")
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    assert "Stop the server first" in view.uninstall_label.text()
+    assert view.uninstall_confirm_button.isHidden()
+    view.run_uninstall()
+    assert fake.runs == []
+
+
+def test_the_plan_names_the_folder_and_its_size_before_anything_is_pressed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    text = view.uninstall_label.text()
+    assert str(tmp_path) in text
+    assert "2.1 GB" in text or "2.3 GB" in text, text
+    assert not view.uninstall_confirm_button.isHidden()
+
+
+def test_keep_my_characters_is_unticked_by_default_and_is_what_reaches_run(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Owner answer 2: one button with a checkbox, unticked. Not two buttons."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.keep_characters_check.isChecked() is False
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.runs == [False]
+
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.runs == [False, True]
+
+
+def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The promise on screen is "reinstall and your characters are there".
+
+    On a `generated` entry that promise rests on a file this action wrote into
+    Yu'lon's config directory, because the one inside the folder went with the
+    folder. The user is told which file: it is the thing that has to travel
+    with a moved config directory, and the thing worth a backup.
+    """
+    kept = tmp_path / "config" / "db-secrets" / "wow-vanilla-deadbeef.json"
+    fake = _FakeUninstall(
+        tmp_path,
+        report=purge.PurgeReport(
+            kept_volumes=("yulon-wow-vanilla-deadbeef_db-data",),
+            secret_kept=kept,
+            folder_removed=True,
+            record_forgotten=True,
+        ),
+    )
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    text = view.uninstall_label.text()
+    assert "find those characters again" in text
+    assert str(kept) in text
+
+
+def test_the_removal_is_signalled_up_with_the_game_and_the_folder(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The window needs both to find the tab, which is keyed by (game, server dir)."""
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    seen: list[tuple[str, object]] = []
+    view.uninstalled.connect(lambda game, folder: seen.append((game, folder)))
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert seen == [("wow-wotlk", tmp_path)]
+
+
+def test_an_uninstall_that_failed_says_so_and_signals_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A tab dropped after a failed removal would take the only surface with it."""
+    fake = _FakeUninstall(tmp_path, failure="the folder could not be deleted")
+    view = _uninstall_view(ps, tmp_path, fake)
+    seen: list[object] = []
+    failures: list[str] = []
+    view.uninstalled.connect(lambda game, folder: seen.append(game))
+    view.action_failed.connect(failures.append)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert seen == []
+    assert "could not be deleted" in view.uninstall_label.text()
+    assert failures and "could not be deleted" in failures[0]
+
+
+def test_a_failed_uninstall_makes_the_user_ask_for_a_fresh_plan(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The machine changed under the plan, so the photograph is no longer evidence."""
+    fake = _FakeUninstall(tmp_path, failure="the folder could not be deleted")
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    view.run_uninstall()
+    assert fake.runs == [False], "a second press acted on a plan that had already failed"
+
+
+def test_the_tab_reports_itself_busy_while_the_uninstall_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`busy_reason()` is what stops the window destroying a running QThread.
+
+    A purge is a long blocking job in a `_JobWorker`, and a tab torn down under
+    one is the 0xC0000409 abort `drop_controller()` and this function exist to
+    prevent.
+    """
+    view: ControllerView | None = None
+    fake = _FakeUninstall(tmp_path, while_running=lambda: view.busy_reason())
+    view = _uninstall_view(ps, tmp_path, fake)
+    assert view.busy_reason() is None
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert fake.busy_seen and fake.busy_seen[0] is not None, fake.busy_seen
+    assert "uninstall" in str(fake.busy_seen[0]).lower()
+    assert view.busy_reason() is None, "the tab stayed busy after the job finished"
+
+
+def test_a_second_press_cannot_delete_what_the_first_promised_to_keep(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The uninstall controls lock while the purge runs, and the slot refuses too.
+
+    Found by review, 2026-09-08, and it is the same defect `_set_busy` was
+    written for in the first place -- the uninstall controls were simply added
+    outside it. The state that loses data: tick "Keep my characters", press
+    Uninstall, and while the 60-to-90-second teardown runs, untick the box and
+    press again. `keep` is read at press time, so the second run resolves the
+    plan afresh and removes `<project>_db-data` -- the volume the first press
+    promised to keep.
+
+    Asserted at both seams on purpose. The disabled widget is a statement about
+    the button; the `_uninstall_running` guard is a statement about the action,
+    and reaches the case where something else re-enables the widget or a
+    queued click arrives anyway.
+    """
+    seen: list[bool] = []
+
+    def while_running() -> None:
+        seen.append(view.uninstall_confirm_button.isEnabled())
+        seen.append(view.keep_characters_check.isEnabled())
+        view.run_uninstall()  # the second press, mid-teardown
+
+    view: ControllerView | None = None
+    fake = _FakeUninstall(tmp_path, while_running=while_running)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.keep_characters_check.setChecked(True)
+    view.run_uninstall()
+
+    assert seen == [False, False], f"the uninstall controls stayed live: {seen}"
+    assert len(fake.runs) == 1, f"the purge ran {len(fake.runs)} times, not once"
+    assert fake.runs[0] is True, "the one run that happened did not keep the characters"
+
+
+def test_a_ticked_plan_says_the_client_data_volume_is_kept_not_removed(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Owner answer 3, 2026-09-08, read off the dialog before the press.
+
+    A ticked purge keeps the 3.2 GB client-data volume as well as the database
+    volume, and the sentence a person reads must say so -- the plan is what
+    stands between them and a 3.2 GB re-download they did not expect.
+    """
+    fake = _FakeUninstall(tmp_path)
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.keep_characters_check.setChecked(True)
+    view.show_uninstall_plan()
+
+    said = view.uninstall_label.text()
+    kept = [line for line in said.splitlines() if "KEPT" in line]
+    removed = [line for line in said.splitlines() if "volumes removed" in line]
+    assert kept and "_client-data" in kept[0], said
+    assert removed and "_client-data" not in removed[0], said
+
+
+def test_a_tab_with_no_uninstall_wired_shows_no_uninstall_controls(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.9a is WotLK; 8.9b is Vanilla. A tree without the seam offers no button."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert view.uninstall_button is None
+
+
+# -- the rebuild control (the action `_format_report` has always named) --------
+
+
+def _rebuild_services(
+    ps: _Ps, tmp_path: Path, lines: Sequence[str] = ("--- build", "done")
+) -> tuple[ControllerServices, list[object]]:
+    """Services whose rebuild seam records that it was asked, and what with.
+
+    A list of the cancel events it was handed, so "was it started?" and "was it
+    given a way to stop?" are two separate assertions rather than one flag.
+    """
+    started: list[object] = []
+    services = _services(ps, tmp_path, [])
+
+    def rebuild(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.rebuild = rebuild
+    return services, started
+
+
+def test_the_modules_tab_offers_a_rebuild_beside_the_sentence_that_demands_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Until 2026-09-08 a grep for a rebuild button across `yulon/ui/` found NOTHING.
+
+    `_format_report` has always printed "worldserver REBUILD required before
+    this takes effect" — for 20 of the 41 shipped manifests, every one of them a
+    `module` — naming an action the app did not have. The button lives on this
+    tab because that is where the sentence is printed; a control the user has to
+    go looking for on another tab is most of the way back to not having one.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert "ebuild" in view.rebuild_button.text()
+
+
+def test_declining_the_rebuild_confirmation_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half a warning label could not have: the user says no and nothing runs.
+
+    `conftest._no_modal_dialogs` answers every `question()` with No, so this is
+    also what every other test in this file asserts implicitly whenever it
+    builds a view. Asserted three ways, because "the seam was not called" alone
+    would be just as true of a button that is broken: the question really was
+    asked, nothing was started, and the panel is not left claiming a job.
+    """
+    asked: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        asked.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is False
+    assert started == [], "declined, and the rebuild ran anyway"
+    assert asked, "the user was never asked"
+    assert str(tmp_path) in asked[0], "the question did not say which install it is about"
+    assert view.rebuild_log.running is False
+
+
+def test_accepting_the_rebuild_confirmation_streams_the_engine_into_the_panel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Requirement 5: what a person watches is a panel with the engine's own lines in it.
+
+    A `QPlainTextEdit` that says "rebuilding…" and then nothing for an hour is
+    indistinguishable from a hang, which is the state this app has already put a
+    user in once. `LogPanel` is the widget that solves it — timestamped lines, a
+    ticking elapsed field beside a Stop button — and it is reused rather than
+    respelled.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started = _rebuild_services(ps, tmp_path, lines=("--- build", "compiling"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.rebuild_server() is True
+    # The panel's lines cross from its worker thread by a QUEUED connection, so
+    # the thread ending is not the same as the text having arrived; `pump_until`
+    # is what makes the difference, and it reports an expiry rather than
+    # returning silently on the deadline.
+    pump_until(
+        lambda: "compiling" in view.rebuild_log.text(),
+        "the rebuild's output reached the panel",
+    )
+    assert len(started) == 1, started
+    assert started[0] is not None, "the panel's Stop button has nothing to set"
+    text = view.rebuild_log.text()
+    assert "--- build" in text and "compiling" in text, text
+
+
+def test_the_rebuild_confirmation_offers_yes_and_no_and_defaults_to_refusing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirm whose default is Yes is a notice with extra steps.
+
+    Neither the buttons nor the default is observable from the outcome, so this
+    is the one place the call's ARGUMENTS are the subject. An hour of compiling
+    and a server going down is not something Enter should be able to start.
+    """
+    calls: list[tuple[object, ...]] = []
+
+    def question(*a: object, **k: object) -> object:
+        calls.append(a)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, _ = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.rebuild_server()
+
+    buttons, default = calls[0][-2], calls[0][-1]
+    yes = controller_view_module.QMessageBox.StandardButton.Yes
+    no = controller_view_module.QMessageBox.StandardButton.No
+    assert buttons == yes | no
+    assert default is no, "Enter would start an hour of compiling"
+
+
+def test_a_game_with_no_rebuild_wiring_greys_the_button_instead_of_failing_on_click(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.rebuild` is None when nothing wired one; the tab says so up front.
+
+    The same rule the console tab applies to a missing pty and the catalog tile
+    to an unsupported platform (roadmap 6.1): refusing on click and printing the
+    error afterwards is not the same as saying so before it is pressed.
+    """
+    services = _services(ps, tmp_path, [])
+    services.rebuild = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_button.isEnabled() is False
+    assert view.rebuild_server() is False
+
+
+def test_the_rebuild_panel_is_joined_at_shutdown_like_every_other_worker(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A `QThread` destroyed while running ABORTS the process (0xC0000409, verified).
+
+    Every LogPanel this view owns has to be reachable from the exit path, and
+    the view grew a second one with this feature. `log_panels()` is what
+    `main.py` walks, so a third panel added later is registered by existing
+    code rather than by remembering to edit two files.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert set(view.log_panels()) == {view.console_log, view.rebuild_log}
+    view.shutdown()
+    assert view.rebuild_log.running is False
+
+
+def test_a_server_adopted_from_wsl_is_refused_a_rebuild_by_name(tmp_path: Path) -> None:
+    """The wiring's own refusal, and the one this app is least able to notice going wrong.
+
+    `native.Seams` addresses the LOCAL daemon: four of its five 7.3 primitives
+    take a `wsl_distro` the field types do not carry, and its own docstring
+    records that a repair reaching a stage on an adopted install "would hand
+    these seams a container living on another daemon, and the erasure would then
+    send all of them to the wrong one silently". A rebuild is exactly that
+    repair. So it is refused in the wiring, where the distro is known, rather
+    than left to build images on the Windows-local daemon and then fail to find
+    containers that live inside the distro.
+    """
+    services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu-22.04")
+    assert services.rebuild is not None
+    with pytest.raises(InstallerError) as raised:
+        list(services.rebuild(None))
+    message = str(raised.value)
+    assert "Ubuntu-22.04" in message
+    assert "Nothing was started" in message
+
+
+def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> None:
+    """Every tab this app can open offers the control, not just the one with modules.
+
+    A CMaNGOS install has no manifest store and so never prints the REBUILD
+    sentence, but its worldserver is compiled from the same kind of checkout and
+    its users patch it the same way. Wiring the seam in `_assemble()` — the
+    shared half — is what makes that true by construction rather than by
+    remembering it four times.
+    """
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        assert services.rebuild is not None, entry.id
+
+
+def test_the_rebuild_sentence_names_a_button_that_is_really_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence and the control, asserted against each other rather than separately.
+
+    "worldserver REBUILD required before this takes effect" was printed for 20
+    of the 41 shipped manifests while a grep for a rebuild button across
+    `yulon/ui/` returned nothing. Two tests — one that the sentence appears and
+    one that a button exists — would both have been green with the sentence
+    pointing at a control on another tab, or at one renamed since. This reads
+    the label off the widget and looks for it in the report the user is shown.
+    """
+    # The asker is injected for the reason `test_modules_tab_lists_manifests_and
+    # _installs_selected` injects it: `mod-ah-bot` is one of the two manifests that
+    # HAS a question, and with the real one this test sits on a modal dialog for
+    # ever. It was written on a branch whose base predates that seam, and this is
+    # what it did when it was first run on a tree that has it.
+    view = ControllerView(
+        WOTLK,
+        _services(ps, tmp_path, []),
+        status_poll_ms=0,
+        prompt_asker=lambda parent, manifest, prompts: {p.key: "42" for p in prompts},
+    )
+    for i in range(view.module_list.count()):
+        if view.module_list.item(i).data(256) == "mod-ah-bot":
+            view.module_list.setCurrentRow(i)
+            break
+    view._module_action("install")
+
+    report = view.module_report.toPlainText()
+    assert "REBUILD required" in report
+    assert view.rebuild_button.text() in report, (
+        "the report tells the user to press something whose name is not on this tab: " f"{report!r}"
+    )
+
+
+def test_a_running_rebuild_locks_the_server_tab_and_unlocks_it_afterwards(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start, Stop and Remove act on the containers a rebuild is replacing.
+
+    Both directions, because either alone is a hole: a Stop pressed mid-rebuild
+    fights the recreate, and a Rebuild pressed during the 10-30 minute import
+    (which `busy_reason()` records cannot be stopped at all) tears down the
+    database it is writing into. The unlock is asserted after a job that FAILS,
+    which is the shape a hand-placed `_set_busy(False)` misses.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+
+    def refuses(cancel: object = None) -> Iterator[str]:
+        yield "starting"
+        raise InstallerError("that folder has no install record")
+
+    services = _services(ps, tmp_path, [])
+    services.rebuild = refuses
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    assert view.start_button.isEnabled()
+    assert view.rebuild_server() is True
+    pump_until(lambda: bool(failures), "the failed rebuild reported itself")
+
+    assert view.start_button.isEnabled() is False
+    assert view.stop_button.isEnabled() is False
+    assert "no install record" in failures[0], failures
+    # The panel's own header is one wrapped label; the refusal also has to reach
+    # the channel `main.py` writes to the app log.
+    assert "FAILED" in view.rebuild_log.status_text()
+
+    # And the lock comes off — including for the buttons `_set_busy` re-enables
+    # rather than the ones it left alone.
+    view.refresh_status()
+    assert view.rebuild_button.isEnabled() is True
+    assert view.repair_button.isEnabled() is True
+
+
+def test_a_rebuild_is_refused_while_another_action_of_this_tab_is_running(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror of the lock above, and the one that protects a running import."""
+    answered: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        answered.append(title)
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started = _rebuild_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view._set_busy(True)
+
+    assert view.rebuild_server() is False
+    assert started == [], "a rebuild started on top of another action"
+    assert answered == [], "the confirmation was shown for a press that could not run"
+    assert view.rebuild_button.isEnabled() is False
+
+
+def test_a_job_ending_never_hands_back_a_button_the_game_cannot_use(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Unlocking must not re-enable a control a standing fact disabled.
+
+    Exactly the bug `catalog_view._set_buttons_enabled()` carries its own
+    paragraph about: that pass knows only whether a job is running, while
+    "this game has no rebuild wiring" is a fact about the TAB. A blanket
+    `setEnabled(True)` on the way out survives every other test in this file —
+    measured as a surviving mutation on 2026-09-08 — because nothing else ever
+    unlocks a tab whose rebuild is None.
+    """
+    services = _services(ps, tmp_path, [])
+    services.rebuild = None
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert view.rebuild_button.isEnabled() is False
+
+    view._set_busy(True)
+    view._set_busy(False)
+
+    assert (
+        view.rebuild_button.isEnabled() is False
+    ), "a job ending handed back a button whose action does not exist"
+
+
+# ------------------- the guard, on the button (8.7a / T7)
+
+
+_DIRECT_WORLD_MOD: dict[str, object] = {
+    "schema_version": 1,
+    "id": "world-sql",
+    "name": "World SQL",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "build": {"rebuild": False, "restart": True},
+    "sql": [{"db": "world", "statement": "UPDATE item_template SET stackable = 200"}],
+}
+
+
+def _no_sql_reaches_the_database(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Record what the tab's REAL `DockerSql` was asked to run, without replacing it.
+
+    The applier under test is the one `for_entry()` built, holding the runner it
+    built -- nothing here reaches inside it. The two `SqlRunner` methods are
+    recorded on the class instead, which is the seam the engine calls, so a
+    statement that got past the guard is counted rather than shelled out.
+    """
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        DockerSql, "run_statement", lambda self, db, statement: sent.append((db, statement))
+    )
+    monkeypatch.setattr(DockerSql, "run_file", lambda self, db, path: sent.append((db, path.name)))
+    return sent
+
+
+def test_the_wotlk_modules_tab_refuses_direct_world_sql_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8.7a's second clause, on the applier `for_entry()` really hands the tab.
+
+    This is the test T2's press could not be: that gate wired `world_running`
+    onto the applier itself, because no shipped caller passed one, and its
+    README leads with *"met by the engine and by no button"*. Here nothing is
+    attached and no private field is touched -- `docker.world_running` is
+    patched, which is the function the view's own lambda calls, and the refusal
+    has to travel the whole shipped path to arrive.
+
+    Catches the four view sites rewired to anything but `docker.world_running`
+    (a patched function nobody calls changes nothing, and the real
+    `container_state` would shell out to the docker CLI, which `conftest`'s
+    guard fails on), the seam dropped between factory and `Applier`, and the
+    guard itself deleted.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "the world server is running" in str(raised.value)
+    assert "sql inline → world" in str(raised.value)
+    assert sent == [], "the guard is a pre-pass: nothing reached the runner"
+    assert asked == [WOTLK.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_wotlk_modules_tab_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `None` branch, on the button -- the one T2's press never saw live.
+
+    `docker.container_state()` answers an empty `ContainerState` for a missing
+    container and for a daemon that will not reply, and `.settled` turns that
+    into `False`, which through this guard is fail-OPEN. The view calls
+    `docker.world_running()` precisely so that arrives as `None`.
+
+    Catches a view site rewired to `container_state(...).settled` or to
+    `status == "running"`: both answer `False` here, the install would proceed,
+    and this test would find the statement sitting in `sent`.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert sent == []
+
+
+def test_a_paused_world_refuses_direct_sql_on_the_wotlk_modules_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T20 (Codex, on `a6e2aff6`): `paused` used to read as down through this guard.
+
+    `docker.container_state` is patched here, not `docker.world_running` as
+    the two tests above patch it -- this one has to travel THROUGH
+    `docker.world_running`'s own `paused`-to-`True` mapping, not around it, or
+    it would prove nothing about the table the finding was about. The view
+    still calls `docker.world_running()`, which still calls
+    `docker.container_state()`, so a real `docker inspect` reporting `paused`
+    reaches the guard exactly as it would on a live box.
+
+    Its mutation is the old table, `paused: False`: with that in place a
+    paused world reads as not running, the guard returns instead of refusing,
+    and the statement lands in `sent`.
+    """
+    server_dir = tmp_path / "wotlk"
+    server_dir.mkdir()
+    (server_dir / (WOTLK.install.password.file or ".db_password")).write_text(
+        "hunter2", encoding="utf-8"
+    )
+    asked: list[str] = []
+
+    def container_state(container: str, *, wsl_distro: str | None = None) -> docker.ContainerState:
+        asked.append(container)
+        return docker.ContainerState("paused", "T", 0)
+
+    monkeypatch.setattr(docker, "container_state", container_state)
+    sent = _no_sql_reaches_the_database(monkeypatch)
+
+    services = ControllerServices.for_entry(WOTLK, server_dir)
+    assert services.applier is not None
+
+    with pytest.raises(apply_module.ApplyError) as raised:
+        services.applier.install(parse_manifest(_DIRECT_WORLD_MOD))
+
+    assert "the world server is running" in str(raised.value)
+    assert "sql inline → world" in str(raised.value)
+    assert sent == [], "the guard is a pre-pass: nothing reached the runner"
+    assert asked == [WOTLK.container_spec().world], "asked about THIS install's world container"
+
+
+# ------------------------------------ the pending-database-updates button (T14)
+#
+# T11 built the route that applies a phase declared `rerun_on_marked` to an
+# install the probe already reads as finished, and its reviewer then found the
+# route had no way in from the app: the catalog tile greys to "Installed" once
+# the folder is known, and `rebuild_stages()` excludes `import` on purpose. The
+# tests below are about the button that closes that — who is offered it, and the
+# refusal that has to arrive through the shipped wiring rather than through a
+# seam a test attached.
+
+
+def _updates_services(
+    ps: _Ps, tmp_path: Path, lines: Sequence[str] = ("--- import", "applied")
+) -> tuple[ControllerServices, list[object], list[str]]:
+    """Services whose updates route records the confirmation it gave and the press it took."""
+    started: list[object] = []
+    asked: list[str] = []
+    services = _services(ps, tmp_path, [])
+
+    def confirmation() -> str:
+        asked.append("confirmation")
+        return "apply three files?"
+
+    def press(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.updates = native.UpdateRoute(confirmation=confirmation, press=press)
+    return services, started, asked
+
+
+def test_the_updates_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase(
+    tmp_path: Path,
+) -> None:
+    """The enabling rule at the wiring, over every game the app can manage.
+
+    Read off the catalog by `native.update_phases()`, so this is the same
+    question `test_database_updates.py` asks of the data, asked here of what
+    `for_entry()` actually hands a tab. Tortoise is the one entry whose plan
+    carries such a phase today; the other three get `None` and a dead control,
+    which is the rule the rebuild seam already follows — a control that is
+    visibly unavailable beats one that is pressed and then explains itself.
+
+    Catches the route wired for every entry (three games would then offer a
+    press that applies nothing and reports success), and the reader hard-coded
+    to an id.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").updates is not None
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+        entry = load_catalog().get(game)
+        assert ControllerServices.for_entry(entry, tmp_path / game).updates is None, game
+
+
+def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_updates_button(
+    tmp_path: Path,
+) -> None:
+    """The same refusal `rebuild_for_app()` exists for, taken as a greying rather than a sentence.
+
+    `native.Seams` addresses the local daemon and erases `wsl_distro`, so a
+    press against a server living inside a distro would ask THIS Docker about a
+    container it has never heard of. That answer is `None` and the guard refuses
+    on it, which is safe but says the wrong thing; withholding the control says
+    the true one.
+
+    Catches the `wsl_distro` test dropped from the wiring.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
+    assert inside.updates is None
+
+
+def test_a_tab_with_no_updates_route_has_a_dead_button_that_is_harmless_to_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.updates is None` greys it, and pressing it anyway does nothing.
+
+    Catches the button enabled unconditionally, and `apply_database_updates()`
+    reaching for a route it was never given.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert not view.updates_button.isEnabled()
+    assert view.apply_database_updates() is False
+
+
+def test_declining_the_updates_confirmation_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is real: the question is asked, and No means nothing ran.
+
+    `is ... Yes` and not `is not ... No`, because Escape and the window's close
+    button both answer `NoButton` — and this press writes DDL into a database
+    with somebody's characters in it.
+
+    Catches the confirmation skipped, and the verdict read as `is not No`.
+    """
+    seen: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        seen.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, asked = _updates_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.updates_button.isEnabled()
+    assert view.apply_database_updates() is False
+    assert seen == ["apply three files?"], seen
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    assert started == [], "declined, and the press ran anyway"
+    assert view.rebuild_log.running is False
+
+
+def test_a_confirmation_that_refuses_puts_the_sentence_where_the_user_is_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clone that predates the directory these phases name refuses at `expand()`.
+
+    That refusal arrives while the dialog is being COMPOSED — the file list is
+    expanded from the folder, so there is no list to offer — and it must not
+    become a traceback, an empty dialog, or a press. T11's reviewer, note 4.
+
+    Catches the confirmation call left outside a `try`, and a refusal that
+    yields an empty file list instead of raising.
+    """
+    asked: list[str] = []
+
+    def question(*a: object, **k: object) -> object:
+        asked.append("asked")
+        return controller_view_module.QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, _ = _updates_services(ps, tmp_path)
+    route = services.updates
+    assert route is not None
+
+    def refuse() -> str:
+        raise InstallerError("found no file matching src/x/*.sql under /srv")
+
+    services.updates = native.UpdateRoute(confirmation=refuse, press=route.press)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    assert view.apply_database_updates() is False
+    assert started == [], "refused, and the press ran anyway"
+    assert asked == [], "the user was asked to confirm a press that could not be described"
+    assert failures and "found no file matching" in failures[0], failures
+
+
+def test_the_tortoise_updates_button_refuses_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal on the route `for_entry()` really builds, with nothing attached by hand.
+
+    `docker.world_running` is patched — the function the engine's own seam
+    resolves on the call — so the refusal has to travel the whole shipped path
+    to arrive: the tab's wiring, `install_wiring.installer_for_app()`, and
+    `update_databases()`'s guard. T11's reviewer (note 3) recorded that this
+    route writes DDL into `tw_char` and that nothing stopped the world; this is
+    that, refused before the database is even started.
+
+    Catches the guard deleted, the seam bound to `container_state(...).settled`
+    (which answers `False` here and would let the press through), and a wiring
+    that hands the engine a `world_running` bound at import.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.updates is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.updates.press(None))
+
+    assert "world server is running" in str(raised.value)
+    assert "Press Stop" in str(raised.value)
+    assert asked == [tortoise.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_tortoise_updates_button_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` is not "no", on the button.
+
+    An unreadable inspect and a missing container both answer `None`, and
+    through this guard `False` would be fail-OPEN. Nothing reaches the daemon:
+    `conftest`'s guard fails any test whose argv gets to the docker CLI, so a
+    press that got past this refusal would be red here for a second reason.
+
+    Catches the `None` branch folded into the `False` one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.updates is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.updates.press(None))
+
+    assert "could not tell whether" in str(raised.value)
+
+
+# ---------------------------------------------- the adopt-as-imported button (T19)
+#
+# T14's button refuses an install with no marker row, and the install it was
+# built for is exactly that. The probe cannot prove such an import finished --
+# three rounds tried -- so this button asks the person instead. What the tests
+# below are about is the greying, because that is where this control differs
+# from every other one on the tab: it is offered on a READING of the databases
+# and not on a fact about the catalog, and the reading is taken once per time
+# the database comes up rather than on every poll or every paint.
+
+POPULATED = docker.ImportState("populated", "903 rows in tw_char.characters")
+ADOPT_ANSWERS = {
+    "populated": POPULATED,
+    "imported": docker.ImportState("imported", "tw_world.yulon_install records it", complete=True),
+    "absent": docker.ImportState("absent", "no schema exists yet"),
+    "partial": docker.ImportState("partial", "tw_char exists, no marker"),
+    "unreadable": docker.ImportState("unreadable", "the databases would not answer"),
+}
+
+
+def _adopt_services(
+    ps: _Ps,
+    tmp_path: Path,
+    answer: docker.ImportState = POPULATED,
+    lines: Sequence[str] = ("--- adopt", "the row is written"),
+) -> tuple[ControllerServices, list[object], list[str], list[str]]:
+    """Services whose adopt route records every question put to it and every press taken."""
+    started: list[object] = []
+    asked: list[str] = []
+    probed: list[str] = []
+    services = _services(ps, tmp_path, [])
+
+    def state() -> docker.ImportState:
+        probed.append("state")
+        return answer
+
+    def confirmation() -> str:
+        asked.append("confirmation")
+        return "write one row?"
+
+    def press(cancel: object = None) -> Iterator[str]:
+        started.append(cancel)
+        yield from lines
+
+    services.adopt = native.AdoptRoute(state=state, confirmation=confirmation, press=press)
+    return services, started, asked, probed
+
+
+@pytest.mark.parametrize("named", sorted(ADOPT_ANSWERS))
+def test_the_adopt_button_is_live_for_populated_databases_and_no_others(
+    qapp: object, ps: _Ps, tmp_path: Path, named: str
+) -> None:
+    """The enabling rule, one test per answer the probe can give.
+
+    `populated` and nothing else. `imported` means the row is already there and
+    the press would refuse; `absent` and `partial` mean there is no import to
+    make a claim about; `unreadable` means nobody could look -- including the
+    ordinary case where the database is simply down, which must never arm a
+    control that writes a marker row.
+
+    Enumerated rather than sampled because the danger is per answer: a rule
+    written as `!= "imported"` passes a sampled test and arms this press on a
+    database that answered nothing.
+
+    Catches the rule widened to "not imported", written as truthiness of the
+    reading (every answer is truthy), or dropped so the button follows
+    `services.adopt` alone.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path, ADOPT_ANSWERS[named])
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    assert not view.adopt_button.isEnabled(), "nothing has been asked yet"
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert probed == ["state"], probed
+    assert view.adopt_button.isEnabled() is (named == "populated")
+
+
+def test_the_adopt_reading_is_taken_once_per_time_the_database_comes_up(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Not on every poll, and not on every paint. The probe costs `docker exec`s.
+
+    The five-second poll runs forever on every tab the app has open, and this
+    reading is `MarkerGate.probe()` — several `docker exec … mariadb` calls
+    against the install's database. Taken on the poll it would be several of
+    those every five seconds; taken at tab build time it would be paid for by
+    every install that opens a controller view, most of which will never press
+    this. Once per time the database comes up is the rule the import question
+    beside it already keeps.
+
+    And it is DROPPED when the database goes down, rather than kept: the answer
+    was taken from a database nothing can now renew it against, and a control
+    that writes a marker row must not stay lit on one.
+
+    Catches the reading taken in `_status_ready` unguarded, taken in
+    `_build_modules_tab`, and remembered across a database that went away.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    view.refresh_status()
+    view.refresh_status()
+    assert probed == ["state"], probed
+    assert view.adopt_button.isEnabled()
+
+    ps.names = ""
+    view.refresh_status()
+    assert not view.adopt_button.isEnabled(), "the database went away and the reading with it"
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert probed == ["state", "state"], probed
+
+
+def test_a_probe_that_raises_leaves_the_adopt_button_dead(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The one outcome that must never follow from a question nobody answered.
+
+    `AdoptRoute.state` is documented not to raise; this is the boundary that
+    holds if some future gate forgets, and what it would otherwise arm is a
+    press that writes a completion marker on a database that could not be read.
+
+    Catches the failure slot left off the `_run` call, and a slot that keeps the
+    last good reading.
+    """
+    services, _, _, _ = _adopt_services(ps, tmp_path)
+
+    def angry() -> docker.ImportState:
+        raise RuntimeError("the daemon is not there")
+
+    route = services.adopt
+    assert route is not None
+    services.adopt = native.AdoptRoute(
+        state=angry, confirmation=route.confirmation, press=route.press
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert not view.adopt_button.isEnabled()
+
+
+def test_a_tab_with_no_adopt_route_has_a_dead_button_that_is_harmless_to_press(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`services.adopt is None` greys it, and pressing it anyway does nothing.
+
+    Catches the button enabled unconditionally, and `adopt_as_imported()`
+    reaching for a route it was never given.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    assert not view.adopt_button.isEnabled()
+    assert view.adopt_as_imported() is False
+
+
+def test_the_adopt_button_is_offered_only_where_the_plan_declares_a_rerunnable_phase(
+    tmp_path: Path,
+) -> None:
+    """The catalog half of the greying, over every game the app can manage.
+
+    Adopting buys nothing where no later press would then do anything it cannot
+    do now, and the row it writes is a claim nothing takes back — so it is
+    refused there rather than allowed as harmless.
+
+    Catches the route wired for every entry, and the reader hard-coded to an id.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    assert ControllerServices.for_entry(tortoise, tmp_path / "tw").adopt is not None
+    for game in ("wow-wotlk", "wow-tbc", "wow-vanilla"):
+        entry = load_catalog().get(game)
+        assert ControllerServices.for_entry(entry, tmp_path / game).adopt is None, game
+
+
+def test_a_server_adopted_from_a_wsl_distro_is_not_offered_the_adopt_button(
+    tmp_path: Path,
+) -> None:
+    """`native.Seams` addresses the local daemon and erases `wsl_distro`.
+
+    A press against a server living inside a distro would ask THIS Docker about
+    a container it has never heard of; withholding the control says the true
+    thing where refusing would say the wrong one.
+
+    Catches the `wsl_distro` test dropped from the wiring.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    inside = ControllerServices.for_entry(tortoise, tmp_path / "tw", wsl_distro="Ubuntu")
+    assert inside.adopt is None
+
+
+def test_declining_the_adopt_confirmation_writes_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is real, and this is the press where it matters most.
+
+    `is ... Yes` and not `is not ... No`, because Escape and the window's close
+    button both answer `NoButton` — and Yes here is a person saying something
+    about their databases that nothing takes back.
+
+    Catches the confirmation skipped, and the verdict read as `is not No`.
+    """
+    seen: list[str] = []
+
+    def question(parent: object, title: str, text: str, *a: object, **k: object) -> object:
+        seen.append(text)
+        return controller_view_module.QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(controller_view_module.QMessageBox, "question", question)
+    services, started, asked, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+
+    assert view.adopt_button.isEnabled()
+    assert view.adopt_as_imported() is False
+    assert seen == ["write one row?"], seen
+    assert asked == ["confirmation"], "the engine's own confirmation text was not used"
+    assert started == [], "declined, and the press ran anyway"
+    assert view.rebuild_log.running is False
+
+
+def test_the_adopt_press_runs_the_routes_own_generator_into_the_panel(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Yes starts the engine's own press, with the panel's Stop wired to its cancel.
+
+    Catches the handler running something other than `route.press`, and a press
+    started without an event the panel's Stop can set.
+    """
+    monkeypatch.setattr(
+        controller_view_module.QMessageBox,
+        "question",
+        lambda *a, **k: controller_view_module.QMessageBox.StandardButton.Yes,
+    )
+    services, started, _, _ = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert view.adopt_as_imported() is True
+    # The press runs on the panel's worker thread and its lines cross back by a
+    # queued connection, so the handler returning is not the press having run;
+    # `pump_until` is what makes the difference (the rebuild's own tests say so
+    # in the same words).
+    pump_until(
+        lambda: "the row is written" in view.rebuild_log.text(),
+        "the adopt press's output reached the panel",
+    )
+    assert len(started) == 1, started
+    assert started[0] is not None, "the panel's Stop button has nothing to set"
+    assert "--- adopt" in view.rebuild_log.text()
+
+
+def test_the_adopt_button_greys_itself_once_its_own_press_has_finished(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The press changes the answer, so the answer is asked again.
+
+    A button still lit after the row it writes has been written would offer a
+    press whose only outcome is the refusal "these databases already carry
+    Yu'lon's marker". The reading is dropped when any job on this tab finishes
+    and re-taken on the next poll — which is also why a rebuild or an updates
+    press drops it: both can change what the databases read as.
+
+    Catches the reading kept across a finished job.
+    """
+    services, _, _, probed = _adopt_services(ps, tmp_path)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert view.adopt_button.isEnabled()
+
+    view._rebuild_finished(True, "")
+    assert not view.adopt_button.isEnabled(), "the reading survived the press that changed it"
+    view.refresh_status()
+    assert probed == ["state", "state"], probed
+
+
+def test_the_tortoise_adopt_press_refuses_while_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal on the route `for_entry()` really builds, with nothing attached by hand.
+
+    `docker.world_running` is patched — the function the engine's own seam
+    resolves on the call — so the refusal has to travel the whole shipped path
+    to arrive: the tab's wiring, `install_wiring.installer_for_app()` and
+    `adopt_as_imported()`'s guard. And the sentence has to name THIS button: a
+    refusal from the adopt press telling the user to press "Apply pending
+    database updates…" again is an instruction that does the wrong thing when
+    followed.
+
+    Catches the guard deleted, the seam bound to `container_state(...).settled`
+    (which answers `False` here and would let the press through), and the
+    guard's button label left hard-coded to the updates one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    asked: list[str] = []
+
+    def world_running(container: str, *, wsl_distro: str | None = None) -> bool | None:
+        asked.append(container)
+        return True
+
+    monkeypatch.setattr(docker, "world_running", world_running)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.adopt.press(None))
+
+    assert "world server is running" in str(raised.value)
+    assert native.ADOPT_BUTTON_LABEL in str(raised.value)
+    assert native.UPDATES_BUTTON_LABEL not in str(raised.value)
+    assert asked == [tortoise.container_spec().world], "asked about THIS install's world container"
+
+
+def test_the_tortoise_adopt_press_refuses_when_it_cannot_tell_whether_the_world_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` is not "no", on this button too, and the remedy names Docker.
+
+    Nothing reaches the daemon: `conftest`'s guard fails any test whose argv
+    gets to the docker CLI, so a press that got past this refusal would be red
+    here for a second reason.
+
+    Catches the `None` branch folded into the `False` one.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    monkeypatch.setattr(docker, "world_running", lambda container, wsl_distro=None: None)
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+
+    with pytest.raises(InstallerError) as raised:
+        list(services.adopt.press(None))
+
+    assert "could not tell whether" in str(raised.value)
+    assert "check that Docker is running" in str(raised.value)
+
+
+def test_the_tortoise_adopt_confirmation_names_the_row_through_the_shipped_wiring(
+    tmp_path: Path,
+) -> None:
+    """The dialog a user really meets, composed through `for_entry()` and nothing else.
+
+    It asks the databases nothing — every reading this press makes is in the
+    press — so it can be composed here with no daemon at all, which is also why
+    a clone this app has never touched still gets a truthful dialog.
+
+    Catches the confirmation reaching for a database, and a row named from
+    anything but the plan the writer reads.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    server_dir = tmp_path / "tw"
+    server_dir.mkdir()
+    services = ControllerServices.for_entry(tortoise, server_dir)
+    assert services.adopt is not None
+    said = services.adopt.confirmation()
+    assert native.ADOPT_CONSEQUENCE in said
+    assert sqlplan.MARKER_TABLE in said
+    assert str(server_dir) in said
+
+
+# --------------------------------------------------------------------------
+# 8.8 -- Add to Steam...
+# --------------------------------------------------------------------------
+
+
+class _FakeSteam:
+    """The 8.8 seam, standing in for the thing that writes the user's profile.
+
+    A fake and not the real `SteamShortcuts` for `Uninstall`'s reason: a view
+    test that reached the real one would be a view test that edits the Steam
+    library of whoever is running it.
+    """
+
+    def __init__(self, outcome: object) -> None:
+        self.outcome = outcome
+        self.presses = 0
+
+    def add(self) -> object:
+        self.presses += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _report(tmp_path: Path) -> steam.AddReport:
+    config = tmp_path / "userdata/18347166/config"
+    return steam.AddReport(
+        entries=("Turtle WoW", "Turtle WoW Server"),
+        path=config / "shortcuts.vdf",
+        backup=config / "shortcuts.vdf.yulon-bak-20260910-200500",
+        replaced=False,
+        artwork=tuple(config / "grid" / f"{i}.png" for i in range(6)),
+        compat_tool="GE-Proton11-6-x86_64",
+        compat_path=tmp_path / "config/config.vdf",
+        compat_backup=None,
+    )
+
+
+def test_the_add_to_steam_button_says_what_it_wrote(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The confirmation names both entries, the file, the backup and the tool."""
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(_report(tmp_path))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+
+    assert view.steam_button is not None
+    view.steam_button.click()
+
+    said = view.steam_label.text()
+    assert "Turtle WoW" in said and "Turtle WoW Server" in said
+    assert "shortcuts.vdf" in said and "yulon-bak-20260910-200500" in said
+    assert "GE-Proton11-6-x86_64" in said
+    assert view.steam_button.isEnabled()
+
+
+def test_a_refused_add_to_steam_is_readable_on_screen_not_just_emitted(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Steam running is the refusal 8.8's definition of done names by hand.
+
+    On the label as well as on the signal, and the button comes back enabled:
+    the remedy is to close Steam and press it again, and a control that stayed
+    grey would be telling the user to do something they then cannot do.
+    """
+    services = _services(ps, tmp_path, [])
+    services.steam = _FakeSteam(steam.SteamRefusal(steam.RUNNING))
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    refused: list[str] = []
+    view.action_failed.connect(refused.append)
+
+    assert view.steam_button is not None
+    view.steam_button.click()
+
+    assert "Steam is running" in view.steam_label.text()
+    assert refused == [steam.RUNNING]
+    assert view.steam_button.isEnabled()
+
+
+def test_there_is_no_add_to_steam_button_at_all_without_the_seam(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Absent, not disabled -- what `_steam_seam()` answers off Linux."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.services.steam is None
+    assert view.steam_button is None
+    assert not view.steam_label.isVisible()
+
+
+@pytest.mark.parametrize("platform_id", ["windows", "macos"])
+def test_the_steam_seam_is_none_on_windows_and_macos(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, platform_id: str
+) -> None:
+    """The one platform question in this file, asked in one place."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: platform_id)
+
+    assert controller_view_module._steam_seam(WOTLK, tmp_path, tmp_path / "client") is None
+
+
+def test_the_steam_seam_is_built_on_linux_and_carries_the_client_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The client entry is a path into the folder the user picked, from `state.json`."""
+    monkeypatch.setattr(controller_view_module.platform, "detect", lambda: "linux")
+
+    seam = controller_view_module._steam_seam(WOTLK, tmp_path, tmp_path / "client")
+
+    assert seam is not None
+    assert seam.client_dir == tmp_path / "client"
+    assert seam.game == WOTLK.name

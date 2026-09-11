@@ -782,3 +782,89 @@ def test_the_entry_point_wires_installs_through_install_wiring_and_no_controller
     assert "yulon.install_wiring.installer_for_app" in modules
     assert "db_root_password" not in source.lower()
     assert "make_installer" not in source
+
+
+# ----------------------------------------------------- 8.9a: the tab goes too
+#
+# The view signals the removal up; the window drops the tab and resets the
+# Catalog tile. Both halves are here because the window owns both registries and
+# the live `AppState`, and neither the view nor the catalog can reach them.
+
+
+def test_an_uninstalled_server_loses_its_tab_and_every_registry_entry(
+    window: Any, tmp_path: Any
+) -> None:
+    """`drop_controller()` and not a second teardown.
+
+    A QThread destroyed while running ABORTS the process, which is why that
+    function does `shutdown()`, the console panel's stop+join and the three
+    registries before `removeTab`. An uninstall that removed the tab any other
+    way would reintroduce exactly that abort, on top of a server that has just
+    been deleted.
+    """
+    server_dir = tmp_path / "purge-me"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    tabs = window.property("tabs")
+    assert tabs.indexOf(view) != -1
+
+    view.uninstalled.emit("wow-wotlk", server_dir)
+
+    assert view not in window.yulon_controllers, "the removed tab is still in the shutdown list"
+    assert view.console_log not in window.yulon_log_panels, "its console panel is still joined"
+    assert tabs.indexOf(view) == -1, "the tab is still in the tab bar"
+
+
+def test_the_catalog_tile_is_recomputed_from_what_survived_the_uninstall(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recomputed from the surviving installs, never cleared.
+
+    `installed_dirs()` is one folder per GAME, so a machine with two installs of
+    one game still has one after the first is purged - and its tab is still
+    open. The window is the only thing that knows what survived, so it is the
+    window that hands the list over.
+    """
+    server_dir = tmp_path / "recompute-me"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    # The purge itself forgot the record (it is the last thing `run()` does);
+    # this drives that seam directly, because the run is what a unit test must
+    # not do.
+    view.services.uninstall.forget()
+
+    seen: list[Any] = []
+    monkeypatch.setattr(catalog, "forget_installed", lambda g, s: seen.append((g, dict(s))))
+    view.uninstalled.emit("wow-wotlk", server_dir)
+
+    assert len(seen) == 1, seen
+    game, surviving = seen[0]
+    assert game == "wow-wotlk"
+    assert server_dir not in surviving.values(), "the tile was recomputed from a stale record"
+
+
+def test_the_tabs_uninstaller_forgets_the_windows_own_live_state(
+    window: Any, tmp_path: Any
+) -> None:
+    """Not `load_state()` -> forget -> `save_state()`, which would clobber the session.
+
+    `build_window()` holds ONE live `AppState` and every tab writes into it, so
+    an uninstaller that re-read the file would forget this install and silently
+    undo whatever else the session had remembered. The proof is object identity:
+    the state saved by the forget is the same object the install was remembered
+    into.
+    """
+    server_dir = tmp_path / "live-state"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    remembered = window.saved_states[-1]
+    assert any(i.server_dir == server_dir for i in remembered.installs)
+
+    view.services.uninstall.forget()
+
+    saved = window.saved_states[-1]
+    assert saved is remembered, "the uninstaller re-loaded state.json instead of using the live one"
+    assert all(i.server_dir != server_dir for i in saved.installs)

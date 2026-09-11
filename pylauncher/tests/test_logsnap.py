@@ -204,6 +204,37 @@ def test_a_logs_directory_that_cannot_be_written_is_reported_and_never_raised(
     assert snap.problem != ""
 
 
+def test_a_log_that_could_not_be_read_is_reported_rather_than_saved_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A wedged log driver must not become a saved snapshot of nothing.
+
+    `docker logs` that fails -- or times out, which `_docker()` reports in the
+    same non-zero shape -- used to come back as `""`, and `capture()` wrote that
+    empty string to disk and answered `Snapshot(path=...)`: a zero-byte file the
+    user was told was saved (retrospective audit, 2026-09-08). That is the exact
+    failure the box's clause "a snapshot that fails or hangs is reported" exists
+    for, and it shipped on four ticked boxes.
+    """
+
+    class _LogsFail(_FakeRunner):
+        def __call__(self, cmd, cwd=None, timeout=None):
+            if cmd[:2] == ["docker", "logs"]:
+                return _completed(1, "", "Error response from daemon: wedged")
+            return super().__call__(cmd, cwd, timeout)
+
+    monkeypatch.setattr(runner, "run", _LogsFail())
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    logs_dir = tmp_path / "logs"
+
+    snap = logsnap.capture(SPEC, server_dir, game="wow-wotlk", logs_dir=logs_dir)
+
+    assert snap.path is None
+    assert "ac-worldserver" in snap.problem and "read" in snap.problem
+    assert not logs_dir.exists() or not any(logs_dir.iterdir()), "an empty snapshot was saved"
+
+
 # -- the recorder the controller is given ----------------------------------
 #
 # `Controller.pre_stop` is a plain callable, so the controller never learns

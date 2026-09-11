@@ -50,7 +50,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from yulon.catalog.catalog import BotMarker, CatalogEntry
 from yulon.log import get_logger
@@ -69,12 +69,20 @@ an escaping rule that has to be right on four cores and two SQL modes.
 """
 
 
+@runtime_checkable
 class SqlReader(Protocol):
     """The read half of `apply.DockerSql`, and deliberately only that half.
 
     Typed as a Protocol with one method so nothing in this module can reach
     `run_statement()` or `run_file()` even by accident: what is not in the type
     cannot be called through it.
+
+    `runtime_checkable` since 2026-09-07, for one caller outside this module:
+    `apply.Applier` holds a `SqlRunner` — the WRITE half — and has to find out
+    whether the object it was handed can also be asked a question, because the
+    real one (`DockerSql`) can and a test's write-only fake cannot. An
+    `isinstance` against this Protocol only checks the method is THERE; that is
+    the whole claim being made, and the alternative was `hasattr`.
     """
 
     def query(self, db: Db, statement: str) -> str: ...

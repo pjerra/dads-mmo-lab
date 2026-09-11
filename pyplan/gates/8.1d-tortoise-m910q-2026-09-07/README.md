@@ -11,7 +11,7 @@ is built class by class, spec by spec, level by level, and this fork logs every 
 
 **Ticked 2026-09-07.** The last clause was met at 06:33Z, twenty hours after the rest: the owner
 logged in with the gate account, made a character, entered the world and left again, and the
-count on the tab moved **0 → 1 → 0** around him.
+count on the tab moved **1 → 0** around him. Not 0 → 1 → 0: the watch's first line is already `up — 1 players` at 06:33:01Z and the account row reads `last_login 06:31:47`, so he was already on when the watching began. The login half was not observed and this record used to say it was (audit, 2026-09-08).
 
 ## What was proved
 
@@ -26,7 +26,7 @@ count on the tab moved **0 → 1 → 0** around him.
 | Every stop leaves a log whose contents match the Console tab | 227 061 bytes, 2000 lines, the console tail byte-identically inside it |
 | A snapshot that fails is reported and the stop still happens | `problem=…File exists`, `stop() -> True`, `running` → `exited` |
 | A crash-looping world reads as a loop | `restart_loop`, `stable=False`, **7 → 10 restarts** across seven polls |
-| **Visible effect:** the player count moves when a client logs in and out | **0 → 1 → 0**, 06:33:01Z to 06:34:34Z, with 500 bots counted as bots throughout — screenshots `8-` and `9-` |
+| **Visible effect:** the player count moves when a client logs in and out | **1 → 0**, 06:33:01Z to 06:34:34Z — the watch began after he had logged in, so only the logout was seen, with 500 bots counted as bots throughout — screenshots `8-` and `9-` |
 
 ## Two per-tree facts, and one of them contradicts its sibling
 

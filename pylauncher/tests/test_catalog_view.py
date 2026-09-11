@@ -10,11 +10,19 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QPushButton, QScrollArea, QSplitter, QWidget
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QWidget,
+)
 
+import main
 from main import DEFAULT_WINDOW_SIZE
 from tests.conftest import JOB_PACE, process_events, pump_until, spelled_bounds, wait_for_panel
-from yulon import runner, wsl
+from yulon import platform, runner, wsl
 from yulon.apply import ApplyError
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallOptions
@@ -122,6 +130,160 @@ def test_one_tile_per_catalog_entry_with_install_button(qapp: object) -> None:
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
     for game in CATALOG.games:
         assert view.button_for(game.id).text() == "Install"
+
+
+# ------------------------------------------------- T28: the two columns come out equal
+
+
+def _tile_widths_by_row(scroll: QScrollArea) -> list[tuple[int, ...]]:
+    """Each grid row's tile widths, left to right, off the live widgets.
+
+    Walks the `QGridLayout` under the scroll area rather than trusting anything
+    computed, because the frame T28 was filed from
+    (`catalog-two-columns-unequal.png`) is exactly a mismatch between what the
+    two columns actually measure on screen.
+    """
+    grid = scroll.widget().layout()
+    assert isinstance(grid, QGridLayout)
+    rows: list[tuple[int, ...]] = []
+    for row in range(grid.rowCount()):
+        widths = [
+            item.widget().width()
+            for column in range(grid.columnCount())
+            if (item := grid.itemAtPosition(row, column)) is not None and item.widget() is not None
+        ]
+        if widths:
+            rows.append(tuple(widths))
+    return rows
+
+
+def _assert_the_two_columns_are_equal(scroll: QScrollArea) -> None:
+    """Every row's tiles the same width within a pixel, and column to column too.
+
+    The within-a-row check alone would pass a grid where row 0 is 400/400 and
+    row 1 is 300/300 -- each row internally even, the two COLUMNS still not
+    the same width the ticket asks for. `QGridLayout` gives one width per
+    column across the whole grid, so this either holds everywhere or is a bug
+    in the layout, not a hidden per-row coincidence.
+    """
+    rows = _tile_widths_by_row(scroll)
+    assert rows, "no tile rows found under the scroll area"
+    for row in rows:
+        assert max(row) - min(row) <= 1, f"a row's tiles differ in width: {row}"
+    full_rows = [row for row in rows if len(row) == 2]
+    if full_rows:
+        lefts = [row[0] for row in full_rows]
+        rights = [row[1] for row in full_rows]
+        assert max(lefts) - min(lefts) <= 1, f"left column width varies by row: {lefts}"
+        assert max(rights) - min(rights) <= 1, f"right column width varies by row: {rights}"
+        assert (
+            max(lefts + rights) - min(lefts + rights) <= 1
+        ), f"the two columns are not the same width: left={lefts} right={rights}"
+
+
+def test_the_shipped_catalogs_tile_columns_come_out_equal_widths(qapp: object) -> None:
+    """T28: the owner's frame off `yulon-arch` showed WotLK and Vanilla's column
+    drawn narrow and TBC/Tortoise's wide -- an unstretched `QGridLayout` column
+    takes the width its content asks for, and a word-wrapped label asks in
+    proportion to its longest line.
+
+    Laid out through `_catalog_in_the_default_window()` rather than a bare
+    `view.resize(*DEFAULT_WINDOW_SIZE)`: the catalog's own budget is not the
+    whole window, it is a `QSplitter` half of it beside the log panel
+    (`main.py`'s `build_window()`), and resizing the view alone to the full
+    1100px gives it more room than it ever gets in the real app -- room wide
+    enough that the very defect this test exists for stopped reproducing.
+    """
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    # The fixture has to be measuring a REAL constraint, not the full window --
+    # round 1's bare-splitter version happened to give the tiles a viewport
+    # nearly the whole 1100px wide, which is why it stopped reproducing the
+    # defect it was written for.
+    viewport_width = scroll.viewport().width()
+    assert 0 < viewport_width < DEFAULT_WINDOW_SIZE[0], (
+        f"the catalog pane is not actually constrained by the splitter: "
+        f"viewport={viewport_width} of a {DEFAULT_WINDOW_SIZE[0]}px window"
+    )
+    _assert_the_two_columns_are_equal(scroll)
+
+
+def test_the_columns_stay_equal_with_one_long_and_one_short_description(qapp: object) -> None:
+    """A second, built-for-this catalog: one entry's description much longer than
+    the other's -- the shape of the owner's frame, WotLK/Vanilla against
+    TBC/Tortoise -- so this keeps exercising the layout rule even if
+    `catalog.json`'s own descriptions are ever edited to be nearly the same
+    length.
+    """
+    from yulon.catalog.catalog import Catalog
+
+    short = CATALOG.get("wow-wotlk").model_copy(update={"description": "Short."})
+    long_winded = CATALOG.get("wow-tbc").model_copy(
+        update={"description": "A very long description of this server. " * 12}
+    )
+    two = Catalog(games=(short, long_winded))
+    panel = LogPanel()
+    view = CatalogView(two, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
+    viewport_width = scroll.viewport().width()
+    assert 0 < viewport_width < DEFAULT_WINDOW_SIZE[0], (
+        f"the catalog pane is not actually constrained by the splitter: "
+        f"viewport={viewport_width} of a {DEFAULT_WINDOW_SIZE[0]}px window"
+    )
+    _assert_the_two_columns_are_equal(scroll)
+
+
+def test_the_columns_stay_equal_across_the_splitters_supported_width_range(
+    qapp: object,
+) -> None:
+    """T28 round 2: the catalog pane is not a fixed width -- it is one side of a
+    `QSplitter` the user drags, and the two tests above only ever measured it
+    at the width a fresh window happens to open at.
+
+    Three points across the range `build_window()` actually allows:
+
+    * the width a fresh window's first layout gives it, with no `setSizes()`
+      call at all -- the same point the two tests above check;
+    * `main._CATALOG_MIN_WIDTH`, the floor `build_catalog_tab()` sets on the
+      catalog view (`catalog_view.setMinimumWidth`) and the narrowest the
+      splitter will honour;
+    * a wide point with room to spare, so the stretch factors are exercised
+      giving the columns MORE than their preferred width too, not only less.
+
+    All three must land at genuinely different viewport widths -- a matrix
+    that silently measured the same width three times would prove nothing
+    beyond the first test.
+    """
+    panel = LogPanel()
+    view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
+    _window, scroll, splitter = _catalog_in_the_default_window(view, panel)
+    total = sum(splitter.sizes())
+
+    measured: dict[str, int] = {}
+
+    # 1. The default allocation: the state `_catalog_in_the_default_window()`
+    # already laid out, untouched.
+    measured["default"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    # 2. The floor.
+    splitter.setSizes([main._CATALOG_MIN_WIDTH, total - main._CATALOG_MIN_WIDTH])
+    process_events()
+    measured["min"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    # 3. Wide -- comfortably above both other points, still inside the window.
+    wide = 900
+    splitter.setSizes([wide, total - wide])
+    process_events()
+    measured["wide"] = scroll.viewport().width()
+    _assert_the_two_columns_are_equal(scroll)
+
+    assert (
+        len(set(measured.values())) == 3
+    ), f"the three points did not land at genuinely different widths: {measured}"
+    assert measured["min"] < measured["default"] < measured["wide"], measured
 
 
 def test_install_asks_for_folders_then_streams_the_installer(
@@ -425,6 +587,20 @@ def test_a_script_that_exits_0_without_installing_is_not_remembered(
     )
     warned: list[str] = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warned.append(a[2]))  # type: ignore[attr-defined]
+
+    # This install FAILS, so `_offer_restart()` runs, and its predicate
+    # `docker_group_reexec()` asks the machine two questions in order: does this
+    # process already carry the docker group, and if not, does the group
+    # database say the user has it? The second question is `id -nG <user>`, a
+    # subprocess — which lands in `ran` and refutes the assertion below.
+    #
+    # Which question the machine stops at is a property of the DEVELOPER'S box,
+    # not of the code under test. CI's runner and the Yu'lon VMs carry the
+    # docker group, so they stop at the first and never spawn anything; a box
+    # with no docker at all, such as the WSL tree Yu'lon moved into on
+    # 2026-09-10, does not, so it reaches the second and the test failed there
+    # and only there. Stating the premise makes every box answer alike.
+    monkeypatch.setattr(platform, "_process_group_names", lambda gids: {"docker"})
 
     panel = LogPanel()
     view = CatalogView(
@@ -1559,7 +1735,8 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
     rmtrees `spec.dest` when `(spec.dest / ".git").is_dir()` is False and
     `spec.dest.exists()` is True; `yulon/apply.py` `Applier.clone_dir` returns
     `server_dir / CLONE_DIRS[type] / id`; `catalog.json` gives `wow-wotlk`
-    `"has_manifests": true` and it is the only entry that has it;
+    `"has_manifests": true` (`wow-tbc` carries it too since 8.7b, and this
+    walk is about the WotLK entry the test drives);
     `yulon/ui/controller_view.py` passes that same `server_dir` to
     `wotlk_modules.applier()`.
 
@@ -1602,7 +1779,10 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
     # 2. That folder, and nothing else, is what the tab's applier is rooted at.
     assert entry.has_manifests is True, "the tab builds no Applier without this"
     git = _RealCloneThenStop()
-    applier = wotlk_modules.applier(adopted_dir, git=git)
+    # `world_running` is required since T7 and answered `False` here: this test
+    # is about where a clone lands, and a world that could not be asked about
+    # would refuse the SQL step before the clone path was ever exercised.
+    applier = wotlk_modules.applier(adopted_dir, git=git, world_running=lambda: False)
     assert applier.server_dir == adopted_dir
 
     manifest = next(m for m in wotlk_modules.store().load_all("module") if m.source is not None)
@@ -1643,28 +1823,32 @@ def test_an_unverified_adoption_can_no_longer_delete_what_it_finds(
 
 def _catalog_in_the_default_window(
     view: CatalogView, panel: LogPanel
-) -> tuple[QSplitter, QScrollArea]:
+) -> tuple[QMainWindow, QScrollArea, QSplitter]:
     """Lay the catalog out exactly as `build_window()` does, at the size it opens at.
 
-    The tiles' width budget is not the window's — the Catalog tab is a splitter
-    with the log panel beside it, so the view gets roughly half of it. Rebuilding
-    that arrangement rather than resizing the view to some chosen number is the
-    point: the budget has to be the app's own, or the test is measuring a window
-    that does not exist.
+    Built through `main.build_catalog_tab()` — the SAME function
+    `build_window()` calls — rather than a bare `QSplitter` that only mimics
+    it. T28 round 1's version of this helper WAS that bare splitter, and round
+    2's review is why it is gone: the tab bar's own frame, the central
+    widget's `QVBoxLayout`, and the splitter's `setCollapsible(0, False)` /
+    stretch-factor / `setMinimumWidth(_CATALOG_MIN_WIDTH)` rules all eat into
+    or bound the catalog's width budget before a single tile is measured, and
+    none of that exists on a splitter built by hand. It happened not to change
+    round 1's two assertions, which is exactly why it was the wrong thing to
+    trust.
 
-    The splitter comes back with the scroll area because `addWidget()` reparents
-    both children onto it: dropping it here would delete the C++ side of the very
-    widgets the caller is about to measure.
+    Returns the window, the scroll area (for the tile geometry), and the
+    splitter (so a caller can drive it across a width range with `setSizes()`
+    — round 2's width matrix does exactly that).
     """
-    splitter = QSplitter()
-    splitter.addWidget(view)
-    splitter.addWidget(panel)
-    splitter.resize(*DEFAULT_WINDOW_SIZE)
-    splitter.show()
+    window = QMainWindow()
+    _tabs, _banner, splitter = main.build_catalog_tab(window, view, panel)
+    window.resize(*DEFAULT_WINDOW_SIZE)
+    window.show()
     process_events()
     scroll = view.findChild(QScrollArea)
     assert isinstance(scroll, QScrollArea)
-    return splitter, scroll
+    return window, scroll, splitter
 
 
 def test_every_install_button_is_inside_the_default_window(qapp: object) -> None:
@@ -1685,7 +1869,7 @@ def test_every_install_button_is_inside_the_default_window(qapp: object) -> None
     """
     panel = LogPanel()
     view = CatalogView(CATALOG, lambda e: _FakeInstaller(e, []), panel, pick_dir=lambda *_: None)
-    window, scroll = _catalog_in_the_default_window(view, panel)
+    window, scroll, _splitter = _catalog_in_the_default_window(view, panel)
     assert window.isHidden() is False  # geometry is only meaningful once laid out
     viewport = scroll.viewport()
 
@@ -1959,3 +2143,75 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     deadline, and is named so this audit can tell it from one.
     """
     assert spelled_bounds(__file__) == {"JOB_PACE"}
+
+
+# ------------------------------------------------------- 8.9a: the tile back
+#
+# `_remember_installed()` is the way IN and there was no way OUT:
+# `_show_installed()` early-returns for a game not in `_installed_dirs`, so
+# nothing could un-grey a tile. An uninstall needs the inverse, and it is not
+# "clear the key" - `installed_dirs()` is one folder per GAME, so a machine with
+# two WotLK installs still has one after the first is purged.
+
+
+def _installed_view(tmp_path: Path, installed: dict[str, Path]) -> CatalogView:
+    return CatalogView(
+        CATALOG,
+        lambda e: _FakeInstaller(e, []),
+        LogPanel(),
+        pick_dir=lambda *_: None,
+        installed_games=installed,
+    )
+
+
+def test_a_purged_install_puts_its_tile_back_to_install(qapp: object, tmp_path: Path) -> None:
+    """The visible effect the box asks for: the tile reads Install again."""
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    view.forget_installed("wow-wotlk", {})
+    button = view.button_for("wow-wotlk")
+    assert button.text() == "Install"
+    assert button.isEnabled() is True
+    assert "Already installed" not in button.toolTip()
+
+
+def test_purging_one_of_two_installs_of_a_game_leaves_the_tile_installed(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Recomputed from the surviving installs, never cleared.
+
+    `installed_dirs()` is "one folder per game, last remembered wins", so a
+    machine with two WotLK installs still has one after the first is purged -
+    and its tab is still open. A tile flipped back to Install there would offer
+    a second install of a game that already has two.
+    """
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "first"})
+    view.forget_installed("wow-wotlk", {"wow-wotlk": tmp_path / "second"})
+    button = view.button_for("wow-wotlk")
+    assert button.text() == "Installed"
+    assert button.isEnabled() is False
+    assert str(tmp_path / "second") in button.toolTip()
+
+
+def test_forgetting_an_install_does_not_re_enable_a_platform_gated_tile(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tile the platform gate disabled is a standing fact about the TILE.
+
+    `_set_buttons_enabled()` already carries this rule for the job lock, and the
+    un-install path is a third way to reach the same button.
+    """
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    view._gated.add("wow-wotlk")
+    view.forget_installed("wow-wotlk", {})
+    assert view.button_for("wow-wotlk").isEnabled() is False
+
+
+def test_forgetting_a_game_that_was_never_installed_changes_nothing(
+    qapp: object, tmp_path: Path
+) -> None:
+    """A signal can arrive for a tab opened before the tile knew about it."""
+    view = _installed_view(tmp_path, {"wow-wotlk": tmp_path / "wotlk"})
+    view.forget_installed("wow-tbc", {"wow-wotlk": tmp_path / "wotlk"})
+    assert view.button_for("wow-wotlk").text() == "Installed"
+    assert view.button_for("wow-tbc").text() == "Install"

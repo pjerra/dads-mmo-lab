@@ -42,10 +42,39 @@ def test_a_name_typed_in_the_wrong_case_still_finds_the_character() -> None:
     every command is built with — the server is just as case-sensitive as its
     column.
     """
-    sql = _Reader("Guglu\n")
+    sql = _Reader("Guglu\t1\n")
 
-    assert play.canonical_character(sql, WOTLK, "guglu") == "Guglu"
+    assert play.canonical_character(sql, WOTLK, "guglu") == play.Stored("Guglu", True)
     assert "UPPER" in sql.asked[0][1], sql.asked[0][1]
+
+
+def test_the_name_lookup_brings_back_whether_that_character_is_logged_in() -> None:
+    """8.4d's review, finding 2: the destructive action needs a FRESH reading.
+
+    The `online` flag the view had was the character list's, read once and
+    stale from then on -- and on the tree it matters on, the bot manager logs
+    bots in and out on a timer with nobody touching anything. It comes back
+    with the name because the two belong to the same moment; asking twice would
+    be two answers about two different ones.
+
+    Both directions, and a third for the answer that has no such column at all:
+    a row that does not say is read as NOT logged in, which is the direction
+    that refuses a command rather than sends it.
+    """
+    assert play.canonical_character(_Reader("Guglu\t1\n"), WOTLK, "guglu").online is True
+    assert play.canonical_character(_Reader("Guglu\t0\n"), WOTLK, "guglu").online is False
+    assert play.canonical_character(_Reader("Guglu\n"), WOTLK, "guglu").online is False
+
+
+def test_the_name_lookup_asks_for_the_online_column_rather_than_deducing_it() -> None:
+    """The value has to arrive from the server for the guard above it to mean
+    anything -- a `Stored` built with `online=False` by default would satisfy
+    every refusal test in the suite and send nothing, ever."""
+    sql = _Reader("Guglu\t1\n")
+
+    play.canonical_character(sql, WOTLK, "guglu")
+
+    assert "online" in sql.asked[0][1], sql.asked[0][1]
 
 
 def test_a_name_that_is_not_there_answers_nothing_rather_than_itself() -> None:
@@ -176,7 +205,7 @@ def test_a_gear_set_on_this_tree_joins_the_item_instance_to_get_its_id() -> None
     because their inventory row carries `item_template` too. The shapes are not
     mirror images of each other, and `yulon.play.equipped` says which is which.)
     """
-    sql = _Reader("6948\n2589\n")
+    sql = _Reader("6948\t5\n2589\t5\n")
 
     worn = play.equipped(sql, WOTLK, "Guglu")
 
@@ -185,10 +214,13 @@ def test_a_gear_set_on_this_tree_joins_the_item_instance_to_get_its_id() -> None
     # The COLUMN THAT IS SELECTED has to come from the joined table, not from
     # the inventory row: `SELECT ci.itemEntry` mentions both `item_instance`
     # and `itemEntry` and is still wrong, and a mutation to exactly that
-    # survived the earlier version of this test.
+    # survived the earlier version of this test. The second selected column is
+    # the OWNER (8.4c) and is checked by its own test below; the item is first
+    # because that is what this function answers.
     selected = statement.split("SELECT ", 1)[1].split(" FROM", 1)[0].strip()
+    item_column = selected.split(",")[0].strip()
     joined_alias = statement.split(" ON ", 1)[0].rsplit(" ", 1)[-1].strip()
-    assert selected == f"{joined_alias}.itemEntry", f"{selected!r} from {statement!r}"
+    assert item_column == f"{joined_alias}.itemEntry", f"{selected!r} from {statement!r}"
     assert "item_instance" in statement, statement
 
 
@@ -227,21 +259,107 @@ def test_the_gear_set_query_follows_the_catalog_and_not_an_if_in_this_module() -
 
 
 def test_a_tree_that_has_not_measured_its_gear_refuses_rather_than_guesses() -> None:
-    """Tortoise has no Play block yet — 8.4d is the box that measures it.
-
-    Guessing a shape is not free: `template_column` is a column name that goes
-    into a statement unread, and the wrong one either errors or answers the
+    """Guessing a shape is not free: `template_column` is a column name that
+    goes into a statement unread, and the wrong one either errors or answers the
     wrong number (see `play.equipped`'s own note). So the read refuses and names
     the game rather than defaulting to whichever sibling was measured last.
 
-    This stood on Vanilla until 8.4c measured it. The guard moved rather than
-    went.
+    This stood on Vanilla until 8.4c measured it and on Tortoise until 8.4d did.
+    With every shipped tree measured the entry is SYNTHESISED -- a real entry
+    with its block taken away -- rather than the assertion being deleted, and
+    the second half asserts against the shipped catalog that no real tree is
+    left to stand here, so a fifth game arriving without its 8.4 box fails this
+    rather than quietly inheriting a stand-in.
     """
     import pytest
 
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = load_catalog().get("wow-wotlk").model_copy(update={"play": None})
 
     with pytest.raises(play.NotMeasured) as refused:
-        play.equipped(_Reader(""), tortoise, "Guglu")
+        play.equipped(_Reader(""), unmeasured, "Guglu")
 
-    assert "WoW Tortoise" in str(refused.value)
+    assert unmeasured.name in str(refused.value)
+    assert [entry.id for entry in load_catalog().games if entry.play is None] == []
+
+
+def test_the_tortoise_gear_read_is_the_flat_one_this_fork_ships() -> None:
+    """8.4d, read from this fork's own shipped SQL rather than from its sibling.
+
+    `src/tortoise-wow/sql/create_databases.sql:573-581` declares
+    `character_inventory(guid, bag, slot, item, item_template)` -- the template
+    id is a column of the inventory row -- and its own writer confirms the
+    encoding the predicate assumes: `Player.cpp:18856-18869` inserts
+    `bag` = the container's guid or 0, `slot` = `item->GetSlot()`,
+    `item_template` = `item->GetEntry()`. The joined shape would answer the same
+    ids by a longer road and could only lose a piece whose `item_instance` row
+    is missing, so the flat one is the shape and the join is not asked for.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    sql = _Reader("")
+
+    play.equipped(sql, tortoise, "Guglu")
+
+    statement = sql.asked[0][1]
+    assert "item_instance" not in statement, statement
+    assert "ci.item_template" in statement, statement
+
+
+# -- two characters, one name -----------------------------------------------
+
+
+def test_two_characters_with_one_name_are_named_rather_than_guessed_between() -> None:
+    """Measured on the live Vanilla server, 2026-09-07 (8.4c): that server holds
+    two characters called Joleta and two called Dalnaal, because
+    `characters.name` is a NON-unique index there and the bot generator
+    collided.
+
+    The read used to key the inventory off a scalar subquery on that column, so
+    it did not answer the wrong set — MySQL refused the statement outright with
+    "Subquery returns more than 1 row", and the tab turned that into "Joleta is
+    wearing nothing" with the button greyed out, for a character wearing a full
+    set. Now the owner comes back beside the item and the refusal is this app's
+    own, in words a person can act on.
+    """
+    import pytest
+
+    vanilla = load_catalog().get("wow-vanilla")
+    sql = _Reader("4334\t186\n2656\t186\n2690\t804\n")
+
+    with pytest.raises(play.Ambiguous) as refused:
+        play.equipped(sql, vanilla, "Joleta")
+
+    said = str(refused.value)
+    assert "186" in said and "804" in said, said
+    assert "Joleta" in said, said
+
+
+def test_the_equipped_read_asks_who_owns_each_row_rather_than_a_scalar_subquery() -> None:
+    """The shape that makes the ambiguity visible instead of fatal.
+
+    A subquery in the WHERE cannot report two owners: the engine refuses the
+    statement before this app sees anything. Joining the owner in and selecting
+    its guid costs the same round trip and hands the answer back.
+    """
+    for entry in (WOTLK, load_catalog().get("wow-vanilla")):
+        sql = _Reader("")
+
+        play.equipped(sql, entry, "Guglu")
+
+        statement = sql.asked[0][1]
+        assert "(SELECT" not in statement.upper(), statement
+        assert ".characters ch ON ch.guid = ci.guid" in statement, statement
+        selected = statement.split("SELECT ", 1)[1].split(" FROM", 1)[0]
+        assert selected.split(",")[1].strip() == "ch.guid", statement
+
+
+def test_one_character_with_gear_is_not_mistaken_for_two() -> None:
+    """The other direction of the same guard: every row of one owner is one set.
+
+    Without this a fix that raised on any repeated guid — the normal case, since
+    a wearer has nineteen rows — would refuse every character on the server and
+    still pass the test above.
+    """
+    vanilla = load_catalog().get("wow-vanilla")
+    sql = _Reader("4334\t186\n2656\t186\n2690\t186\n")
+
+    assert play.equipped(sql, vanilla, "Joleta") == (4334, 2656, 2690)

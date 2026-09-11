@@ -191,12 +191,7 @@ def test_stream_does_not_deadlock_on_large_stderr_payload() -> None:
     """
     # 200,000 short stderr lines is comfortably larger than any common pipe
     # buffer size, on every platform this runs on.
-    script = (
-        "import sys\n"
-        "for i in range(200_000):\n"
-        "    print(i, file=sys.stderr)\n"
-        "print('done')\n"
-    )
+    script = "import sys\nfor i in range(200_000):\n    print(i, file=sys.stderr)\nprint('done')\n"
     start = time.monotonic()
     lines = list(stream(_python_cmd(script)))
     elapsed = time.monotonic() - start
@@ -214,7 +209,7 @@ def test_stream_terminates_child_on_early_generator_abandonment() -> None:
     process running indefinitely, and must not hang waiting for it.
     """
     # A child that would run "forever" if not terminated by stream()'s cleanup.
-    script = "import sys, time\n" "print('started')\n" "sys.stdout.flush()\n" "time.sleep(60)\n"
+    script = "import sys, time\nprint('started')\nsys.stdout.flush()\ntime.sleep(60)\n"
     gen = stream(_python_cmd(script))
     first_line = next(gen)
     assert first_line == "started"
@@ -351,6 +346,183 @@ def test_the_exit_hook_ends_the_child_of_a_stream_another_thread_is_inside() -> 
         except OSError:
             pass
         worker.join(timeout=HANG_BOUND)
+
+
+class _BlockedStream:
+    """A `stream()` a worker thread is blocked inside, and the pid of its quiet child.
+
+    Every test below needs the same three steps before it can ask its own
+    question — start the generator, get a line out of it on a worker thread, and
+    establish that the worker is now INSIDE the frame rather than about to be —
+    and the third is the one that matters: a test that pressed its button before
+    the worker reached `readline()` would pass by ending a child nobody was
+    waiting on, which is not the shape any of this exists for.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.generator = stream(_python_cmd(_PID_THEN_SLEEP))
+        self.lines: queue.Queue[str] = queue.Queue()
+        self.outcome: list[BaseException] = []
+
+        def work() -> None:
+            try:
+                for line in self.generator:
+                    self.lines.put(line)
+            except BaseException as exc:  # noqa: BLE001 - the shape under test
+                self.outcome.append(exc)
+
+        self.worker = threading.Thread(target=work, daemon=True, name=name)
+        self.worker.start()
+        self.pid = int(self.lines.get(timeout=HANG_BOUND))
+        deadline = time.monotonic() + HANG_BOUND
+        while not self.generator.gi_running and time.monotonic() < deadline:
+            time.sleep(POLL_PACE)
+        assert self.generator.gi_running, "the worker should be blocked inside the generator by now"
+
+    def close(self) -> None:
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        self.worker.join(timeout=HANG_BOUND)
+
+
+def test_end_streams_started_on_ends_the_child_a_worker_thread_is_blocked_reading() -> None:
+    """The Stop button's reach: end the child of every live stream STARTED on one thread.
+
+    This is the source half of the log-panel Stop defect (7.10, measured on
+    `yulon-ubuntu2` 2026-09-08). A `LogPanel` worker sits in
+    `for line in proc.stdout` inside a `stream()` generator; the panel's own
+    `_stop` flag is only read between lines, so a source that has gone quiet is
+    never asked again. `pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/` recorded 120
+    seconds of `running=True cancelled=True worker._stop=True lines=210` after
+    the click, and then `panel.wait(10000) -> False`.
+
+    Nothing but the child ending releases that thread, so "the worker left the
+    generator" is "the child was ended" on every platform, with no liveness
+    probe that means something different on Windows — the observable
+    `test_the_exit_hook_ends_the_child_of_a_stream_another_thread_is_inside`
+    already chose for the same reason.
+
+    Mutation this catches: dropping the `_end_child` call (the worker stays
+    inside the generator and `worker.is_alive()` is still True at
+    `HANG_BOUND`), and never recording `_Child.started_on` (nothing matches the
+    ident, the count is 0, and the assertion below names the count).
+    """
+    blocked = _BlockedStream("test-end-streams-worker")
+    try:
+        assert runner.end_streams_started_on(blocked.worker.ident) == 1
+        blocked.worker.join(timeout=HANG_BOUND)
+        assert not blocked.worker.is_alive(), "still inside the generator: the child was not ended"
+        assert blocked.generator.gi_frame is None, "the generator's finally never ran"
+        # STILL A FAILURE, deliberately. A child we terminated exits non-zero
+        # (143 on the live box, in that gate's own last line), and `stream()`
+        # goes on raising it: `docker.run_attached()` reads a raised status as a
+        # failed build and a swallowed one as `AttachedRun(0, ...)`, so a
+        # `return` here would report a killed compile as a build that worked.
+        # Whose stop it was is the PANEL's to know -- see `LogPanel.stop()`.
+        assert isinstance(blocked.outcome[0], subprocess.CalledProcessError), blocked.outcome
+    finally:
+        blocked.close()
+
+
+def test_end_streams_started_on_returns_before_the_reap_it_asked_for_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It is called from the GUI thread, so it must not wait for a child to die.
+
+    `origin/rust-main:crates/dml-core/src/proc.rs`'s `abandon()` records this
+    exact trap (`pyplan/rust-prior-art.md` does not mention that file, so it was
+    read on the branch): "`kill()` can fail, and the `wait()` that followed it
+    was then INFINITE against a process whose whole problem is that it outlives
+    the deadline. Measured 2026-08-03: a 600ms-bounded call returned after 605
+    SECONDS." `_end_child()` ends with an unbounded `proc.wait()` after its
+    `kill()`, so calling it inline on the thread that painted the Stop button
+    would freeze the window for as long as the child took to go — which on the
+    one machine that measured it was ten minutes.
+
+    Asserted through a blocking stand-in rather than a stopwatch, because the
+    production hang needs `kill()` to fail and a test cannot force that (the
+    same reasoning `proc.rs` gives for its `Abandonable` trait).
+
+    Mutation this catches: ending the children inline (`_end_child(child.proc)`
+    in the loop). `entered` is then set from this thread, `release` is never
+    set, and the test hangs at `HANG_BOUND` inside the call instead of reaching
+    the assertion below it.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    real_end_child = runner._end_child
+
+    def blocking_end_child(proc: subprocess.Popen[str]) -> None:
+        entered.set()
+        release.wait(HANG_BOUND)
+        real_end_child(proc)
+
+    monkeypatch.setattr(runner, "_end_child", blocking_end_child)
+    blocked = _BlockedStream("test-end-streams-nonblocking")
+    try:
+        assert runner.end_streams_started_on(blocked.worker.ident) == 1
+        assert entered.wait(HANG_BOUND), "the reap was never started"
+        assert not release.is_set(), (
+            "this thread only reaches here while the reap is still blocked; if the ending "
+            "happened inline it would have waited for it"
+        )
+    finally:
+        release.set()
+        blocked.close()
+
+
+def test_end_streams_started_on_leaves_a_stream_another_thread_started_alone() -> None:
+    """A panel's Stop ends ITS job's children and nobody else's.
+
+    Two things run streams in this app that must not be reachable from one
+    panel's Stop: the other panels (an install in the Catalog window while the
+    Console tab follows a log), and `docker.repair_import()`, which "cannot be
+    cancelled, deliberately... the only way to abandon a running `compose up` is
+    to terminate it -- which stops `ac-db-import` part-way through writing
+    schemas" (`docker.py`). Both are streams on some other thread, and the
+    filter is the whole of what keeps them out of reach.
+
+    Mutation this catches: an ident filter that is not one (`if True`, or
+    comparing against `threading.get_ident()` -- the CALLER's thread, which is
+    the GUI thread and matches nothing, so the working case would break too).
+    """
+    blocked = _BlockedStream("test-end-streams-other-thread")
+    try:
+        # This thread's own ident: real, never equal to the worker's, and not a
+        # number invented for the test.
+        assert runner.end_streams_started_on(threading.get_ident()) == 0
+        blocked.worker.join(POLL_PACE)
+        assert blocked.worker.is_alive(), "another thread's stream was ended"
+        assert not blocked.outcome, blocked.outcome
+    finally:
+        blocked.close()
+
+
+def test_a_finished_stream_on_this_thread_is_not_counted_as_something_to_end() -> None:
+    """A THREAD IDENT IS REUSED, and the count has to survive that.
+
+    Found by the checks gate on `yulon-fedora` 2026-09-09, where the whole file
+    runs in one process: the test above read `assert 2 == 1`. The registry outlives
+    the threads in it -- an entry stays while its generator does -- so an earlier
+    test's finished stream was still registered, the OS had handed its dead
+    thread's ident to the new worker, and `started_on == ident` was true of both.
+
+    Reproduced here without needing the recycling: this stream ran to completion
+    ON THIS THREAD, so its entry is attributed to the caller's own ident, which is
+    exactly the shape the gate produced. Asking the child settles it.
+
+    Mutation this catches: filtering on `child.proc is not None` (the count is 1,
+    and the panel's Stop is reported as having ended a job that had already ended).
+    """
+    finished = stream(_python_cmd("print('done')"))
+    assert list(finished) == ["done"]
+    child = runner._LIVE_STREAMS[finished]
+    assert child.started_on == threading.get_ident(), "this stream ran here"
+    assert child.proc is not None and child.proc.poll() is not None, "its child has exited"
+
+    assert runner.end_streams_started_on(threading.get_ident()) == 0
 
 
 # The same abandonment as `_ABANDON_AND_EXIT`, in the app's shape: the frame is

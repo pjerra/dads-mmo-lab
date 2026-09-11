@@ -316,6 +316,44 @@ class HistoryReader(Protocol):
     def no_local_commits(self, dest: Path, branch: str | None) -> bool | None: ...
 
 
+@runtime_checkable
+class BehindReader(Protocol):
+    """ "How many commits would an update bring in?" — the fourth read-only question.
+
+    The same `git rev-list --count` as `HistoryReader`, with the range the other
+    way round, and the two are not interchangeable. `no_local_commits()` counts
+    `FETCH_HEAD..HEAD` and its answer is a GUARD's input, so it fails closed:
+    "could not ask" refuses. This one counts `HEAD..FETCH_HEAD` and its answer
+    is a NUMBER a user reads, so "could not ask" has to stay distinguishable
+    from "nothing to bring in" — `None` and `0` are different sentences on
+    screen, and collapsing them is the same defect this file has already
+    recorded twice (`native.read_claim()`, `read_clone_claim()`).
+
+    A fourth one-method Protocol rather than a method on `HistoryReader`, for
+    the reason `HistoryReader` is not a method on `TreeReader`: a fake satisfies
+    a Protocol by having the methods, so widening an existing one silently stops
+    every existing fake from narrowing and sends the question to the host CLI
+    instead.
+    """
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None: ...
+
+
+def _parse_count(raw: str) -> int | None:
+    """`git rev-list --count`'s stdout as a number, or `None` if it is not one.
+
+    Never a guess and never a zero. The figure this parses is shown to a user
+    beside the words "commits behind", and 8.7a's definition of done is that it
+    equals the same range run by hand — so a git that answered something
+    unexpected has to come back as "could not ask", not as "up to date".
+    """
+    try:
+        return int(raw.strip())
+    except ValueError:
+        logger.debug(f"git rev-list --count did not answer with a number: {raw!r}")
+        return None
+
+
 def _fetch_ref(branch: str | None) -> str:
     """What both update paths name on the `git fetch` command line.
 
@@ -521,6 +559,48 @@ class RunnerGit:
             logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
         return proc.stdout.strip() == "0"
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        """How many commits an update would bring into `dest`. None = cannot ask.
+
+        `no_local_commits()`'s fetch and `no_local_commits()`'s target, with the
+        rev-list range reversed — see `BehindReader` for why that reversal is
+        the whole difference, and `no_local_commits()` for why the target is
+        `FETCH_HEAD` after this method's own fetch rather than
+        `refs/remotes/origin/<branch>`, which a branchless `fetch origin HEAD`
+        never refreshes.
+
+        The prior art counted `HEAD..origin/{branch}`
+        (`crates/dml-wow/src/maint.rs:443`, read 2026-09-08) and that was right
+        THERE: it fetched with `git fetch --quiet origin` and no refspec, which
+        does update the remote-tracking refs. This app's fetch names a ref, so
+        the same spelling would read a ref nothing had written since clone time
+        — the measured 2026-09-01 defect in `no_local_commits()`. Same figure,
+        different tree, and it had to be asked rather than inherited.
+
+        Read-only in the sense that matters: nothing outside `.git` is touched
+        and no working tree is changed. It does cost a network round trip, so it
+        belongs behind a control the user pressed and not on a timer.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _fetch_ref(branch)
+        try:
+            _run_git(
+                ["git", *_LINE_ENDING_ARGS, *_HTTP_VERSION_ARGS, "fetch", "origin", ref],
+                cwd=dest,
+            )
+        except GitError as exc:
+            logger.debug(
+                f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
+            )
+            return None
+        try:
+            proc = _run_git(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=dest)
+        except GitError as exc:
+            logger.debug(f"could not ask git how far behind {dest} is: {exc}")
+            return None
+        return _parse_count(proc.stdout)
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():
@@ -822,6 +902,37 @@ class ContainerGit:
             logger.debug(f"could not ask git what {dest} has that the update would not: {exc}")
             return None
         return proc.stdout.strip() == "0"
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        """How many commits an update would bring into `dest`. None = cannot ask.
+
+        `RunnerGit.commits_behind()` carries the reasoning; both implementations
+        must answer identically, because a caller narrowing to `BehindReader`
+        never learns which one it got and the figure is compared against `git
+        rev-list` run by hand.
+
+        The split of containers is `no_local_commits()`'s and for its measured
+        reason: the fetch is `writes=True` because `_READ_ONLY_CONTAINER_ARGS`
+        begins `--network none` and a reader container cannot reach a remote at
+        all, and the count that follows stays `writes=False` because it answers
+        from the objects that fetch just landed.
+        """
+        if not (dest / ".git").is_dir():
+            return None
+        ref = _fetch_ref(branch)
+        try:
+            self._capture(dest, ["fetch", "origin", ref], writes=True)
+        except GitError as exc:
+            logger.debug(
+                f"could not fetch origin {ref} in {dest} to count what it is behind: {exc}"
+            )
+            return None
+        try:
+            proc = self._capture(dest, ["rev-list", "--count", "HEAD..FETCH_HEAD"], writes=False)
+        except GitError as exc:
+            logger.debug(f"could not ask git how far behind {dest} is: {exc}")
+            return None
+        return _parse_count(proc.stdout)
 
     def clone(self, spec: CloneSpec) -> None:
         if (spec.dest / ".git").is_dir():

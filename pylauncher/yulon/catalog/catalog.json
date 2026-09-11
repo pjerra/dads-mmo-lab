@@ -98,7 +98,9 @@
           "inventory_column": "item"
         },
         "teleport_command": "teleport name",
-        "mail_item_cap": 12
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": {
@@ -492,7 +494,9 @@
       "play": {
         "equipped": { "template_column": "item_template" },
         "teleport_command": "tele name",
-        "mail_item_cap": 12
+        "mail_item_cap": 12,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
@@ -541,7 +545,8 @@
         "notes": [
           "A Vanilla client is the wrong version — the installer checks for this."
         ]
-      }
+      },
+      "has_manifests": true
     },
     {
       "id": "wow-vanilla",
@@ -887,7 +892,10 @@
       "play": {
         "equipped": { "template_column": "item_template" },
         "teleport_command": "tele name",
-        "mail_item_cap": 1
+        "mail_item_cap": 1,
+        "revive_offline": true,
+        "rename_command": "character rename",
+        "set_level_command": "character level"
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
@@ -933,13 +941,14 @@
         "notes": [
           "Community repacks (realmlist.wtf at top level, no locale folder) are detected and warned about."
         ]
-      }
+      },
+      "has_manifests": true
     },
     {
       "id": "wow-tortoise",
       "name": "WoW Tortoise",
       "status": "beta",
-      "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress and unverified with a real client.",
+      "description": "Tortoise (the Turtle-WoW solo fork on MaNGOS Zero) with the cmangos playerbots AI, source-compiled in Docker. This is the tree the Turtle WoW V2 servers are built from. Installer is work-in-progress; it has been driven with a real 1.18.1 client on the test box (8.3d, 8.5d), and the running build still lacks the command channel and the account-password fix that upstream has since shipped.",
       "emulator": {
         "name": "Shyalya/tortoise-wow (Turtle-WoW V2 + cmangos playerbots)",
         "sources": [
@@ -947,7 +956,7 @@
             "repo": "Shyalya/tortoise-wow",
             "branch": "playerbots-integration-gh",
             "dest": "src/tortoise-wow",
-            "rev": "7c0fb278f3f8966422f219e6f5035cb09b76ada7"
+            "rev": "3a8472e68e4aca5d2675feb9241e924f1c31899c"
           },
           {
             "repo": "ElunaLuaEngine/Eluna",
@@ -1148,6 +1157,23 @@
                   "on_error": "warn"
                 },
                 {
+                  "name": "character updates",
+                  "into": "tw_char",
+                  "files": [
+                    "src/tortoise-wow/sql/character_updates/*.sql"
+                  ],
+                  "sort": "name",
+                  "on_error": "fail",
+                  "rerun_on_marked": true,
+                  "notes": [
+                    "sql/character_updates/ is the fork's own directory and NOTHING on this tree applies it. Database.AutoUpdate.Path points the core's updater at sql/database_updates/, whose only children are character/ and world/; the fork's sql/setup_databases.sh imports create_databases.sql and then database_updates/*.sql, and that top level holds no .sql at all. Both read on m910q, 2026-09-09.",
+                    "Measured twice. yulon-arch 2026-09-08: a FRESH install crash-looped on character migration 20260903211500 until these were applied into tw_char by hand (pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/README.md). m910q 2026-09-09 01:09Z: an ESTABLISHED install of 903 characters entered a restart loop on TRUNCATE character_inventory_copy the first morning honor maintenance fell due, saved_variables.nextHonorMaintenanceDay 20705 being that day (pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md, finding 1). So every install that has never had these is one honor-maintenance day from being unstartable, and the day is weekly.",
+                    "After `playerbots characters` and not merely after `schemas`: 20260708055500 indexes ai_playerbot_random_bots, which create_databases.sql does not create and the playerbots module's characters SQL does. The other two need guild_bank_money and character_inventory, both CREATE TABLEs inside create_databases.sql.",
+                    "Re-runnable on an install that already has them, read from the three files on 2026-09-09: ADD INDEX IF NOT EXISTS, MODIFY money INT(10) UNSIGNED (an absolute column type, so a second run is a no-op), CREATE TABLE IF NOT EXISTS ... LIKE. on_error is `fail` because a missing directory here is a fork sync that moved it, and a silent skip is the defect this phase exists to end. rerun_on_marked is set on the strength of that reading and of nothing else (T11): it makes this the one phase the import applies to an install already marked imported, which is the only route the m910q's 903-character install has to the file it died without.",
+                    "The load-bearing order is this phase before the first world start: the core updater's own sql/database_updates/character/20260903211500 DROPs idx_owner_bot_event, the index that only 20260708055500 here adds, which is why a fresh install crash-looped on it (reviewer, 2026-09-09)."
+                  ]
+                },
+                {
                   "name": "realm row",
                   "into": "tw_logon",
                   "statements": [
@@ -1217,6 +1243,16 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 1,
+        "revive_offline": true,
+        "rename_command": "rename",
+        "rename_offline_refusal": "has to be logged in before a rename can be flagged on this server -- the same command run on an offline character here replaces the name with the character's guid instead, so it is not sent",
+        "set_level_command": null,
+        "set_level_absent_reason": "No set-level control on this server. Nothing its console can run moves an existing character to a level you pick: `.levelup` is the one that would, and the console is not allowed to run it, while `.rndbot level <bot>` ignores the number it is handed and re-rolls that bot at the level it already has. What the console can do is `.reset level`, which puts a character who is logged in back to the configured starting level, and `.rndbot create level=<n>`, which makes a NEW character at the level you name rather than moving one that is already there."
+      },
       "accounts": {
         "level": { "level_column": "rank", "max_level": 4 },
         "scheme": "mangos_sha"
@@ -1226,7 +1262,20 @@
         "prompt_precedes_answer": false
       },
       "operations": {
-        "channel": "attach"
+        "channel": "soap",
+        "namespace": "urn:MaNGOS",
+        "port": 7878,
+        "gm_level": 4,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878"
+          }
+        },
+        "publish": true,
+        "must_not_listen": []
       },
       "observability": {
         "characters": {
@@ -1247,7 +1296,8 @@
         "notes": [
           "Only the custom Turtle-WoW 1.18.1 client (build 7272) works; any other build will not connect."
         ]
-      }
+      },
+      "has_manifests": true
     }
   ]
 }

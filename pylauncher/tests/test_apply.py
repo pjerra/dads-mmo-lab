@@ -10,6 +10,8 @@ every step that could not run appears in `ApplyReport.skipped`.
 
 from __future__ import annotations
 
+import ast
+import json
 from pathlib import Path
 from typing import Any
 
@@ -180,7 +182,130 @@ def test_module_install_touches_include_sh_activates_conf_and_writes_keys(tmp_pa
     assert "AuctionHouseBot.EnableSeller = 1\n" in conf
     assert conf.endswith("AuctionHouseBot.NewKey = 7\n")  # absent key is appended
     assert report.rebuild_required is True
-    assert any("ac-db-import" in step for step in report.done)  # db-import SQL is NOT run here
+    # db-import SQL is NOT run here. Until 2026-09-07 that fact was in `done`.
+    assert not any("sql" in step for step in report.done)
+    assert [p.db for p in report.pending_sql] == ["world"]
+
+
+def _ahbot_git(*sql_files: str) -> _FakeGit:
+    files = {"conf/mod_ahbot.conf.dist": "AuctionHouseBot.GUID = 0\n"}
+    files.update({name: f"-- {name}" for name in sql_files})
+    return _FakeGit(files)
+
+
+def test_db_import_sql_is_pending_with_the_files_it_really_found(tmp_path: Path) -> None:
+    """8.7a: a step nothing ran must not be in `done`, and the count must be real.
+
+    Measured on yulon-ubuntu 2026-09-07: `apply.py` appended
+    `sql data/sql/db-world/*.sql -> world: left to ac-db-import on next start`
+    to `done` having run nothing and looked at nothing — not even whether the
+    glob matched a file — and the Modules tab ticks every `done` entry. So the
+    two things this asserts are the two things that were missing: the step is
+    not claimed, and the glob was actually resolved against the clone.
+    """
+    git = _ahbot_git("data/sql/db-world/b.sql", "data/sql/db-world/a.sql")
+    applier = Applier(tmp_path, git=git, sql=_FakeSql())
+
+    report = applier.install(parse_manifest(MODULE), {"bot_guid": "42"})
+
+    assert not any("sql" in step for step in report.done)
+    assert report.skipped == ()
+    assert len(report.pending_sql) == 1
+    pending = report.pending_sql[0]
+    assert pending.db == "world"
+    assert pending.path == "data/sql/db-world/*.sql"
+    assert pending.files == ("data/sql/db-world/a.sql", "data/sql/db-world/b.sql")
+
+
+def test_a_caller_tells_applied_from_not_applied_without_reading_a_sentence(
+    tmp_path: Path,
+) -> None:
+    """The whole point of the field: `pending_sql` empty means nothing is owed.
+
+    A caller that decided by grepping "left to ac-db-import" out of `done` would
+    be the same defect one layer up — the report's own English is not an API.
+    """
+    ale_git = _FakeGit({"SitMeansRest.lua": "x\n", "sql/tables.sql": "C"})
+    direct = Applier(tmp_path / "ale", git=ale_git, sql=_FakeSql()).install(parse_manifest(ALE))
+    assert direct.pending_sql == ()
+
+    deferred = Applier(
+        tmp_path / "mod", git=_ahbot_git("data/sql/db-world/a.sql"), sql=_FakeSql()
+    ).install(parse_manifest(MODULE), {"bot_guid": "42"})
+    assert deferred.pending_sql != ()
+
+
+def test_a_db_import_glob_matching_nothing_reports_none_rather_than_a_guess(
+    tmp_path: Path,
+) -> None:
+    """An empty match is a fact worth having: the clone brought no SQL at all.
+
+    `_run_sql` raises for a direct step whose file is missing, but a db-import
+    step must not — upstream's own updater joins the module's `data/sql` path
+    and skips what is not there (`UpdateFetcher.cpp:159-186`), so a module with
+    no SQL is normal, not broken. It is still not "one file was applied".
+    """
+    report = Applier(tmp_path, git=_ahbot_git(), sql=_FakeSql()).install(
+        parse_manifest(MODULE), {"bot_guid": "42"}
+    )
+    assert report.pending_sql[0].files == ()
+
+
+def test_a_conf_key_the_catalog_names_with_no_value_is_reported_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """8.7a's first defect, measured on `yulon-ubuntu` 2026-09-08 and fixed here.
+
+    `mod-npc-beastmaster.json` names `Creatures.CustomIDs` on
+    `env/dist/etc/worldserver.conf` with a note and no `default`. The install
+    reported `activate … mod_npc_beastmaster.conf` and **nothing at all** about
+    `worldserver.conf` — not in `done`, not in `skipped` — and the file was
+    byte-identical before and after. So the one core-side configuration change
+    that module needs was documented in the catalog, never made, and never
+    mentioned. Same shape as the SQL clause above: a step nobody takes has to be
+    visible, and a key with no value is not a value.
+    """
+    manifest = dict(MODULE)
+    manifest["conf"] = [
+        *MODULE["conf"],
+        {
+            "file": "env/dist/etc/worldserver.conf",
+            "keys": [{"key": "Creatures.CustomIDs", "note": "add 601026"}],
+        },
+    ]
+    core = tmp_path / "env/dist/etc/worldserver.conf"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    core.write_bytes(b'Creatures.CustomIDs = "190010"\n')
+
+    report = Applier(tmp_path, git=_ahbot_git(), sql=_FakeSql()).install(
+        parse_manifest(manifest), {"bot_guid": "42"}
+    )
+
+    assert (
+        "conf env/dist/etc/worldserver.conf: no value in the catalog for "
+        "Creatures.CustomIDs — not written" in report.skipped
+    )
+    # And nothing was claimed either: the file is byte-identical.
+    assert core.read_bytes() == b'Creatures.CustomIDs = "190010"\n'
+    assert not any("worldserver.conf" in step for step in report.done)
+
+
+def test_a_templated_db_import_path_answers_unknown_not_zero(tmp_path: Path) -> None:
+    """`{key}` in a db-import path is a count this run cannot take, not a zero.
+
+    No shipped manifest has one, and `_action_templates` deliberately leaves
+    db-import paths out of `required_prompts` — so a value for the key was never
+    asked for and rendering it here would raise on a step that is not being run.
+    Globbing the raw `{key}` instead would match nothing and report a confident
+    "no files", which is the lie this box exists to remove. `None` is the third
+    answer, the same one `importer_sees_modules()` keeps for "cannot tell".
+    """
+    step = {"db": "world", "path": "data/sql/{flavour}/*.sql", "applied_by": "db-import"}
+    data = {**MODULE, "sql": [step]}
+    report = Applier(tmp_path, git=_ahbot_git("data/sql/db-world/a.sql"), sql=_FakeSql()).install(
+        parse_manifest(data), {"bot_guid": "42"}
+    )
+    assert report.pending_sql[0].files is None
 
 
 def test_missing_template_value_is_an_error_not_garbage(tmp_path: Path) -> None:
@@ -1768,3 +1893,1796 @@ def test_the_relocation_licence_needs_a_clone_id_that_is_a_string(
 
     assert (clone / "src" / "mine.cpp").read_bytes() == before
     assert sql.statements == [] and sql.files == []
+
+
+# ------------------------------------------------- the two AH bot modules
+#
+# FACT 3 of the 2026-09-07 night's measurements: `mod-ah-bot` and
+# `mod-ah-bot-plus` are the only 2 of the 41 shipped manifests carrying a prompt
+# with no default, and the Modules tab called the applier with no values at all,
+# so the only thing either of them could produce was
+# `conf AuctionHouseBot.GUIDs: no value for {bot_guid}` — AFTER the clone.
+
+
+class _FakeReader(_FakeSql):
+    """A `SqlRunner` that can also be read, like the real `DockerSql` can.
+
+    `rows` is what `query()` hands back; `""` is the answer a SELECT gives for
+    "no such row", which is the case the whole existence check exists for. A
+    reader whose `fail` is set raises instead, which is a DIFFERENT answer and
+    must not be confused with the empty one: a database that is stopped has not
+    said the character is missing.
+    """
+
+    def __init__(self, rows: str = "", fail: str = "") -> None:
+        super().__init__()
+        self.rows = rows
+        self.fail = fail
+        self.queries: list[tuple[str, str]] = []
+
+    def query(self, db: str, statement: str) -> str:
+        self.queries.append((db, statement))
+        if self.fail:
+            raise RuntimeError(self.fail)
+        return self.rows
+
+
+def _shipped(item_id: str) -> Any:
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    return wotlk_modules.store().load("module", item_id)
+
+
+AHBOT_DIST = (
+    "[worldserver]\nAuctionHouseBot.Account = 0\nAuctionHouseBot.GUID = 0\n"
+    "AuctionHouseBot.GUIDs = 0\nAuctionHouseBot.EnableSeller = 0\n"
+)
+
+
+def test_the_ah_bot_install_refuses_an_unanswered_prompt_before_it_clones(tmp_path: Path) -> None:
+    """The headline: no answer installs NOTHING, not a half-installed module."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+
+    with pytest.raises(ApplyError) as refusal:
+        applier.install(_shipped("mod-ah-bot"))
+
+    assert "GUID of the AH bot character" in str(refusal.value)
+    assert git.calls == [], "it cloned before it checked the answer it was given"
+    assert not (tmp_path / "modules" / "mod-ah-bot").exists()
+
+
+def test_an_answer_that_is_not_a_number_is_refused_before_the_clone(tmp_path: Path) -> None:
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows="Ahbot\n"))
+
+    for bad, said in (
+        ("", "cannot be left empty"),
+        ("  ", "cannot be left empty"),
+        ("four", "whole number"),
+        ("42x", "whole number"),
+        ("1.5", "whole number"),
+    ):
+        with pytest.raises(ApplyError) as refusal:
+            applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": bad})
+        assert said in str(refusal.value), (bad, str(refusal.value))
+        assert "GUID of the AH bot character" in str(refusal.value), bad
+    assert git.calls == []
+    assert not (tmp_path / "modules").exists(), "a refused install left a folder behind"
+
+
+def test_installing_the_ah_bot_with_a_real_guid_writes_that_number(tmp_path: Path) -> None:
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="Ahbot\n")
+    report = Applier(tmp_path, git=git, sql=reader).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}
+    )
+
+    conf = (tmp_path / "env/dist/etc/modules/mod_ahbot.conf").read_text(encoding="utf-8")
+    assert "AuctionHouseBot.GUID = 42\n" in conf
+    assert "AuctionHouseBot.Account = 7\n" in conf
+    assert report.rebuild_required is True
+    assert [db for db, _ in reader.queries] == ["characters", "characters"]
+    assert "42" in reader.queries[0][1]
+
+
+def test_a_guid_that_names_no_character_is_refused_by_name(tmp_path: Path) -> None:
+    """The silent no-op FACT 5 of the module's own behaviour: it just does nothing."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    applier = Applier(tmp_path, git=git, sql=_FakeReader(rows=""))
+
+    with pytest.raises(ApplyError) as refusal:
+        applier.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "999"})
+
+    assert "999" in str(refusal.value)
+    assert "character" in str(refusal.value)
+    assert git.calls == []
+
+
+def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Path) -> None:
+    """ "I could not check" is said out loud, never spelled like "I checked"."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    report = Applier(tmp_path, git=git, sql=_FakeSql()).install(
+        _shipped("mod-ah-bot-plus"), {"bot_guid": "42"}
+    )
+    assert any(
+        "not checked" in s.lower() and "bot_guid" in s for s in report.skipped
+    ), report.skipped
+
+    # A reader that RAISED is the same answer, not "the character is missing":
+    # a stopped database must not make a module uninstallable.
+    stopped = _FakeReader(fail="Error response from daemon: container not running")
+    second = Applier(tmp_path, git=_FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST}), sql=stopped)
+    report2 = second.install(_shipped("mod-ah-bot-plus"), {"bot_guid": "42"})
+    assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
+
+
+def test_required_prompts_are_only_the_ones_the_action_actually_renders() -> None:
+    """Removing the AH bot renders no template, so it must ask the user nothing."""
+    ahbot = _shipped("mod-ah-bot")
+    assert [p.key for p in apply_module.required_prompts(ahbot, "install")] == [
+        "bot_guid",
+        "bot_account",
+    ]
+    assert apply_module.required_prompts(ahbot, "remove") == ()
+
+    every = _shipped_all()
+    unanswered = {
+        m.id
+        for m in every
+        if any(p.default is None for p in apply_module.required_prompts(m, "install"))
+    }
+    assert unanswered == {"mod-ah-bot", "mod-ah-bot-plus"}, unanswered
+
+
+def test_every_other_shipped_manifest_still_installs_without_being_asked_anything() -> None:
+    """The 39 that were never the problem must not have become uninstallable.
+
+    `_check_values()` began refusing an answer `check_answer()` rejects on
+    2026-09-07, as the first statement of `install()`. That is the fix for
+    `mod-ah-bot`, and it is also a NEW way for a manifest that worked to stop
+    working: a `choice` whose default is not among its own `choices`, a `bool`
+    defaulting to a word this app does not know, an `int` defaulting to `"1.5"`
+    — each of those used to be written into a conf file unread, and each is now
+    a refusal before the clone.
+
+    The sibling test above pins WHICH manifests have to ask a human something.
+    This one pins that every other answer the app fills in for itself is one it
+    would accept, which is the half that turns a shipped default into a broken
+    Install button. Counted on 2026-09-07 over the 41 `wow-wotlk` manifests this
+    sweeps: 54 prompts, of which exactly 3 carry no default — `mod-ah-bot`'s two
+    and `mod-ah-bot-plus`'s one — so 51 defaults are asserted here.
+
+    It was watched failing before it was kept: setting `hearthstone-cd`'s
+    `cooldown` default to `"45_Min_Nope"` produced
+
+        AssertionError: ["hearthstone-cd install cooldown='45_Min_Nope':
+        choose one of: 1_Sec, 1_Min, 5_Min, 15_Min, 30_Min"]
+    """
+    refused = []
+    for manifest in _shipped_all():
+        for action in ("install", "configure", "remove"):
+            for prompt in apply_module.required_prompts(manifest, action):
+                if prompt.default is None:
+                    continue  # the sibling test owns which manifests may do this
+                problem = apply_module.check_answer(prompt, prompt.default)
+                if problem:
+                    refused.append(
+                        f"{manifest.id} {action} {prompt.key}={prompt.default!r}: {problem}"
+                    )
+    assert refused == [], refused
+
+
+def _shipped_all() -> list[Any]:
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    store = wotlk_modules.store()
+    out: list[Any] = []
+    for kind in ("module", "ale", "mod", "keg"):
+        try:
+            out.extend(store.load_all(kind))
+        except Exception:  # a family this game does not ship
+            continue
+    return out
+
+
+def test_a_manifest_can_declare_the_restart_it_needs(tmp_path: Path) -> None:
+    """`restart_recommended` also has a declared half, independent of the derived one.
+
+    Before T27 the derivation answered yes for NPCs, direct SQL and server DBCs
+    only — three things that all reach the database or the data volume — so a
+    manifest whose whole content is `conf[].keys` reported "nothing further
+    needed" while the change it had just written sat in a file the emulator
+    reads only at startup. T27 (`test_a_conf_write_recommends_a_restart_the_
+    world_reads_it_at_its_next_start`, below) taught the derivation to see a
+    conf write directly. `build.restart` stays for the shape that still is not
+    one — a Lua/DB-table "conf", patched or prompted rather than key-written
+    (`apply.py:2121`) — and it only ADDS a yes, never takes one away.
+    """
+    conf = tmp_path / "etc"
+    conf.mkdir()
+    (conf / "mangosd.conf").write_text('Motd = "old"\n', encoding="utf-8", newline="\n")
+    body: dict[str, Any] = {
+        "schema_version": 1,
+        "id": "motd",
+        "name": "Message of the Day",
+        "type": "mod",
+        "game": "wow-tbc",
+        "conf": [{"file": "etc/mangosd.conf", "keys": [{"key": "Motd", "default": '"new"'}]}],
+    }
+
+    derived = Applier(tmp_path).install(parse_manifest(body))
+    assert derived.rebuild_required is False
+    assert derived.restart_recommended is True, "T27: writing the key is visible on its own"
+
+    asked = Applier(tmp_path).install(
+        parse_manifest({**body, "build": {"rebuild": False, "restart": True}})
+    )
+    assert asked.rebuild_required is False
+    assert asked.restart_recommended is True
+
+    # It is not a second spelling of `rebuild`: the two are independent.
+    both = parse_manifest({**body, "build": {"rebuild": True, "restart": True}})
+    assert both.build.rebuild is True and both.build.restart is True
+
+    # And `rebuild` has to be SPELLED OUT beside it, which is not obvious and is
+    # why it is asserted rather than left to be discovered: the FIELD defaults
+    # to True while `Manifest.build` defaults to the object `Build(rebuild=
+    # False)`. So omitting the block entirely means "no rebuild" and writing
+    # `"build": {"restart": true}` means "rebuild" — opposite answers, from two
+    # defaults one line apart in `manifest.py`, neither of which mentions the
+    # other. On a CMaNGOS game, where nothing can be rebuilt at all, that typo
+    # is an hour of compiling asked of a user for no change.
+    lopsided = parse_manifest({**body, "build": {"restart": True}})
+    assert lopsided.build.rebuild is True
+    assert parse_manifest(body).build.rebuild is False
+
+
+_THING_MODULE: dict[str, Any] = {
+    "schema_version": 1,
+    "id": "mod-thing",
+    "name": "Thing",
+    "type": "module",
+    "game": "wow-wotlk",
+    "source": {"repo": "azerothcore/mod-thing"},
+    "conf": [
+        {
+            "file": "env/dist/etc/modules/thing.conf",
+            "template": "conf/thing.conf.dist",
+        }
+    ],
+}
+
+
+def test_a_conf_write_recommends_a_restart_the_world_reads_it_at_its_next_start(
+    tmp_path: Path,
+) -> None:
+    """T27 (`pyplan/tickets/T27-...md`, evidence in `pyplan/gates/8.6-spec-takes-effect-
+    yulon-ubuntu2-2026-09-10/`): activating `mod-playerbots`' conf through the app's own
+    seam reported `restart_recommended = False` (`03-activate.log:38`) while the running
+    world went on reading its OLD config until the restart of step 04 ("Config::LoadFile:
+    Failed open file" before, "Loading TalentSpecs" after — `04-restart-and-list.log:27-32`).
+
+    `_conf()`'s own `done: activate ...` outcome IS the fact the old derivation could not
+    see. The sentence it writes names the file and says the world reads it at its next
+    start, so a user pressing Install is told the one thing this app cannot do for them.
+    """
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    assert deployed.read_text(encoding="utf-8") == "Thing.Enabled = 1\n"
+    sentence = next(step for step in report.done if step.startswith("activate "))
+    assert "env/dist/etc/modules/thing.conf" in sentence
+    assert "the world reads" in sentence and "next start" in sentence
+    assert report.rebuild_required is False  # not conflating the two questions
+    assert report.restart_recommended is True
+
+
+def test_a_conf_that_writes_nothing_does_not_recommend_a_restart(tmp_path: Path) -> None:
+    """The other half of the same fact: nothing written is nothing to restart for.
+
+    The deployed file already exists — `_conf()` never re-copies over one that is
+    already there (`apply.py:2124`) — so this install's own conf step does nothing at
+    all, and none of the other three derived causes (NPCs, direct SQL, server DBCs)
+    apply either.
+    """
+    deployed = tmp_path / "env/dist/etc/modules/thing.conf"
+    deployed.parent.mkdir(parents=True)
+    deployed.write_text("Thing.Enabled = 1\n", encoding="utf-8")
+
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(_THING_MODULE))
+
+    assert not any(step.startswith("activate ") for step in report.done)
+    assert report.restart_recommended is False
+
+
+def test_a_module_with_no_conf_leaves_restart_recommended_unchanged(tmp_path: Path) -> None:
+    """A manifest with no `conf` at all takes neither branch T27 touched.
+
+    `restart_recommended` is still exactly the four-way OR it always was for such a
+    manifest — False here because none of the four apply, unaffected by the new conf
+    clause because there is no conf step to run.
+    """
+    body = {**_THING_MODULE, "conf": ()}
+    git = _FakeGit({"README.md": "upstream\n"})
+    report = Applier(tmp_path, git=git).install(parse_manifest(body))
+
+    assert not any("conf" in step or "activate" in step for step in report.done)
+    assert report.restart_recommended is False
+
+
+_THING_MODULE_WITH_KEY: dict[str, Any] = {
+    **_THING_MODULE,
+    "conf": [
+        {
+            "file": "env/dist/etc/modules/thing.conf",
+            "template": "conf/thing.conf.dist",
+            "keys": [{"key": "Thing.Level", "default": "5"}],
+        }
+    ],
+}
+
+
+def test_reapplying_an_identical_keyed_conf_does_not_recommend_a_restart(
+    tmp_path: Path,
+) -> None:
+    """T27 round 2 (Codex adversarial review): `_set_conf_key`'s replace path wrote
+    on every call regardless of whether the value actually changed, so re-applying
+    an already-identical keyed conf still reported `set N key(s) ... the world
+    reads ... at its next start` and recommended a restart though nothing on disk
+    changed. The first `_conf()` mutation test only isolated the template-copy
+    `target.exists()` skip; this isolates the keyed-write half of the same clause.
+    """
+    git = _FakeGit({"conf/thing.conf.dist": "Thing.Enabled = 1\n"})
+    applier = Applier(tmp_path, git=git)
+    m = parse_manifest(_THING_MODULE_WITH_KEY)
+
+    first = applier.install(m)
+    assert any(step.startswith("set 1 key(s)") for step in first.done)
+    assert first.restart_recommended is True
+
+    second = applier.configure(m)  # same manifest, same values, file already matches
+    assert not any(step.startswith("set ") for step in second.done)
+    assert second.restart_recommended is False
+
+
+def test_configuring_ale_asks_for_the_restart_the_engine_needs() -> None:
+    """Measured live on `yulon-ubuntu2`, 2026-09-09 (8.7a's fifth clause).
+
+    `applier.configure('mod-ale')` reported `2 step(s), 0 skipped, rebuild=False,
+    restart_recommended=False` — "nothing further needed" — over a world that went on
+    loading scripts from the OLD `ALE.ScriptPath` for another minute, until this gate
+    restarted it by hand: `dml_bridge_ping` still answered *Command 'dml_bridge_ping'
+    does not exist* after the write, and answered `DML-BRIDGE-READY` after the restart.
+
+    That is the exact shape the `build.restart` field was added for and its own schema
+    description names ("a file the emulator reads only at startup") — TBC's five conf
+    mods declare it, and this WotLK module, whose whole configure IS a conf write, did
+    not. `configure` never sets `rebuild_required`, so without the field there is
+    nothing in the report to tell a user to restart.
+    """
+    ale = _shipped("mod-ale")
+    assert ale.build.rebuild is True, "installing ALE is a C++ module: it needs the compile"
+    assert ale.build.restart is True, (
+        "configuring ALE writes ALE.Enabled/ALE.ScriptPath into a file the engine reads at "
+        "startup; a report that recommends nothing tells the user the value is in force"
+    )
+
+
+# --------------------------------------------------------------------------
+# module_updates() — checklist 8.7a, "how far behind each installed module is"
+# --------------------------------------------------------------------------
+
+
+class _FakeBehind:
+    """A `BehindReader` that answers from a dict keyed by folder name."""
+
+    def __init__(self, answers: dict[str, int | None]) -> None:
+        self.answers = answers
+        self.asked: list[tuple[str, str | None]] = []
+
+    def commits_behind(self, dest: Path, branch: str | None) -> int | None:
+        self.asked.append((dest.name, branch))
+        return self.answers.get(dest.name)
+
+
+def test_module_updates_reports_one_row_per_installed_checkout(tmp_path: Path) -> None:
+    """Installed means "a clone is on disk here", and the row carries the number.
+
+    The list is what the user reads, so it is the enumeration that matters: a
+    module the store has never heard of is still installed, and a store entry
+    nobody installed is not. Neither of those is a fact about the manifests.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-solocraft", "mod-aoe-loot"):
+        (modules / name / ".git").mkdir(parents=True)
+    # Not a checkout: AzerothCore's own `modules/` carries CMakeLists.txt and
+    # friends beside the module folders, and a folder somebody copied in by
+    # hand has no `.git` either. Both are named, neither is counted.
+    (modules / "not-a-clone").mkdir()
+    (modules / "CMakeLists.txt").write_text("x\n", encoding="utf-8")
+
+    git = _FakeBehind({"mod-aoe-loot": 3, "mod-solocraft": 0})
+    rows = apply_module.module_updates(tmp_path, git=git)
+
+    assert [(r.key, r.behind, r.is_checkout) for r in rows] == [
+        ("mod-aoe-loot", 3, True),
+        ("mod-solocraft", 0, True),
+        ("not-a-clone", None, False),
+    ]
+    # Sorted, and a non-checkout is never asked — there is nothing to fetch.
+    assert git.asked == [("mod-aoe-loot", None), ("mod-solocraft", None)]
+
+
+def test_module_updates_asks_each_module_about_its_own_branch(tmp_path: Path) -> None:
+    """The branch is the MANIFEST's, because the manifest's is what an update fetches.
+
+    All 21 shipped `wow-wotlk` manifests omit `source.branch`, so `None` is the
+    ordinary answer — which is exactly why passing the wrong one would go
+    unnoticed until the first module that names one.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-a", "mod-b"):
+        (modules / name / ".git").mkdir(parents=True)
+
+    git = _FakeBehind({"mod-a": 1, "mod-b": 2})
+    apply_module.module_updates(tmp_path, git=git, branches={"mod-a": "wotlk"})
+
+    assert git.asked == [("mod-a", "wotlk"), ("mod-b", None)]
+
+
+def test_module_updates_keeps_could_not_ask_apart_from_up_to_date(tmp_path: Path) -> None:
+    """`None` and `0` are different sentences, and the row has to carry both.
+
+    An offline machine that reported every module as up to date would be the
+    same defect this project has now recorded three times: a question with more
+    states than the answer being carried.
+    """
+    modules = tmp_path / "modules"
+    for name in ("mod-offline", "mod-current"):
+        (modules / name / ".git").mkdir(parents=True)
+
+    rows = apply_module.module_updates(
+        tmp_path, git=_FakeBehind({"mod-current": 0, "mod-offline": None})
+    )
+    by_key = {r.key: r for r in rows}
+    assert by_key["mod-current"].behind == 0
+    assert by_key["mod-offline"].behind is None
+    assert "0 commits behind" in by_key["mod-current"].line
+    assert "could not ask" in by_key["mod-offline"].line
+
+
+def test_module_updates_on_a_server_with_no_modules_folder_is_empty(tmp_path: Path) -> None:
+    """The three CMaNGOS games have no `modules/` at all, and that is not an error."""
+    assert apply_module.module_updates(tmp_path, git=_FakeBehind({})) == ()
+
+
+# ----------------------------------------------- a folder instead of a clone
+#
+# The second way to fill `modules/<id>`: a folder on the user's own disk,
+# copied in through a seam, instead of a repository cloned through git. The
+# engine learns nothing new about what a module IS — the copy lands at the same
+# path, gets the same claim, the same `include.sh`, and the same deploy /
+# patch / SQL / conf / client / DBC pass over whatever is now there.
+#
+# It also learns one hook: a manifest DERIVED from a link or a folder cannot
+# know the conf files and SQL directories the content carries until the content
+# is on disk, so `complete()` is handed the filled clone and returns the
+# manifest the later steps read. There is no second clone and no second report.
+
+
+class _Copier:
+    """The `FolderCopier` seam: records the pair it was handed, materialises `files`.
+
+    A fake for the reason `_FakeGit` is one — the real copier is a `copytree`
+    over a folder the user chose, and the property under test is that the
+    engine goes through the seam and then treats the result exactly as it
+    treats a clone. `fail` is how the `OSError` branch is reached without
+    arranging a full disk.
+    """
+
+    def __init__(self, files: dict[str, str] | None = None, *, fail: OSError | None = None) -> None:
+        self.files = files or {}
+        self.fail = fail
+        self.calls: list[tuple[Path, Path]] = []
+
+    def __call__(self, src: Path, dest: Path) -> None:
+        self.calls.append((src, dest))
+        if self.fail is not None:
+            raise self.fail
+        for rel, text in self.files.items():
+            p = dest / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+
+
+FOLDER_MODULE: dict[str, Any] = {
+    "id": "mod-my-thing",
+    "name": "mod-my-thing",
+    "type": "module",
+    "game": "wow-wotlk",
+    "description": "Custom module (copied from a folder you provided).",
+    # Dropped again by `_folder_module()`; here only so pydantic will build the
+    # object at all — see that function.
+    "source": {"repo": "you/mod-my-thing"},
+    "build": {"rebuild": True},
+}
+
+
+def _folder_module(**over: Any) -> Any:
+    """The manifest a folder derivation hands this engine: `type='module'`, no `source`.
+
+    Built by parsing and then `model_copy`, not by parsing a sourceless dict,
+    and that is a LANE BOUNDARY rather than a shortcut. Today
+    `Manifest._shape_by_type` requires a `source` for `type='module'`, and the
+    one-clause relaxation that lets a folder-derived manifest through belongs to
+    `manifest.py` — another lane's file, which this one may not touch. What the
+    applier reads is the OBJECT, so the object is what this builds; when the
+    relaxation lands, `parse_manifest` produces the same one and this helper
+    becomes a plain parse.
+    """
+    return parse_manifest({**FOLDER_MODULE, **over}).model_copy(update={"source": None})
+
+
+def _a_folder_to_copy(tmp_path: Path) -> Path:
+    """A directory OUTSIDE the server dir, standing in for the one the user picked."""
+    src = tmp_path / "elsewhere" / "mod-my-thing"
+    (src / "src").mkdir(parents=True)
+    (src / "src" / "mod.cpp").write_text("// the user's module\n", encoding="utf-8")
+    return src
+
+
+def test_install_from_a_folder_copies_through_the_seam_and_then_walks_the_same_steps(
+    tmp_path: Path,
+) -> None:
+    """The whole of the divergence: `git.clone` is replaced by one call to a copier.
+
+    Everything after it is the shipped install, asserted here one item at a
+    time because each is a thing a "just copy the folder in" implementation
+    would plausibly leave out: the claim that makes the folder recognisable
+    next time, the `include.sh` CMake needs, the conf activation, the
+    pending-SQL report and the rebuild sentence.
+    """
+    copier = _Copier(
+        {
+            "src/mod.cpp": "// the user's module\n",
+            "conf/mod_thing.conf.dist": "Thing.Enable = 0\n",
+            "data/sql/db-world/a.sql": "-- a",
+        }
+    )
+    git = _FakeGit({"README.md": "upstream\n"})
+    origins = _Origins()
+    applier = Applier(tmp_path, git=git, remote_url=origins)
+    m = _folder_module(
+        conf=[
+            {"file": "env/dist/etc/modules/mod_thing.conf", "template": "conf/mod_thing.conf.dist"}
+        ],
+        sql=[{"db": "world", "path": "data/sql/db-world/*.sql", "applied_by": "db-import"}],
+    )
+    source = _a_folder_to_copy(tmp_path)
+    clone = applier.clone_dir(m)
+
+    report = applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    assert copier.calls == [(source, clone)]
+    assert git.calls == []  # a copy is not a clone, and git is never asked to make one
+    assert apply_module.read_clone_claim(clone, item_id="mod-my-thing") is Ownership.OWNED
+    assert (clone / "include.sh").exists()
+    conf = tmp_path / "env/dist/etc/modules/mod_thing.conf"
+    assert conf.read_text(encoding="utf-8") == "Thing.Enable = 0\n"
+    assert f"copy {source} → {clone.relative_to(tmp_path)}" in report.done
+    assert "touch include.sh" in report.done
+    assert [(p.db, p.files) for p in report.pending_sql] == [
+        ("world", ("data/sql/db-world/a.sql",))
+    ]
+    assert report.rebuild_required is True
+
+
+def test_a_folder_install_needs_a_copier_and_says_so(tmp_path: Path) -> None:
+    """A folder source that put nothing at the clone path is a refusal, not an install.
+
+    Two ways to get there and one answer for both. `FolderSource` will not be
+    built without a copier at all — the seam is not optional, because an
+    optional one is an install that silently copies nothing. And a copier that
+    ran and left no directory (a filter that matched nothing, a copy into the
+    wrong place) must not go on to write a claim, touch `include.sh` and report
+    a module that is not there.
+    """
+    with pytest.raises(TypeError, match="copier"):
+        apply_module.FolderSource(path=tmp_path)  # type: ignore[call-arg]
+
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+    nothing = _Copier()  # runs, copies nothing
+
+    with pytest.raises(ApplyError) as err:
+        applier.install(m, folder=apply_module.FolderSource(path=source, copier=nothing))
+
+    assert nothing.calls == [(source, applier.clone_dir(m))]
+    assert str(source) in str(err.value)
+    assert not applier.clone_dir(m).exists()
+
+
+def test_a_copier_that_could_not_read_the_folder_speaks_the_appliers_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """`OSError` out of the seam becomes `ApplyError`, as `GitError` does for a clone.
+
+    One failure vocabulary for the whole applier: every caller of `install()`
+    handles `ApplyError`, and a bare `PermissionError` reaching the Modules tab
+    would arrive as an unhandled worker exception rather than as a report line.
+    """
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+    refused = _Copier(fail=PermissionError(13, "Permission denied"))
+
+    with pytest.raises(ApplyError, match="Permission denied"):
+        applier.install(
+            _folder_module(), folder=apply_module.FolderSource(path=source, copier=refused)
+        )
+
+    assert not applier.clone_dir(_folder_module()).exists()
+
+
+def test_a_manifest_with_a_source_and_a_folder_is_one_source_too_many(tmp_path: Path) -> None:
+    """Two ways to fill the clone is a caller bug, refused before either one runs.
+
+    Cloning and then copying over it, or copying and then cloning over it, are
+    both destructive and neither is what anybody meant. The manifest's `source`
+    is what the report and the claim would name, the folder is where the bytes
+    would come from — a contradiction this engine must not resolve by picking.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    git = _FakeGit({"README.md": "upstream\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+
+    with pytest.raises(ApplyError, match="one source"):
+        applier.install(
+            parse_manifest(OWNED_ITEM),
+            folder=apply_module.FolderSource(path=source, copier=copier),
+        )
+
+    assert git.calls == [] and copier.calls == []
+
+
+def _thing_conf() -> Any:
+    """The `conf` tuple a completer would have derived from a `conf/*.conf.dist`."""
+    return parse_manifest(
+        {
+            **FOLDER_MODULE,
+            "conf": [
+                {
+                    "file": "env/dist/etc/modules/mod_thing.conf",
+                    "template": "conf/mod_thing.conf.dist",
+                }
+            ],
+        }
+    ).conf
+
+
+def _world_sql() -> Any:
+    """The `sql` tuple a completer would have derived from a `data/sql/db-world/`."""
+    return parse_manifest(
+        {
+            **FOLDER_MODULE,
+            "sql": [
+                {"db": "world", "path": "data/sql/db-world/**/*.sql", "applied_by": "db-import"}
+            ],
+        }
+    ).sql
+
+
+def test_the_complete_hook_runs_after_the_folder_is_there_and_the_steps_read_what_it_returned(
+    tmp_path: Path,
+) -> None:
+    """The hook exists because a derived manifest cannot know what it is derived FROM.
+
+    A link or a folder yields an id, a name and a type; the conf files to
+    activate and the SQL directories to report are in the content, and the
+    content is not on disk until the clone or the copy has run. So the hook is
+    handed the FILLED clone, and every step after it reads the manifest it
+    returned — not the empty one the caller passed in.
+    """
+    copier = _Copier(
+        {"conf/mod_thing.conf.dist": "Thing.Enable = 0\n", "data/sql/db-world/a.sql": "-- a"}
+    )
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    minimal = _folder_module()  # no conf, no sql: nothing is known yet
+    seen: list[tuple[str, tuple[str, ...]]] = []
+
+    def complete(manifest: Any, clone: Path) -> Any:
+        # What the hook can see is the whole point: the folder is already there.
+        seen.append((manifest.id, tuple(sorted(p.name for p in clone.rglob("*") if p.is_file()))))
+        return manifest.model_copy(update={"conf": _thing_conf(), "sql": _world_sql()})
+
+    source = _a_folder_to_copy(tmp_path)
+    report = applier.install(
+        minimal, folder=apply_module.FolderSource(path=source, copier=copier), complete=complete
+    )
+
+    assert seen and seen[0][0] == "mod-my-thing"
+    assert "mod_thing.conf.dist" in seen[0][1]  # called AFTER the copy, not before
+    assert (tmp_path / "env/dist/etc/modules/mod_thing.conf").is_file()
+    assert [(p.db, p.files) for p in report.pending_sql] == [
+        ("world", ("data/sql/db-world/a.sql",))
+    ]
+    # And the manifest handed in is untouched: the hook returns, it does not mutate.
+    assert minimal.conf == () and minimal.sql == ()
+
+
+def test_the_complete_hook_also_finishes_a_manifest_that_was_cloned(tmp_path: Path) -> None:
+    """A link derivation knows no more than a folder one, so the hook is not folder-only.
+
+    Same clone path, same shipped `git.clone`, and the conf the hook found in
+    what came down is activated by the same pass that cloned it — no second
+    clone and no second report.
+    """
+    git = _FakeGit({"conf/mod_thing.conf.dist": "Thing.Enable = 0\n"})
+    applier = Applier(tmp_path, git=git, remote_url=_Origins())
+    m = parse_manifest({**FOLDER_MODULE, "id": "mod-linked", "name": "mod-linked"})
+    seen: list[bool] = []
+
+    def complete(manifest: Any, clone: Path) -> Any:
+        seen.append((clone / "conf" / "mod_thing.conf.dist").is_file())
+        return manifest.model_copy(update={"conf": _thing_conf()})
+
+    applier.install(m, complete=complete)
+
+    assert seen == [True]
+    assert len(git.calls) == 1
+    assert (tmp_path / "env/dist/etc/modules/mod_thing.conf").is_file()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("id", "mod-something-else"), ("type", "mod"), ("game", "wow-tbc")],
+)
+def test_a_complete_hook_that_changes_the_id_is_refused(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """The hook finishes ONE manifest; it does not get to substitute another.
+
+    Everything downstream of it is addressed by those three fields: the clone
+    path already written to (`clone_dir()` reads `type` and `id`), the claim
+    already inside that folder, and the `item_id` the report carries. A hook
+    returning a different item would report an install of something that was
+    never installed, over a folder holding another module's claim — so a
+    difference is a refusal rather than a silently relabelled report.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    source = _a_folder_to_copy(tmp_path)
+
+    def swap(manifest: Any, clone: Path) -> Any:
+        return manifest.model_copy(update={field: value})
+
+    with pytest.raises(ApplyError, match=field):
+        applier.install(
+            _folder_module(),
+            folder=apply_module.FolderSource(path=source, copier=copier),
+            complete=swap,
+        )
+
+
+def test_remove_deletes_a_copied_folder_this_app_claimed_even_without_git(tmp_path: Path) -> None:
+    """A copy has no `.git`, and the guard's no-`.git` branch refused everything.
+
+    That branch was written for content somebody else put there — a tarball
+    unpacked into `modules/<id>`, a hand-installed module — and until a copy
+    could land there, "no `.git`" and "not ours" were the same fact. They are
+    not any more: this app's own claim is inside the folder it wrote, and it is
+    the same evidence that authorises removing a clone. Without this, a module
+    installed from a folder could never be uninstalled through the app.
+    """
+    copier = _Copier({"src/mod.cpp": "// the user's module\n"})
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins())
+    m = _folder_module(sql=[{"db": "world", "statement": "DELETE FROM x", "when": "remove"}])
+    source = _a_folder_to_copy(tmp_path)
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    clone = applier.clone_dir(m)
+    assert not (clone / ".git").exists()
+
+    report = applier.remove(m)
+
+    assert not clone.exists()
+    assert sql.statements == [("world", "DELETE FROM x")]
+    assert any(step.startswith("rm -r ") for step in report.done)
+    assert (source / "src" / "mod.cpp").is_file()  # the folder it was copied FROM is untouched
+
+
+def test_remove_still_refuses_a_hand_made_folder_without_a_claim(tmp_path: Path) -> None:
+    """The relaxation above is exactly one clause wide, and this is its other side.
+
+    A REGRESSION test, and said so rather than counted as evidence: it passes
+    before the claim is consulted in the no-`.git` branch as well as after,
+    because before the change every such folder was refused. Its job starts the
+    moment that branch learns to say yes — a relaxation written as "no `.git`
+    and nothing here we recognise, let it through" would delete three evenings
+    of somebody's work, which is the harm the whole guard exists for.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_FakeGit({}), sql=sql, remote_url=_Origins())
+    m = _folder_module()
+    clone = applier.clone_dir(m)
+    (clone / "src").mkdir(parents=True)
+    mine = clone / "src" / "mine.cpp"
+    mine.write_text("// my patch, three evenings\n", encoding="utf-8")
+    before = mine.read_bytes()
+
+    with pytest.raises(ApplyError, match="was not put there by this app"):
+        applier.remove(m)
+
+    assert mine.read_bytes() == before
+    assert sql.statements == [] and sql.files == []
+
+
+def test_a_second_folder_install_over_this_apps_own_copy_is_allowed_and_a_strangers_is_not(
+    tmp_path: Path,
+) -> None:
+    """Re-choosing the same folder is how a custom module is updated, so it must pass.
+
+    And the folder next to it that this app did not write must still not be
+    copied over: the real copier REPLACES its destination, so this guard is the
+    only thing between a user's hand-installed `modules/mod-theirs` and losing
+    it.
+    """
+    copier = _Copier({"src/mod.cpp": "// v1\n"})
+    applier = Applier(tmp_path, git=_FakeGit({}), remote_url=_Origins())
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    assert len(copier.calls) == 2  # this app's own copy: allowed, and replaced
+
+    theirs = _folder_module(id="mod-theirs", name="mod-theirs")
+    hand_made = applier.clone_dir(theirs)
+    (hand_made / "src").mkdir(parents=True)
+    (hand_made / "src" / "mine.cpp").write_text("// three evenings\n", encoding="utf-8")
+
+    with pytest.raises(ApplyError, match="was not put there by this app"):
+        applier.install(theirs, folder=apply_module.FolderSource(path=source, copier=copier))
+
+    assert len(copier.calls) == 2  # the seam is where the harm is, and it was not reached
+    assert (hand_made / "src" / "mine.cpp").read_text(encoding="utf-8") == "// three evenings\n"
+
+
+def test_a_folder_source_never_asks_git_anything(tmp_path: Path) -> None:
+    """There is no repository, so every git question is one with no true answer.
+
+    `remote_url()` on a copy answers `None` at best and, on a copy taken from
+    somebody's checkout, whatever THAT checkout's origin was — a URL this
+    install has nothing to do with. `is_unmodified` and `no_local_commits` are
+    the same. The guard must reach its answer from the claim alone, on the
+    install and on the remove.
+    """
+    copier = _Copier({"src/mod.cpp": "// x\n"})
+    git = _FakeGit({}, unmodified=True, no_local_commits=True)
+    origins = _Origins(OWNED_URL)
+    applier = Applier(tmp_path, git=git, remote_url=origins)
+    m = _folder_module()
+    source = _a_folder_to_copy(tmp_path)
+
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    applier.install(m, folder=apply_module.FolderSource(path=source, copier=copier))
+    applier.remove(m)
+
+    assert origins.asked == []
+    assert git.asked_about == [] and git.branches_asked == []
+    assert git.calls == []
+
+
+# ------------------------------------------- the running-world guard (8.7a)
+#
+# `checklist.md:2501`: *a module whose SQL targets the world database is refused
+# while the server runs, with the step named and no rows written, and applies
+# once the server is stopped.* Owner answer 7 is the rule
+# (`phase8-parity-decisions.md:44`); `WORLD_HELD_DBS` is the enumeration.
+#
+# The subject is the shape the shipped catalog actually has. The brief for this
+# work said there was exactly ONE direct SQL step across the four games'
+# manifests (`wow-wotlk/modules/mod-arac.json`); loading every manifest through
+# `parse_manifest` says **44**, across 30 files and all four games, because
+# `SqlStep.applied_by` DEFAULTS to `"direct"` (`manifest.py:136`) and a step that
+# names no route is one. So a manifest with several direct `world` steps is the
+# ordinary case, not a contrived one — `all-stackables` ships three on install
+# and two on remove for TBC, Tortoise and Vanilla — and it is what makes "a
+# guard that refuses after the first statement" a shape a test can catch.
+
+
+STACKABLES: dict[str, Any] = {
+    "id": "all-stackables",
+    "name": "All Stackables",
+    "type": "mod",
+    "game": "wow-wotlk",
+    "source": {"repo": "DadsMmoLab/dads-mmo-lab", "sparse_path": "mods/all-stackables"},
+    "sql": [
+        {"db": "world", "statement": "CREATE TABLE yulon_stackable_backup (entry INT);"},
+        {"db": "world", "path": "up.sql"},
+        {"db": "world", "path": "down.sql", "when": "remove"},
+    ],
+}
+
+
+def _stackables_git() -> _FakeGit:
+    return _FakeGit({"up.sql": "UPDATE item_template SET stackable = 200;\n", "down.sql": "-- d\n"})
+
+
+def _one_step(db: str, **over: Any) -> dict[str, Any]:
+    """A manifest whose whole content is one direct SQL step against `db`."""
+    return {
+        "id": f"one-{db}",
+        "name": "One Step",
+        "type": "mod",
+        "game": "wow-wotlk",
+        "source": {"repo": "DadsMmoLab/dads-mmo-lab"},
+        "sql": [{"db": db, "statement": "SELECT 1", **over}],
+    }
+
+
+class _Seam:
+    """A `world_running` seam that records how often it was asked."""
+
+    def __init__(self, answer: bool | None) -> None:
+        self.answer = answer
+        self.asked = 0
+
+    def __call__(self) -> bool | None:
+        self.asked += 1
+        return self.answer
+
+
+def test_direct_world_sql_is_refused_while_the_world_runs(tmp_path: Path) -> None:
+    """The whole clause, in the words the user reads.
+
+    Catches the guard being deleted, and a `raise` softened into a log line:
+    the message is asserted whole, so a refusal that stops naming the steps or
+    stops saying no rows were written fails here rather than being noticed live.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the world server is running, and it holds world in memory and writes "
+        "back over whatever it finds there. No SQL was run and no rows were written: "
+        "sql inline → world, sql up.sql → world. Press Stop, then install again — the steps "
+        "this run already took repeat, and the SQL follows them."
+    )
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_refusal_lands_before_the_first_statement_not_between_two(tmp_path: Path) -> None:
+    """A guard that refuses after the first statement is worse than none.
+
+    `all-stackables` install-time SQL is `CREATE TABLE … backup` followed by the
+    `UPDATE item_template` the backup exists to undo. Run the first and refuse
+    the second and the mod is half applied with no way for a reader to tell.
+    So the check is a pre-pass over the action's steps and not a test inside the
+    loop: this asserts the FIRST statement never reached the runner either, and
+    that both steps are named in one sentence.
+
+    Catches the guard moved into `_sql`'s loop or into `_run_sql`, where step 1
+    would run and step 2 would be refused.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert sql.statements == []  # the inline step is FIRST and it did not run
+    assert sql.files == []
+    assert "sql inline → world" in str(raised.value)
+    assert "sql up.sql → world" in str(raised.value)
+
+
+@pytest.mark.parametrize("db", ["characters", "world", "playerbots"])
+def test_every_database_a_running_world_holds_is_refused(tmp_path: Path, db: str) -> None:
+    """`WORLD_HELD_DBS` is the union of what the pages name, asserted one by one.
+
+    Catches the set shrunk to `{"world"}` — which `checklist.md:2501` alone
+    would permit and owner answer 7 and `c-operators-risk.md:90` would not.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(_one_step(db)))
+    assert sql.statements == []
+
+
+def test_an_auth_step_is_never_the_reason_for_a_refusal(tmp_path: Path) -> None:
+    """Account rows are not held by the worldserver, and no page asks for them.
+
+    Catches the membership test degenerating to "every step is guarded", which
+    would refuse an install with the world up that nothing in the plan forbids.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    report = applier.install(parse_manifest(_one_step("auth")))
+    assert sql.statements == [("auth", "SELECT 1")]
+    assert report.skipped == ()
+
+
+def test_an_ale_step_runs_because_no_page_names_that_database(tmp_path: Path) -> None:
+    """The one place this guard is deliberately silent, recorded as a decision.
+
+    `acore_ale` is the ALE Lua engine's own schema and it lives inside the
+    worldserver process, so the reason `characters`/`world`/`playerbots` are
+    guarded plausibly reaches it. Owner answer 7, `checklist.md:2501` and both
+    design pages name it nowhere, and one shipped step targets it
+    (`manifests/wow-wotlk/ale/paragon.json`). Left running rather than quietly
+    decided for; this test is what makes the decision visible if it changes.
+
+    Catches `"ale"` being added to `WORLD_HELD_DBS` without an owner answer —
+    which would be the same fault in the other direction.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    applier.install(parse_manifest(_one_step("ale")))
+    assert sql.statements == [("ale", "SELECT 1")]
+
+
+def test_an_unguarded_step_beside_a_guarded_one_does_not_run_either(tmp_path: Path) -> None:
+    """Half a manifest is not an outcome anybody asked for.
+
+    The `auth` step is FIRST, so a guard that filtered step by step and let the
+    permitted ones through would have written it before reaching the refusal.
+    Nothing is lost by refusing it: the second press re-runs it.
+
+    Catches a per-step filter that runs what it does not refuse.
+    """
+    data = _one_step("auth")
+    data["sql"] = [
+        {"db": "auth", "statement": "INSERT INTO account VALUES (1)"},
+        {"db": "world", "statement": "UPDATE item_template SET stackable = 200"},
+    ]
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError, match="the world server is running"):
+        applier.install(parse_manifest(data))
+    assert sql.statements == []
+
+
+def test_with_the_world_stopped_every_step_runs(tmp_path: Path) -> None:
+    """The other half of the clause: *applies once the server is stopped*.
+
+    Catches the condition inverted, and catches a guard that refuses on any
+    answer at all rather than on "not a clear no".
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+    report = applier.install(parse_manifest(STACKABLES))
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+    assert report.skipped == ()
+
+
+def test_a_seam_that_cannot_tell_refuses_rather_than_running(tmp_path: Path) -> None:
+    """`None` is "could not ask", which is not "not running" — fail closed.
+
+    The same three-valued discipline `docker._running()` keeps for a project it
+    cannot read, and the reason the seam is typed `bool | None`.
+
+    Catches `if running is False: return` written as `if not running: return`,
+    where `None` is falsy and the SQL would go into a world nobody asked about.
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: None)
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert "the seam gave no answer" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_a_seam_that_raises_refuses_and_carries_the_reason(tmp_path: Path) -> None:
+    """A dead Docker daemon is a refusal with a reason, not a traceback.
+
+    Catches the `try` removed — which turns a probe failure into an unhandled
+    exception in the middle of an install — and catches the reason dropped from
+    the sentence, which leaves the user a refusal they cannot act on.
+    """
+
+    def boom() -> bool:
+        raise OSError("docker daemon not reachable")
+
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=boom)
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+    assert "OSError: docker daemon not reachable" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_with_no_seam_the_behaviour_is_the_one_every_caller_has_today(tmp_path: Path) -> None:
+    """`c-operators-risk.md:345`: with the seam absent, today's behaviour.
+
+    No shipped caller passes `world_running` yet, so this is the path every
+    press in the app currently takes — and it must be byte for byte what it was
+    before the guard existed, or this change is a regression for four games at
+    once. Named here rather than left implicit: **until a caller wires the seam,
+    this guard protects nobody.**
+
+    Catches a default that fails closed, which would refuse every install.
+    """
+    sql = _FakeSql()
+    report = Applier(tmp_path, git=_stackables_git(), sql=sql).install(parse_manifest(STACKABLES))
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+    assert report.skipped == ()
+
+
+def test_the_db_import_route_is_not_touched_by_this_guard(tmp_path: Path) -> None:
+    """The other route's guard is `docker.apply_module_sql()`, not this one.
+
+    A db-import step writes nothing here — it is resolved into `pending_sql` and
+    handed to upstream's importer, which `docker.py:2029-2036` refuses while the
+    world is up. Refusing it here as well would refuse an install that writes
+    nothing, and would break the one route that already works.
+
+    Catches `applied_by == "direct"` dropped from the filter.
+    """
+    sql = _FakeSql()
+    applier = Applier(
+        tmp_path, git=_ahbot_git("data/sql/db-world/a.sql"), sql=sql, world_running=lambda: True
+    )
+    report = applier.install(parse_manifest(MODULE), {"bot_guid": "42"})
+    assert [p.db for p in report.pending_sql] == ["world"]
+    assert sql.statements == [] and sql.files == []
+
+
+def test_with_no_runner_the_older_message_survives_the_guard(tmp_path: Path) -> None:
+    """An install with no database writes nothing, so there is nothing to refuse.
+
+    Refusing here would replace a true sentence ("no SQL runner configured")
+    with one about a write that was never going to happen.
+
+    Catches the `self.sql is None` early return dropped from the guard.
+    """
+    applier = Applier(tmp_path, git=_stackables_git(), world_running=lambda: True)
+    report = applier.install(parse_manifest(STACKABLES))
+    assert report.skipped == ("sql → world: no SQL runner configured",) * 2
+
+
+def test_the_seam_is_not_asked_for_an_action_with_no_direct_sql(tmp_path: Path) -> None:
+    """Reading it costs a Docker call, and a refusal about nothing is noise.
+
+    `all-stackables` has install-time and remove-time SQL and none at configure
+    time, so `configure()` must not ask — and must not refuse.
+
+    Catches `step.when == when` dropped from the filter, which would refuse a
+    configure over a manifest whose SQL belongs to a different action.
+    """
+    seam = _Seam(True)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=seam)
+    report = applier.configure(parse_manifest(STACKABLES))
+    assert seam.asked == 0
+    assert report.done == () and report.skipped == ()
+
+
+def test_remove_time_sql_is_refused_and_the_clone_survives_to_be_undone(tmp_path: Path) -> None:
+    """The case that decides refuse-versus-skip, and the reason it is a raise.
+
+    A mod's remove-time SQL is its UNDO — `all-stackables` puts `item_template`
+    back from its backup table — and the statements straight after `_sql()` in
+    `remove()` delete the clone that file lives in. Report it as `skipped` and
+    the run reports a clean removal while the world keeps the change and the
+    only copy of the undo is gone. `remove()`'s own comment already puts its
+    refusals before the SQL for exactly this reason.
+
+    Catches the refusal turned into a `skipped` line, which would pass a test
+    that only ever looked at `install()`.
+    """
+    down = tmp_path / "sql_scripts" / "clones" / "all-stackables" / "down.sql"
+    installed = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql())
+    installed.install(parse_manifest(STACKABLES))
+    assert down.is_file()
+
+    sql = _FakeSql()
+    up = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True)
+    with pytest.raises(ApplyError) as raised:
+        up.remove(parse_manifest(STACKABLES))
+
+    assert "sql down.sql → world" in str(raised.value)
+    assert "then remove again" in str(raised.value)
+    assert sql.files == []
+    assert down.is_file()  # the undo is still on disk to be run once the world is down
+
+
+# ------------------------------- the seam, wired, and the way back from Stop (T7)
+#
+# T2 pressed the guard above against a real running worldserver and it held
+# (`pyplan/gates/8.7a-direct-sql-yulon-ubuntu2-2026-09-09/`). It also found the
+# two things this section is about, and neither is a defect in the guard:
+#
+# 1. Nothing shipped passed `world_running`, so `_world_running` was `None` on
+#    all four games and the guard returned at its first line. The press wired
+#    the seam by hand; today's Modules tab would have written 7 219 rows into a
+#    live world without a word.
+# 2. The refusal ends *"Press Stop, then install again"*, and that instruction
+#    could not be followed: the app's Stop takes the database down with the
+#    world, and the direct SQL step then died on `container ... is not running`.
+#    `docker.start_database()` put the database back alone in 6.6 s, so the
+#    route was missing a CALLER, not a primitive.
+
+
+class _StartDb:
+    """A `start_database` seam that records its presses and can refuse."""
+
+    def __init__(self, started: bool = True, boom: Exception | None = None) -> None:
+        self.started = started
+        self.boom = boom
+        self.calls = 0
+
+    def __call__(self) -> bool:
+        self.calls += 1
+        if self.boom is not None:
+            raise self.boom
+        return self.started
+
+
+def test_the_stopped_world_path_starts_the_database_and_says_so(tmp_path: Path) -> None:
+    """The dead end T2 measured, closed: Stop, then install, and it succeeds.
+
+    With the world down the guard permits, and the database is down too because
+    the app's Stop took the whole project with it. The seam starts it alone --
+    the world stays stopped, which is the state the guard is about -- and the
+    report says so, because a run that started a container and did not mention
+    it leaves the operator's install in a state they did not ask for.
+
+    Catches the `start_database` call deleted from `_sql()` (T2's
+    `container ... is not running` comes straight back), and the report line
+    dropped, which would leave a started database unaccounted for.
+    """
+    sql = _FakeSql()
+    start = _StartDb(started=True)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert sql.statements == [("world", "CREATE TABLE yulon_stackable_backup (entry INT);")]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_a_database_that_is_already_up_puts_no_line_in_the_report(tmp_path: Path) -> None:
+    """`start_database()` no-ops on a running database, and so must the sentence.
+
+    Catches the report line appended unconditionally, which would claim a start
+    on every ordinary install -- the shape of `PendingSql`'s closed bug, a
+    `done` entry for something that did not happen.
+    """
+    sql = _FakeSql()
+    start = _StartDb(started=False)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert not [line for line in report.done if "database" in line]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_a_database_that_will_not_start_refuses_with_the_daemons_own_sentence(
+    tmp_path: Path,
+) -> None:
+    """No database, no SQL -- and the reason is the one Docker gave, not a paraphrase.
+
+    `docker.start_database()` raises `DockerCommandError` with the container's
+    name, the timeout and where the logs are; that sentence is the only thing
+    in the room that knows why, so it is carried whole.
+
+    Catches the seam's exception swallowed and the SQL run anyway (statements
+    sent at a database that is not there, half-applied), and the refusal
+    reworded into something that names no steps.
+    """
+    sql = _FakeSql()
+    start = _StartDb(boom=RuntimeError("ac-database did not report healthy within 120s"))
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the database could not be started, so no SQL was run and no rows were "
+        "written: sql inline → world, sql up.sql → world. "
+        "ac-database did not report healthy within 120s"
+    )
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_database_is_not_started_for_an_action_with_no_direct_sql(tmp_path: Path) -> None:
+    """Starting a container costs a Docker call and a running database.
+
+    `all-stackables` has install-time and remove-time SQL and none at configure
+    time, so a configure must not reach for the database at all.
+
+    Catches the `when` filter dropped, which would start a database for every
+    press of every button on the Modules tab.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql(),
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    applier.configure(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+def test_a_live_world_is_refused_before_any_database_is_started(tmp_path: Path) -> None:
+    """The order is the whole of it: refuse first, start second.
+
+    Swap them and a press against a live world starts containers before saying
+    no -- and on a stack the user has Stopped, the guard's own advice would be
+    undone by the guard's own run.
+
+    Catches the two calls transposed in `_sql()`.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=_FakeSql(),
+        world_running=lambda: True,
+        start_database=start,
+    )
+
+    with pytest.raises(ApplyError):
+        applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+def test_without_the_start_seam_the_route_behaves_exactly_as_before(tmp_path: Path) -> None:
+    """Absent means today's behaviour, byte for byte -- the rule the guard follows too.
+
+    Catches the seam made mandatory, which would break every caller that has no
+    Docker to offer (`apply_module()` on a folder, the tests above).
+    """
+    sql = _FakeSql()
+    applier = Applier(tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: False)
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert not [line for line in report.done if "database" in line]
+    assert sql.files == [("world", "up.sql")]
+
+
+def test_no_runner_means_no_database_is_started_either(tmp_path: Path) -> None:
+    """A run that writes nothing has nothing to start a database for.
+
+    Catches the `self.sql is None` early return dropped, which would start a
+    database for an install whose every SQL step is reported as skipped.
+    """
+    start = _StartDb()
+    applier = Applier(
+        tmp_path, git=_stackables_git(), world_running=lambda: False, start_database=start
+    )
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 0
+
+
+# ------------------------------------------- every applier the app builds (T7)
+
+
+def _seam_source(value: ast.expr, name: str) -> str:
+    """What a seam keyword is bound to, reduced to one of three answers.
+
+    `"passthrough"` -- a bare name IDENTICAL to the keyword, which is how every
+    factory and `apply_module()` hands the caller's own seam on. The name has to
+    match: `world_running=some_other_reading` is a different fact under the
+    right label, and reading any `ast.Name` as a pass-through (round 1 did) let
+    that through the audit unseen.
+    `"docker.<name>"` -- a lambda over the `docker` function of that name, which
+    is the shipped wiring; anything else comes back as `"other"` and fails the
+    audit by name.
+    """
+    if isinstance(value, ast.Name):
+        return "passthrough" if value.id == name else "other"
+    if isinstance(value, ast.Lambda) and isinstance(value.body, ast.Call):
+        called = value.body.func
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            return f"{called.value.id}.{called.attr}"
+    return "other"
+
+
+def _applier_call_sites() -> list[tuple[str, int, set[str | None]]]:
+    """Every call in `yulon/` that builds an `Applier` or asks a factory for one.
+
+    An AST walk rather than a grep, because the same construction is spelled
+    four ways in this tree -- `Applier(`, `GuardedApplier(`, a bare `applier(`
+    inside a game's own `apply_module()`, and `wotlk_modules.applier(` from the
+    view -- and a text search that knew about three of them would report a clean
+    audit over the fourth (`pyplan` records this as *audit by argv, not by
+    string*).
+
+    WHAT IT ENUMERATES: every `ast.Call` in `yulon/**.py` whose callee name ends
+    in `Applier` or `applier`, wherever it is written.
+
+    WHAT IT CANNOT SEE, said plainly rather than left to be discovered -- round
+    1 of this ticket claimed the count made the walk exhaustive, and it does
+    not. A construction reached under any other name is invisible to it:
+    `Build = Applier` then `Build(...)`; `functools.partial(Applier, ...)`;
+    `cls(...)` inside a classmethod; a factory held in a variable or a dict and
+    called through it. None of those changes the count, because the walk never
+    counted them in the first place.
+
+    THE REAL BACKSTOP is not this test: `world_running` is a REQUIRED
+    keyword-only parameter on all four factories, so a caller that omits it
+    fails at the call and under mypy, whatever it is spelled. This walk is the
+    second line -- it catches a direct `Applier(...)` that bypasses the
+    factories, and (with `_seam_bindings` below) a site whose seam is present
+    and reads the wrong thing.
+    """
+    root = Path(__file__).resolve().parents[1] / "yulon"
+    sites: list[tuple[str, int, set[str | None]]] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if not name.endswith(("Applier", "applier")):
+                continue
+            sites.append(
+                (path.relative_to(root).as_posix(), node.lineno, {k.arg for k in node.keywords})
+            )
+    return sites
+
+
+def _seam_bindings(seam: str) -> list[tuple[str, str]]:
+    """`(file:line, what the seam is bound to)` for every site that passes `seam`."""
+    root = Path(__file__).resolve().parents[1] / "yulon"
+    found: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if not name.endswith(("Applier", "applier")):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == seam:
+                    where = f"{path.relative_to(root).as_posix()}:{node.lineno}"
+                    found.append((where, _seam_source(keyword.value, seam)))
+    return found
+
+
+def test_no_applier_the_app_builds_is_left_without_the_world_running_seam() -> None:
+    """The one thing between 8.7a's second clause and a defence (T2's finding 1).
+
+    Every one of these sites passed nothing until T7, so `Applier._world_running`
+    was `None` in the shipped app and the guard returned at its first line for
+    all four games.
+
+    Catches a construction site added without the seam where this walk can see
+    it -- a new game's factory, a second applier on a tab -- and, through the
+    count, a site added in a spelling it CAN follow but nobody thought to check.
+    A site spelled some other way is not caught here at all; `_applier_call_sites`
+    says which shapes those are, and the required keyword on all four factories
+    is what stops them.
+    """
+    sites = _applier_call_sites()
+    where = [f"{f}:{n}" for f, n, _ in sites]
+
+    assert [f"{f}:{n}" for f, n, kw in sites if "world_running" not in kw] == []
+    assert [f"{f}:{n}" for f, n, kw in sites if "start_database" not in kw] == []
+    assert len(sites) == 13, where
+
+
+def test_the_seam_every_site_passes_reads_the_world_the_three_valued_way() -> None:
+    """A seam that is PRESENT and answers `False` for "could not ask" is worse than none.
+
+    `container_state(...).settled` is `False` when Docker will not answer, and
+    through this guard `False` is fail-OPEN: it is the one answer that lets SQL
+    into a live world's tables. My Party's group next door in the view reads
+    exactly that property, correctly for its own question, and T2's press left a
+    written warning that a wiring which copied it verbatim would pass every
+    audit that only looked for the keyword. This is that audit not stopping at
+    the keyword.
+
+    Two bindings are permitted and no third: the enclosing function's own
+    parameter (every factory hands the caller's seam on) and a lambda over
+    `docker.world_running()` / `docker.start_database()`, which are the
+    functions that own the mapping and the primitive.
+
+    Catches a site rewired to `docker.container_state(...).settled`, to
+    `status == "running"` alone, or to a constant -- none of which the test
+    above can see, because all of them spell the keyword correctly.
+    """
+    assert {source for _, source in _seam_bindings("world_running")} == {
+        "passthrough",
+        "docker.world_running",
+    }
+    assert {source for _, source in _seam_bindings("start_database")} == {
+        "passthrough",
+        "docker.start_database",
+    }
+    # Four games, four real readings, and all of them in the one file that knows
+    # this install's container spec and WSL distro. By file rather than by line:
+    # a line number here would go stale on the next edit above it and be
+    # "corrected" by whoever hit it, which is how an audit stops auditing.
+    real = [w for w, s in _seam_bindings("world_running") if s == "docker.world_running"]
+    assert [w.split(":")[0] for w in real] == ["ui/controller_view.py"] * 4, real
+
+
+def test_the_audit_reads_a_differently_named_pass_through_as_a_stranger() -> None:
+    """The audit's own unit test, because round 1's version could not tell them apart.
+
+    `_seam_source` accepted ANY bare name as a pass-through, so
+    `world_running=some_other_reading` -- a different fact wearing the right
+    label -- read as clean. No site in the tree spells it that way today, which
+    is exactly why the tightening needs a test of its own rather than a mutation
+    of the shipping code: there is nothing live for such a mutation to break.
+
+    Catches `value.id == name` loosened back to `isinstance(value, ast.Name)`.
+    """
+    call = ast.parse("f(world_running=world_running, start_database=something_else)").body[0]
+    assert isinstance(call, ast.Expr) and isinstance(call.value, ast.Call)
+    same, different = call.value.keywords
+    assert _seam_source(same.value, "world_running") == "passthrough"
+    assert _seam_source(different.value, "start_database") == "other"
+
+
+def test_the_shipped_manifests_this_guard_stands_in_front_of() -> None:
+    """How much is on this path, counted rather than asserted (T2's correction).
+
+    The brief for the press called `mod-arac` *the only shipped manifest with a
+    direct world-SQL step*. `SqlStep.applied_by` DEFAULTS to `"direct"`
+    (`manifest.py:136`), so every step that names no route is one: 43 steps
+    across 18 manifests in all four games. `mod-arac` is the only `module`-type
+    one, which is the narrower true statement.
+
+    The 44th direct step in the tree is `wow-wotlk/ale/paragon.json`'s, into
+    `ale` -- outside `WORLD_HELD_DBS`, which is what makes the two numbers
+    differ and why this counts the set the guard names rather than every direct
+    step.
+
+    Catches `WORLD_HELD_DBS` narrowed and the `applied_by` default flipped to
+    `db-import`: either would empty this guard's blast radius without a word,
+    and both would leave every other test above green.
+    """
+    root = Path(__file__).resolve().parents[1] / "manifests"
+    steps, files, games = 0, set(), set()
+    for path in sorted(root.glob("*/*/*.json")):
+        manifest = parse_manifest(json.loads(path.read_text(encoding="utf-8")))
+        at_risk = [
+            step
+            for step in manifest.sql
+            if step.applied_by == "direct" and step.db in apply_module.WORLD_HELD_DBS
+        ]
+        if at_risk:
+            steps += len(at_risk)
+            files.add(path)
+            games.add(path.parent.parent.name)
+
+    assert (steps, len(files), sorted(games)) == (
+        43,
+        18,
+        ["wow-tbc", "wow-tortoise", "wow-vanilla", "wow-wotlk"],
+    )
+
+
+# ------------------- the window the database start opens (T7, round 2)
+#
+# Codex's must-fix. The first reading of `world_running` is taken, then
+# `start_database()` may block for up to 180 s waiting for the database to
+# report healthy (`docker._DB_HEALTHY_TIMEOUT_SECONDS`), and only then is the
+# first statement sent. The Server tab's Start is a button the same user can
+# press inside that window, and `compose up` in another terminal needs no
+# button at all. A world that came up there is holding these tables when the
+# writes land -- and the report would have said it was left stopped.
+
+
+class _WorldThatComesUp:
+    """A `world_running` seam that answers one way, then another.
+
+    The first answer is the ground the press is permitted on; the second is
+    what the world did while the database was being waited for.
+    """
+
+    def __init__(self, then: bool | None) -> None:
+        self.answers: list[bool | None] = [False, then]
+        self.asked = 0
+
+    def __call__(self) -> bool | None:
+        answer = self.answers[min(self.asked, len(self.answers) - 1)]
+        self.asked += 1
+        return answer
+
+
+def test_a_world_started_while_the_database_came_up_is_refused_before_the_first_statement(
+    tmp_path: Path,
+) -> None:
+    """The race, closed: the reading the SQL runs on is taken after the wait, not before.
+
+    Catches the second `_refuse_direct_sql_into_a_running_world()` call dropped
+    from `_sql()`, which is the whole fix; and the guard asked again but its
+    answer ignored. Both leave every other test in this file green, because
+    every one of them holds the world still.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=True)
+    start = _StartDb(started=True)
+    applier = Applier(
+        tmp_path, git=_stackables_git(), sql=sql, world_running=seam, start_database=start
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert str(raised.value) == (
+        "all-stackables: the world server is running, and it holds world in memory and writes "
+        "back over whatever it finds there. No SQL was run and no rows were written: "
+        "sql inline → world, sql up.sql → world. Press Stop, then install again — the steps "
+        "this run already took repeat, and the SQL follows them."
+    )
+    assert sql.statements == [] and sql.files == []
+    assert seam.asked == 2, "once for the permission, once for the reading the SQL runs on"
+    assert start.calls == 1, "the database was started, and that is why the window existed"
+
+
+def test_a_world_that_stops_answering_while_the_database_came_up_is_refused_too(
+    tmp_path: Path,
+) -> None:
+    """`None` after the wait is a refusal, for the reason it is one before it.
+
+    *Could not ask* is not *not running*, and a Docker that stopped answering
+    mid-press is the case where a guard most wants to be closed: the daemon may
+    be busy starting the very world this refusal is about.
+
+    Catches the second reading narrowed to `if running is True` -- which would
+    let an unreadable Docker through on exactly the press that waited two
+    minutes for it.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=None)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=seam,
+        start_database=_StartDb(started=True),
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert "could not tell whether the world server is running" in str(raised.value)
+    assert "sql inline → world, sql up.sql → world" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+    assert seam.asked == 2
+
+
+def test_a_world_that_stayed_down_is_asked_twice_and_the_sql_runs(tmp_path: Path) -> None:
+    """The ordinary stopped-world press, and the price of the second reading.
+
+    Two `docker inspect`s per install that has direct world SQL, not one. Worth
+    saying out loud: the second is only taken when the start seam was actually
+    consulted, so a caller with no Docker to offer still pays for exactly one.
+
+    Catches the second reading turned into a refusal on `False` (every stopped
+    install would refuse), and the whole re-check made unconditional, which
+    would ask twice on the no-seam path this engine promises to leave alone.
+    """
+    sql = _FakeSql()
+    seam = _WorldThatComesUp(then=False)
+    applier = Applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=seam,
+        start_database=_StartDb(started=True),
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert seam.asked == 2
+    assert sql.files == [("world", "up.sql")]
+    assert "started the database alone; the world server was left stopped" in report.done
+
+
+def test_without_a_start_seam_the_world_is_read_exactly_once(tmp_path: Path) -> None:
+    """No start, no window, no second Docker call.
+
+    Catches the re-check hoisted out of the `if`, which would double the cost of
+    every press on every caller that has no database to start.
+    """
+    seam = _Seam(False)
+    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=seam)
+
+    applier.install(parse_manifest(STACKABLES))
+
+    assert seam.asked == 1
+
+
+# ------------------- WotLK, the game the press was run on (T7, round 2)
+
+
+def test_the_wotlk_factory_hands_the_seam_to_the_guard(tmp_path: Path) -> None:
+    """The arrival test for the one game T2 actually pressed.
+
+    `wotlk_modules.applier()` is the only one of the four that can build its own
+    `DockerSql` (this game's database password is a fixed catalog value), so a
+    test that omitted `sql=` would reach the real Docker CLI rather than the
+    guard. The runner here is a fake for that reason, not for the guard's.
+
+    Catches `world_running` accepted by that factory and dropped on the way to
+    `Applier(...)` -- the defect T7 exists to close, on the game whose live
+    press recorded it.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    sql = _FakeSql()
+    applier = wotlk_modules.applier(
+        tmp_path, git=_stackables_git(), sql=sql, world_running=lambda: True
+    )
+
+    with pytest.raises(ApplyError) as raised:
+        applier.install(parse_manifest(STACKABLES))
+
+    assert "the world server is running" in str(raised.value)
+    assert sql.statements == [] and sql.files == []
+
+
+def test_the_wotlk_factory_hands_over_the_database_start_as_well(tmp_path: Path) -> None:
+    """The other seam, through the same factory: Stop, then install, and it applies.
+
+    Catches `start_database` accepted by the WotLK factory and dropped, which
+    would leave the game T2 measured with the guard armed and its own
+    instruction still unfollowable.
+    """
+    from yulon.controller_wow_wotlk import modules as wotlk_modules
+
+    sql = _FakeSql()
+    start = _StartDb(started=True)
+    applier = wotlk_modules.applier(
+        tmp_path,
+        git=_stackables_git(),
+        sql=sql,
+        world_running=lambda: False,
+        start_database=start,
+    )
+
+    report = applier.install(parse_manifest(STACKABLES))
+
+    assert start.calls == 1
+    assert "started the database alone; the world server was left stopped" in report.done
+    assert sql.files == [("world", "up.sql")]

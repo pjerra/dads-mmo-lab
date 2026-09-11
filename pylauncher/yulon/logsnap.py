@@ -98,7 +98,19 @@ def capture(
     )
     if not container:
         return Snapshot(problem=f"could not find {spec.world} in the compose project here")
-    text = _trim(docker.log_tail(container, wsl_distro=wsl_distro))
+    raw = docker.log_tail(container, wsl_distro=wsl_distro)
+    if raw is None:
+        # The clause this box was ticked on: "a snapshot that fails or hangs is
+        # reported and the stop still happens". The fail arm was gated live; the
+        # hang arm shipped as a zero-byte file called a snapshot, because a
+        # failed read came back as an empty log (audit, 2026-09-08).
+        return Snapshot(
+            problem=(
+                f"could not read {spec.world}'s log, so no snapshot was saved -- the "
+                f"stop goes ahead without it"
+            )
+        )
+    text = _trim(raw)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     prefix = f"{game}-{composegen.install_id(server_dir)}"
     target = logs_dir / f"{prefix}-{stamp}.log"

@@ -98,7 +98,7 @@ Three honest gaps:
 
 ## What has been run against a real server, rather than only tested
 
-All of the below on Linux; none of it yet on Windows or macOS.
+All of the below on Linux. On Windows, the command channel and the Accounts tab have been pressed on the gate box (8.2b, 8.3a, 2026-09-07) and the rest of the Windows halves are owed and named as such in the checklist; nothing on macOS, because no macOS machine exists on this side. This line said "none of it yet on Windows" for two days after that stopped being true (audit, 2026-09-08).
 
 - **Installing a server** — Ubuntu 24.04 VM, 2026-08-21. Worth being exact: the install itself
   was driven by the CLI harness (then `python -m yulon.catalog.installer wow-wotlk --server-dir …`,
@@ -131,8 +131,11 @@ All of the below on Linux; none of it yet on Windows or macOS.
 ## Which servers
 
 The catalog lists four: WoW WotLK (stable), WoW TBC and WoW Vanilla (beta), WoW Tortoise (work in
-progress). Only WotLK has had its features exercised against a live server; the other three are a
-later phase and are listed, not vouched for.
+progress). All four have now been exercised against a live server in Phase 8 -- TBC, Vanilla and
+Tortoise each on the test box with a real game client of its own version -- and every ticked
+box in `pyplan/checklist.md` says what was measured on which tree. Tortoise stays work in
+progress for the reasons its entry gives: the running build has no command channel and its
+`account set password` locks an account out, both fixed upstream and not yet rebuilt in.
 
 ## Odds and ends
 

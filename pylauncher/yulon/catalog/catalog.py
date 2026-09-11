@@ -453,6 +453,18 @@ class SqlPhase(_Strict):
     into_each: dict[str, str] | None = None
     files: tuple[str, ...] = ()
     statements: tuple[str, ...] = ()
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Per-tree facts about THIS phase: what it applies, and what already applies (or "
+            "fails to apply) the same files on this tree. For a phase whose reason is visible "
+            "only on a running server -- `wow-tortoise`'s `character updates` exists because "
+            "the fork's own updater is pointed at a different directory, which is invisible "
+            "from the JSON -- this is where the measurement lives, beside the value it "
+            "explains, rather than in a docstring written per FIELD while the fact is per "
+            "field per GAME. Not `description`: that is the game blurb a user reads."
+        ),
+    )
     gzip: bool = False
     sort: Literal["natural", "name"] = "natural"
     on_error: Literal["fail", "warn"] = Field(
@@ -460,6 +472,22 @@ class SqlPhase(_Strict):
         description=(
             "`warn` logs every failing file by name and continues — the scripts' "
             "`2>/dev/null`, made visible."
+        ),
+    )
+    rerun_on_marked: bool = Field(
+        default=False,
+        description=(
+            "Apply this phase to an install the import probe already reads as finished -- a "
+            "marker row of any hash (`imported`), or `populated` with every schema complete -- "
+            "so a phase added to a plan after somebody installed still reaches their "
+            "databases. The marker rule (phase7-decisions, 'Probe') is otherwise unchanged: "
+            "every phase without this flag is skipped there, and this route writes no marker "
+            "and re-asks no `verify` rule, because it is not the whole import those describe. "
+            "Only for a phase whose files are idempotent on their own terms -- it runs on "
+            "every install press, for the life of the install. `wow-tortoise`'s `character "
+            "updates` is the case that produced it: an install made before that phase existed "
+            "is one honor-maintenance day from a restart loop the app has no button to fix "
+            "(`pyplan/gates/7.9-rerun-m910q-2026-09-09/README.md`, finding 1)."
         ),
     )
     assert_update_level: bool = Field(
@@ -980,8 +1008,11 @@ class Accounts(_Strict):
     in `account.rank` — measured against a live server on 2026-08-26, where the
     core logged its own INSERT and `SHA1(UPPER(user):UPPER(pass))` matched it
     exactly. CMaNGOS proper (TBC, Vanilla) keeps SRP6 in `v`/`s` with the level
-    in `gmlevel`, which is a THIRD shape and has not been measured, so it is
-    declared unsupported rather than assumed to be tortoise's.
+    in `gmlevel`, a THIRD shape -- measured on 2026-09-07 against both trees with
+    real clients (8.3b, 8.3c): `x = SHA1(reverse(s) + SHA1(UPPER(user:pass)))`
+    little-endian, `v = 7^x mod N`, recomputed by hand and matching the row.
+    This paragraph said "has not been measured, so it is declared unsupported"
+    for a day after it was (audit, 2026-09-08).
 
     Getting this wrong does not fail loudly — it inserts a row that looks
     correct and can never log in.
@@ -1078,6 +1109,85 @@ class Play(_Strict):
             "and the button has to say so before the press."
         ),
     )
+    revive_offline: bool | None = Field(
+        default=None,
+        description=(
+            "Whether `revive` does anything to a character who is NOT logged in, or null "
+            "where nobody has measured it here -- and the button is offered only on a True. "
+            "8.4a and 8.4b both read `characters.health` before and after, saw 0 and 0, and "
+            "concluded the command does nothing offline; 8.4c measured the CORPSE instead "
+            "and watched it go, on a character that never logged in. The offline branch is "
+            "`ConvertCorpseForPlayer` -- 'will resurrected at login without corpse' -- so "
+            "health is exactly the column it does not touch. Null on the trees whose own "
+            "boxes have not looked again."
+        ),
+    )
+    rename_command: str = Field(
+        min_length=1,
+        description=(
+            "This tree's verb for flagging a rename at the next login. `character rename` on "
+            "three of these trees; the tortoise fork registers `rename` at the TOP level "
+            "(`Chat.cpp:850`) and its `characterCommandTable` has no rename row at all, so "
+            "the sibling spelling arrives there as an unknown SUBcommand and answers with a "
+            "list of the subcommands it does have."
+        ),
+    )
+    rename_offline_refusal: str | None = Field(
+        default=None,
+        description=(
+            "What to say instead of offering the at-login rename to a character who is NOT "
+            "logged in, or null where this tree flags an offline character the same way it "
+            "flags a live one. A sentence rather than a boolean because the trees do not "
+            "merely differ in whether it WORKS: on the tortoise fork the same spelling runs "
+            "`UPDATE characters SET name = guid` for an offline character "
+            "(`Commands.cpp:12624-12635`), which does not flag a rename -- it throws the name "
+            "away. That is data loss behind a button, and the sentence says what to do "
+            "instead."
+        ),
+    )
+    set_level_command: str | None = Field(
+        description=(
+            "This tree's verb for putting a character at a level somebody picks -- "
+            "`character level` on three of these trees -- or NULL where the console has no "
+            "route to one. Required rather than defaulted, because a default is exactly how "
+            "a null turns back into a sibling's string on the way to the wire. The tortoise "
+            "fork is the null: the only command that writes an arbitrary level is `.levelup`, "
+            "whose table row sets `AllowConsole` false (`Chat.cpp:923`), and `CliHandler::"
+            "isAvailable` refuses on that field before it looks at security at all -- a "
+            "refusal the `command` DB table cannot override, since that table carries "
+            "SecurityLevel and Help and nothing else (`Chat.cpp:1730-1770`)."
+        ),
+    )
+    set_level_absent_reason: str | None = Field(
+        default=None,
+        description=(
+            "The sentence the Characters tab draws where the set-level control would be, on a "
+            "tree that has no such command. Required exactly where `set_level_command` is "
+            "null, and forbidden where it is not -- 8.4d's own clause is that the group is "
+            "replaced by a sentence NAMING WHAT DOES EXIST rather than one implying nothing "
+            "does, so 'not supported' would satisfy the shape and miss the point. It lives in "
+            "the catalog beside the measurement it comes from rather than in the view, "
+            "because it is a fact about a server and not a piece of English about a button."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_absent_level_command_says_what_this_tree_has_instead(self) -> Play:
+        """The two fields are one fact and neither can hold it alone.
+
+        A null command with no sentence draws an empty space where a group was,
+        which is the outcome 8.4d exists to prevent; a sentence beside a command
+        that works is a sentence nothing would ever draw, so it would rot
+        unread. Asserted here because the relationship has no other owner --
+        the view reads both and the catalog file writes both, and neither can
+        see the other (`defects live between the parts`).
+        """
+        if (self.set_level_command is None) != bool(self.set_level_absent_reason):
+            raise ValueError(
+                "set_level_absent_reason is required exactly where set_level_command is null: "
+                f"command={self.set_level_command!r}, reason={self.set_level_absent_reason!r}"
+            )
+        return self
 
 
 class Console(_Strict):
@@ -1226,7 +1336,16 @@ class Operations(_Strict):
         default=None, gt=0, lt=65536, description="The channel's port inside the container."
     )
     gm_level: int | None = Field(
-        default=None, ge=0, le=3, description="The level the channel needs of its account."
+        default=None,
+        ge=0,
+        le=9,
+        description=(
+            "The level the channel needs of its account, on THIS tree's scale. Capped at 3 "
+            "until 2026-09-08 -- the MaNGOS/AzerothCore scale -- and Tortoise's administrator "
+            "is 4 on a scale that runs to 4 (measured: its SOAP answered a rank-3 account with "
+            "'below administrator'). The real bound is the entry's `accounts.level.max_level`, "
+            "checked on the entry; this one only keeps the shape sane."
+        ),
     )
     enable_env: dict[str, str] = Field(
         default_factory=dict,
@@ -1365,6 +1484,26 @@ class CatalogEntry(_Strict):
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
+
+    @model_validator(mode="after")
+    def _the_channel_rank_is_one_this_tree_can_hold(self) -> CatalogEntry:
+        """`operations.gm_level` may not exceed `accounts.level.max_level`.
+
+        Two blocks written by different boxes about the same account: the channel
+        says what rank it needs, the accounts block says what ranks exist. A rank
+        above the scale is not a stricter requirement, it is one no row can meet,
+        and the first sign of it was a 401 on a fresh install (yulon-arch,
+        2026-09-08) rather than a catalog error. Checked here, once, for both.
+        """
+        ops = self.operations
+        if ops is not None and ops.gm_level is not None and self.accounts.level is not None:
+            top = self.accounts.level.max_level
+            if ops.gm_level > top:
+                raise ValueError(
+                    f"{self.id}: operations.gm_level {ops.gm_level} is above this tree's own "
+                    f"level scale (accounts.level.max_level {top}); no account can hold it"
+                )
+        return self
 
     @model_validator(mode="after")
     def _every_patch_names_a_source_this_entry_clones(self) -> CatalogEntry:

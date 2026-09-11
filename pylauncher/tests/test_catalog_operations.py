@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from yulon.catalog.catalog import ConfEnable, Operations, load_catalog
+from yulon.catalog.catalog import CatalogEntry, ConfEnable, Operations, load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
 
@@ -105,13 +105,17 @@ def test_every_tree_now_states_its_channel_and_they_are_not_the_same() -> None:
     assert channels["wow-wotlk"].enable_env and not channels["wow-wotlk"].enable_conf
     for game in ("wow-tbc", "wow-vanilla"):
         assert channels[game].enable_conf and not channels[game].enable_env
-    # And the one that has nothing to switch on at all.
-    assert channels["wow-tortoise"].channel == "attach"
-    assert channels["wow-tortoise"].port is None
+    # Tortoise joined the SOAP trees on 2026-09-08: the fork re-added the
+    # interface (3f9a062) and the pin moved onto it (3a8472e); measured on the
+    # fresh install on yulon-arch (pyplan/gates/tortoise-fresh-yulon-arch-2026-09-08/).
+    assert channels["wow-tortoise"].channel == "soap"
+    assert channels["wow-tortoise"].port == 7878
+    assert channels["wow-tortoise"].namespace == "urn:MaNGOS"
+    assert channels["wow-tortoise"].enable_conf and not channels["wow-tortoise"].enable_env
 
 
 def test_an_attach_channel_declares_nothing_it_does_not_have() -> None:
-    """Tortoise links neither gsoap nor RASocket, so most of this block is meaningless.
+    """A core with no listener (Tortoise until 2026-09-08) has nothing for most of this block.
 
     There is no listener to enable, so no `enable_env` and no `enable_conf`;
     no port to publish; no envelope, so no namespace; and no account, because
@@ -321,3 +325,31 @@ def test_every_tree_says_how_high_its_levels_go() -> None:
         level = load_catalog().get(game).accounts.level
         assert level is not None, game
         assert level.max_level == ceiling, game
+
+
+def test_tortoise_asks_the_channel_for_the_rank_this_fork_calls_administrator() -> None:
+    """Measured on the fresh install on yulon-arch, 2026-09-08 19:52Z.
+
+    The SOAP block was first written with `gm_level: 3` copied from Vanilla, and
+    the fork answered the first `server info` with *the account exists but its GM
+    level is below administrator, which SOAP requires* -- a 401 with the account
+    known. This tree's `accounts.level` scale runs to 4 (`rank`, measured in 8.3d),
+    and its administrator is the top of that scale, not MaNGOS's 3. A per-tree
+    fact, taken from the tree.
+    """
+    entry = load_catalog().get("wow-tortoise")
+    assert entry.operations is not None and entry.accounts.level is not None
+    assert entry.operations.gm_level == 4
+    assert entry.operations.gm_level == entry.accounts.level.max_level
+
+
+def test_a_channel_rank_above_the_trees_own_level_scale_is_refused() -> None:
+    """`gm_level` used to be capped at 3 by the field alone -- the MaNGOS/AzerothCore
+    scale, written before a five-rank tree existed. The bound is the entry's own
+    `accounts.level.max_level` now, so a rank no account on that tree can hold is
+    a catalog error and not a 401 on the first press."""
+    entry = load_catalog().get("wow-vanilla")
+    assert entry.operations is not None and entry.accounts.level is not None
+    too_high = entry.operations.model_copy(update={"gm_level": entry.accounts.level.max_level + 1})
+    with pytest.raises(ValidationError, match="level"):
+        CatalogEntry.model_validate({**entry.model_dump(), "operations": too_high.model_dump()})

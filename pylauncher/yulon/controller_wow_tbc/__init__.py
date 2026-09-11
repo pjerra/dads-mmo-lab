@@ -25,10 +25,21 @@ version cannot answer:
   (`catalog/families/sqlplan.py`), and the one question that evidence cannot
   answer is stated rather than guessed at — see that module.
 
-There is no `modules.py`. Module/manifest management is driven by
-`manifests/<game>/`, only `manifests/wow-wotlk/` exists, and the entry's
-`has_manifests` is false — so a TBC manifest store would be a directory listing
-of nothing wearing the name of a feature.
+`modules.py` binds `manifests/wow-tbc/` (roadmap 8.7b), and what it binds is
+the interesting part. An AzerothCore module is a git repository compiled into
+the worldserver; CMaNGOS has no such mechanism, so there is nothing here to
+clone or link in. What this core DOES have is a conf file it reads at startup
+and a world database it loads at startup — so on this game a "module" is a
+**configuration activation** (`conf[].keys` into `etc/mangosd.conf`) or a **SQL
+mod** (`sql[].statement` into `mangos`), both of which the manifest schema
+already expressed for AzerothCore's own `mods` family. The `modules`, `ale` and
+`kegs` indexes exist and are empty, because "there are none" is a fact and a
+missing file is an error message in the user's Modules tab.
+
+One schema field was added for it: `Build.restart`. `ApplyReport.
+restart_recommended` was derived from NPCs, direct SQL and server DBCs, and a
+conf-only item has none of the three — so it reported "nothing further needed"
+over a value mangosd would not read until the next start.
 
 Public entry points, for the view that dispatches on `entry.id`:
 
@@ -43,4 +54,8 @@ Public entry points, for the view that dispatches on `entry.id`:
   `.CORE_DATABASES`, plus the shared report types
 * `repair.import_state()`, `.import_gate()`, `.db_password()`,
   `.reset_unfinished()` (which raises — read its docstring before wiring it)
+* `modules.store()`, `.applier(server_dir, sql=...)`, `.apply_module()`,
+  `.refresh()`, `.GAME` — note that `applier()` REQUIRES its SQL runner,
+  unlike WotLK's, because this game's database password is generated per
+  install rather than fixed in the catalog
 """

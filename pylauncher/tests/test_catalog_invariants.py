@@ -28,15 +28,17 @@ window, was deleted with this task because nothing had called it since.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
+from tests import catalog_provenance
 from yulon import resources
 from yulon.catalog import composegen, families, native
-from yulon.catalog.catalog import CatalogEntry, NativeInstall, load_catalog
+from yulon.catalog.catalog import CATALOG_FILE, CatalogEntry, NativeInstall, load_catalog
 from yulon.catalog.families import FAMILIES
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.catalog.installer import InstallerError, installer_for
@@ -1023,3 +1025,198 @@ def test_the_import_reader_answers_every_spelling_of_the_controller() -> None:
         found = imported_modules(module, line)
         assert not any(reaches_the_controller(name) for name in found), (line, sorted(found))
     assert not reaches_the_controller("yulon.controllers")
+
+
+# -- provenance: where every per-tree value in the catalog came from -------
+#
+# Phase 8's exit line asks that "every value still marked unverified in the
+# catalog's operations block [be] replaced by a measured one, and that set
+# enumerated by name in the catalog test rather than left to memory". Nothing
+# enumerated it, and "measured" lived only in the model docstrings -- which are
+# written per FIELD while the values are per field per GAME, so no single value
+# could be asked where it came from. `tests/catalog_provenance.py` holds the
+# table and the vocabulary; `pyplan/phase8-designs/d-catalog-provenance.md`
+# holds the design and the questions left open.
+#
+# The ground before these five landed, recorded because a guard that was already
+# true proves nothing: at `dcc64543` the string "provenance" did not appear in
+# `pylauncher/yulon/` or in any catalog test, and the 39 values `catalog.json`
+# writes under a game's `play` or `accounts` block carried no marker of any kind.
+
+
+CATALOG_RAW = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
+"""The catalog as the FILE has it.
+
+Presence is the subject here, and a parsed `CatalogEntry` cannot answer
+presence: pydantic fills a default in and the result is indistinguishable from
+a value somebody typed.
+"""
+
+
+def _written_down_values() -> dict[str, object]:
+    """Every leaf `catalog.json` writes under a game's `play` or `accounts` block."""
+    found: dict[str, object] = {}
+    for game in CATALOG_RAW["games"]:
+        for block in catalog_provenance.BLOCKS:
+            if block in game:
+                for path, value in catalog_provenance.leaves(game[block], block).items():
+                    found[f"{game['id']}:{path}"] = value
+    return found
+
+
+def test_every_value_the_catalog_writes_about_a_tree_says_where_it_came_from() -> None:
+    """The guard. A value with no provenance and no owed row is a red.
+
+    Its subject is asserted before its rule, which is the whole point of it: a
+    scoping function that answers empty makes every assertion under it pass, and
+    this project has shipped that shape once already -- `_plans_whose_phase_the_checklist_ticks`
+    returned `[]` for twenty-six ticked boxes while the citation guard ran on two
+    hand-written pages. So the count is pinned and all four games are named. A
+    new field in a `play` or `accounts` block moves the count and comes here for
+    a row rather than arriving unremarked.
+    """
+    values = _written_down_values()
+    assert values, "the walk found nothing, so everything below this line passes for free"
+    assert {key.split(":")[0] for key in values} == {
+        game["id"] for game in CATALOG_RAW["games"]
+    }, "a game writes neither block, so this guard says nothing about it"
+
+    marked = set(catalog_provenance.PROVENANCE)
+    owed = set(catalog_provenance.OWED)
+    assert not marked & owed, sorted(marked & owed)
+
+    unaccounted = sorted(set(values) - marked - owed)
+    assert not unaccounted, (
+        "these values say nothing about where they came from; give each one a row in "
+        "PROVENANCE or, if nobody has asked this tree yet, in OWED with what would "
+        f"settle it: {unaccounted}"
+    )
+    stale = sorted((marked | owed) - set(values))
+    assert not stale, f"the table names values the catalog no longer writes: {stale}"
+
+    # Last, and deliberately not first. The two assertions at the top are the
+    # anti-vacuity pin -- they refuse a walk that found nothing and a walk that
+    # missed a game -- while this one is a change detector, and putting a change
+    # detector ahead of the rule costs the rule its error message: a new field
+    # would go red on a number instead of on the sentence naming what to do
+    # about it. It still earns its place. A field added AND marked in the same
+    # commit is a deliberate act and reads the count as its receipt.
+    assert len(values) == 39, (
+        f"the catalog now writes {len(values)} per-tree values under play/accounts, not 39; "
+        f"if that is intended, move the number: {sorted(values)}"
+    )
+
+
+def test_the_provenance_debts_are_exactly_these_four() -> None:
+    """The exit line's own clause: the unmeasured set, by name, in the catalog test.
+
+    Spelled out here rather than derived, because the derivation is what it is
+    checking. Exact in both directions -- a value that gets measured has to be
+    struck from `OWED` and moved, and a new debt cannot be added quietly -- so
+    the list reads as a statement of what Phase 8 still owes rather than as a
+    floor somebody has stopped looking at.
+
+    All four are ceilings and citations rather than shapes, which is worth
+    saying: no tree's TABLE, COLUMN or COMMAND is unmeasured. Three are values a
+    press read back without ever asking for the answer the tree would refuse,
+    and the fourth is a real measurement whose reading is not in this repo.
+    """
+    assert set(catalog_provenance.OWED) == {
+        "wow-wotlk:play.mail_item_cap",
+        "wow-wotlk:accounts.level.max_level",
+        "wow-tbc:accounts.level.max_level",
+        "wow-tortoise:accounts.scheme",
+    }
+    for key, reason in catalog_provenance.OWED.items():
+        assert len(reason) > 80, f"{key}: a debt with no reason is a debt nobody can discharge"
+
+
+def test_a_measured_provenance_cites_a_page_that_is_really_there() -> None:
+    """The citation resolves, or it is not a citation.
+
+    `dcc64543` widened the docs guard to gate folders and its first catch was
+    `tests/test_srp6.py` in 8.3c's README -- a file never written under that
+    name. A provenance table is the same shape of claim and would rot the same
+    way: a gate folder renamed or a README moved leaves a row pointing at
+    nothing, and a row pointing at nothing reads exactly like a measurement.
+    """
+    pyplan = Path(__file__).resolve().parents[2] / "pyplan"
+    assert pyplan.is_dir(), pyplan
+    seen = 0
+    for key, mark in catalog_provenance.PROVENANCE.items():
+        if mark.kind != "measured-on":
+            continue
+        assert (pyplan / mark.cite).is_file(), f"{key} cites {mark.cite}, which is not there"
+        seen += 1
+    assert seen == 34, seen
+
+
+def test_a_read_from_source_provenance_cites_a_line_and_not_a_sentence() -> None:
+    """A prediction has to say which line it read, and this repo cannot check the line.
+
+    The emulator trees are cloned by an install and not vendored here, so there
+    is no file to open and the shape is all there is. Stated rather than hidden:
+    this guard catches a row holding English instead of a citation, and catches
+    nothing about whether the line says what the row claims.
+    """
+    kinds = {key: mark.kind for key, mark in catalog_provenance.PROVENANCE.items()}
+    predictions = [key for key, kind in kinds.items() if kind == "read-from-source"]
+    assert predictions == ["wow-tortoise:play.rename_offline_refusal"], predictions
+    for key in predictions:
+        cite = catalog_provenance.PROVENANCE[key].cite
+        assert catalog_provenance.SOURCE_CITE.match(cite), f"{key}: {cite!r} is not a path:line"
+    assert not catalog_provenance.SOURCE_CITE.match(
+        "measured on m910q, 2026-09-08"
+    ), "the shape rule admits prose, so it is not a shape rule"
+
+
+def test_an_inherited_value_names_the_tree_it_came_from_and_that_tree_measured_it() -> None:
+    """Driven against a fixture, because the shipped table has no inherited row.
+
+    Both halves are here on purpose and neither stands alone. The FIXTURE proves
+    the rule can fail -- a rule that has never been handed an `inherited` row is
+    a rule nobody has run -- and the assertion about the real table records WHY
+    it is only a fixture, so a future row does not arrive believing it is
+    covered by a live case.
+
+    The rule itself: an inherited value points at the game it was copied from,
+    that game exists, and it carries a non-inherited provenance for the SAME
+    dotted path. Otherwise "inherited" is a chain with nothing at the end of it,
+    which is the state this vocabulary exists to make visible.
+    """
+    assert not [
+        key for key, mark in catalog_provenance.PROVENANCE.items() if mark.kind == "inherited"
+    ], "an inherited value shipped; this rule now has a live case and should be given one"
+
+    ids = {game["id"] for game in CATALOG_RAW["games"]}
+    good = {
+        "wow-tbc:play.mail_item_cap": catalog_provenance.Provenance(
+            "measured-on", "gates/8.4b-tbc-m910q-2026-09-07/README.md"
+        ),
+        "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-tbc"),
+    }
+    bad_no_such_tree = {
+        "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-turtle")
+    }
+    bad_nothing_at_the_end = {
+        "wow-tbc:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-vanilla"),
+        "wow-vanilla:play.mail_item_cap": catalog_provenance.Provenance("inherited", "wow-tbc"),
+    }
+
+    def unresolved(table: dict[str, catalog_provenance.Provenance]) -> list[str]:
+        broken = []
+        for key, mark in table.items():
+            if mark.kind != "inherited":
+                continue
+            path = key.split(":", 1)[1]
+            source = table.get(f"{mark.cite}:{path}")
+            if mark.cite not in ids or source is None or source.kind == "inherited":
+                broken.append(key)
+        return broken
+
+    assert unresolved(good) == []
+    assert unresolved(bad_no_such_tree) == ["wow-vanilla:play.mail_item_cap"]
+    assert sorted(unresolved(bad_nothing_at_the_end)) == [
+        "wow-tbc:play.mail_item_cap",
+        "wow-vanilla:play.mail_item_cap",
+    ]

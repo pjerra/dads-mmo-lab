@@ -70,6 +70,19 @@ would not because `_` is a wildcard.
 """
 
 
+AHBOT_ACCOUNT = "AHBOT"
+"""The account the auction-house module runs as, which is not a person's.
+
+`manifests/wow-wotlk/modules/mod-ah-bot.json` tells the user to create it by
+this name and hand its character's GUID to the module. Listing it beside real
+players offers to change its password -- which would break the auction house
+without a word, since the module logs in as it. The Rust launcher excluded it
+(`origin/rust-main:crates/dml-wow/src/pages.rs:302`) and this port dropped the
+exclusion for want of reading that first (retrospective audit, 2026-09-08).
+A literal name rather than a pattern: it is the name the manifest asks for.
+"""
+
+
 def accounts(sql: SqlReader, entry: CatalogEntry, marker: Marker, *, app_account: str) -> Listing:
     """This install's accounts, without the bots and without the app's own."""
     level = entry.accounts.level
@@ -94,7 +107,8 @@ def accounts(sql: SqlReader, entry: CatalogEntry, marker: Marker, *, app_account
     group = "" if level.table is None else " GROUP BY a.id, a.username"
     statement = (
         f"SELECT a.id, a.username, {selected} FROM {auth}.account a{join} "
-        f"WHERE NOT ({bots}) AND LEFT(a.username, {len(APP_PREFIX)}) <> '{APP_PREFIX}'"
+        f"WHERE NOT ({bots}) AND LEFT(a.username, {len(APP_PREFIX)}) <> '{APP_PREFIX}' "
+        f"AND a.username <> '{AHBOT_ACCOUNT}'"
         f"{group} ORDER BY a.username;"
     )
     try:

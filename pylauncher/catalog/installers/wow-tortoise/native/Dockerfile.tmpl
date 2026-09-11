@@ -23,7 +23,7 @@
 #   * tools/mmap at {{CORE_DIR}}/src/tools/mmap — MoveMapGen's off-mesh and
 #     settings inputs, named by the mmaps argv in catalog.json. The script fed
 #     them from a host bind of src/; there is no such bind at run time here.
-FROM ubuntu:22.04 AS builder
+FROM ubuntu:24.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
@@ -96,6 +96,52 @@ WORKDIR /src/_build
 # `ModuleNameToVariable()` upper-cases and replaces every non-alphanumeric with an
 # underscore, so `mod-playerbots` becomes `MODULE_MOD_PLAYERBOTS`, and a per-module value
 # beats the global default (CMakeLists.txt:459-464).
+# WHY THIS IMAGE CANNOT YET BE REBUILT ONTO THEIR CURRENT HEAD (measured on
+# m910q, 2026-09-08, three attempts).
+#
+# Their SOAP commit 3f9a062 -- the one that would turn wow-tortoise's operations
+# block from `attach` into a real command channel -- ships gsoap as a PREBUILT
+# static library, `dep/lib/gsoap/libgsoap++.a`, and `src/mangosd/CMakeLists.txt`
+# links that path directly. Two things follow, and both were measured:
+#
+#   1. The archive was compiled against glibc >= 2.38. Linking it here fails
+#      after ~39 minutes with hundreds of `undefined reference to 'strlcpy'`
+#      (glibc 2.38) and `'__isoc23_strtoul'` (the C23 ABI, same release). This
+#      image builds on ubuntu:22.04, which is glibc 2.35.
+#
+#   2. Building gsoap from the source beside it does NOT work either, which is
+#      the non-obvious half. `dep/include/gsoap/stdsoap2.h` is 2.8.125 and was
+#      added by that same commit; `dep/src/gsoap/stdsoap2.cpp` is 2.7.15 and was
+#      last touched by an unrelated one. Wiring the source in (add_subdirectory
+#      plus linking the target) applies cleanly and then fails in 29 seconds on
+#      `'struct soap_blist' has no member named 'ptr'`, `soap_dime_forward was
+#      not declared`, and a dozen more of the same shape: a 2.7 implementation
+#      against a 2.8 header.
+#
+# So the workaround is a base-image bump, and it was MEASURED on m910q the same
+# night rather than left as a guess. Building this exact Dockerfile with both
+# stages on `ubuntu:24.04` (glibc 2.39, GCC 13) SUCCEEDS in 46 minutes, and the
+# binary it produces really does carry the interface:
+#
+#     ns1__executeCommand, soap_serve, urn:MaNGOS, SOAP.Enabled
+#     objdump -T ... | GLIBC_2.38   <- the floor their archive imposes
+#
+# That last line is the whole cost of the decision and is why the bump cannot be
+# builder-only: the RUNTIME stage must also be >= glibc 2.38, or the binary will
+# not start. Both `FROM` lines move together or neither does.
+#
+# DONE, on the owner's decision, 2026-09-08. Both FROM lines are ubuntu:24.04 and
+# they move together for the reason above: a builder-only bump produces a binary
+# the runtime cannot start.
+#
+# What this costs, stated plainly because it is a shipped installer change: this
+# game's server image now needs glibc 2.38 or newer, and its C++ is compiled by
+# GCC 13 rather than 11. Both were measured on this exact Dockerfile before the
+# change was made, not after.
+#
+# The other three games are NOT touched. wow-tbc and wow-vanilla have their own
+# templates on ubuntu:22.04 and no reason to move; a per-tree fact is measured
+# per tree, and this one is a fact about Tortoise's vendored gsoap.
 RUN cmake .. \
         -DCMAKE_INSTALL_PREFIX={{CORE_DIR}} \
         -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
@@ -111,7 +157,25 @@ RUN mkdir -p {{CORE_DIR}}/sql {{CORE_DIR}}/src/tools && \
     cp -r /src/sql/. {{CORE_DIR}}/sql/ && \
     cp -r /src/tools/mmap {{CORE_DIR}}/src/tools/mmap
 
-FROM ubuntu:22.04
+# ONE of their migrations cannot apply to their own base, and it is this one.
+# Measured on m910q 2026-09-08 on a copy of a live install
+# (pyplan/gates/tortoise-reimport-rehearsal-m910q-2026-09-08/): with tw_world
+# imported from sql/base at head 3a8472e, the updater applied 157 world
+# migrations and cancelled the server on 20260903063722_world with
+#   [1062] Duplicate entry '44070' for key 'PRIMARY'   (spell_proc_event)
+# -- a row their base does not hold, so the file collides with itself or a
+# sibling, and a FRESH install at their head cannot start. Their updater is
+# hash-keyed (SHA1 of the file, src/shared/Database/AutoUpdater.cpp), so the
+# copy rewritten here is a new migration to it: applied once, recorded under
+# its own hash, every statement of it run with duplicates skipped rather than
+# the server cancelled. An install that already recorded the original is left
+# alone by this -- its rows are there and IGNORE skips them. The owner refused
+# a blanket rewrite of all 173 (answer 1, 2026-09-08); this is the one that is
+# measured broken, and the line goes the day upstream fixes the file.
+RUN sed -i 's/^\(\s*\)INSERT INTO/\1INSERT IGNORE INTO/' \
+    {{CORE_DIR}}/sql/database_updates/world/20260903063722_world.sql
+
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC

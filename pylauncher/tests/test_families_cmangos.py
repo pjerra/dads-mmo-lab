@@ -49,7 +49,7 @@ from tests.support_native import (
     Recorder,
     lay_patch_sources,
 )
-from yulon import docker, platform, resources
+from yulon import dbsecret, docker, platform, resources
 from yulon.catalog import composegen, native
 from yulon.catalog.catalog import (
     CatalogEntry,
@@ -67,6 +67,7 @@ from yulon.catalog.installer import (
     cancelled_install_message,
     installer_for,
 )
+from yulon.catalog.native import UPDATES_BUTTON_LABEL
 
 DB_PASSWORD = "tbc-0123456789abcdef"
 
@@ -2285,7 +2286,11 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     evidence = finished_extraction(rec, server_dir, client)
 
     with pytest.raises(InstallerError) as caught:
-        list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+        list(
+            engine(rec, world_running=a_world_that_is(False)).run(
+                InstallOptions(server_dir=server_dir, client_dir=client)
+            )
+        )
     images, doomed = remedy_steps(str(caught.value), server_dir)
     ctx = context(server_dir, client, completed=OLD_TWELVE_STAGE_COMPLETED)
     assert images == engine(rec).built_image_refs(ctx), str(caught.value)
@@ -2311,7 +2316,11 @@ def test_the_remedy_the_refusal_names_gets_the_fix_in_and_keeps_the_database(
     rec.calls.clear()
     rec.container_runs.clear()
 
-    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False)).run(
+            InstallOptions(server_dir=server_dir, client_dir=client)
+        )
+    )
     assert "build" in rec.calls, said
     assert [run.argv[0].rsplit("/", 1)[-1] for run in rec.container_runs] == [
         "ad",
@@ -2407,7 +2416,11 @@ def test_removing_only_the_image_rebuilds_but_leaves_the_old_maps_where_they_wer
     rec.images = False
     rec.calls.clear()
     rec.container_runs.clear()
-    said = list(engine(rec).run(InstallOptions(server_dir=server_dir, client_dir=client)))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False)).run(
+            InstallOptions(server_dir=server_dir, client_dir=client)
+        )
+    )
     assert "build" in rec.calls, said
     assert all(
         extractor_file(server_dir, name).read_bytes()
@@ -2834,6 +2847,71 @@ def test_db_password_refuses_when_the_file_is_gone_but_the_volume_exists(
     assert not (server_dir / ".db_password").exists()
 
 
+def kept_copy(server_dir: Path, *, password: str, volume: str) -> Path:
+    """Put a copy of the password where a purge with the box ticked would have left it.
+
+    Keyed through `composegen.install_id()` with this file's pinned
+    `platform_id`, because the engine under test resolves its own id through
+    the same seam: the id lowercases a path on Windows and does not on Linux,
+    so a copy filed under the ambient answer would be invisible to the stage on
+    one of the two.
+    """
+    return dbsecret.remember(
+        ENTRY.id,
+        composegen.install_id(server_dir, platform_id=lambda: "linux"),
+        password=password,
+        volume=volume,
+    )
+
+
+def test_db_password_writes_back_the_copy_yulon_kept_when_this_install_was_purged(
+    tmp_path: Path,
+) -> None:
+    """The other side of "keep my characters": the file comes back, and no one is locked out.
+
+    This is the exact state a ticked uninstall leaves behind — no
+    `.db_password`, and `<project>_db-data` still on the daemon — which is the
+    state the refusal below exists for. What makes it safe here and not there is
+    that the copy was made FOR THIS VOLUME by the action that deleted the file,
+    so writing it back restores what the database already knows rather than
+    replacing it.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    volume = db_volume(server_dir)
+    kept_copy(server_dir, password=DB_PASSWORD, volume=volume)
+    rec = Recorder()
+    rec.volumes.add(volume)
+
+    said = list(engine(rec)._db_password(context(server_dir)))
+
+    assert ENTRY.install.password.file is not None
+    secret = server_dir / ENTRY.install.password.file
+    assert secret.read_text(encoding="utf-8").strip() == DB_PASSWORD
+    assert any(volume in line for line in said), said
+
+
+def test_a_copy_kept_for_another_volume_does_not_unlock_the_refusal(tmp_path: Path) -> None:
+    """The copy names what it opens, and the stage checks that name before trusting it.
+
+    Two installs of one game keep two copies; a value from the wrong one would
+    lock this database out exactly as a minted password would, and it would do
+    it while looking like a recovery. The password matches on purpose — the
+    volume name is the only thing separating the two cases.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    kept_copy(server_dir, password=DB_PASSWORD, volume="yulon-wow-tbc-somewhere-else_db-data")
+    rec = Recorder()
+    rec.volumes.add(db_volume(server_dir))
+
+    with pytest.raises(InstallerError) as refusal:
+        list(engine(rec)._db_password(context(server_dir)))
+
+    assert db_volume(server_dir) in str(refusal.value)
+    assert not (server_dir / ".db_password").exists(), "the refusal wrote nothing"
+
+
 VOLUME_DELETING_PAIRS = (("volume", "rm"), ("volume", "prune"))
 """Consecutive argv words that delete a named volume, whatever surrounds them."""
 
@@ -2928,8 +3006,52 @@ def test_the_live_volume_refusal_names_a_way_to_delete_the_volume_the_server_tab
         for path in app_modules()
         for kind, spelling in volume_deleting_spellings(path.read_text(encoding="utf-8"))
         if not (kind == "text" and path.resolve() == own_file)
+        if path.name not in THE_UNINSTALL
     ]
     assert offenders == [], offenders
+
+
+THE_UNINSTALL = frozenset({"docker.py", "purge.py"})
+"""The two files 8.9a's uninstall is allowed to live in, and nowhere else.
+
+This scan's docstring said it "goes red the day any part of the app grows such
+an action, the Server tab included, at which point this refusal should point at
+it rather than at a terminal". 2026-09-08 is that day: 8.9a built
+`docker.remove_volume()` and `purge.py` around it.
+
+The refusal above is NOT re-pointed yet, and that is deliberate rather than
+forgotten. It belongs to the CMaNGOS family, and 8.9a wires uninstall for
+AzerothCore only - 8.9b is the box that brings Vanilla, and it is the box that
+owes this refusal a sentence naming the tab instead of a terminal command. Until
+then, sending a CMaNGOS user to a button their tab does not have would be the
+same round trip this test exists to prevent, one step later.
+
+Two files and not a blanket exemption, and the test below keeps them honest: the
+only ARGV spelling anywhere is the one inside `docker.remove_volume()`.
+"""
+
+
+def test_the_only_volume_deleting_command_in_the_app_is_the_uninstalls_own(
+    tmp_path: Path,
+) -> None:
+    """The exemption above is a place, not a licence.
+
+    `THE_UNINSTALL` lets two files carry the action; this says WHERE in them.
+    Exactly one function may issue the argv, and it is the one whose contract is
+    that the volume is gone afterwards. A second `volume rm` anywhere - a
+    convenience wrapper, a fallback in `remove_staged()` - fails here.
+    """
+    import yulon.docker as docker_module
+
+    source = Path(inspect.getsourcefile(docker_module) or "").read_text(encoding="utf-8")
+    issuing = [
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and volume_deleting_spellings(ast.unparse(node))
+        and any(kind == "argv" for kind, _ in volume_deleting_spellings(ast.unparse(node)))
+    ]
+    assert issuing == ["remove_volume"], issuing
 
 
 A_NEW_SERVER_TAB_ACTION = '''
@@ -4258,7 +4380,11 @@ def test_the_import_leaves_a_finished_one_alone_even_when_an_older_plan_wrote_it
     tmp_path: Path,
 ) -> None:
     rec = ready_to_import(IMPORTED_OLDER_PLAN)
-    said = list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    said = list(
+        engine(rec, world_running=a_world_that_is(False))._import(
+            context(server_with_sql(tmp_path))
+        )
+    )
     assert rec.sql_calls == [], "nothing was sent to the database"
     assert any("leaving them alone" in line for line in said), said
 
@@ -4275,8 +4401,359 @@ def test_the_import_leaves_a_populated_database_that_is_complete_alone(
     """
     full = docker.ImportState("populated", "every schema has tables and rows", complete=True)
     rec = ready_to_import(full)
-    list(engine(rec)._import(context(server_with_sql(tmp_path))))
+    list(
+        engine(rec, world_running=a_world_that_is(False))._import(
+            context(server_with_sql(tmp_path))
+        )
+    )
     assert rec.sql_calls == []
+
+
+# -- the phases a plan re-runs on an install that is already finished (T11) ----
+
+
+POPULATED_AND_COMPLETE = docker.ImportState(
+    "populated", "every schema has tables and rows", complete=True
+)
+"""The other answer `_import` treats as finished, and it is not `imported`.
+
+The spine returns for both without importing, so a re-run route that recognised
+only the marker would leave an install imported by the shell scripts — which has
+no marker row at all and reads `populated` — exactly as exposed as before.
+"""
+
+MARKED_ONLY = "SELECT 'only the phases the marker rule covers'"
+"""The statement of an ordinary phase: applied to a fresh install, never again."""
+
+EVERY_PRESS = "SELECT 'a phase declared rerun_on_marked'"
+"""The statement of the flagged phase: applied on every press, finished or not."""
+
+
+def a_world_that_is(answer: bool | None) -> Callable[[str], bool | None]:
+    """The `world_running` seam, answering the same thing however often it is asked.
+
+    Copied rather than shared with `test_database_updates.py`'s helper of the
+    same name (T14's `worlds()` sits beside it for the same reason): that file
+    imports fixtures FROM this one, so the other direction would be circular.
+    """
+
+    def world_running(container: str) -> bool | None:
+        return answer
+
+    return world_running
+
+
+def rerun_plan() -> SqlPlan:
+    """The shipped plan with two statement phases, one of them `rerun_on_marked`.
+
+    Statements and no files, so nothing has to be laid on disk and each phase is
+    identifiable by the exact text the client was handed. The PAIR is the point:
+    every assertion below is about which of the two moved, and a plan with only
+    the flagged phase in it could not tell "the flag was honoured" from "the
+    whole plan ran again".
+    """
+    return SQL.model_copy(
+        update={
+            "phases": (
+                SqlPhase(name="world base", into=ENTRY.databases.world, statements=(MARKED_ONLY,)),
+                SqlPhase(
+                    name="character updates",
+                    into=ENTRY.databases.characters,
+                    statements=(EVERY_PRESS,),
+                    rerun_on_marked=True,
+                ),
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize("finished", [IMPORTED_OLDER_PLAN, POPULATED_AND_COMPLETE])
+def test_a_phase_declared_rerunnable_reaches_an_install_the_probe_reads_as_finished(
+    tmp_path: Path, finished: docker.ImportState
+) -> None:
+    """The route T10's fix had no way to travel.
+
+    `MarkerGate.probe()` reads a marker row as `imported` whatever its hash, so
+    a phase added to the plan afterwards reached fresh installs only — and the
+    m910q's Tortoise world stopped starting one morning for want of a table one
+    of those files creates (`7.9-rerun-m910q-2026-09-09`, finding 1). The phase
+    now says of itself that it may run there, and this is that sentence being
+    honoured.
+
+    Over BOTH answers the family treats as finished, because they are one branch
+    in `_import` and an install made by the shell scripts carries no marker.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(finished)
+    said = list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
+    assert EVERY_PRESS in rec.sql_calls, rec.sql_calls
+    assert any("character updates" in line for line in said), said
+
+
+def test_the_phases_a_finished_install_may_not_re_run_are_still_left_alone(
+    tmp_path: Path,
+) -> None:
+    """The marker rule, unchanged for everything that did not ask for this.
+
+    The same run as above: the flagged phase moved, and nothing else did. Phase
+    0 is the expensive half of that promise — `create_schemas()` writes `CREATE
+    USER ... IDENTIFIED BY` and its grants, and re-running it against somebody's
+    server is a password change nobody asked for — so it is asserted off the
+    SCRIPTS, where that text is, and not off the first lines in `sql_calls`.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
+    assert MARKED_ONLY not in rec.sql_calls, rec.sql_calls
+    assert not [s for s in rec.sql_scripts if "CREATE DATABASE" in s or "IDENTIFIED BY" in s]
+
+
+def test_a_re_run_over_a_finished_install_writes_no_marker_and_re_asks_no_verify_rule(
+    tmp_path: Path,
+) -> None:
+    """It is not the import those two describe, and it must not claim to be.
+
+    A marker row records that THIS plan finished; one written after two of its
+    seven phases would tell the next press a lie it can never take back. The
+    verify rules are the same argument from the other end — they are about a
+    whole world, and a world that was already imported is not being re-checked
+    here. Nothing is lost by leaving both alone: the row that is already there
+    reads `imported` on the next press, exactly as it does now.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    list(
+        engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+            context(server_dir)
+        )
+    )
+    assert not [s for s in rec.sql_scripts if sqlplan.MARKER_TABLE in s], rec.sql_scripts
+    asked = {rule.query for rule in SQL.verify}
+    assert not [s for s in rec.sql_calls if s in asked], rec.sql_calls
+
+
+def test_a_fresh_install_applies_a_rerunnable_phase_once_and_not_twice(
+    tmp_path: Path,
+) -> None:
+    """`absent` runs the plan; the flagged phase is IN that plan and is not a second copy.
+
+    The cheap way to write this feature is to apply the flagged phases before or
+    after the ordinary import unconditionally, and every assertion above still
+    passes when it is written that way. A file applied twice is harmless only
+    while it is idempotent, which is a promise about the sources rather than
+    about this code, and the transcript would say the same thing twice.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(ABSENT)
+    list(engine_with_sql(rerun_plan(), rec)._import(context(server_dir)))
+    assert rec.sql_calls.count(EVERY_PRESS) == 1, rec.sql_calls
+    assert rec.sql_calls.count(MARKED_ONLY) == 1, rec.sql_calls
+
+
+def test_a_re_run_that_the_database_refuses_stops_the_install_before_the_world_starts(
+    tmp_path: Path,
+) -> None:
+    """A `fail` phase is `fail` on this route too, and the stage is before `up`.
+
+    The temptation is to soften it — the install is finished, this is only an
+    upgrade, why break it — and softening it recreates the exact silence this
+    phase exists to end: the character SQL does not land, the log says the
+    databases are already imported, and the world crash-loops on the first
+    morning honor maintenance falls due.
+
+    The sentence is `sqlplan.apply()`'s own, naming the run that the client
+    rejected — the same one the ordinary import raises, because it is the same
+    call over the same runs.
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    rec.failing_sql = EVERY_PRESS
+    with pytest.raises(InstallerError, match="Nothing after it was applied"):
+        list(
+            engine_with_sql(rerun_plan(), rec, world_running=a_world_that_is(False))._import(
+                context(server_dir)
+            )
+        )
+
+
+def test_a_rerunnable_phase_is_still_asked_whether_its_update_level_landed(
+    tmp_path: Path,
+) -> None:
+    """`assert_update_level` means the same thing wherever the phase runs.
+
+    The check exists because a `warn` phase and a broken world print the same
+    transcript (2026-09-03), and that is no less true on an install this route
+    touches — more so, since no verify rule is re-asked here and this is then
+    the only question anything asks about what actually landed. A phase carrying
+    both flags whose chain did not land is a refusal, not a line in the log.
+
+    Files rather than statements because the model refuses the level flag on a
+    `statements` phase: the column it looks for is built from the last FILE the
+    phase applied.
+    """
+    server_dir = tmp_path / "srv"
+    updates = server_dir / "updates"
+    updates.mkdir(parents=True)
+    for n in (1, 2):
+        (updates / f"{n:04d}_step.sql").write_text(f"-- {n:04d}_step.sql\n", encoding="utf-8")
+    plan = SQL.model_copy(
+        update={
+            "phases": (
+                SqlPhase(
+                    name="character updates",
+                    into=ENTRY.databases.characters,
+                    files=("updates/*.sql",),
+                    sort="name",
+                    assert_update_level=True,
+                    rerun_on_marked=True,
+                ),
+            )
+        }
+    )
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    rec.column_answer = "0\n"
+    with pytest.raises(InstallerError, match="required_0002_step"):
+        list(
+            engine_with_sql(plan, rec, world_running=a_world_that_is(False))._import(
+                context(server_dir)
+            )
+        )
+
+
+# -- the world must be down before a finished install's rerun (T24) ----------
+#
+# T11 landed `_rerun_on_marked()`, reached the moment `_import` reads the probe
+# as finished, with nothing before it asking whether the world that owns
+# `tw_char`/`characters` is up: `start-db` only proves the DATABASE container,
+# and `up` runs three stages later, never before. T14 closed this on the
+# Modules-tab button's own route (`update_databases()`), which has its own
+# `ctx.updates_only` arm and its own guard; this route is the OTHER caller of
+# `_rerun_on_marked()` — the ordinary install spine, reached by `engine.run()`
+# (the CLI harness, and any "Use existing..." folder whose world is running).
+
+
+@pytest.mark.parametrize(
+    "running,detail",
+    [
+        (True, "world server is running"),
+        (None, "could not tell whether"),
+    ],
+)
+def test_a_finished_installs_rerun_refuses_before_up_while_the_world_is_up_or_unreadable(
+    tmp_path: Path, running: bool | None, detail: str
+) -> None:
+    """The stage order T11's reviewer read: no SQL, and `up` never runs either.
+
+    A full `run()`, not a bare `_import()` call — a mutation deleting the guard
+    would still pass a test that never gave `up` a chance to run, and asserting
+    stage order is the whole point (T11's reviewer, note 3).
+    """
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(running))
+    assert detail in str(raised.value)
+    assert rec.sql_calls == [], rec.sql_calls
+    assert "start" not in rec.calls, "the world server was started (`up` ran)"
+    assert "reset" not in rec.calls, "a database was cleared"
+
+
+def test_a_finished_installs_rerun_refuses_naming_press_stop_then_install_again(
+    tmp_path: Path,
+) -> None:
+    """The 8.7a sentence shape, with the remedy this route can actually follow.
+
+    `update_databases()`'s own refusal names the Modules-tab button — the
+    thing a press on THAT route just made. This route is reached by Install (or
+    the CLI harness, or a "Use existing..." folder), so the remedy names that
+    instead; the fact and the "Press Stop" clause are the same rule as T7's and
+    T14's guards, said again so a user meets one rule under three doors.
+    """
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=a_world_that_is(True))._import(
+                context(server_with_sql(tmp_path))
+            )
+        )
+    said = str(raised.value)
+    assert "Press Stop" in said, said
+    # The remedy must be one a REMEMBERED install can follow: its catalog tile is
+    # greyed "Installed" (catalog_view.py:432-439), so "press Install again" is
+    # not it (Codex on T24); the Modules-tab button is enabled for exactly the
+    # plans this route fires on.
+    assert UPDATES_BUTTON_LABEL in said, said
+    assert "press Install again" not in said, said
+    assert "nothing was imported and nothing was cleared" in said, said
+
+
+def test_a_finished_installs_rerun_names_docker_when_the_world_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """The `None` branch, and why the remedy has to name Docker first.
+
+    `docker.container_state()` answers an empty state both for a container
+    that is not there and for a daemon that will not reply, so "Stop the
+    server" is advice nobody stuck on the second one can follow (cold review
+    of T14, round 1 — the same shape, a third time).
+    """
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(
+            engine(rec, world_running=a_world_that_is(None))._import(
+                context(server_with_sql(tmp_path))
+            )
+        )
+    said = str(raised.value)
+    assert "could not tell whether" in said, said
+    assert "Docker" in said, said
+    assert rec.sql_calls == [], rec.sql_calls
+
+
+def test_a_finished_installs_rerun_proceeds_once_the_world_reads_down(tmp_path: Path) -> None:
+    """`False` is the one answer that lets this route apply the flagged phase — unchanged."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(False))
+    assert any("leaving them alone" in line for line in said), said
+    assert "start" in rec.calls, "the world was never brought back up"
+
+
+def test_the_finished_installs_rerun_asks_the_world_through_the_same_seam_t7_wired(
+    tmp_path: Path,
+) -> None:
+    """Reused, not re-derived: `Seams.ask_world_running`, T7's seam, is the one asked.
+
+    A second, independently-written mapping from container status to a
+    boolean would be a second place the `paused` finding (T20) has to be
+    fixed. Caught by a seam that raises: if this route asked anything else, an
+    angry `world_running` override would never be reached at all.
+    """
+
+    def angry(container: str) -> bool | None:
+        raise RuntimeError("the daemon is not there")
+
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    with pytest.raises(InstallerError) as raised:
+        list(engine(rec, world_running=angry)._import(context(server_with_sql(tmp_path))))
+    assert "could not tell whether" in str(raised.value)
+    assert "the daemon is not there" in str(raised.value)
+    assert rec.sql_calls == [], rec.sql_calls
 
 
 def test_the_import_clears_a_half_written_database_before_it_runs(
@@ -4500,8 +4977,28 @@ def test_the_import_cancel_note_is_said_at_the_import_and_nowhere_else(
     rec = Recorder()
     said = install(rec, tmp_path / "srv", client_folder(tmp_path))
     at = said.index("--- import")
-    assert said[at + 1] == native.IMPORT_CANCEL_NOTE
-    assert said.count(native.IMPORT_CANCEL_NOTE) == 1
+    assert said[at + 1] == native.IMPORT_STAGE_CANCEL_NOTE
+    assert said.count(native.IMPORT_STAGE_CANCEL_NOTE) == 1
+
+
+def test_a_finished_installs_ordinary_run_never_says_the_bare_clearing_promise(
+    tmp_path: Path,
+) -> None:
+    """The spine says the import stage's note BEFORE `_import` probes, so on a finished
+    install -- whose route is `_rerun_on_marked()`, which clears nothing -- a note that
+    promised clearing was false up front and contradicted by the stop's own words later
+    (Codex on T19, round 2). The stage's note now names both arms; the bare clearing
+    promise (`IMPORT_CANCEL_NOTE`) is a stop-time sentence for the fresh-import route and
+    appears in no line of a finished install's run, and the re-run note is the updates
+    stage's, not this one's. Catches the stage note reverted to `IMPORT_CANCEL_NOTE`."""
+    server_dir = tmp_path / "srv"
+    server_dir.mkdir()
+    rec = ready_to_import(IMPORTED_OLDER_PLAN)
+    said = install(rec, server_dir, client_folder(tmp_path), world_running=a_world_that_is(False))
+    assert said.count(native.IMPORT_STAGE_CANCEL_NOTE) == 1, said
+    assert not any(native.IMPORT_CANCEL_NOTE in line for line in said), said
+    assert not any(native.RERUN_CANCEL_NOTE in line for line in said), said
+    assert any("leaving them alone" in line for line in said), said
 
 
 def test_import_is_recorded_and_sits_between_start_db_and_up() -> None:

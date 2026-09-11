@@ -145,6 +145,13 @@ class Recorder:
     db_start_error: str = ""
     db_healthy: bool = True
     ready: bool = True
+    tag_problem: str = ""
+    """What `docker tag` answers when it refuses, or empty when it tags.
+
+    The rebuild's rollback is kept through this seam, and a double that could
+    only ever succeed could not produce the refusal the engine has to make
+    BEFORE it compiles over the only copy of the running build.
+    """
 
     world_output: native.WorldOutput = native.WorldOutput(
         text="mangosd loading", restarts=0, status="running"
@@ -158,6 +165,18 @@ class Recorder:
     `world_output` a callable that changes its answer, because a double that
     cannot produce a different second reading cannot produce the failure this
     module exists to make producible (see `tests/test_ready_budget.py`).
+    """
+
+    ready_specs: list[docker.ReadySpec] = field(default_factory=list)
+    """Every `ReadySpec` handed to `wait_ready`, in order — recorded, not dropped.
+
+    The seam took the spec and threw it away until 2026-09-09, and what that
+    hid was measured live on `yulon-ubuntu2`: a rebuild waits for the AUTH
+    marker `{{REALM_HOST}}:{{WORLD_PORT}}` filled with `INSTALL_REALM_HOST`,
+    which is the address a FRESH install advertises and which the install's own
+    last act (`_advertise_realm`) then replaces. A double that returns `ready`
+    without looking at the pattern answers True to a marker that can never
+    match a real log.
     """
 
     container_runs: list[docker.ContainerRun] = field(default_factory=list)
@@ -514,9 +533,12 @@ class Recorder:
             container_project=self.container_project,
             start_db=self.start_db,
             start=self.start,
+            recreate=self.recreate,
             wait_db_healthy=lambda spec: self.db_healthy,
-            wait_ready=lambda spec, ready: self.ready,
+            wait_ready=self.wait_ready,
             world_output=lambda spec: self.world_output,
+            tag_image=self.tag_image,
+            remove_image=self.remove_image,
             # An INERT SELinux by default: not enforcing, on a filesystem that
             # could hold a label if it were. That is Ubuntu/Arch/macOS, which
             # is what every other test in both files is about, and it keeps
@@ -536,6 +558,11 @@ class Recorder:
             setattr(seams, key, value)
         return seams
 
+    def wait_ready(self, spec: object, ready: docker.ReadySpec) -> bool:
+        """Answer `self.ready`, and KEEP the pattern that was asked about."""
+        self.ready_specs.append(ready)
+        return self.ready
+
     def gather(self, entry: object, server_dir: Path, **_kwargs: object) -> preflight.Facts:
         self.calls.append("gather")
         return preflight.Facts(
@@ -551,6 +578,28 @@ class Recorder:
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
+        return True
+
+    def tag_image(self, src: str, dst: str) -> str:
+        """`docker.tag_image()`: recorded as `tag:<src>-><dst>`, refused as `tag_problem`."""
+        self.calls.append(f"tag:{src}->{dst}")
+        return self.tag_problem
+
+    def remove_image(self, ref: str) -> str:
+        """`docker.remove_image()`: recorded as `rmi:<ref>`, always allowed here."""
+        self.calls.append(f"rmi:{ref}")
+        return ""
+
+    def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
+        """`docker.recreate_staged()` — `start` with `--force-recreate`.
+
+        Recorded under its OWN name, never as `start`. The two are different
+        requests: a rebuild that issued the plain `up -d` would leave the
+        pre-rebuild containers running, which is the defect the whole rebuild
+        control exists for, and a double that logged both as "start" could not
+        tell that apart from a correct run.
+        """
+        self.calls.append("recreate")
         return True
 
 

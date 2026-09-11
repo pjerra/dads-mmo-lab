@@ -71,20 +71,25 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, cast
 
-from yulon import docker, platform
+from yulon import dbsecret, docker, platform
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch
+from yulon.catalog.catalog import CmangosData, NativeInstall, SourcePatch, SqlPlan
 from yulon.catalog.families import conf, dockerfile, extract, patch, sqlplan
 from yulon.catalog.installer import InstallerError
 from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
-    IMPORT_CANCEL_NOTE,
+    IMPORT_STAGE_CANCEL_NOTE,
     INSTALL_REALM_HOST,
+    RERUN_CANCEL_NOTE,
+    UPDATES_BUTTON_LABEL,
     ImportGate,
+    MarkerRow,
     Secrets,
     Stage,
     StageContext,
     StagedInstaller,
+    import_reads_as_finished,
+    rerunnable_phases,
     secret_token_name,
     stop_abandoned_worker,
 )
@@ -242,7 +247,7 @@ class CmangosInstaller(StagedInstaller):
             Stage("mmaps", self._mmaps, cancel_note=extract.MMAPS_CANCEL_NOTE),
             Stage("conf", self._conf),
             Stage("start-db", self.stage_start_db, recorded=False),
-            Stage("import", self._import, cancel_note=IMPORT_CANCEL_NOTE),
+            Stage("import", self._import, cancel_note=IMPORT_STAGE_CANCEL_NOTE),
             Stage("up", self.stage_up, recorded=False),
             Stage("ready", self.stage_ready, recorded=False),
         )
@@ -618,6 +623,17 @@ class CmangosInstaller(StagedInstaller):
                 f"Docker would not say whether the database volume {volume} exists ({exc}), so "
                 "this install cannot prove a new password is safe to write. Nothing was written."
             ) from exc
+        if exists and self._is_the_copy_this_volume_was_made_with(ctx, volume):
+            try:
+                _write_secret(path, ctx.secrets.db_password)
+            except OSError as exc:
+                raise InstallerError(f"{path} could not be written: {exc}") from exc
+            yield (
+                f"Put this install's database password back into {plan.file} from the copy "
+                f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
+                "your characters are in. Back that file up."
+            )
+            return
         if exists:
             raise InstallerError(
                 f"{path} is gone, but this install's database volume {volume} still exists and "
@@ -635,6 +651,32 @@ class CmangosInstaller(StagedInstaller):
             f"Wrote this install's database password to {plan.file}. Back that file up: the "
             f"database in {volume} cannot be opened without it."
         )
+
+    def _is_the_copy_this_volume_was_made_with(self, ctx: StageContext, volume: str) -> bool:
+        """Is the secret in hand the one Yu'lon kept when it deleted this install's folder?
+
+        The narrow exception to the refusal above, and it is narrow in three
+        ways rather than one, because a wrong `True` here writes a password
+        into a file the rest of the install then believes:
+
+        * there has to BE a copy, filed under this game and this folder's
+          install id — the pair a reinstall to the same folder recomputes;
+        * the copy has to name THIS volume. Two installs of one game keep two
+          copies, and a value from the wrong one locks this database out
+          exactly as a minted password would, while looking like a recovery;
+        * it has to be the value the spine actually resolved. `resolve_secrets()`
+          reads the FILE first and only falls back to the copy, so a
+          `.db_password` that reappeared between the two reads wins — and if the
+          two disagree, the one the database was created with is not knowable
+          from here and the refusal is the honest answer.
+
+        A stale copy for a volume that no longer exists never reaches this
+        method: it is only asked when the volume DOES exist.
+        """
+        kept = dbsecret.recall(self.entry.id, self._install_id(ctx.server_dir))
+        if kept is None:
+            return False
+        return kept.volume == volume and kept.password == ctx.secrets.db_password
 
     def _db_volume(self, server_dir: Path) -> str:
         """`<compose project>_<volume key>` — what `docker volume ls` shows for this install."""
@@ -1110,6 +1152,42 @@ class CmangosInstaller(StagedInstaller):
         that could not be run at all, therefore raises with no marker written,
         and the next press imports again.
 
+        On an install the table called finished, the one thing that still
+        happens is `_rerun_on_marked()` — the phases the plan declares
+        re-runnable, and only those. Everything from `db = ...` down is the
+        ordinary import and is not reached there.
+
+        **The world is read once more, right before that call, and not
+        before.** `start-db` above only proves the DATABASE container; `up`
+        runs stages later and never before this one, so until this guard
+        existed a press through `engine.run()` — the CLI harness
+        (`install_wiring.py`) or a "Use existing..." folder whose world is
+        already running — streamed the flagged phases' `ADD INDEX`/`ALTER`/
+        `CREATE TABLE` into a live world's tables (T11's reviewer, note 3;
+        Codex, T24). `_refuse_rerun_into_a_running_world()` is this route's
+        own enforcement point for the rule `update_databases()` already
+        enforces on the button's route — a second point for one rule, not a
+        second rule, T7's and T14's own shape.
+
+        Only right here, and not before `stage_import()` the way `updates_only`
+        is: the finding this closes (T11's reviewer, note 3) is about the
+        finished-install branch alone, and the `absent`/`partial` arms below
+        run the ordinary import, which is a different route with no incident
+        recorded against it.
+
+        **`ctx.updates_only` is read before `stage_import()` is called, and that
+        ordering is the whole of the updates button's safety argument.** That
+        press consents to a named list of files. `stage_import()`'s table would
+        answer it with a full multi-hour import and a completion marker on
+        `absent`, and with `gate.reset()` — `DROP DATABASE IF EXISTS` over every
+        schema the plan names — on `partial`, which it reaches even with
+        `service=None` because the `if service is None: return` sits AFTER that
+        block. Any check placed after that call would be a second probe, and a
+        second probe is a second question: the answer can differ between the two
+        and the destructive arm would still be reachable on the first. So the
+        route branches here, ahead of the table, and the ordinary import is
+        unreachable on it rather than guarded on it (cold review of T14, round 1).
+
         The mapping is `_secret_tokens()` and not `_public_tokens()`: a phase
         statement may legitimately carry `{{DB_PASSWORD}}` — the shipped
         Tortoise plan's `CREATE USER ... IDENTIFIED BY` does — and none of what
@@ -1118,11 +1196,14 @@ class CmangosInstaller(StagedInstaller):
         """
         plan = self._data().sql
         gate = _Remembering(self._gate(ctx))
+        if ctx.updates_only:
+            yield from self._only_the_rerunnable_phases(ctx, plan, gate)
+            return
         yield from self.stage_import(ctx, gate, None)
         seen = gate.last
-        if seen is not None and (
-            seen.state == "imported" or (seen.state == "populated" and seen.complete)
-        ):
+        if seen is not None and import_reads_as_finished(seen):
+            self._refuse_rerun_into_a_running_world()
+            yield from self._rerun_on_marked(ctx, plan)
             return
         db = self._native().db
         container = self.entry.container_spec().db
@@ -1215,13 +1296,7 @@ class CmangosInstaller(StagedInstaller):
                 )
             )
         try:
-            sqlplan.write_marker(
-                plan,
-                container=container,
-                client=db.client,
-                password=password,
-                exec_stdin=self._seams.exec_stdin,
-            )
+            self.write_import_marker(ctx)
         except InstallerError:
             # `write_marker()` goes through `sqlplan._run_sql()`, which turns
             # both of its failures into an `InstallerError` already naming the
@@ -1235,6 +1310,319 @@ class CmangosInstaller(StagedInstaller):
                 f"({type(exc).__name__}: {exc})."
             ) from exc
         yield "The databases are imported and marked complete."
+
+    def _refuse_rerun_into_a_running_world(self) -> None:
+        """Owner answer 7, at the ordinary install route's own enforcement point.
+
+        `_rerun_on_marked()` streams the plan's re-runnable phases into the
+        character database, and nothing before this call has ever asked
+        whether the world server that owns that database is up: `stage_start_db`
+        only proves the DATABASE container is up, and `up` is three stages
+        later and never before this one. T14 closed the same gap on the
+        Modules-tab button's route (`native.StagedInstaller.
+        _refuse_writes_into_a_running_world`); this is the OTHER caller of
+        `_rerun_on_marked()` — the ordinary spine, reached through
+        `engine.run()` (the CLI harness, `install_wiring.py:342`, and any
+        "Use existing..." folder whose world happens to be running) — and that
+        function's own sentence names the button that pressed it, which is not
+        what got THIS call made. So the fact and the "Press Stop" clause are
+        the same rule, said again with the remedy this route can follow:
+        `self._refuse_writes_into_a_running_world` above is one stanza too far
+        to reuse verbatim, so the reading is shared and the words are not.
+
+        Reused, not re-derived: `self._seams.ask_world_running` is `StagedInstaller`'s
+        own T7 seam (`native.Seams.ask_world_running`, wired for every game by
+        T7's applier work and read the same way by T14's guard) — the container
+        status to `True`/`False`/`None` mapping lives once, in `docker.world_running`,
+        and this call is the third caller of it rather than a fourth copy of
+        the table.
+
+        Not stopped on the user's behalf: a stop is its own consent (T7's
+        rule), and this function only ever refuses or returns.
+
+        Fails closed on anything short of an explicit `False`, the same
+        discipline `apply.Applier`'s and `native`'s guards use: `None` and a
+        seam that raises are both refusals, because *could not ask* is not
+        *not running*.
+        """
+        container = self.entry.container_spec().world
+        why = ""
+        try:
+            running: bool | None = self._seams.ask_world_running(container)
+        except Exception as exc:  # noqa: BLE001 - any seam failure is one answer here
+            logger.warning(f"could not tell whether {container} is running: {exc}")
+            running, why = None, f"{type(exc).__name__}: {exc}"
+        if running is False:
+            return
+        if running is None:
+            # Docker named FIRST: `docker.container_state()` answers an empty
+            # state both for a container that is not there and for a daemon
+            # that will not reply, so "Stop the server" is advice that cannot
+            # be followed on a machine where Docker itself is down (cold
+            # review of T14, round 1).
+            raise InstallerError(
+                f"Yu'lon could not tell whether {self.entry.name}'s world server is running "
+                f"({why or 'the daemon gave no answer'}), and a running one holds these "
+                f"databases in memory and writes back over whatever it finds in them. "
+                f"Nothing was applied, nothing was imported and nothing was cleared. Docker "
+                f"itself may be the thing that is not answering — it reads a stopped container "
+                f"and a daemon that is down the same way — so check that Docker is running, "
+                f"then press Stop on the Server tab if the server is up, and apply these "
+                f'files with "{UPDATES_BUTTON_LABEL}" on the Modules tab (or run the install '
+                f"again from the command line)."
+            )
+        raise InstallerError(
+            f"{self.entry.name}'s world server is running, and it holds these databases in "
+            f"memory and writes back over whatever it finds in them. Nothing was applied, "
+            f"nothing was imported and nothing was cleared. Press Stop on the Server tab, then "
+            f'apply these files with "{UPDATES_BUTTON_LABEL}" on the Modules tab — it starts '
+            f"the database on its own and keeps the world server down — or run the install "
+            f"again from the command line. (A remembered install's catalog tile reads "
+            f"Installed and cannot be pressed, which is why the button is the remedy here; "
+            f"Codex on T24.)"
+        )
+
+    def _only_the_rerunnable_phases(
+        self, ctx: StageContext, plan: SqlPlan, gate: _Remembering
+    ) -> Iterator[str]:
+        """The updates press's whole import stage: one probe, a precondition, the flagged phases.
+
+        `stage_import()` is deliberately not called. Its table is written for a
+        press that consented to an INSTALL, and two of its arms would answer a
+        press that consented to a named list of files with something else
+        entirely — see `_import`'s own paragraph on the ordering.
+
+        ONE probe, through the same `_Remembering` gate the ordinary route uses,
+        so `_rerun_on_marked()`'s own reading of "already imported" and this
+        precondition are the same answer to the same question rather than two
+        answers a live database could give differently.
+
+        The refusal names the state and its detail and says what to do instead.
+        It does not offer to import: an install that stopped at or after `import`
+        is resumed by pressing Install, which is a different consent with a
+        different dialog and — unlike this tuple — carries the `db-password`
+        stage that persists the app user's password.
+        """
+        seen = gate.probe()
+        if not import_reads_as_finished(seen):
+            raise InstallerError(
+                f"{self.entry.name}'s databases do not read as a finished import "
+                f"({seen.state}: {seen.detail}), so these files do not belong to them yet. "
+                f"Nothing was applied, nothing was imported and nothing was cleared. Finish "
+                f"the install of this folder first -- these files go in as part of it"
+                + (
+                    " -- and if the state above is unreadable, check that Docker is running "
+                    "and that the database container is up before anything else."
+                    if seen.state == "unreadable"
+                    else "."
+                )
+            )
+        yield f"These databases read as {seen.state}; nothing else in the install plan is re-run."
+        yield from self._rerun_on_marked(ctx, plan)
+
+    def _rerun_on_marked(self, ctx: StageContext, plan: SqlPlan) -> Iterator[str]:
+        """The phases a plan declares re-runnable, applied to an install already read as finished.
+
+        The marker rule (phase7-decisions, "Probe") says a finished import is
+        never re-run: a plan whose hash moved must not `DROP realmd` on a server
+        with accounts on it. The cost of that rule is that a phase ADDED to a
+        plan reaches fresh installs only, and on 2026-09-09 the m910q's Tortoise
+        world stopped starting for want of a table one such phase's files create
+        — honor maintenance fell due for the first time and truncates
+        `character_inventory_copy` (`pyplan/gates/7.9-rerun-m910q-2026-09-09`,
+        finding 1). Nothing in the app could put those files on that install.
+
+        So the exception is declared per PHASE and by the phase itself, beside
+        the `notes` that argue its files are idempotent, rather than by a rule
+        about plan hashes: `rerun_on_marked` is a promise about ONE phase's
+        files, and the phase and its promise cannot drift apart while they are
+        the same object. Every phase without it is skipped here exactly as
+        before, which is what keeps the probe's table true.
+
+        **No marker is written and no `verify` rule is re-asked**, and both
+        follow from what this is not: a marker row says this PLAN finished, and
+        one written after two of its seven phases would tell every later press
+        something it can never take back. The rules describe a whole world; a
+        world that was imported before this phase existed is not being
+        re-checked by it. The row already there goes on reading `imported`.
+
+        What IS asked is `assert_update_level`, for the flagged phases' own
+        runs: a `warn` phase and a broken world print the same transcript
+        (2026-09-03), and with no verify rule re-asked on this route that check
+        is the only question anything asks about what actually landed.
+
+        Phase 0 is not reached from here on purpose. `create_schemas()` writes
+        `CREATE USER ... IDENTIFIED BY` and its grants, and this route runs
+        against a server somebody is playing on.
+
+        **`cancel_note=RERUN_CANCEL_NOTE`, not `sqlplan.apply()`'s default**,
+        because both of this method's callers reach it with the gate already
+        reading a finished import: a stop mid-run here changes neither the
+        marker nor the gate's next answer, so `IMPORT_CANCEL_NOTE`'s clearing
+        promise would be false whichever caller it came from. Found by the
+        cold reviewer round 1: clearing the stage's own `cancel_note` in
+        `update_stages()` did not close this, because `sqlplan.apply()`'s
+        between-run check raises independently of the stage heading, and it
+        was still defaulting to the install route's wording here.
+        """
+        phases = rerunnable_phases(plan)
+        if not phases:
+            return
+        db = self._native().db
+        container = self.entry.container_spec().db
+        password = ctx.secrets.db_password
+        runs = self._rerunnable_runs(plan, ctx)
+        if not runs:
+            return
+        named = ", ".join(phase.name for phase in phases)
+        yield (
+            f"These databases are imported already, but {len(runs)} SQL step(s) of {named} are "
+            "applied to every install, however old. This is what puts a file added to the "
+            "install plan since onto a server that already exists."
+        )
+        yield from self._stream(
+            lambda sink: sqlplan.apply(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                exec_stdin=self._seams.exec_stdin,
+                sink=sink,
+                cancel=ctx.cancel,
+                cancel_note=RERUN_CANCEL_NOTE,
+            ),
+            cancel=ctx.cancel,
+        )
+        self._check_cancel(ctx.cancel)
+        try:
+            failing = sqlplan.check_update_levels(
+                runs,
+                container=container,
+                client=db.client,
+                password=password,
+                sql_query=self._query_seam(),
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"{named} ran over these databases but they could not be checked "
+                f"({type(exc).__name__}: {exc})."
+            ) from exc
+        if failing:
+            raise InstallerError(
+                f"{named} ran over these databases and they are not at the level it leaves "
+                f"behind: {', '.join(failing)}."
+            )
+        yield f"{named}: applied. The import marker is unchanged."
+
+    def _rerunnable_runs(self, plan: SqlPlan, ctx: StageContext) -> tuple[sqlplan.PhaseRun, ...]:
+        """Every file and statement the flagged phases would apply, in the order they apply.
+
+        One expansion, two callers: the press's own (`_rerun_on_marked`) and the
+        confirmation's (`update_files`). Written twice, the dialog could offer a
+        file list the run then did not stream — which is the shape of promise
+        this project has already been bitten by once, in `rebuild_confirmation`
+        claiming "nothing else in the folder is rewritten" about a stage that
+        writes two files.
+        """
+        try:
+            return sqlplan.expand(
+                plan.model_copy(update={"phases": rerunnable_phases(plan)}),
+                ctx.server_dir,
+                self._schemas(),
+                self._secret_tokens(ctx),
+            )
+        except InstallerError:
+            # The same ordering as the ordinary import's: every refusal
+            # `expand()` raises is already the sentence a user reads, and
+            # `InstallerError` is a `RuntimeError`, so a broad clause ahead of
+            # this one would wrap one finished sentence inside another.
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The phases this install re-runs on every press could not be prepared: {exc}"
+            ) from exc
+
+    def update_files(self, ctx: StageContext) -> tuple[str, ...]:
+        """The confirmation's file list, expanded from the folder this install lives in.
+
+        Named as the run's own log names each step — `PhaseRun.rel`, the path
+        relative to the server dir — so a user reading the dialog and a user
+        reading the transcript afterwards are reading the same strings.
+        """
+        plan = self._data().sql
+        if not rerunnable_phases(plan):
+            return ()
+        return tuple(run.rel for run in self._rerunnable_runs(plan, ctx))
+
+    # -- adopting an install this app did not make (T19) ----------------------
+
+    def adopt_gate(self, ctx: StageContext) -> ImportGate:
+        """`_gate()`, under the spine's name for it. The SAME gate the import stage drives.
+
+        Not a second gate and not a second question: the reading that offers the
+        adopt button, the reading its press refuses on, and the reading
+        `_import` branches on all come out of `MarkerGate.probe()` over this
+        plan. A separate probe here would be a second implementation of "is this
+        imported?", which is the drift `import_reads_as_finished()` exists to
+        prevent one layer up.
+
+        Not `_Remembering`: this press probes twice on purpose — once before the
+        row is written and once after — and a gate that answered the second
+        question from the first reading could not tell the write landed.
+        """
+        return self._gate(ctx)
+
+    def marker_row(self) -> MarkerRow:
+        """The row an adopt press writes, read off the plan the writer reads it off.
+
+        `plan.marker_db` and not `self._schemas()[plan.marker_db]`, because
+        `sqlplan.write_marker()` spells the schema exactly that way — the
+        mapping is the identity for this family (`_schemas()` says why), so the
+        two agree today, and naming the writer's own spelling is what keeps them
+        agreeing if it ever stops being the identity.
+
+        `plan.plan_hash()` is asked here rather than remembered, so the
+        confirmation names the hash the write will use even when an app upgrade
+        moved it between the dialog opening and the press.
+        """
+        plan = self._data().sql
+        return MarkerRow(
+            schema=plan.marker_db,
+            table=sqlplan.MARKER_TABLE,
+            plan_hash=plan.plan_hash(),
+            databases=sqlplan.plan_schemas(plan, self._schemas()),
+        )
+
+    def write_import_marker(self, ctx: StageContext) -> None:
+        """`sqlplan.write_marker()` for this install. The ONE spelling of the row.
+
+        Both routes that record a finished import come through here: the
+        ordinary import, at the end of a successful one after `verify()` passed,
+        and the adopt press, on the person's word. A second call site would be a
+        second spelling of the row — a different schema, a different hash, a
+        `CREATE TABLE` that differed by a column — and the probe reads one shape
+        only.
+
+        It is also the ledger's single row for this write
+        (`pyplan/write-ledger.md`): the write leaves this process as an argv
+        with SQL on its stdin, which the ledger's walk sees only because it was
+        taught this function's name.
+
+        Raises:
+            InstallerError: the client refused the statements, or could not be
+                reached. `sqlplan._run_sql()` has already named the marker in
+                the sentence.
+        """
+        db = self._native().db
+        sqlplan.write_marker(
+            self._data().sql,
+            container=self.entry.container_spec().db,
+            client=db.client,
+            password=ctx.secrets.db_password,
+            exec_stdin=self._seams.exec_stdin,
+        )
 
     def _gate(self, ctx: StageContext) -> ImportGate:
         """The family's `ImportGate`: the SQL plan's marker table, asked through the seams.
@@ -1730,6 +2118,15 @@ class _Remembering:
 
     def reset(self) -> tuple[str, ...]:
         return self.inner.reset()
+
+    def adoption_gaps(self) -> tuple[str, ...]:
+        """Straight through: there is nothing to remember, and it is not a state.
+
+        `last` is about the five-branch table, which this question is not part
+        of. Caching it would make a gate that answers "nothing is missing" from
+        a reading taken before a stage that could have changed the answer.
+        """
+        return self.inner.adoption_gaps()
 
 
 def _write_secret(path: Path, value: str) -> None:

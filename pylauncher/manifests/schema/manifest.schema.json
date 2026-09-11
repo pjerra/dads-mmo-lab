@@ -2,11 +2,17 @@
   "$defs": {
     "Build": {
       "additionalProperties": false,
-      "description": "Whether installing/removing needs the worldserver rebuilt.",
+      "description": "What must happen after installing/removing before the change is live.",
       "properties": {
         "rebuild": {
           "default": true,
           "title": "Rebuild",
+          "type": "boolean"
+        },
+        "restart": {
+          "default": false,
+          "description": "Declare that this item needs the worldserver restarted. `ApplyReport.restart_recommended` is otherwise DERIVED \u2014 from NPCs, direct SQL and server DBCs, all of which reach the database or the data volume \u2014 and that derivation cannot see a conf write. An item whose whole content is `conf[].keys` reported 'nothing further needed' while the value it had just written sat in a file the emulator reads once, at startup. On CMaNGOS that IS the whole shape of a module (roadmap 8.7b), so it is declared here rather than guessed at. False by default, and it never suppresses a derived yes \u2014 only adds one.",
+          "title": "Restart",
           "type": "boolean"
         }
       },
@@ -170,6 +176,41 @@
       "title": "Deploy",
       "type": "object"
     },
+    "ExistsCheck": {
+      "additionalProperties": false,
+      "description": "A read run against the server's own database before an answer is accepted.\n\nDeclared here rather than coded in the applier because it is per-item\nknowledge (style-guide \u00a74), and it exists because of what the AH bot modules\ndo with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an\nerror inside the module, it is a module that quietly posts nothing \u2014 which\nfrom the outside is indistinguishable from \"this module does not work\"\n(measured on the owner's own install, 2026-09-07).\n\n`query` and `missing` are templates over the manifest's prompt keys.\n`query` must be a single SELECT: the applier hands it to the READ half of\nthe SQL seam, and a manifest is content rather than code, so the one thing\nit must not be able to do through this field is write.",
+      "properties": {
+        "db": {
+          "enum": [
+            "auth",
+            "characters",
+            "world",
+            "playerbots",
+            "ale"
+          ],
+          "title": "Db",
+          "type": "string"
+        },
+        "missing": {
+          "description": "What to tell the user when no row came back.",
+          "minLength": 1,
+          "title": "Missing",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        }
+      },
+      "required": [
+        "db",
+        "query",
+        "missing"
+      ],
+      "title": "ExistsCheck",
+      "type": "object"
+    },
     "Npc": {
       "additionalProperties": false,
       "description": "An NPC the item adds that the user may need to spawn (`.npc add <entry>`).",
@@ -207,6 +248,45 @@
         "name"
       ],
       "title": "Npc",
+      "type": "object"
+    },
+    "Origin": {
+      "additionalProperties": false,
+      "description": "How a CUSTOM manifest came to exist: derived by this app, not shipped by the project.\n\nPresent only on a manifest `yulon.module_source` derived from a link the user\npasted or a folder the user chose. Every file under `manifests/` has\n`origin=None`, and `test_origin_is_optional_and_every_shipped_manifest_has_none`\nasserts that over the tree rather than trusting it.\n\nIt exists because a local folder is **not** a `Source`. `Source` means \"where\ncontent is cloned from\" and its `url` property feeds `git.CloneSpec`; a path\nis not a clone URL, `same_repo()`/`remote_url()` have no meaning for a copy,\nand `README.md` \u00a73a treats `repo` as the piracy fence, which the user's own\ndisk should neither need to pass nor be allowed to weaken. So a folder-derived\nmanifest carries no source at all and records where it came from here.\n\n`path` is the folder the module was copied from, for a human reading the file\nand for choosing the same folder again; it is `None` for a link, whose source\nalready says where it came from. Nothing in the applier reads this model \u2014\nownership is decided by the clone claim, as it is for a shipped module.",
+      "properties": {
+        "added": {
+          "description": "ISO date the derivation happened.",
+          "minLength": 1,
+          "title": "Added",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "link",
+            "folder"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The folder it was copied from (kind='folder'); null for a link.",
+          "title": "Path"
+        }
+      },
+      "required": [
+        "kind",
+        "added"
+      ],
+      "title": "Origin",
       "type": "object"
     },
     "Patch": {
@@ -291,6 +371,18 @@
           ],
           "default": null,
           "title": "Default"
+        },
+        "exists": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExistsCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A row that must be found before this answer is used; see `ExistsCheck`."
         },
         "key": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
@@ -493,7 +585,8 @@
     "build": {
       "$ref": "#/$defs/Build",
       "default": {
-        "rebuild": false
+        "rebuild": false,
+        "restart": false
       }
     },
     "client": {
@@ -568,6 +661,18 @@
       },
       "title": "Npcs",
       "type": "array"
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Origin"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set only on a manifest this app derived; see `Origin`."
     },
     "patches": {
       "default": [],

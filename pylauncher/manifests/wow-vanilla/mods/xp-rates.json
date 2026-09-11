@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "id": "xp-rates",
+  "name": "XP Rate Customization",
+  "type": "mod",
+  "game": "wow-vanilla",
+  "description": "Kill / Quest / Explore XP multipliers in mangosd.conf.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Rate.XP.Kill",
+          "default": "{kill}"
+        },
+        {
+          "key": "Rate.XP.Quest",
+          "default": "{quest}"
+        },
+        {
+          "key": "Rate.XP.Explore",
+          "default": "{explore}"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Kill[ \\t]*=.*$",
+      "replace": "Rate.XP.Kill    = 1",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Quest[ \\t]*=.*$",
+      "replace": "Rate.XP.Quest   = 1",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Explore[ \\t]*=.*$",
+      "replace": "Rate.XP.Explore = 1",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "kill",
+      "question": "Kill XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "quest",
+      "question": "Quest XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "explore",
+      "question": "Explore XP multiplier",
+      "kind": "float",
+      "default": "1"
+    }
+  ],
+  "notes": [
+    "Three keys and no more: mangos-classic sets Rate.XP.Kill at `src/game/World/World.cpp:422`",
+    "and has no per-tier `.Vanilla` / `.BC` twins at all. The TBC manifest's note about those",
+    "is a fact about that fork and does not apply here (read on ~/vanilla-75b, 2026-09-08).",
+    "The anchors are load-bearing on THIS tree in a way they are not on TBC: `Rate.Pet.XP.Kill`",
+    "ships two lines above `Rate.XP.Kill` (`etc/mangosd.conf:1509-1510`), so an unanchored",
+    "`Rate\\.XP\\.Kill` would rewrite the pet rate and nothing would report it.",
+    "The remove patches restore the shipped column alignment, which is why they carry the",
+    "spacing rather than a single space: the conf comes back byte-identical."
+  ]
+}

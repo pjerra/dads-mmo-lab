@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "id": "xp-rates",
+  "name": "XP Rate Customization",
+  "type": "mod",
+  "game": "wow-tbc",
+  "description": "Kill / Quest / Explore XP multipliers in mangosd.conf.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Rate.XP.Kill",
+          "default": "{kill}"
+        },
+        {
+          "key": "Rate.XP.Quest",
+          "default": "{quest}"
+        },
+        {
+          "key": "Rate.XP.Explore",
+          "default": "{explore}"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Kill[ \\t]*=.*$",
+      "replace": "Rate.XP.Kill    = 1",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Quest[ \\t]*=.*$",
+      "replace": "Rate.XP.Quest   = 1",
+      "regex": true,
+      "when": "remove"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Rate\\.XP\\.Explore[ \\t]*=.*$",
+      "replace": "Rate.XP.Explore = 1",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "kill",
+      "question": "Kill XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "quest",
+      "question": "Quest XP multiplier",
+      "kind": "float",
+      "default": "1"
+    },
+    {
+      "key": "explore",
+      "question": "Explore XP multiplier",
+      "kind": "float",
+      "default": "1"
+    }
+  ],
+  "notes": [
+    "TBC also ships Rate.XP.Kill.Vanilla / .BC (and the Quest and Explore twins), which are",
+    "multiplied ON TOP of these per content tier. This mod leaves those at 1 on purpose, so",
+    "one number means one thing; set them by hand if you want vanilla and TBC to differ.",
+    "The keys are matched with an anchored `Rate.XP.Kill =` so the `.Vanilla` line is untouched."
+  ]
+}

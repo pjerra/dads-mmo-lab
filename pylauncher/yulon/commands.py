@@ -185,27 +185,63 @@ def teleport_to(character: str, location: str, *, verb: str) -> str:
     return line(f"{verb.strip()} {character} {location}")
 
 
-def set_character_level(character: str, level: int) -> str:
-    """`character level <character> <level>`.
+_LEVEL_VERB = re.compile(r"^(?:[a-z]+ )?level$")
+"""What a set-level verb looks like: `character level` on three of these trees.
+
+The fourth has none at all, and that is why this is a passed argument rather
+than the constant it used to be. On the tortoise fork the only command that
+writes an arbitrary level is `.levelup`, registered with `AllowConsole` false
+(`Chat.cpp:923`, read from that fork's source 2026-09-07), and `CliHandler::
+isAvailable` refuses on that field before it looks at security -- so its entry's
+`play.set_level_command` is null, and a default here is precisely how a null
+turns back into a sibling's string on the way to the wire.
+"""
+
+_RENAME_VERB = re.compile(r"^(?:[a-z]+ )?rename$")
+"""`character rename` on three trees, and the bare `rename` on the tortoise fork.
+
+Registered there at the top level (`Chat.cpp:850`), with no rename row in its
+`characterCommandTable` at all -- so the sibling spelling is an unknown
+SUBcommand there and answers with the list of subcommands it does have, which
+reads like this app being broken rather than like a command that is elsewhere.
+"""
+
+
+def set_character_level(character: str, level: int, *, verb: str) -> str:
+    """`<verb> <character> <level>`.
 
     1 to 255 is the shape this command takes; whether THIS server allows level
     80 or 60 is its own configured business and it says so itself when asked.
+
+    The verb is the CALLER'S, from `play.set_level_command`, and required for
+    the reason `cap` and `realms` are: a tree that has no such command carries a
+    null there, and a default here would quietly restore a string for it.
     """
     _character(character)
+    _require(
+        bool(_LEVEL_VERB.match(verb.strip())),
+        f"{verb!r} is not a set-level command this app has measured on a server",
+    )
     _require(1 <= level <= 255, f"{level} is not a level this command takes")
-    return line(f"character level {character} {level}")
+    return line(f"{verb.strip()} {character} {level}")
 
 
-def rename_at_login(character: str) -> str:
-    """`character rename <character>` -- marked for rename at the next login.
+def rename_at_login(character: str, *, verb: str) -> str:
+    """`<verb> <character>` -- marked for rename at the next login.
 
     The optional `reserveName` and `$newName` arguments are deliberately not
     sent: one reserves the old name server-wide and the other renames without
     asking the player, and neither is what a button called "Rename at next
-    login" promises.
+    login" promises. On the tortoise fork a second argument is not optional
+    trimming but a DIFFERENT command -- `rename <char> <newname>` renames on the
+    spot (`Commands.cpp:12588-12609`) with no name-validity check of its own.
     """
     _character(character)
-    return line(f"character rename {character}")
+    _require(
+        bool(_RENAME_VERB.match(verb.strip())),
+        f"{verb!r} is not a rename command this app has measured on a server",
+    )
+    return line(f"{verb.strip()} {character}")
 
 
 def revive(character: str) -> str:

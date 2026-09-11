@@ -80,17 +80,49 @@ def test_a_stopped_server_is_not_asked_how_many_players_it_has(tmp_path: Path) -
     assert verdict.players is None
 
 
-def test_a_restart_count_that_grew_between_ticks_is_a_restart_loop(tmp_path: Path) -> None:
-    """The count is the only thing that separates a loop from a server that is up."""
+def test_one_new_restart_is_a_hiccup_and_not_yet_a_loop(tmp_path: Path) -> None:
+    """A single OOM-kill the next boot survives is not a pattern.
+
+    This used to call a loop on ONE new restart, and the false alarm is
+    photographed in 8.2b's own evidence (`1-refusal-while-running.png`: a
+    healthy server, the command-channel button greyed, "restart loop -- 1
+    restarts"). rust-main had already built this on the same `RestartCount`
+    signal, chose three, and wrote down why (`crates/dml-wow/src/lifecycle.rs`,
+    BOOT_LOOP_RESTART_STRIKES): Docker only increments the count for a death, so
+    one is already abnormal -- but calling one a loop "would train users to
+    ignore the warning", and three consecutive failures to get through boot is
+    a pattern no healthy start produces. Owner's decision, 2026-09-08.
+    """
     watch = _watch(tmp_path, [_running(restarts=2), _running(restarts=3)])
 
     first = watch.tick()
     second = watch.tick()
 
     assert first.state == "up"
-    assert second.state == "restart_loop"
+    assert second.state == "up", "one new restart read as a loop"
     assert second.restarts == 3
-    assert second.stable is False
+
+
+def test_three_new_restarts_since_the_watch_began_are_a_restart_loop(tmp_path: Path) -> None:
+    """The count is the only thing that separates a loop from a server that is up.
+
+    Three NEW since this watcher first looked -- a delta, never the absolute
+    count, so a long-lived server carrying hundreds of historical restarts can
+    never trip it on its first tick.
+    """
+    watch = _watch(
+        tmp_path,
+        [
+            _running(restarts=200),
+            _running(restarts=201),
+            _running(restarts=202),
+            _running(restarts=203),
+        ],
+    )
+
+    states = [watch.tick().state for _ in range(4)]
+
+    assert states == ["up", "up", "up", "restart_loop"], states
 
 
 def test_a_container_docker_calls_restarting_is_a_loop_on_the_very_first_tick(
@@ -115,8 +147,8 @@ def test_a_young_run_after_a_restart_still_reads_as_a_loop(tmp_path: Path) -> No
         tmp_path,
         [
             _running(restarts=4),
-            _running(started=just_started, restarts=5),
-            _running(just_started, 5),
+            _running(started=just_started, restarts=7),
+            _running(just_started, 7),
         ],
     )
 
@@ -366,7 +398,7 @@ def test_a_restarted_container_is_not_called_a_loop_and_is_not_called_settled_ei
         tmp_path,
         [
             _running(long_ago, 8),
-            _running(long_ago, 9),
+            _running(long_ago, 11),  # three new restarts: a loop, under the three-strike rule
             _running(three_minutes_in, 0),
             _running(eleven_minutes_in, 0),
         ],
@@ -396,7 +428,7 @@ def test_a_loop_in_the_run_that_followed_is_caught_on_its_own_evidence(tmp_path:
             _running(long_ago, 8),
             _running(long_ago, 9),
             _running(three_minutes_in, 0),
-            _running(thirty_seconds_in, 1),
+            _running(thirty_seconds_in, 3),
         ],
     )
 

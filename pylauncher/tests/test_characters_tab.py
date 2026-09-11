@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from yulon import play as play_module
 from yulon.catalog.catalog import load_catalog
 from yulon.play import Character
 from yulon.ui import controller_view as controller_view_module
@@ -19,7 +20,16 @@ from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
 TORTOISE = load_catalog().get("wow-tortoise")
-"""The tree with no Play block. It was Vanilla until 8.4c measured that one."""
+"""The tree whose console has no route to an arbitrary level (8.4d)."""
+
+UNMEASURED = WOTLK.model_copy(update={"play": None})
+"""A tree with no Play block at all, synthesised because no shipped one is left.
+
+It was Vanilla until 8.4c measured that one and Tortoise until 8.4d measured
+this one. `model_copy` keeps the id, so `ControllerServices.for_entry` still
+finds a factory: this stands for a game whose 8.4 box has not been done, not
+for one this build cannot manage.
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -124,16 +134,19 @@ def test_a_tree_that_has_not_measured_its_play_block_gets_a_sentence(tmp_path: P
     """Not a disabled button: a button that cannot work is a promise the tab
     cannot keep, and 8.4d is the box that makes it work there.
 
-    The entry is Tortoise because it is the one whose block is genuinely absent.
-    Vanilla stood here until 8.4c, and after that box its `play` was not None —
-    so the fixture said "this tree has not measured its block" about a tree that
-    had, and passed anyway because the test forces `play=None`. A fixture that
-    passes on a false premise is testing the argument, not the tree.
+    The entry used to be Tortoise, because it was the one whose block was
+    genuinely absent. 8.4d measured it, so the premise moved to a synthesised
+    entry rather than staying on a tree that has since been measured: Vanilla
+    stood here until 8.4c and, once its `play` was not None, the fixture said
+    "this tree has not measured its block" about a tree that had, and passed
+    anyway because the test forces `play=None`. A fixture that passes on a false
+    premise is testing the argument, not the tree.
     """
-    view = _view(tmp_path, TORTOISE, play=None)
+    view = _view(tmp_path, UNMEASURED, play=None)
 
     assert view.character_list.isVisibleTo(view) is False
-    assert TORTOISE.name in view.character_report.text()
+    assert UNMEASURED.name in view.character_report.text()
+    assert UNMEASURED.play is None, "the premise this test is about"
 
 
 def test_the_actions_wait_for_a_character_to_be_chosen(tmp_path: Path) -> None:
@@ -308,18 +321,23 @@ def test_on_a_one_item_per_mail_tree_the_button_promises_a_mail_per_piece(
     assert "(2 mails)" in said, said
 
 
-def test_revive_is_only_offered_for_a_character_who_is_logged_in(tmp_path: Path) -> None:
-    """Measured on the live server, 2026-09-07, by a gate that had been fixed to
-    start from a state the command was supposed to change.
+def test_revive_is_not_offered_offline_on_a_tree_that_has_not_measured_it(
+    tmp_path: Path,
+) -> None:
+    """WotLK, whose entry says nothing about an offline revive.
 
-    `revive` on an OFFLINE character answers success and does nothing: the row
-    read `health 0` before and `health 0` twenty seconds after, while the server
-    said yes with an empty message. It acts on a live player object, and an
-    offline character has none.
+    It said something for a while, and what it said was wrong. 8.4a and 8.4b
+    read `characters.health` before and after -- 0 and 0 -- and concluded the
+    command does nothing to a character who is not logged in, so the button was
+    disabled for every tree by a constant in this file. 8.4c watched the CORPSE
+    instead, on the Vanilla server, and it went; the offline branch is
+    `ConvertCorpseForPlayer`, "will resurrected at login without corpse", which
+    is a real effect in exactly the column health is not.
 
-    So the button is offered only where it can work. Every other action here
-    works offline -- the teleport's own help says "Character can be offline" --
-    so this is one control's rule and not the tab's.
+    So the rule is now the entry's rather than this tab's, and an unmeasured
+    tree keeps the greyed button -- for the honest reason, which is that nobody
+    has run the command there and watched. Every other action works offline: the
+    teleport's own help says "Character can be offline".
     """
     people = (
         Character(1, "Guglu", 78, True, "ADMIN"),
@@ -363,3 +381,335 @@ def test_the_list_refresh_after_an_action_is_bounded_rather_than_a_single_guess(
     view.refresh_characters()
     view._characters_listed_at(stale_generation, ())
     assert view.character_list.count() == 2, "a late older refresh emptied the list"
+
+
+def test_revive_is_offered_offline_where_the_tree_measured_that_it_works(
+    tmp_path: Path,
+) -> None:
+    """Vanilla, measured live on m910q 2026-09-07 (8.4c).
+
+    An offline character with a corpse kept it through twelve untouched seconds,
+    lost it within twelve seconds of the command, and never logged in. The entry
+    carries that as `play.revive_offline`, and the button follows the entry.
+    """
+    vanilla = load_catalog().get("wow-vanilla")
+    assert vanilla.play is not None and vanilla.play.revive_offline is True
+
+    view = _view(tmp_path, entry=vanilla, play=_Play(characters=_people(), cap=1))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(1)
+    assert view.character_list.currentItem().text().endswith("PLAYER")
+    assert view.revive_button.isEnabled() is True, view.revive_button.text()
+    assert "logged in" not in view.revive_button.text(), view.revive_button.text()
+    assert "Ganaar" in view.revive_button.text(), view.revive_button.text()
+
+
+def test_a_gear_set_that_cannot_be_read_says_why_rather_than_wearing_nothing(
+    tmp_path: Path,
+) -> None:
+    """Two characters called Joleta on the live Vanilla server, 2026-09-07.
+
+    The read raises rather than answering a wrong set, and the tab used to
+    swallow that into "Joleta is wearing nothing" -- a false sentence about the
+    character in place of a true one about the server. The button is still
+    disabled, because there is still nothing safe to press; what changed is that
+    it now says which of the two things is wrong.
+    """
+    play = _Play(characters=_people())
+
+    def refuse(character: str) -> tuple[int, int]:
+        raise play_module.Ambiguous(
+            f"2 characters here are called {character}",
+            "(guids 255, 446), and no command this app sends can tell them apart.",
+        )
+
+    play.gear_set_size = refuse  # type: ignore[method-assign]
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(0)
+
+    said = view.send_gear_button.text()
+    assert view.send_gear_button.isEnabled() is False
+    assert "2 characters" in said, said
+    assert "wearing nothing" not in said, said
+    # Short enough to read on a button, with the whole of it a hover away: the
+    # first version put all 180 characters on the label and it ran off the end
+    # of the window.
+    assert len(said) < 60, said
+    assert "guids 255, 446" in view.send_gear_button.toolTip(), view.send_gear_button.toolTip()
+
+
+def test_a_gear_read_that_fails_some_other_way_still_does_not_claim_it_is_naked(
+    tmp_path: Path,
+) -> None:
+    """A dead database is not a naked character either.
+
+    The catch-all used to answer (0, 0), which the tab drew as "is wearing
+    nothing" -- so a server that could not be read looked exactly like a
+    character with no gear.
+    """
+    play = _Play(characters=_people())
+
+    def explode(character: str) -> tuple[int, int]:
+        raise RuntimeError("the database went away")
+
+    play.gear_set_size = explode  # type: ignore[method-assign]
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(0)
+
+    said = view.send_gear_button.text()
+    assert view.send_gear_button.isEnabled() is False
+    assert "wearing nothing" not in said, said
+    assert "Guglu" in said, said
+
+
+# -- 8.4d: a group that is absent AND says why -------------------------------
+
+
+def _in_the_layout(widget: object) -> bool:
+    """Whether the form added a row for this control."""
+    parent = widget.parentWidget()
+    return parent.layout().indexOf(widget) >= 0
+
+
+def _shown(widget: object) -> bool:
+    """Whether this control would paint itself inside the group box that owns it.
+
+    A widget left OUT of the form still has that group box as its PARENT, and a
+    parented widget nobody laid out paints at the corner of it -- so "no row was
+    added" is not by itself "no control is on screen", and hiding it is a second
+    thing the tab has to do.
+
+    Measured against the parent rather than the view, because `isVisibleTo(view)`
+    cannot answer it at all: a QTabWidget hides every page but the current one,
+    so that probe is False for every widget on this tab whether the tab drew it
+    or not.
+
+    **This is a separate function, and its callers assert it separately, because
+    the two halves ANDed together proved nothing.** 8.4d's review deleted the
+    two `setVisible(False)` lines in `_build_characters_tab`, purged the
+    bytecode on both sides, and all 21 tests in this file still passed: where
+    the control is absent `indexOf` is already -1, so an `and` short-circuits
+    before the visibility half is ever reached, and the half that guards the
+    corner-painting bug was dead. Re-run against the same mutation on
+    2026-09-08, with the assertions split, it fails.
+    """
+    parent = widget.parentWidget()
+    return widget.isVisibleTo(parent)
+
+
+def _drawn(widget: object) -> bool:
+    """Both halves at once, for the places that want the whole answer.
+
+    Never the ONLY assertion about a control the tab is supposed to withhold --
+    see `_shown`.
+    """
+    return _in_the_layout(widget) and _shown(widget)
+
+
+def test_the_set_level_control_is_drawn_exactly_where_the_tree_has_the_command(
+    tmp_path: Path,
+) -> None:
+    """Both directions, walking every game in the catalog.
+
+    This is the box's own clause and it is written as a walk rather than as two
+    named entries on purpose: the failure it guards is not "Tortoise draws the
+    button", it is "the tab decides by id". A walk cannot be satisfied by an
+    `if entry.id == "wow-tortoise"` -- that would pass here today and be wrong
+    for the fifth game -- and it fails the day a tree's block changes its mind
+    without the tab following.
+
+    The tallies at the end are what stop it passing vacuously: a catalog where
+    every tree has a level command, or none has, would make one direction of
+    this assert nothing at all.
+    """
+    with_control, without_control = [], []
+    for entry in load_catalog().games:
+        if entry.play is None:  # pragma: no cover - none shipped since 8.4d
+            continue
+        view = _view(
+            tmp_path, entry, play=_Play(characters=_people(), cap=entry.play.mail_item_cap)
+        )
+        view.refresh_characters()
+        view.character_list.setCurrentRow(0)
+        has_command = entry.play.set_level_command is not None
+        (with_control if has_command else without_control).append(entry.id)
+
+        assert _in_the_layout(view.set_level_button) is has_command, entry.id
+        assert _in_the_layout(view.new_level) is has_command, entry.id
+        # Separately, and not folded into the line above with an `and`: where
+        # the control is absent `_in_the_layout` is already False, so an ANDed
+        # probe can never reach this one and a tab that added no row but hid
+        # nothing would pass. That mutant survived the first version of this
+        # file (see `_shown`).
+        assert _shown(view.set_level_button) is has_command, entry.id
+        assert _shown(view.new_level) is has_command, entry.id
+        assert (view.set_level_button in view.character_buttons()) is has_command, entry.id
+        assert _in_the_layout(view.set_level_absent) is not has_command, entry.id
+        assert _shown(view.set_level_absent) is not has_command, entry.id
+        if has_command:
+            assert view.set_level_absent.text() == "", entry.id
+        else:
+            assert view.set_level_absent.text() == entry.play.set_level_absent_reason, entry.id
+
+    assert with_control, "no tree drew the control, so one direction proved nothing"
+    assert without_control, "no tree withheld it, so the other direction proved nothing"
+
+
+def test_where_the_control_is_absent_the_sentence_names_what_the_server_can_do(
+    tmp_path: Path,
+) -> None:
+    """The half of the box a walk cannot check: that the sentence is about what
+    EXISTS.
+
+    "the group is replaced by a sentence naming what does exist rather than one
+    implying nothing does". A generic walk can only assert that some sentence is
+    drawn -- "Not supported" would satisfy it. This asserts the words, once, on
+    the tree they were measured from, every one of them re-read on m910q on
+    2026-09-08 against `~/tortoise-server/src/tortoise-wow` and that install's
+    own `etc/mangosd.conf`:
+
+    * `reset level` is `{ "level", SEC_ADMINISTRATOR, true, ... }` -- console
+      allowed -- at `src/game/Chat/Chat.cpp:653`, and its handler
+      (`Commands.cpp:3814`) takes only a `Player**` through `ExtractPlayerTarget`
+      at `:3817`, so the character has to be logged in.
+    * the level it writes is `CONFIG_UINT32_START_PLAYER_LEVEL`
+      (`Commands.cpp:3824-3826`), and the NUMBER that key currently holds is
+      `StartPlayerLevel = 1` at `etc/mangosd.conf:714` -- a line the owner of
+      any install can edit. So the sentence must NOT say one: finding 5 of the
+      review, and "present tense rots" -- shipped data that names a live
+      config value is wrong the day somebody changes it, silently.
+
+    The sentence itself used to say this console has NO command that puts a
+    character at a level you pick, and an adversarial review refuted that:
+    `.rndbot` is AllowConsole true (`Chat.cpp:1012`) and its dispatch reaches
+    `PlayerbotMgr::CreateBot`, which parses `level=<n>` and calls `SetLevel`.
+    The button is still rightly absent -- nothing console-legal moves an
+    EXISTING character to a chosen level -- so the sentence draws that
+    distinction rather than denying the command exists, and the two
+    assertions below hold it to both halves.
+
+    Two of these assertions are the same words `test_the_sentence_in_place_of_
+    the_level_control_names_what_this_fork_has` makes about the catalog string.
+    That is on purpose and it is not the same claim: that one says the
+    measurement is written down, this one says the tab DRAWS it -- a view that
+    fell back to a phrase of its own would pass that test and fail this.
+    """
+    view = _view(tmp_path, TORTOISE, play=_Play(characters=_people(), cap=1))
+
+    said = view.set_level_absent.text()
+
+    assert "reset level" in said, said
+    assert "logged in" in said, said
+    assert "configured starting level" in said, said
+    assert "level 1" not in said, said
+    # The route the review found, and the reason the sentence is narrower than
+    # it was: `rndbot` IS console-allowed (`Chat.cpp:1012`) and
+    # `rndbot create level=<n>` reaches `CreateBot`, which parses `level=` and
+    # calls `SetLevel` (`PlayerbotMgr.cpp:2389`, `:2497-2510`). What it cannot
+    # do is move a character that already exists, and that is the true clause.
+    assert "rndbot create level=" in said, said
+    assert "existing character" in said, said
+    assert "NEW character" in said, said
+    assert _in_the_layout(view.set_level_absent) is True
+    assert _shown(view.set_level_absent) is True
+    assert _in_the_layout(view.set_level_button) is False
+    assert _shown(view.set_level_button) is False
+
+
+def test_the_at_login_rename_is_withheld_offline_where_it_would_destroy_the_name(
+    tmp_path: Path,
+) -> None:
+    """The fork's other trap, and it is worse than an absent command.
+
+    `rename <char>` with no new name flags the rename for an ONLINE character
+    (`Commands.cpp:12612-12623`); for an offline one the same spelling runs
+    `UPDATE characters SET name = guid` (`:12624-12635`), throwing the name away
+    and putting the numeric guid there. A button labelled "Rename at next login"
+    that silently does that is data loss, so the entry carries a refusal and the
+    tab draws it -- and, like the revive rule, it is the ENTRY's fact: WotLK,
+    whose entry carries no such refusal, keeps its offline rename.
+    """
+    view = _view(tmp_path, TORTOISE, play=_Play(characters=_people(), cap=1))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(0)
+    assert view.rename_button.isEnabled() is True, "an online character can be flagged"
+    assert view.rename_button.toolTip() == "", "nothing to explain about a character who is in"
+
+    view.character_list.setCurrentRow(1)
+    assert view.rename_button.isEnabled() is False
+    said = view.rename_button.text()
+    assert said.startswith("Ganaar "), said
+    assert "logged in" in said, said
+    # In two lengths, like the Ambiguous refusal twenty lines below it in the
+    # view, and for the same reason: 8.4c put a 180-character sentence on one of
+    # these labels and it ran off the end of the window
+    # (`pyplan/gates/8.4c-vanilla-m910q-2026-09-07/4-two-of-one-name.png`). This
+    # refusal is ~200 characters. The bound is the one that box's own test
+    # already uses, so a label that overflows fails here rather than in a
+    # screenshot somebody takes later.
+    assert len(said) < 60, f"{len(said)} characters on a button: {said}"
+    hover = view.rename_button.toolTip()
+    assert "guid" in hover, "the whole sentence says what the server would have done instead"
+    assert hover == TORTOISE.play.rename_offline_refusal, hover
+
+    # And the label goes back when a character who IS logged in is chosen again:
+    # a stale refusal on a button that now works is the same defect the other
+    # way round.
+    view.character_list.setCurrentRow(0)
+    assert view.rename_button.isEnabled() is True
+    assert view.rename_button.text() == "Rename at next login Guglu"
+    assert view.rename_button.toolTip() == ""
+
+    wotlk = _view(tmp_path, WOTLK, play=_Play(characters=_people()))
+    wotlk.refresh_characters()
+    wotlk.character_list.setCurrentRow(1)
+    assert wotlk.rename_button.isEnabled() is True, wotlk.rename_button.text()
+    assert wotlk.rename_button.toolTip() == ""
+
+
+def test_the_control_follows_the_measurement_rather_than_the_game_it_belongs_to(
+    tmp_path: Path,
+) -> None:
+    """The two entries with their facts SWAPPED, which is the only way to prove
+    the tab is not reading the id.
+
+    A walk over the shipped catalog cannot catch it: an
+    `if entry.id == "wow-tortoise"` in the view draws exactly what the walk
+    expects, today, and is wrong about the fifth game and about this one the day
+    the owner rebuilds the fork with its 2026-09-07 SOAP commit and whatever
+    else that pull brings. So here Tortoise's entry is given a level command and
+    WotLK's has its taken away, and the tab has to change its mind about both.
+    """
+    tortoise_with_one = TORTOISE.model_copy(
+        update={
+            "play": TORTOISE.play.model_copy(
+                update={"set_level_command": "character level", "set_level_absent_reason": None}
+            )
+        }
+    )
+    wotlk_without_one = WOTLK.model_copy(
+        update={
+            "play": WOTLK.play.model_copy(
+                update={
+                    "set_level_command": None,
+                    "set_level_absent_reason": "a sentence measured on some other server",
+                }
+            )
+        }
+    )
+
+    gained = _view(tmp_path, tortoise_with_one, play=_Play(characters=_people(), cap=1))
+    lost = _view(tmp_path, wotlk_without_one, play=_Play(characters=_people()))
+
+    assert _drawn(gained.set_level_button) is True, "the id is Tortoise and the fact is not"
+    assert _in_the_layout(gained.set_level_absent) is False
+    assert _shown(gained.set_level_absent) is False
+    assert _in_the_layout(lost.set_level_button) is False, "the id is WotLK and the fact is not"
+    assert _shown(lost.set_level_button) is False, "the id is WotLK and the fact is not"
+    assert lost.set_level_absent.text() == "a sentence measured on some other server"

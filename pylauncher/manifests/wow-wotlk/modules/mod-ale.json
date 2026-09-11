@@ -6,10 +6,12 @@
   "game": "wow-wotlk",
   "description": "Lua scripting engine (LuaJIT/5.2/5.3/5.4); required by every ALE mod and keg. ALE is not Eluna — scripts are not interchangeable.",
   "source": {
-    "repo": "azerothcore/mod-ale"
+    "repo": "azerothcore/mod-ale",
+    "rev": "319f43edd58ffa6ed72873ddd68820ab86e4a99b"
   },
   "build": {
-    "rebuild": true
+    "rebuild": true,
+    "restart": true
   },
   "conf": [
     {
@@ -21,7 +23,9 @@
           "note": "container-visible path; quoted; always re-applied on configure"
         },
         {
-          "key": "ALE.EnableLuaEngine"
+          "key": "ALE.Enabled",
+          "default": "1",
+          "note": "the module's own key, read 2026-09-08 from conf/mod_ale.conf.dist:63 and src/LuaEngine/ALEConfig.cpp:20. This manifest said ALE.EnableLuaEngine, which is in neither; the engine therefore took its COMPILED default, and that default is false while the shipped conf's comment beside it says true. Written rather than surfaced for that reason."
         }
       ],
       "template": "conf/mod_ale.conf.dist"
@@ -38,6 +42,8 @@
     }
   ],
   "notes": [
-    "env/dist/etc is volume-mounted to /azerothcore/env/dist/etc, so no docker cp is needed. Reload scripts in-game with .reload ale."
+    "env/dist/etc is volume-mounted to /azerothcore/env/dist/etc, so no docker cp is needed. Reload scripts in-game with .reload ale.",
+    "This module is C++: installing it puts a clone under modules/ and changes nothing about the server that is running. The engine arrives only when the image is rebuilt, which is why yulon.party reads the worldserver binary rather than this conf file to decide whether the Lua engine is there (measured on yulon-ubuntu 2026-09-08: no ALE string in a 528 MB worldserver built 2026-09-04).",
+    "build.restart is declared because `configure` never sets rebuild_required and this item's whole configure is a conf write. Measured on yulon-ubuntu2 2026-09-09: configure reported `2 step(s), 0 skipped, rebuild=False, restart_recommended=False` while the running world went on loading scripts from the previous ALE.ScriptPath — dml_bridge_ping still answered 'does not exist' until the world was restarted."
   ]
 }

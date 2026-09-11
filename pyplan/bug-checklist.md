@@ -3615,3 +3615,349 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
       refusal (the folder was built before the doodad patch), so it never reached `ready` and no
       `The server is up.` belongs to this gate; it did not compile.
       `pyplan/gates/bug43-keepawake-win11-2026-09-05/README.md`.
+
+### 44. Four defects in the module manifest layer, found while gating 8.7a — 2026-09-08, OPEN; **a fifth added and `a`'s silence half fixed 2026-09-09**
+
+Found on `yulon-ubuntu` by pressing the Modules tab against the live AzerothCore install; the
+readings are in `pyplan/gates/8.7a-wotlk-yulon-ubuntu-2026-09-08/`. All four are about what a
+manifest DECLARES versus what the install does, which is the same shape as the defect 8.7a's own
+text was opened for. **`e` was added on 2026-09-09** from the fifth clause's press on
+`yulon-ubuntu2` (`pyplan/gates/8.7a-wotlk-yulon-ubuntu2-2026-09-09/`), and is the same shape one
+layer along: a fact the manifest never stated, so the report told a user nothing was owed.
+
+- [ ] **a. A conf key declared with no value is never written.** *(the SILENCE half fixed
+      2026-09-09; the value half stays open)*
+      `manifests/wow-wotlk/modules/mod-npc-beastmaster.json` names `Creatures.CustomIDs` on
+      `env/dist/etc/worldserver.conf` with a note and no `default`. Installing the module reports
+      `activate … mod_npc_beastmaster.conf` and says nothing about `worldserver.conf`; the file is
+      byte-identical before and after, still without `601026`. So the only *core-side*
+      configuration change this module needs — the only one a running server could show without a
+      rebuild — is documented in the catalog and not made. Currently harmless only by luck: the
+      module's own creature row carries `flags_extra = 2` (`CREATURE_FLAG_EXTRA_MODULE`), which
+      suppresses the warning the key exists to silence (`ObjectMgr.cpp:1219-1229`, read on the
+      box), and the boot logged no gossip complaint at all.
+      **2026-09-09:** `Applier._conf` built its write list from the keys that HAVE a value and
+      `continue`d, so that conf entry reached neither `done` nor `skipped` — the tab showed nothing
+      at all where a step had been skipped. It now reports
+      `conf env/dist/etc/worldserver.conf: no value in the catalog for Creatures.CustomIDs — not
+      written`, driven by a failing test first
+      (`test_a_conf_key_the_catalog_names_with_no_value_is_reported_not_dropped`, RED message in the
+      8.7a-ubuntu2 README). **Reported, not filled in**: which value belongs in a user's core
+      configuration is the catalog's sentence to write, and this key in particular is an APPEND to a
+      comma-separated list that the applier has no syntax for. And on 601026 the key cannot be shown
+      by a running server whatever we write, for the `flags_extra = 2` reason above — so the
+      manifest's note ("add 601026 to silence a harmless gossip warning") describes a warning that
+      does not occur. Whoever closes the value half decides that first.
+      Prior art for the shape: `origin/rust-main:crates/dml-wow/src/moduletail.rs:31-47` gives every
+      not-done outcome a name (*"Only `Activated` wrote anything; the other three are QUIET
+      outcomes"*), and `tuning.rs:596-616` re-reads the file to answer `NOT_FOUND` rather than
+      shrugging.
+
+- [ ] **b. Two shipped manifests declare a SQL step for a module that ships no SQL.**
+      `mod-junk-to-gold` and `mod-learn-spells` both declare `data/sql/db-world/*.sql` with
+      `applied_by: db-import`; neither clone contains a single `.sql` file. The report is honest —
+      `files=[]`, not a guess — but the tab still shows a pending SQL step for a module that owes
+      none.
+
+- [ ] **c. `mod-1v1-arena`'s manifest names the wrong database and the wrong depth.**
+      It declares `db=characters path=data/sql/db-characters/*.sql`. The repository ships
+      `data/sql/db-world/base/1v1_Battlemaster.sql` and `data/sql/delete/1v1_delete.sql`. So
+      `pending_sql` came back empty while the importer — which walks the module's `data/sql` tree
+      itself rather than the manifest's glob — applied `1v1_Battlemaster.sql` to the **world**
+      database, moving `acore_world.updates` 2977 → 2978. The apply was right; the report of what
+      was owed was not, and a flat `*.sql` glob cannot see a file one directory deeper.
+
+- [ ] **d. Removing a module leaves its activated conf behind.**
+      `remove mod-learn-spells` reported one step, `rm -r modules/mod-learn-spells`, and
+      `env/dist/etc/modules/mod_learnspells.conf` is still on disk. Harmless on this tree, because
+      AzerothCore does not open a conf for a module it was not compiled with (see below) — but it
+      is a file this app wrote and does not take back.
+
+- [x] **e. `configure` on a conf-only module reported that nothing further was needed.** — 2026-09-09,
+      FIXED. Measured live on `yulon-ubuntu2` (`8.7a-wotlk-yulon-ubuntu2-2026-09-09/3-press.log`):
+      `applier.configure('mod-ale')` wrote `ALE.Enabled` and `ALE.ScriptPath` and reported
+      `2 step(s), 0 skipped, rebuild=False, restart_recommended=False`, while the running world went
+      on loading scripts from the PREVIOUS `ALE.ScriptPath` — `dml_bridge_ping` still answered
+      *Command 'dml_bridge_ping' does not exist* after the write and `DML-BRIDGE-READY` only after a
+      restart. `configure` never sets `rebuild_required` (`apply.py::_report`, `action !=
+      "configure"`) and the `restart_recommended` derivation reads NPCs, direct SQL and server DBCs,
+      none of which a conf write touches — so with nothing declared, the report recommends nothing.
+      The field that exists for exactly this is `build.restart`, whose schema description names the
+      shape in advance ("a file the emulator reads once, at startup"); TBC's five conf mods declare
+      it and this WotLK module did not. Fixed in
+      `manifests/wow-wotlk/modules/mod-ale.json` (`build.restart: true`, with the measurement in its
+      notes), test first
+      (`test_configuring_ale_asks_for_the_restart_the_engine_needs`). **Not** fixed by widening the
+      derivation: what an item needs after a conf write is the item's own fact. **Worth a sweep
+      nobody has done:** every other manifest whose `configure` is a conf write and which declares no
+      `build.restart` has the same silence.
+
+**And one fact that is not a defect but decides a definition-of-done clause.** 8.7a asks that "a
+configuration change the module needs is shown by the running server". On AzerothCore it cannot
+be, until the worldserver is rebuilt with the module: `Loading Modules Configuration...` looks
+conf files up by the names of the modules **compiled into the binary**
+(`Acore::Module::GetEnableModulesList()`, the same list `.server debug` prints). Measured with two
+activated module conf files sitting in `env/dist/etc/modules/`: the server asked for
+`playerbots.conf` by name, failed to open it, and answered `> Not found modules config files`
+without looking at either. The rebuild is the owner's to run.
+
+**2026-09-09: the other side of that was measured.** After the rebuild lane compiled `mod-ale` into
+the binary on `yulon-ubuntu2`, the same server named the module and named the conf file it opened
+(`> mod_ale.conf`), and a value the app's own `configure()` wrote into that file changed what the
+running server did — five named scripts loaded from the path it wrote, and a console command that
+did not exist a minute earlier. The control (the same file pointed at a decoy directory, the same
+restart) is in the same folder. So the clause is answerable on this tree; what it needs first is the
+rebuild, per module.
+---
+
+### 45. The Modules tab can never ask for a value that has a default — 2026-09-08, OPEN
+
+Found by pressing the button rather than calling the applier, during the 8.7b live gate on
+`m910q` (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/`, `04-install-tab-press.txt`).
+
+`ControllerView._module_values()` opens the prompt dialog only when *some* required prompt has no
+default:
+
+```python
+needed = required_prompts(manifest, cast(When, action))
+if not any(prompt.default is None for prompt in needed):
+    return True, None
+```
+
+The comment above it says the gate is "deliberately narrow" so that 39 of the shipped manifests
+get no new window — which was the right trade when the two exceptions were `mod-ah-bot` and
+`mod-ah-bot-plus`, whose prompts have no default and which were simply unreachable from the GUI
+before 2026-09-07. The TBC manifest set added on 8.7b changes what that narrowness costs: every
+one of its five items is a knob whose value the operator is meant to choose, and every one of them
+carries a default, so the dialog never opens for any of them.
+
+Measured live, on the running TBC install. Ground line 924 of `etc/mangosd.conf`:
+
+```
+Motd = "Welcome to the Continued Massive Network Game Object Server."
+```
+
+After selecting **Message of the Day** and pressing **Install selected** — no dialog shown, nothing
+asked:
+
+```
+Motd = "Welcome!"
+```
+
+`"Welcome!"` is `motd.json`'s prompt default. There is no path from the Modules tab to any other
+value: the same press on a second machine writes the same string. The restarted server duly
+reported `Welcome!` (`07-after-restart-motd.txt`), so the manifest machinery is sound — it is the
+tab that has no way to ask. `Yulon 8.7b gate` reached the server in the same gate only because that
+install was driven through `services.applier.install(manifest, {"motd": …})` in a script.
+
+The same holds for the rest of the set: `xp-rates` (three multipliers, all defaulted),
+`all-stackables` (`stack_size`, default `200`), and `all-flight-paths` and `cross-faction`, which
+have no prompts at all. So on this game the tab offers five items and zero choices.
+
+Not a blocker for 8.7b, whose clause is only that the key reaches the running server, and it does.
+It is a blocker for the feature being worth having: a message of the day the operator cannot write
+is a message of the day nobody wants.
+
+A note in passing, because it is the same rot: `_format_report`'s docstring counts "41 shipped
+manifests … 20 of the 41 … 21 others (7 ale, 2 keg, 11 mod, and `mod-arac`)", measured 2026-09-07.
+Counted through `load_manifest()` on 2026-09-08 the tree holds **46** (41 `wow-wotlk` + 5
+`wow-tbc`): 21 `module`, 16 `mod`, 7 `ale`, 2 `keg`, of which 20 are `rebuild=True`. The split the
+sentence is about still holds; the totals beside it went stale the moment 8.7b landed, which is
+what a count written in prose does.
+
+**The obvious fix is the wrong one.** "Open the dialog whenever the manifest has any prompt" puts a
+window in front of all 46 manifests including the 20 that need a rebuild and whose prompts are
+internal plumbing, which is the churn the narrow gate was written to avoid. The shape that fits what was
+measured is a per-prompt fact — a prompt the operator is meant to answer versus one that merely
+needs a value — declared in the manifest, not inferred from whether somebody remembered to leave
+the default out. That is a schema change and an owner call, so it is filed and not fixed here.
+
+---
+
+### 46. On CMaNGOS there is no compliant way to install a SQL mod at all — 2026-09-08, OPEN
+
+Owner answer 7 (2026-09-06, quoted in [`write-ledger.md`](write-ledger.md)): *no Phase 8 feature
+writes `characters` or `world` while the world server is up.* The ledger's row for
+`apply.py::_run_sql::run_statement` reads "**yes, and unguarded**", and says 8.7 is where the
+applier's guard lands.
+
+So on TBC the compliant sequence for `all-stackables`, whose three statements all target the world
+schema, is: press **Stop** on the Server tab, press **Install selected**, press **Start**.
+
+**That sequence does not exist.** Measured on `m910q` against the live `~/tbc-7.4c` install,
+2026-09-08 09:07Z (`pyplan/gates/8.7b-tbc-m910q-2026-09-08/14-sql-mod-world-stopped.txt`,
+`14-sql-mod-with-the-world-stopped.png`):
+
+```
+--- pressing Stop on the Server tab, as owner answer 7 requires ---
+status label: status: db down, auth down, world down
+census after Stop: tbc-db exited | tbc-mangosd exited | tbc-realmd exited
+is the DATABASE still reachable? ERR: … container f94521f9a435… is not running
+
+--- now pressing Install selected on all-stackables, world down ---
+install all-stackables FAILED: SQL failed (inline → mangos): Error response from daemon:
+container f94521f9a435da653cf216d8308c02fa1e9535e0a122efbdc542144a35b32605 is not running
+```
+
+The app's Stop is `docker.stop_staged()`, which runs `compose stop` over the whole project — by
+design, and the docstring says why: it walks `depends_on` "so the servers close their connections
+before the database goes away". The applier's `DockerSql` reaches the database with
+`docker exec tbc-db mariadb`. Stopping the world therefore removes the only route the applier has
+to the database, and the two facts are individually correct and jointly fatal.
+
+The consequence is a fork with no good branch. Install the SQL mod with the server up and you break
+owner answer 7 — which is what the 8.7b gate itself did for its step 9, deliberately and with the
+data restored to ground afterwards, because the alternative was not to gate the clause. Stop first
+and the install fails. And when 8.7a's guard lands as written — refuse world SQL while the world
+runs — it closes the first branch too, and `all-stackables`, `xp-rates`' SQL siblings and every
+future CMaNGOS SQL mod become uninstallable through the app on all three CMaNGOS trees (8.7b TBC,
+8.7c Vanilla, 8.7d Tortoise).
+
+Two things have to be true for the feature to work, and neither is today:
+
+* **The guard's question is the wrong one.** "Is the world server running" and "may I write the
+  world database" are the same question only on a tree where the database outlives the world. The
+  guard needs to ask about the *world container*, and the app needs a way to put the world down
+  while leaving the database up — which `compose stop tbc-mangosd` does and `stop_staged()`
+  deliberately does not. That is a new capability, not a flag.
+* **The failure is unreadable.** What the user gets is a raw daemon error carrying a 64-character
+  container id, naming neither the database, nor the module, nor anything to do about it. Every
+  other refusal in this app names the thing and the next action; this one is the exception because
+  it is not a refusal at all — it is an unguarded call failing.
+
+Nothing was written by the failed press: `stackable > 1` stayed at 3471, `stackable = 200` at its
+ground 121, and `yulon_stackable_backup` was never created. The failure is clean, which is the only
+good news in the entry.
+---
+
+## Found by the 8.7c / 8.9b live gates on m910q, 2026-09-08
+
+- [ ] **MEDIUM — The Modules tab never asks for the one value a `mod` exists to set.**
+  *This is the same defect as §45 above, found independently by the 8.7b gate on `wow-tbc`
+  and by the 8.7c gate on `wow-vanilla`. Both records are kept because each measured it on
+  a different game and by a different route; fix them as one item.*
+  `ControllerView._module_values()` (`ui/controller_view.py`) opens the prompt dialog only when
+  some prompt has **no** default: `if not any(prompt.default is None for prompt in needed):
+  return True, None`. That is right for the 39 manifests where the default is a good answer,
+  and wrong for the three where it is a placeholder. Pressing Install on `motd` writes
+  `Motd = "Welcome!"` with no dialog and no way past it, and `motd`'s whole point is a sentence
+  the operator chooses; `xp-rates` (all three multipliers default to 1, i.e. "change nothing")
+  and `all-stackables` (200) are the same shape. **Not a Vanilla defect** — the same three
+  manifests exist on `wow-tbc` and equivalents on `wow-wotlk`, so it lands on every game with
+  manifests. Found by 8.7c's gate, whose driver replaced `_prompt_asker` and watched it never
+  be called (`pyplan/gates/8.7c-vanilla-m910q-2026-09-08/README.md`, finding 1). The clause was
+  still met with the manifest's own default, because that value differs from the line the
+  server was running. The fix is a decision, not a patch: either a manifest says which of its
+  prompts must be asked even when it has a default, or the tab always asks when a manifest has
+  any prompt at all. It is the owner's, and it belongs with 9.x's UI pass rather than to a
+  modules box.
+- [ ] **LOW — A ticked purge deletes the built image, so "reinstall to find those characters
+  again" costs a full recompile.** `purge.Uninstaller.run(keep_characters=True)` keeps
+  `<project>_db-data` and removes `built_image_refs()` — correct, the image is this install's
+  alone — and then deletes the folder, which on a CMaNGOS tree holds `src/` and a 2.4 GB
+  extracted `data/`. So the reinstall the dialog promises re-clones, recompiles, re-extracts
+  and rebuilds mmaps. Measured on m910q 2026-09-08: with the image gone, `docker compose up` in
+  the restored folder tries to **pull** from a registry that does not exist — `failed to resolve
+  reference "yulon.local/cmangos-vanilla-server:native-e9e233c0": dial tcp: lookup yulon.local:
+  no such host` — and hangs whatever is waiting for the server. Nothing here is wrong; what is
+  missing is that the sentence a user reads ("Kept … — reinstall to the same folder to find
+  those characters again") says nothing about the price. This is `pyplan/8.9b-gate-plan.md`
+  open question 2 with a measured shape, and the answer is the owner's: either the ticked path
+  keeps `./data` and `src/` too and the dialog says so, or the dialog names the recompile.
+  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/README.md`, finding 1.
+- [x] **LOW — Every purge plan logged a warning that the install came from a newer Yu'lon.**
+  `purge._default_reason()` and `apply.server_dir_claim()` both call
+  `native.read_claim(server_dir, valid=())` and both say in their own docstrings that the stage
+  names are not their business — one wants the version, the other the identity.
+  `native._parse_state()` measured `completed` against that empty tuple anyway, so every
+  recorded stage came out "unknown" and the log said *"records stages this build does not know:
+  clone-sources, write-dockerfile, build, … — this is usually an older Yu'lon opening an install
+  a newer one created"* about an install this build had written itself. Advice about a version
+  mismatch that is not happening, on the one action that cannot be undone. Family-neutral, so
+  8.9a's WotLK gate produced it too and nobody read the log; read on m910q during 8.9b's,
+  2026-09-08. **Fixed** by warning only when the caller named the stages it knows (`if unknown
+  and valid:`); `stages` is still filtered and `unknown` is still carried, so nothing the file
+  yields changes. Pinned by
+  `test_uninstall_second_family.py::test_planning_a_purge_does_not_warn_that_this_installs_stages_are_unknown`,
+  which also requires the warning to still fire for a caller that did supply a list.
+- [ ] **LOW — The Server tab's caption keeps saying "stopped" above a status line that says
+  everything is up.** `pyplan/gates/8.7b-tbc-m910q-2026-09-08/7-server-tab-started.png`: the
+  caption reads "stopped" while the line under it reads "status: db up, auth up, world up". The
+  entry above (`:552`) covers only the first-poll "unknown"; this is the caption not following a
+  later poll after a Start pressed from the Modules tab's advice. Found by the retrospective
+  audit's read of every frame in the range, 2026-09-08; not pressed again, so the trigger is not
+  narrowed beyond "Start after Stop, watched from the Server tab".
+- [ ] **LOW — A purge refusal that names three running containers sits beside "status: unknown".**
+  `pyplan/gates/8.9b-vanilla-m910q-2026-09-08/3-refused-server-running.png` and every other frame
+  of that gate: the refusal says `vanilla-mangosd, vanilla-realmd, vanilla-db: still running` and
+  the status label two lines up still says unknown. Same family as `:552` (the label is only
+  written by the poll handler), seen here on a tab that was opened and pressed within its first
+  poll interval. The refusal is right; the label beside it is not. Audit, 2026-09-08.
+- [x] **The Rebuild button waited for the address a FRESH install advertises, so no rebuild could
+  ever report ready.** `native._ready_spec()` filled `ready.auth`'s `{{REALM_HOST}}` from
+  `INSTALL_REALM_HOST` (`127.0.0.1`), and `StagedInstaller._advertise_realm()` — the install's LAST
+  act, itself the fix for §35 — rewrites that row to the machine's reachable address. So on every
+  install the button can be pressed on, the marker said `127\.0\.0\.1:8085` while the auth server
+  said `Added realm "Yulon ubuntu2" at 100.99.204.5:8085.` Found on the control's first live press,
+  `yulon-ubuntu2` 2026-09-09: the compile finished, the containers were replaced, the new
+  worldserver came up with `mod-ale` compiled in and answered `dml_bridge_ping` over its own
+  channel — and the press sat in "Waiting for the world server". `wait_for_ready()` grants another
+  window every time the server prints, and this one prints bot statistics every thirty seconds for
+  ever, so unattended it spends `READY_CEILING_SECONDS` (six hours) and then `_restore_rollback`
+  puts the OLD build back: *"nothing changes when I log back in"* with six hours added to it.
+  **Fixed** by making the address half of the marker a wildcard (`native.REALM_ADDRESS_PATTERN`)
+  and leaving the port half exact — readiness needs the auth server to have advertised THIS
+  install's realm on THIS install's world port, and WHICH address it advertises is
+  `_advertise_realm()`'s question, asked there against the row. No promise the confirmation makes
+  had to be weakened: the rebuild still reads no database at all. Pinned by three tests in
+  `test_rebuild.py` (matches any address · still refuses another port · install and rebuild use the
+  same marker) and by `test_spine.py`'s rewritten A3/A5 test, which still requires the WORLD marker
+  to be a literal. The seam that hid it took the `ReadySpec` and threw it away; `Recorder` keeps
+  every spec now. Re-pressed on the fix: `REBUILD RETURNED CLEANLY in 63.4s`. Evidence:
+  `pyplan/gates/rebuild-live-yulon-ubuntu2-2026-09-09/`.
+
+---
+
+### 47. Every module Yu'lon installs is silent, because its log channel is declared where the server does not read it — 2026-09-09, OPEN
+
+Found by hand on `yulon-ubuntu2` on 2026-09-09, installing the owner's own Lua script onto the
+WotLK server the closing run had just rebuilt with `mod-ale`.
+
+**What happened.** The engine was compiled in (`Addmod_aleScripts`, `ALE.ScriptPath` and
+`Initialize ALE Lua Engine` all present in the running binary), `mod_ale.conf` was activated with
+`ALE.Enabled = 1` and an absolute script path, and the world named the file in its own banner
+(`Using modules configuration: > mod_ale.conf`). Across three boots the engine printed **nothing**,
+and `logs/ALE.log` was never created. Every reading available said the module was dead.
+
+**It was not dead.** A throwaway Lua file dropped beside the owner's script wrote a row to
+`acore_world` at load instead of printing, and the row appeared. So the engine was running and
+loading scripts the whole time; only its words were missing.
+
+**Two causes, both in the conf the applier activates verbatim.**
+
+* `mod_ale.conf` declares `Logger.ALE=4,ALELog ALEConsole`. AzerothCore's log system reads logger
+  and appender declarations from the **main** config; a logger declared only in a module conf does
+  not exist, so `LOG_INFO("ALE", …)` falls back to the root logger — `Logger.root=2,Console Server`,
+  level 2, **errors only** — and every Info line from every module is dropped. Adding
+  `Logger.ALE=4,Console Server` to `worldserver.conf` made the same binary speak on the next boot:
+  `[ALE]: Executed 7 Lua scripts in 2 ms` and the script's own banner.
+* The module's own console appender, `Appender.ALEConsole=1,4,0,"0 9 0 3 5 0"`, is not accepted, so
+  even the file half (`Appender.ALELog=2,5,0,ALE.log,w`) never produced a file.
+
+**Why it matters beyond this module.** `Applier._conf()` copies `conf.template` and activates keys;
+it has no notion of a logger. 19 of the 21 shipped manifests carry a conf, and any of them that
+declares a logger is silent the same way — including for the person debugging it. The 8.7a fifth
+clause reads a module's configuration back from the *running server* precisely because the file is
+not proof; this is the same lesson one layer down: **a module that cannot talk cannot be gated by
+what it says.**
+
+**Not yet decided** (owner's, or the module lane's): whether the applier should hoist `Logger.*` and
+`Appender.*` lines out of a module conf into the world's own config when it activates one, or
+whether the manifest should declare the logger and the applier write it. Either way the guard is the
+same shape as the others here — install a module whose conf declares a logger, boot, and assert the
+server prints one line the module owns.
+
+**Evidence:** `~/wowserver/env/dist/etc/modules/mod_ale.conf.before-logger-fix` on `yulon-ubuntu2`
+(the bytes as the applier wrote them), the world's own log before and after, and the probe row in
+`acore_world.yulon_ale_probe`. Not a gate folder — this was found while doing the owner a favour,
+not while gating, and it is written here so the module lane can pick it up.

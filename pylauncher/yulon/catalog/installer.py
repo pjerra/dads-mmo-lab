@@ -303,6 +303,139 @@ def generated_compose_files(server_dir: Path) -> tuple[str, ...]:
     )
 
 
+MEASURED_BUILD_TIMES = (
+    "about 15 minutes on an Apple M4 Pro, 35-72 minutes on the Linux boxes this project is "
+    "usually built on, and 68 minutes on a Windows machine that gave Docker 11.7 GB and two "
+    "compiler jobs"
+)
+"""How long the compile took, on machines this project actually timed it on.
+
+Every number is a citation, and `test_rebuild.py` pins each one to the page it
+came from so a friendlier figure cannot be substituted quietly:
+
+* *35-72 minutes* — `pyplan/hunt-rounds.md`, the range across the boxes the
+  hunt rounds were planned around;
+* *68 minutes* — `pyplan/checklist.md`, the native-Windows gate of 2026-09-04,
+  which also records the Docker VM it was given (11.7 GB, 2 jobs) because the
+  number means nothing without it;
+* *15 minutes* — `pyplan/checklist.md`, the macOS gate of 2026-08-29 on an
+  Apple M4 Pro, 12 CPU, 25.7 GB.
+
+Deliberately not averaged into one number. The spread is a factor of five and
+it is explained by the machine, so a user reading this can place their own
+between the two ends; a single "about 45 minutes" would be a figure nobody
+measured, and would be wrong by half an hour in both directions.
+
+The ccache figure — a resume that recovered ~1315 of 1829 edges from the
+BuildKit cache mount and finished in 610.7 s (`pyplan/checklist.md`) — is
+deliberately NOT quoted as a rebuild time. It was measured on a resume after a
+mid-compile kill, the cache is evictable, and a confirmation that offered "or
+about ten minutes" would be read as the likely case rather than the lucky one.
+"""
+
+
+def rebuild_confirmation(entry: CatalogEntry, server_dir: Path) -> str:
+    """The question asked before a rebuild starts. Nothing here is invented.
+
+    A rebuild is the most expensive thing this app can be asked to do to an
+    install that is already working, so the question carries the three facts a
+    person needs in order to answer it, and each is a fact rather than a
+    reassurance:
+
+    * *how long* — `MEASURED_BUILD_TIMES`, quoted from this project's own gates
+      with the machines attached, because "this may take a while" is not
+      something anybody can plan an evening around;
+    * *what happens to the server* — it goes down when the containers are
+      replaced and comes back when it reports ready. Users are told this
+      BEFORE they agree, not in the log afterwards;
+    * *what happens if the new build is broken* — the old one is kept and put
+      back by itself (`native.ROLLBACK_TAG_SUFFIX`; owner answer 2, 2026-09-08),
+      said here because it is the difference between "an hour and a working
+      server either way" and "an hour and maybe no server", and only the first
+      is a question a person can say yes to without a spare evening;
+    * *what saying no costs* — nothing at all, said in as many words. A
+      confirmation that does not say so is answered by the people who are
+      unsure, and the unsure ones are the ones who most need to be able to
+      decline.
+
+    * *what the compile is compiled FROM*, for the games whose build recipe
+      this app owns. Until 2026-09-09 a rebuild compiled the `Dockerfile`
+      rendered on the day the server was installed, so a fix shipped in a later
+      version of the app could not reach it — measured on m910q that night,
+      where the Tortoise upgrade needed that render run by hand first
+      (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/`). It is written again
+      now, and this says so before the press rather than in the log, because
+      "the same compile as last time" and "the same compile with this version's
+      fixes" are different answers to the question being asked. BOTH files are
+      named: `_write_dockerfile()` renders `Dockerfile` and `.dockerignore`
+      through one `dockerfile.write()`, so a clause that named the first and
+      added "nothing else in the folder is rewritten" was wrong about the
+      second (Fable, round 1). And what it costs to stop is stated with it,
+      because `native._put_recipe_back()` is what makes that true rather than
+      the sentence.
+
+      **What protects an edit is the marker, not the edit.** This said "if you
+      have edited either of those two files yourself the rebuild stops", which
+      is false of every edit that leaves the first line alone: `_look()`
+      (`dockerfile.py`) answers `OURS` on `composegen.GENERATED_MARKER` and
+      nothing else, and `write()` then replaces the whole file. Corrected in
+      round 2 to say what the check does — the line at the top is what the app
+      recognises, a file that still carries it is replaced whatever is under
+      it, and a file that does not stops the press. The behaviour half is
+      pinned by `test_a_rebuild_hands_the_compiler_the_current_template_not_the_render_on_disk`,
+      which edits both files below the marker and requires them replaced.
+
+    That clause is conditional on `install.native.dockerfile_dir`, whose own
+    description carries the rule: `None` means the checkout ships its own
+    Dockerfile, this app never wrote one, and `rebuild_stages()` gives that
+    family no re-render to promise. `native.rebuild_stages()` decides the same
+    thing from the family's stage tuple, and
+    `test_the_confirmation_promises_the_re_render_for_exactly_the_games_that_get_it`
+    holds the two derivations equal across every shipped entry — a sentence
+    promising WotLK users something nothing does would be this ticket's own
+    defect repeated in the confirmation.
+
+    It names the folder: two installs of the same game get identical container
+    names and near-identical tabs, and "which one is this about" is not a
+    question to leave to the tab title.
+
+    The sentence lives here rather than in the view for the reason every other
+    user sentence in this module does — `ui/` may not be the author of copy
+    that has to be tested, and this one has assertions on it in
+    `test_rebuild.py` that a Qt-less environment still runs.
+    """
+    native_block = entry.install.native
+    recipe = (
+        "Before it compiles, the build recipe in that folder — the Dockerfile and the "
+        ".dockerignore this app wrote when it installed the server — is written again from "
+        "the templates this version of the app ships, so a fix made to them since you "
+        "installed is in what gets compiled. Yu'lon knows those two files by the line it "
+        "writes at the top of each: while that line is there the file is replaced, including "
+        "anything you changed underneath it, and a file whose first line is no longer exactly "
+        "that line stops the rebuild instead of being overwritten. If you stop the rebuild or "
+        "it fails before your server is replaced, both are put back as they were.\n\n"
+        if native_block is not None and native_block.dockerfile_dir is not None
+        else ""
+    )
+    return (
+        f"Rebuild {entry.name} in {server_dir}?\n\n"
+        f"This compiles the server again from the source and modules in that folder. It is "
+        f"the same compile an install does, and this project has timed it at "
+        f"{MEASURED_BUILD_TIMES}. Yours depends on your machine, and nothing here can "
+        f"predict it better than that range does.\n\n"
+        f"{recipe}"
+        f"Your server will be STOPPED and its containers replaced once the compile finishes, "
+        f"and it will be down until it reports ready. Your characters, accounts and databases "
+        f"are not touched.\n\n"
+        f"The build you have now is kept as a rollback while this runs. If the new build does "
+        f"not come up, the old one is put back automatically and the server is started on it "
+        f"again. That rollback covers the server build only: anything the new build writes "
+        f"into the database on its first start is not put back.\n\n"
+        f"Say no and nothing happens at all — the server you have now keeps running, exactly "
+        f"as it is."
+    )
+
+
 def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     """What Stop actually did, what it did not, and which button to press next.
 
@@ -667,6 +800,70 @@ class InstallEngine(Protocol):
         cancel: threading.Event | None = None,
         ask: runner.Prompter | None = None,
     ) -> Iterator[str]: ...
+
+    def rebuild(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Recompile an install this app made and restart it on the result.
+
+    No `ask`: a rebuild provisions nothing, so there is no question for it to
+    forward. That is not an omission to be filled in later — a stage that turns
+    out to need an answer is a design failure to fix rather than a dialog to
+    add (`native.py`), and the two questions an install can raise are both
+    inside Docker provisioning, which a rebuild does not enter.
+    """
+
+    def update_confirmation(self, options: InstallOptions | None = None) -> str: ...
+
+    def update_databases(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    def adopt_state(self, options: InstallOptions | None = None) -> docker.ImportState: ...
+
+    def adopt_confirmation(self, options: InstallOptions | None = None) -> str: ...
+
+    def adopt_as_imported(
+        self,
+        options: InstallOptions | None = None,
+        *,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[str]: ...
+
+    """Record that these databases are a finished import, on the person's word (T19).
+
+    Three and not two, because this control is offered on a READING and not on
+    a fact about the catalog: `adopt_state()` is that reading, and the tab greys
+    the button on anything but `populated`. It never raises — a status path has
+    nowhere to put an exception, and the one thing that must not follow from a
+    question nobody answered is a control that writes a marker row appearing.
+
+    Here rather than only on `native.StagedInstaller` for `update_databases`'s
+    reason: the tab drives them through this Protocol and nothing else.
+    """
+
+    """Apply the install plan's re-runnable phases to a server that already exists.
+
+    The pair T14 put a button on: the sentence a user agrees to, then the press.
+    Both are here rather than only on `native.StagedInstaller` because the
+    controller tab drives them through this Protocol, exactly as it drives
+    `rebuild` — an engine reached through `installer_for_app()` is typed as this
+    and nothing else, and a `cast` at the call site would hide the contract the
+    view depends on rather than state it.
+
+    No `ask`, for `rebuild`'s reason. `update_confirmation` raises
+    `InstallerError` when the plan cannot be expanded against the folder, which
+    is the shape a clone predating the phases' own directory takes; a family with
+    no such phase answers a confirmation naming none, and the view never offers
+    the control there (`native.update_phases()` decides that off the catalog).
+    """
 
 
 def installer_for(

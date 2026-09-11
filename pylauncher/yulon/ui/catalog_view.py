@@ -320,6 +320,28 @@ class CatalogView(QWidget):
         grid = QGridLayout()
         for index, entry in enumerate(catalog.games):
             grid.addWidget(self._tile(entry), index // 2, index % 2)
+        # Equal columns (T28). `index % 2` never addresses a third column, so
+        # 0 and 1 are the whole grid. Left at the default 0/0 stretch, a
+        # `QGridLayout` hands each column its own preferred width and then
+        # splits any leftover space in proportion to those same preferred
+        # widths — so the column whose word-wrapped labels ask for more stays
+        # wider, and by MORE than its content actually needs. Measured through
+        # the owner's frame (`catalog-two-columns-unequal.png`, `yulon-arch`,
+        # 2026-09-10): WotLK/Vanilla drawn at 224px next to TBC/Tortoise at
+        # 451px, in the same row of the same grid. Equal stretch factors make
+        # the two columns share space equally instead.
+        #
+        # No size policy on `_tile()`'s frame was needed on top of this: a
+        # `QFrame`'s default policy is already `Preferred`/`Preferred`, which
+        # lets `QGridLayout` grow it past its size hint, and the word-wrapped
+        # labels' `minimumSizeHint` (the longest WORD, not the longest line —
+        # `_tile_text`'s v0.6.51 fix) is well under 338px either way, so it
+        # never became the binding constraint once the columns were stretched
+        # evenly. Measured at `DEFAULT_WINDOW_SIZE` through the same splitter
+        # `main.py` builds: both columns land at 338/337px, a 1px rounding
+        # remainder `QGridLayout` has to put somewhere.
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         inner = QWidget()
         inner.setLayout(grid)
         scroll = QScrollArea(self)
@@ -442,6 +464,37 @@ class CatalogView(QWidget):
         """Record an install this view just produced, and grey its button."""
         self._installed_dirs[game_id] = server_dir
         self._show_installed(game_id)
+
+    def forget_installed(self, game_id: str, surviving: Mapping[str, Path]) -> None:
+        """An install of `game_id` is gone (8.9a). Recompute this tile from what is left.
+
+        The inverse of `_remember_installed()`, and the way OUT this view did
+        not have: `_show_installed()` early-returns for a game that is not in
+        `_installed_dirs`, so nothing could ever un-grey a tile.
+
+        `surviving` is the whole `AppState.installed_dirs()` after the record was
+        forgotten, and NOT a game id to delete a key for. That is the difference
+        between right and nearly right here: `installed_dirs()` is one folder per
+        GAME, last remembered wins, so a machine with two WotLK installs still
+        has one after the first is purged - and its tab is still open. Flipping
+        the tile back to "Install" there offers a third install of a game that
+        already has two.
+
+        The re-enable is the enable rule from `_set_buttons_enabled()` and not a
+        bare `setEnabled(True)`: a tile the platform gate disabled (roadmap 6.1)
+        must not become pressable because an install elsewhere was removed.
+        """
+        button = self._buttons.get(game_id)
+        if button is None:
+            return
+        if game_id in surviving:
+            self._installed_dirs[game_id] = surviving[game_id]
+            self._show_installed(game_id)
+            return
+        self._installed_dirs.pop(game_id, None)
+        button.setText("Install")
+        button.setToolTip("")
+        button.setEnabled(game_id not in self._gated)
 
     def button_for(self, game_id: str) -> QPushButton:
         """The Install button of a tile (tests / accessibility)."""
@@ -588,12 +641,20 @@ class CatalogView(QWidget):
             # The cost sentence is CONDITIONAL, because the flat version was not
             # true. "Installing or removing a module writes into that folder and
             # deletes files under it" describes `Applier`, which only exists for an
-            # entry with `has_manifests` - `wow-wotlk` alone of the four. For TBC,
-            # Vanilla and Tortoise `controller_view` passes `applier=None` and
-            # DISABLES both module buttons, so the user was being warned about an
-            # action they cannot perform. It errs safe, which is exactly why it
-            # survived review of the previous wording: a sentence spelled like a
-            # true one, aimed at the cost this time instead of the remedy.
+            # entry with `has_manifests` - `wow-wotlk` alone of the four when this
+            # was written, and `wow-tbc` as well since 8.7b. For Vanilla and
+            # Tortoise `controller_view` still passes `applier=None` and DISABLES
+            # both module buttons, so the user was being warned about an action
+            # they cannot perform. It errs safe, which is exactly why it survived
+            # review of the previous wording: a sentence spelled like a true one,
+            # aimed at the cost this time instead of the remedy.
+            # The condition is the reason this needed no edit when TBC gained
+            # manifests: it asks the entry, not a list of game ids. What DID need
+            # saying is that TBC's cost is smaller than the sentence implies -
+            # every `manifests/wow-tbc/` item is a conf activation or a SQL mod,
+            # so nothing there clones and nothing there is deleted. The sentence
+            # over-warns rather than under-warns, which is the right way round,
+            # and one TBC manifest with a `source` would make it exact again.
             cost = (
                 "Installing or removing a module from its tab writes into that "
                 "folder and deletes files under it."

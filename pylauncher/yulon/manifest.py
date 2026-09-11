@@ -101,9 +101,22 @@ class Source(_Strict):
 
 
 class Build(_Strict):
-    """Whether installing/removing needs the worldserver rebuilt."""
+    """What must happen after installing/removing before the change is live."""
 
     rebuild: bool = True
+    restart: bool = Field(
+        default=False,
+        description=(
+            "Declare that this item needs the worldserver restarted. `ApplyReport."
+            "restart_recommended` is otherwise DERIVED — from NPCs, direct SQL and server "
+            "DBCs, all of which reach the database or the data volume — and that derivation "
+            "cannot see a conf write. An item whose whole content is `conf[].keys` reported "
+            "'nothing further needed' while the value it had just written sat in a file the "
+            "emulator reads once, at startup. On CMaNGOS that IS the whole shape of a module "
+            "(roadmap 8.7b), so it is declared here rather than guessed at. False by default, "
+            "and it never suppresses a derived yes — only adds one."
+        ),
+    )
 
 
 class SqlStep(_Strict):
@@ -208,6 +221,36 @@ class Npc(_Strict):
     note: str | None = None
 
 
+class ExistsCheck(_Strict):
+    """A read run against the server's own database before an answer is accepted.
+
+    Declared here rather than coded in the applier because it is per-item
+    knowledge (style-guide §4), and it exists because of what the AH bot modules
+    do with a wrong answer: `AuctionHouseBot.GUID` naming no character is not an
+    error inside the module, it is a module that quietly posts nothing — which
+    from the outside is indistinguishable from "this module does not work"
+    (measured on the owner's own install, 2026-09-07).
+
+    `query` and `missing` are templates over the manifest's prompt keys.
+    `query` must be a single SELECT: the applier hands it to the READ half of
+    the SQL seam, and a manifest is content rather than code, so the one thing
+    it must not be able to do through this field is write.
+    """
+
+    db: Db
+    query: str = Field(min_length=1)
+    missing: str = Field(min_length=1, description="What to tell the user when no row came back.")
+
+    @field_validator("query")
+    @classmethod
+    def _one_select(cls, value: str) -> str:
+        if not value.strip().upper().startswith("SELECT "):
+            raise ValueError(f"ExistsCheck.query must be a SELECT: {value!r}")
+        if ";" in value.strip().rstrip(";"):
+            raise ValueError(f"ExistsCheck.query must be ONE statement: {value!r}")
+        return value
+
+
 class Prompt(_Strict):
     """A value asked of the user at configure time, referenced as `{key}` elsewhere."""
 
@@ -216,6 +259,10 @@ class Prompt(_Strict):
     kind: PromptKind = "string"
     default: str | None = None
     choices: tuple[str, ...] = ()
+    exists: ExistsCheck | None = Field(
+        default=None,
+        description="A row that must be found before this answer is used; see `ExistsCheck`.",
+    )
 
     @model_validator(mode="after")
     def _choice_needs_choices(self) -> Prompt:
@@ -224,6 +271,34 @@ class Prompt(_Strict):
         if self.kind != "choice" and self.choices:
             raise ValueError("`choices` only valid with kind='choice'")
         return self
+
+
+class Origin(_Strict):
+    """How a CUSTOM manifest came to exist: derived by this app, not shipped by the project.
+
+    Present only on a manifest `yulon.module_source` derived from a link the user
+    pasted or a folder the user chose. Every file under `manifests/` has
+    `origin=None`, and `test_origin_is_optional_and_every_shipped_manifest_has_none`
+    asserts that over the tree rather than trusting it.
+
+    It exists because a local folder is **not** a `Source`. `Source` means "where
+    content is cloned from" and its `url` property feeds `git.CloneSpec`; a path
+    is not a clone URL, `same_repo()`/`remote_url()` have no meaning for a copy,
+    and `README.md` §3a treats `repo` as the piracy fence, which the user's own
+    disk should neither need to pass nor be allowed to weaken. So a folder-derived
+    manifest carries no source at all and records where it came from here.
+
+    `path` is the folder the module was copied from, for a human reading the file
+    and for choosing the same folder again; it is `None` for a link, whose source
+    already says where it came from. Nothing in the applier reads this model —
+    ownership is decided by the clone claim, as it is for a shipped module.
+    """
+
+    kind: Literal["link", "folder"]
+    path: str | None = Field(
+        default=None, description="The folder it was copied from (kind='folder'); null for a link."
+    )
+    added: str = Field(min_length=1, description="ISO date the derivation happened.")
 
 
 class Manifest(_Strict):
@@ -236,6 +311,9 @@ class Manifest(_Strict):
     game: Slug
     description: str = ""
     source: Source | None = None
+    origin: Origin | None = Field(
+        default=None, description="Set only on a manifest this app derived; see `Origin`."
+    )
     build: Build = Build(rebuild=False)
     requires: tuple[Slug, ...] = ()
     conflicts_with: tuple[Slug, ...] = ()
@@ -251,9 +329,24 @@ class Manifest(_Strict):
         default=(), description="Tacit knowledge worth showing a human; not machine-read."
     )
 
+    @property
+    def _copied_from_a_folder(self) -> bool:
+        """A C++ module this app copied off the user's own disk — the one sourceless module.
+
+        One clause wide on purpose. A module derived from a LINK has a source and
+        must still carry it, so this cannot be reached by dropping the field and
+        claiming an origin; and ALE scripts and kegs are always cloned, so they
+        are not relaxed at all.
+        """
+        return self.type == "module" and self.origin is not None and self.origin.kind == "folder"
+
     @model_validator(mode="after")
     def _shape_by_type(self) -> Manifest:
-        if self.type in ("module", "ale", "keg") and self.source is None:
+        if (
+            self.type in ("module", "ale", "keg")
+            and self.source is None
+            and not self._copied_from_a_folder
+        ):
             raise ValueError(f"type={self.type!r} requires a `source`")
         if self.type == "keg" and (self.source is None or self.source.sparse_path is None):
             raise ValueError("type='keg' requires `source.sparse_path` (kegs live inside a repo)")

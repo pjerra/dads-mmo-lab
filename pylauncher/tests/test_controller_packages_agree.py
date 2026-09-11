@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from yulon import party
+from yulon.catalog import native
 from yulon.controller_wow_tbc import accounts as tbc_accounts
 from yulon.controller_wow_tbc import maintenance as tbc_maintenance
 from yulon.controller_wow_tortoise import accounts as tortoise_accounts
@@ -267,6 +269,17 @@ def test_the_dump_the_restore_and_the_listing_all_use_the_declared_client() -> N
         monkey.undo()
 
 
+_NO_UNINSTALL_YET = frozenset({"wow-tbc", "wow-tortoise"})
+"""The games whose tab has no Uninstall yet, and the box that removes each name.
+
+`wow-vanilla` LEFT this set in **8.9b**, the second and last of the two family
+boxes, so both gated families are now wired. `wow-tbc` and `wow-tortoise` are
+CMaNGOS forks too and inherit the same mechanism, but neither has a box yet --
+so they are named here rather than left to be noticed, and this test fails the
+day one of them is wired without this line being edited.
+"""
+
+
 def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Path) -> None:
     """7.9's "mirroring `controller_wow_wotlk`", asked of the OBJECT the view uses.
 
@@ -281,9 +294,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     What the view actually depends on is `ControllerServices`: one field per
     operation the Server tab can perform. So every field is required to arrive
     for every game, with exactly one documented exception -- `store` and
-    `applier` are the module surface, and `manifests/` holds `wow-wotlk` alone,
-    so for the other three they are legitimately None and `_no_manifest_store()`
-    warns if the catalog ever says otherwise.
+    `applier` are the module surface, and a game has them only if the catalog
+    says `has_manifests` and a `manifests/<game>/` tree exists for it. That was
+    `wow-wotlk` alone until 8.7b added `wow-tbc`; for the two that still have
+    none the pair is legitimately None, and `_no_manifest_store()` warns if the
+    catalog ever says otherwise. The exception is keyed on the ENTRY rather
+    than on a list of game ids here, so the next game to get manifests needs no
+    edit in this file -- and cannot silently keep the exemption either.
 
     Enumerated from the dataclass rather than listed here, so a sixteenth
     capability added to the view cannot be wired for WotLK and forgotten for
@@ -304,9 +321,15 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
     from yulon.catalog.catalog import load_catalog
     from yulon.ui.controller_view import ControllerServices
 
-    module_surface = {"store", "applier"}
+    module_surface = {"store", "applier", "module_sql"}
     every_field = {f.name for f in fields(ControllerServices)}
     assert module_surface < every_field, "the module fields are no longer called store/applier"
+    # `module_sql` joined the surface when the module importer got a button
+    # (8.7a). It is None for the same three games and for a second reason as
+    # well as the manifests one: they name no one-shot import service, so there
+    # is no container to run their modules' SQL in. Both halves are asserted
+    # per game in `test_controller_view.py`; what is required here is only that
+    # the exception stays deliberate.
 
     catalog = load_catalog()
     for game in sorted(g.id for g in catalog.games):
@@ -319,6 +342,18 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
 
         services = ControllerServices.for_entry(entry, server_dir)
         absent = sorted(name for name in every_field if getattr(services, name, None) is None)
+        # The FIRST documented exception, and since 8.7b it closes itself too.
+        # `store`/`applier` used to be absent on "everything except wow-wotlk";
+        # the entry now says which games ship manifests, so the exception is
+        # read off the catalog and a game that gains a `manifests/<game>/` tree
+        # fails this test until its store is wired. `module_sql` is absent on
+        # all three CMaNGOS games either way, and for a different reason: they
+        # name no one-shot import service, so there is no container to run
+        # their modules' SQL in. WHOSE manifests arrived is not asked here --
+        # that is `test_controller_view.test_a_tab_gets_a_manifest_store_
+        # exactly_when_the_catalog_says_it_has_one`, which reads the store's
+        # own game id.
+        unstocked = module_surface if not entry.has_manifests else {"module_sql"}
         # The second documented exception, and it closes itself. 8.1a wired the
         # dashboard and the pre-stop snapshot for WotLK only, because the counts
         # need per-tree facts measured per tree; 8.1b, 8.1c and 8.1d each add
@@ -367,11 +402,86 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # 8.4c's block landed first and this was the RED that asked for the
         # `play=` line in `_for_vanilla`.
         unplayed = {"play"} if entry.play is None else set()
-        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed | unplayed
+        # 8.9a's uninstall, and the one seam here whose absence is decided by a
+        # BOX rather than by a fact in the entry -- because that is what the box
+        # says. Uninstall is gated on two FAMILIES, not four games: 8.9a is
+        # AzerothCore (wow-wotlk) and 8.9b is CMaNGOS (wow-vanilla), and
+        # `phase8-decisions.md` calls that the one place owner answer 3's "one
+        # box per family" is deliberately not followed, because the mechanism is
+        # the compose project and the folder -- the engine's, not the
+        # emulator's. So the entry carries nothing that could decide it, and the
+        # list is spelled out with its expiry: wow-tbc and wow-tortoise share
+        # wow-vanilla's engine and inherit the seam when a box wires them.
+        unremovable = {"uninstall"} if game in _NO_UNINSTALL_YET else set()
+        # 8.7a's update check counts git CLONES under `modules/`, so it belongs
+        # to a game whose manifest set actually puts one there. wow-tbc ships a
+        # `modules.json` with an empty `items` -- 8.7b's finding, a core that
+        # compiles no modules -- so it has manifests and still has nothing that
+        # could be behind, which is why this cannot ride on `has_manifests`.
+        # Read off the store the services were handed, so the day a CMaNGOS game
+        # ships its first module manifest this fails until its wiring lands.
+        counted = services.store is not None and any(services.store.load_all("module"))
+        # The four seams behind "Install from link…" and "Install from
+        # folder…" (module-from-link, 2026-09-08) ride on the same fact: a
+        # custom module is a C++ checkout or a copy under `modules/`, so it
+        # belongs to a game whose manifest set already puts one there. On the
+        # three CMaNGOS games a module is a conf key or a SQL mod (8.7b, 8.7c)
+        # and there is no `modules/` folder for a clone or a copy to land in.
+        custom = {
+            "module_from_link",
+            "module_from_folder",
+            "module_install_custom",
+            "module_forget",
+        }
+        uncounted = set() if counted else {"module_updates"} | custom
+        # 8.6's My Party, and the one seam whose absence is decided by the
+        # ENGINE rather than by a measurement. The route is `mod-ale`, an
+        # AzerothCore Lua module hooking AzerothCore's command table, and the
+        # bot it adds is `mod-playerbots`' `addclass`. A CMaNGOS tree has
+        # neither, so there is nothing to wire and nothing a later box could
+        # measure that would change it -- wiring it there would be a control
+        # that sends AzerothCore's commands at a server that has never heard of
+        # them. `InstallParty.for_entry_is_possible` is the same rule spelled
+        # once in the module, and this reads it rather than repeating it, so a
+        # tree that ever gains the route fails this until its wiring lands.
+        unpartied = set() if party.InstallParty.for_entry_is_possible(entry) else {"my_party"}
+        # T14's updates press, and the one seam here whose absence is decided by
+        # the install PLAN. A phase carrying `rerun_on_marked` is a promise that
+        # its own files are safe to re-apply to a server somebody is playing on,
+        # made per phase beside the notes that argue it (T11) -- so a tree with
+        # no such phase has nothing this control could apply, and a button there
+        # would report success having done nothing. Read off the catalog through
+        # the same function the wiring reads it with, so the day another entry's
+        # plan gains one this fails until that game's tab offers the press. It is
+        # absent on the REFERENCE too: AzerothCore imports through a compose
+        # one-shot and carries no phase list for a flag to sit on.
+        unupdatable = set() if native.update_phases(entry) else {"updates"}
+        # T19's adopt press, gated on the SAME fact and read through the same
+        # function, which is the point: the row it writes is a claim about the
+        # databases that nothing takes back, and it buys something only where a
+        # later press would then do what it cannot do now. So a game with no
+        # flagged phase is missing both seams together or neither, and a day
+        # when one is offered without the other is a real gap.
+        unadoptable = set() if native.update_phases(entry) else {"adopt"}
+        allowed = (
+            unstocked
+            | unmeasured
+            | unwired
+            | unlisted
+            | unbrowsed
+            | unprobed
+            | unplayed
+            | unremovable
+            | unpartied
+            | uncounted
+            | unupdatable
+            | unadoptable
+        )
         if game == "wow-wotlk":
+            reference = unprobed | unupdatable | unadoptable
             assert (
-                set(absent) == unprobed
-            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
+                set(absent) == reference
+            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - reference)}"
         else:
             assert set(absent) <= allowed, (
                 f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "
@@ -379,11 +489,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             )
             # And the exception has to be REAL. Without this the test would
             # pass just as happily on an implementation where nothing is ever
-            # None -- including one that handed the three games WotLK's own
+            # None -- including one that handed a game somebody else's
             # manifest store, which is the mistake `_no_manifest_store()`
             # exists to prevent.
             assert set(absent) == allowed, (
-                f"{game} reports {absent} rather than the module surface; `manifests/` holds "
-                "wow-wotlk alone, so a non-None store here means this game was handed "
+                f"{game} reports {absent} rather than the module surface; its entry does not "
+                "say `has_manifests`, so a non-None store here means this game was handed "
                 "somebody else's manifests"
             )

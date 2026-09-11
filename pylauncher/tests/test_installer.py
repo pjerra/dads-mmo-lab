@@ -168,6 +168,11 @@ MODULE_SURFACE_AFTER_7_2 = {
     "InstallEngine",
     "InstallOptions",
     "InstallerError",
+    # Added deliberately 2026-09-08 with the rebuild control: the sentence a
+    # user reads before an hour of compiling, and the measured build times it
+    # quotes. Copy, not machinery — this module still runs no subprocess.
+    "MEASURED_BUILD_TIMES",
+    "rebuild_confirmation",
     "SUDO_PROMPT_PREFIX",
     "UnsupportedPlatformError",
     "cancelled_install_message",

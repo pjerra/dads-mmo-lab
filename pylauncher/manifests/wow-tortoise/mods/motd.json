@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "motd",
+  "name": "Message of the Day",
+  "type": "mod",
+  "game": "wow-tortoise",
+  "description": "The line every player is greeted with at login.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Motd",
+          "default": "\"{motd}\"",
+          "note": "mangosd reads this once, at startup, and sends it to each character as it enters the world"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Motd[ \\t]*=.*$",
+      "replace": "Motd = \"Welcome to Turtle WoW! @/join world to connect with the community around you!\"",
+      "regex": true,
+      "when": "remove",
+      "note": "the line this fork ships at /opt/tortoise/etc/mangosd.conf:901"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "motd",
+      "question": "Message of the day",
+      "kind": "string",
+      "default": "Welcome!"
+    }
+  ],
+  "notes": [
+    "The TBC sibling of this manifest is proved on the console with `.server motd`. THAT",
+    "COMMAND DOES NOT EXIST ON THIS FORK: its serverCommandTable is corpses/exit/",
+    "idlerestart/idleshutdown/info/resetallraids/restart/shutdown (src/game/Chat/Chat.cpp:",
+    "700-711), and `motd` appears nowhere in its command tables (grepped, m910q 2026-09-08).",
+    "The only thing that reports this value here is a logging-in CLIENT:",
+    "src/game/Handlers/CharacterHandler.cpp:786-809 splits sWorld.GetMotd() on `@` and sends",
+    "each piece as a system message. So this item's proof needs the 1.18.1 Turtle client; the",
+    "`perf-report` item is the one 8.7d gated on the console instead.",
+    "Do not put a double quote in the text: the value is written into a quoted conf field.",
+    "An `@` starts a new line in the greeting, which is the fork's own convention -- see the",
+    "shipped default."
+  ]
+}

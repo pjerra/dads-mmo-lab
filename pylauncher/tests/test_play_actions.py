@@ -61,7 +61,7 @@ def _install(tmp_path, sql=None, channel=None) -> play.InstallPlay:
     return play.InstallPlay(
         WOTLK,
         tmp_path,
-        sql=sql if sql is not None else _Reader(**{"SELECT name FROM": "Guglu\n"}),
+        sql=sql if sql is not None else _Reader(**{"SELECT name, online FROM": "Guglu\t1\n"}),
         channel_for_saved=lambda: channel if channel is not None else _Channel(),
     )
 
@@ -146,7 +146,7 @@ def test_a_gear_set_larger_than_one_mail_is_sent_as_the_mails_it_needs(tmp_path)
     does the sending.
     """
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     channel = _Channel()
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -160,7 +160,7 @@ def test_a_gear_set_larger_than_one_mail_is_sent_as_the_mails_it_needs(tmp_path)
 
 def test_the_number_of_mails_a_set_needs_can_be_asked_before_pressing(tmp_path) -> None:
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     install = _install(tmp_path, sql=sql)
 
     assert install.gear_set_size("guglu") == (19, 2)
@@ -169,7 +169,7 @@ def test_the_number_of_mails_a_set_needs_can_be_asked_before_pressing(tmp_path) 
 def test_a_gear_set_from_a_character_wearing_nothing_is_refused(tmp_path) -> None:
     """Rather than sending an empty mail, which the server would refuse anyway
     with a sentence about item ids that says nothing about gear."""
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n"})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n"})
     channel = _Channel()
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -185,7 +185,7 @@ def test_a_set_that_fails_half_way_says_which_mails_went(tmp_path) -> None:
     person send the whole set again and the recipient get the first twelve
     twice."""
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     channel = _Channel("yes", "no")
     install = _install(tmp_path, sql=sql, channel=channel)
 
@@ -202,16 +202,26 @@ def test_a_tree_with_no_measured_play_block_offers_nothing(tmp_path) -> None:
     """The tab draws what the tree has, and a button drawn on a tree nobody has
     asked would send a command nobody has checked.
 
-    The unmeasured tree here was Vanilla until 8.4c measured it; the guard moved
-    to Tortoise rather than going, because it is the guard the whole
-    `NotMeasured` class exists for and there is still exactly one tree holding
-    it. When 8.4d measures Tortoise there will be no tree left to stand here,
-    and the honest thing then is a synthesised entry rather than a deletion.
+    The unmeasured tree here was Vanilla until 8.4c measured it, and Tortoise
+    carries a block written from its source ahead of 8.4d's gate -- which has
+    not run, so this sentence must not say it did (audit, 2026-09-08).
+    Every shipped entry now carries a block, so the tree that
+    stands here is SYNTHESISED -- which is what this guard's own note said to do
+    when the last real one went, rather than delete the assertion the whole
+    `NotMeasured` class exists for. The second half is what keeps it honest: it
+    asserts against the shipped catalog that there is no longer a real tree to
+    stand here, so the day a fifth game lands without its 8.4 box this test says
+    so rather than passing on a stand-in.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = _unmeasured()
 
-    assert play.InstallPlay.for_entry_is_possible(tortoise) is False
+    assert play.InstallPlay.for_entry_is_possible(unmeasured) is False
     assert play.InstallPlay.for_entry_is_possible(WOTLK) is True
+    assert [
+        entry.id
+        for entry in load_catalog().games
+        if not play.InstallPlay.for_entry_is_possible(entry)
+    ] == []
 
 
 def test_the_mail_cap_offered_is_the_one_this_tree_carries(tmp_path) -> None:
@@ -232,15 +242,15 @@ def test_an_unmeasured_tree_has_no_cap_to_offer_rather_than_a_plausible_one(
     nothing behind the promise. It raises instead, in the same voice
     `play.equipped` already refuses in.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = _unmeasured()
     install = play.InstallPlay(
-        tortoise, tmp_path, sql=_Reader(), channel_for_saved=lambda: _Channel()
+        unmeasured, tmp_path, sql=_Reader(), channel_for_saved=lambda: _Channel()
     )
 
     with pytest.raises(play.NotMeasured) as refused:
         install.mail_item_cap  # noqa: B018
 
-    assert "WoW Tortoise" in str(refused.value)
+    assert unmeasured.name in str(refused.value)
 
 
 def test_the_cap_is_this_trees_own_and_not_its_siblings() -> None:
@@ -289,7 +299,7 @@ def test_a_half_sent_set_says_what_arrived_and_does_not_advise_the_impossible(
     delivered will arrive a second time if they do.
     """
     nineteen = "\n".join(str(6000 + n) for n in range(19))
-    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    sql = _Reader(**{"SELECT name, online FROM": "Guglu\t1\n", "character_inventory": nineteen})
     install = _install(tmp_path, sql=sql, channel=_Channel("yes", "no"))
 
     outcome = install.send_gear_set("guglu", to="guglu", subject="s", body="b")
@@ -299,3 +309,326 @@ def test_a_half_sent_set_says_what_arrived_and_does_not_advise_the_impossible(
     assert "1 of 2" in said or "1 of the 2" in said, outcome.problem
     assert "again" in said, "it does not say what pressing again would do"
     assert "missing" not in said, "it still advises an operation that does not exist"
+
+
+def _unmeasured():
+    """A shipped entry with its Play block taken away.
+
+    Written once and used by both guards. `model_copy` keeps the id, so this is
+    still an entry this build has a factory for -- a tree whose 8.4 box has not
+    been done, not a game this build cannot manage.
+    """
+    return WOTLK.model_copy(update={"play": None})
+
+
+# -- 8.4d: the tortoise fork's own verbs -------------------------------------
+
+
+TORTOISE = load_catalog().get("wow-tortoise")
+
+
+def _tortoise(tmp_path, channel):
+    return play.InstallPlay(
+        TORTOISE,
+        tmp_path,
+        sql=_Reader(**{"SELECT name, online FROM": "Guglu\t1\n"}),
+        channel_for_saved=lambda: channel,
+    )
+
+
+def test_the_rename_this_tree_sends_is_its_own_top_level_command(tmp_path) -> None:
+    """Read from this fork's source, 2026-09-07: `rename` is registered at the
+    TOP level (`src/game/Chat/Chat.cpp:850`) and its `characterCommandTable` has
+    no rename row at all.
+
+    Both trees are asserted against one call each, because the failure this
+    guards is a string in `yulon.commands` that is right for three trees and
+    silently wrong for the fourth -- and "silently" is the word: the tortoise
+    console answers `There is no such subcommand` and prints the list of the
+    subcommands it does have, which reads like the app being broken.
+    """
+    tortoise_channel, wotlk_channel = _Channel(), _Channel()
+
+    _tortoise(tmp_path, tortoise_channel).rename("guglu")
+    _install(tmp_path, channel=wotlk_channel).rename("guglu")
+
+    assert tortoise_channel.sent == ["rename Guglu"]
+    assert wotlk_channel.sent == ["character rename Guglu"]
+
+
+def test_a_tree_with_no_level_command_refuses_the_press_and_sends_nothing(tmp_path) -> None:
+    """The headline of 8.4d, at the seam under the button.
+
+    The whole command implementation of this fork writes a level in three places
+    (`Commands.cpp:3516`, `:3569`, `:3826`), and the only one that reaches an
+    arbitrary level is `HandleCharacterLevel`, whose single caller is
+    `HandleLevelUpCommand` -- registered with `AllowConsole` FALSE
+    (`Chat.cpp:923`). `CliHandler::isAvailable` refuses on that field before it
+    looks at security at all (`Chat.cpp:3723-3731`), and the `command` DB table
+    can override a row's SecurityLevel and Help but not its AllowConsole
+    (`Chat.cpp:1730-1770`) -- so this is not a permission this install could be
+    configured into.
+
+    The tab does not draw the control, but the seam refuses on its own: a press
+    that arrived anyway must not fall through to a sibling's `character level`,
+    which on this fork is an unknown subcommand today and, on a fork that later
+    gains one, would be a real command nobody has measured.
+    """
+    channel = _Channel()
+
+    outcome = _tortoise(tmp_path, channel).set_level("guglu", 60)
+
+    assert outcome.done is False
+    assert channel.sent == [], channel.sent
+    assert "reset level" in outcome.problem, outcome.problem
+
+
+def test_the_tortoise_block_carries_this_forks_own_numbers_and_not_a_siblings() -> None:
+    """Every field, against the source line it was read from, in one breath.
+
+    The hazard 8.4c named is the same one here: Vanilla's block matches this one
+    on all four of ITS fields, so pasting it over would have produced a block
+    that passes every other test in this file. What would not have come with it
+    are the rename verb and the absent level command, which are the two facts
+    this fork disagrees with all three siblings about.
+    """
+    block = TORTOISE.play
+
+    assert block is not None
+    assert block.mail_item_cap == 1, "src/game/Mail/Mail.h:51 -- #define MAX_MAIL_ITEMS 1"
+    assert block.teleport_command == "tele name", "Chat.cpp:716/:869 -- `teleport` is no command"
+    assert block.equipped.instance_table is None, "character_inventory carries item_template"
+    assert block.equipped.template_column == "item_template"
+    assert block.revive_offline is True, (
+        "MEASURED, not read off Commands.cpp:3040: 8.4d on m910q, 2026-09-08 -- Bramerm's "
+        "corpse row held for 12 s of watching and went to 0 on the press (transcript.txt:196-204, "
+        "07:37Z), and Ramoni's again in round 2 (transcript-round2.txt:48, 08:25Z). This field "
+        "IS read: controller_view offers the Revive button only on True, and for a few hours on "
+        "2026-09-08 it was null here -- set from a belief that no box had pressed it, while the "
+        "press sat unmerged in a stopped workflow's worktree -- which took the button off a tab "
+        "where it had already worked"
+    )
+    assert block.rename_command == "rename", "Chat.cpp:850 -- top level, not under `character`"
+    assert block.set_level_command is None, "Chat.cpp:923 -- .levelup is AllowConsole=false"
+
+
+def test_the_sentence_in_place_of_the_level_control_names_what_this_fork_has() -> None:
+    """ "a sentence naming what does exist rather than one implying nothing does".
+
+    Re-measured on this fork's own source, 2026-09-08, after the first version
+    of this sentence said "its console has no command that puts a character at a
+    level you pick" and that was FALSE. The first measurement read
+    `src/game/Chat/Chat.cpp` and `Commands.cpp` and stopped there; `.rndbot` is
+    registered `AllowConsole=true` at `Chat.cpp:1012`, and a console `.rndbot
+    create level=<n>` reaches `PlayerbotHolder::HandleCreate`
+    (`modules/mod-playerbots/src/playerbot/PlayerbotMgr.cpp:2593`, no security
+    check and no master required, unlike `HandleGroup` below it) and then
+    `CreateBot` (`:2350`), which parses `level=` at `:2389` and runs
+    `SetLevel(level)` at `:2498`.
+
+    So the clause that survives is narrower, and every word of it was read here:
+
+    * nothing moves an EXISTING character to a chosen level. `.levelup` is
+      `AllowConsole=false` (`Chat.cpp:923`), and the playerbot table's own
+      `level`/`levelup` verb (`PlayerbotMgr.cpp:336`) is
+      `HandleBotLevelUp` (`:3159`), whose whole body is
+      `PlayerbotFactory factory(bot, bot->GetLevel()); factory.Randomize(...)` --
+      it never reads the parameter it was handed. `init` (`:3094`) does the same
+      thing: with no master, which is every console call, the level it builds
+      with is `bot->GetLevel()`.
+    * `.reset level` IS console-legal (`Chat.cpp:653`, `AllowConsole=true`), its
+      handler takes only a `Player**` through `ExtractPlayerTarget` so the
+      character has to be logged in, and the level it writes is
+      `CONFIG_UINT32_START_PLAYER_LEVEL` (`Commands.cpp:3824-3826`).
+    * `.rndbot create level=<n>` makes a NEW character at the level named.
+
+    The number that value happens to hold is NOT in the sentence: it is
+    `StartPlayerLevel` in the operator's own `etc/mangosd.conf`, editable on any
+    install, and this catalog is shipped data that never re-reads it.
+    """
+    said = TORTOISE.play.set_level_absent_reason
+
+    assert said
+    assert "reset level" in said, said
+    assert "logged in" in said, said
+    assert "configured starting level" in said, said
+    # Finding 5: a conf key's current value is not a fact this file may ship.
+    assert "level 1" not in said, said
+    # Finding 1: the console route that DOES take a level is named, and named as
+    # what it is -- a new character rather than a change to an existing one.
+    assert "rndbot create level=" in said, said
+    assert "NEW" in said, said
+    assert "existing character" in said, said
+    assert "no command that puts a character at a level you pick" not in said, said
+    # 8.4d's live gate, m910q 2026-09-08 07:27-07:30Z. The sentence named the
+    # command in an argument order this server REFUSES. Sent as spelled --
+    # `rndbot Aniel level 60` -- the console answered
+    #     Aniel: level - character not found
+    # and sent verb-first -- `rndbot level Aniel 60` -- it answered
+    #     level: Aniel - ok
+    # and left Aniel at level 18, which is the behaviour the sentence describes.
+    # So the description was right about what happens and wrong about what to
+    # type, and somebody following it would read the refusal as the feature.
+    assert ".rndbot level <bot>" in said, said
+    assert ".rndbot <bot> level" not in said, said
+
+
+def test_the_offline_rename_this_fork_would_destroy_a_name_with_is_refused(tmp_path) -> None:
+    """`rename <char>` with no new name is the at-login flag only for a character
+    who is ONLINE.
+
+    For an offline one the same spelling runs
+    `UPDATE characters SET name = guid, at_login = at_login|1`
+    (`src/game/Commands/Commands.cpp:12624-12635`) -- it does not flag the
+    rename, it throws the current name away and puts the numeric guid there.
+    That is data loss behind a button labelled "Rename at next login", so the
+    entry carries the refusal and this asserts the tree that has one and a tree
+    that has not, in one breath.
+    """
+    said = TORTOISE.play.rename_offline_refusal
+
+    assert said
+    assert "logged in" in said, said
+    assert "guid" in said, "the sentence names what the server would do instead"
+    assert WOTLK.play is not None and WOTLK.play.rename_offline_refusal is None
+
+
+# -- 8.4d review, finding 2: the destructive action gets the seam guard -------
+
+
+def _one_row(tmp_path, entry, row: str, channel):
+    """An install whose character lookup answers `row`, verbatim, and its reader.
+
+    Keyed on `UPPER(name)` rather than on the `SELECT name FROM` prefix the rest
+    of this file uses, because the read this guard needs comes back with the
+    online column BESIDE the name -- a fixture keyed on the old prefix would
+    stop matching the moment that select grows, and a test asserting "nothing
+    was sent" would then pass because the name resolved to nothing rather than
+    because the guard fired.
+    """
+    reader = _Reader(**{"UPPER(name)": row})
+    install = play.InstallPlay(entry, tmp_path, sql=reader, channel_for_saved=lambda: channel)
+    return install, reader
+
+
+def test_a_rename_is_not_sent_to_a_character_the_database_says_is_offline(tmp_path) -> None:
+    """The seam refuses it, not only the button.
+
+    The button was the whole protection until now, and it is driven by the
+    `online` flag of a character-list SNAPSHOT: the list is read once, and a bot
+    or a player that logs out a second later leaves a row that still says 1.
+    `RandomPlayerbotMgr` cycles its bots on a timer, so on the tree this matters
+    on, the snapshot goes stale on its own with nobody touching anything.
+
+    What is behind the button there is not an ineffective command, it is a
+    DIFFERENT one: `rename <char>` on an offline character runs
+    `UPDATE characters SET name = guid, at_login = at_login | '1'`
+    (`src/game/Commands/Commands.cpp:12624-12635`, re-read on m910q 2026-09-08),
+    which throws the name away. `set_level`, whose worst outcome is a harmless
+    `There is no such subcommand`, already had the belt-and-braces guard; this
+    is the action that needed it.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, TORTOISE, "Ganaar\t0\n", channel)
+
+    outcome = install.rename("ganaar")
+
+    assert outcome.done is False
+    assert channel.sent == [], channel.sent
+    assert outcome.problem.startswith("Ganaar "), outcome.problem
+    assert "logged in" in outcome.problem, outcome.problem
+    assert "guid" in outcome.problem, outcome.problem
+
+
+def test_the_rename_guard_reads_the_row_at_the_press_rather_than_the_list(tmp_path) -> None:
+    """The reading the refusal is made from is taken WHEN THE BUTTON IS PRESSED.
+
+    Two assertions, because either alone is satisfied by a guard that is not
+    really asking: the statement the seam sent NAMES the online column, and the
+    same install answers differently for the same character when the row behind
+    it says 1 rather than 0. A guard reading a snapshot taken at construction
+    would answer the same both times, and one that hard-coded "offline" would
+    never send at all.
+    """
+    refused_channel, sent_channel = _Channel(), _Channel()
+    offline, reader = _one_row(tmp_path, TORTOISE, "Guglu\t0\n", refused_channel)
+    online, _ = _one_row(tmp_path, TORTOISE, "Guglu\t1\n", sent_channel)
+
+    refused = offline.rename("guglu")
+    allowed = online.rename("guglu")
+
+    assert "online" in reader.asked[0], reader.asked[0]
+    assert refused.done is False
+    assert refused_channel.sent == [], refused_channel.sent
+    assert allowed.done is True, allowed.problem
+    assert sent_channel.sent == ["rename Guglu"], sent_channel.sent
+
+
+def test_a_tree_that_measured_no_such_hazard_still_flags_an_offline_rename(tmp_path) -> None:
+    """The guard is the ENTRY's fact and not a blanket rule.
+
+    WotLK's own box watched `character rename` on an offline character do
+    exactly what its name says -- set the at-login flag and nothing else -- so
+    its entry carries no refusal and this must keep sending. A guard that
+    refused every offline rename everywhere would pass the test above and take a
+    working action away from three trees.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, WOTLK, "Guglu\t0\n", channel)
+
+    outcome = install.rename("guglu")
+
+    assert outcome.done is True, outcome.problem
+    assert channel.sent == ["character rename Guglu"], channel.sent
+
+
+def test_the_actions_that_are_safe_offline_are_not_caught_by_the_rename_guard(
+    tmp_path,
+) -> None:
+    """Every other action on this fork works on a character who is out.
+
+    The teleport's own help says so in as many words, and 8.4c watched the
+    offline revive remove a corpse. A guard written into the shared `_one`
+    rather than into `rename` alone would have taken all of them out on this
+    tree, and nothing else in this file presses them against an offline row.
+    """
+    channel = _Channel()
+    install, _ = _one_row(tmp_path, TORTOISE, "Ganaar\t0\n", channel)
+
+    assert install.teleport("ganaar", "Stormwind").done is True
+    assert install.revive("ganaar").done is True
+    assert channel.sent == ["tele name Ganaar Stormwind", "revive Ganaar"], channel.sent
+
+
+def test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_own_entry(tmp_path) -> None:
+    """The line 8.4d was missing, and every test above it passed without.
+
+    The catalog block, the commands and the tab were all written for this tree
+    and `_for_tortoise` never bound the seam, so `ControllerServices.play` was
+    None and the Characters tab drew *"WoW Tortoise has not had its character
+    actions measured yet"* -- the entry saying the measurement exists and the
+    window saying it does not. `test_every_game_offers_the_whole_controller_
+    surface_wotlk_does` is the guard that caught it, and it asserts presence.
+
+    This asserts WHICH, which is the half that file's own docstring warns
+    presence is not: a seam handed a sibling's entry would send
+    `character rename` on the one fork where that is not a command, and would
+    promise twelve items per mail on the one that carries one. The entry is the
+    object every one of those facts is read from, so naming it names them all.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    server_dir = tmp_path / TORTOISE.id
+    server_dir.mkdir()
+    password_file = TORTOISE.install.password.file
+    if password_file:
+        (server_dir / password_file).write_text("hunter2", encoding="utf-8")
+
+    seam = ControllerServices.for_entry(TORTOISE, server_dir).play
+
+    assert isinstance(seam, play.InstallPlay)
+    assert seam.entry.id == "wow-tortoise", seam.entry.id
+    assert seam.entry.play is not None
+    assert seam.entry.play.rename_command == "rename"
+    assert seam.entry.play.set_level_command is None
+    assert seam.mail_item_cap == 1

@@ -1611,7 +1611,18 @@ def test_stage_import_without_a_service_still_refuses_an_unreadable_database(
 def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     tmp_path: Path,
 ) -> None:
-    """A3/A5: `{{REALM_HOST}}:{{WORLD_PORT}}` is filled from `INSTALL_REALM_HOST`, then escaped."""
+    r"""A3/A5: a literal marker is escaped, and `{{REALM_HOST}}` is a wildcard inside it.
+
+    The escaping is what A5 is about: without it the `.` in `127.0.0.1` is a
+    wildcard and `ready.world`'s own `ready...` matches `readyXYZ`.
+
+    The ADDRESS half stopped being a literal on 2026-09-09, and the reason is
+    in `native.REALM_ADDRESS_PATTERN`: filling it from `INSTALL_REALM_HOST`
+    described a fresh install and nothing after it, because `_advertise_realm()`
+    replaces that row as the install's last act -- so a rebuild waited six hours
+    for a line the auth server would never print again. The port stays exact,
+    and both halves of that are asserted below.
+    """
     assert native.INSTALL_REALM_HOST == "127.0.0.1"
     rec = Recorder(images=False)
     seen: list[docker.ReadySpec] = []
@@ -1631,9 +1642,15 @@ def test_ready_markers_are_filled_and_escaped_unless_the_catalog_says_regex(
     assert seen[0].world == re.escape(composegen.fill(markers.world, tokens))
     assert markers.auth is not None
     filled_auth = composegen.fill(markers.auth, tokens)
-    assert seen[0].auth == re.escape(filled_auth)
+    assert seen[0].auth is not None
+    # The address is open, so the line a FRESH install prints and the line the
+    # same install prints after `_advertise_realm()` both match.
     assert re.search(seen[0].auth, filled_auth)
-    assert not re.search(seen[0].auth, filled_auth.replace(".", "x"))
+    assert re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world}.")
+    # The port is not: a realm on another port is another realm.
+    assert not re.search(seen[0].auth, f"at 100.99.204.5:{ENTRY.ports.world + 1}.")
+    # And the WORLD marker is still a literal, dots and all -- A5 unchanged.
+    assert not re.search(seen[0].world, markers.world.replace(".", "x"))
     assert seen[0].timeout == float(markers.timeout_s)
     assert seen[0].restart_loop == markers.restart_loop
 
@@ -2299,6 +2316,22 @@ def _listing_sites(root: Path) -> set[tuple[str, str]]:
 
 
 _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
+    ("steam.py", "find_profile"): (
+        "8.8. Lists `userdata/` to count Steam profiles. It decides a REFUSAL and never a "
+        "write: zero and two are both named refusals, so a listing that came back short "
+        "stops the press rather than picking a library to write into"
+    ),
+    ("steam.py", "find_compat_tool"): (
+        "8.8. Lists `compatibilitytools.d/` and `steamapps/common/` for a Proton. Same "
+        "shape: nothing found is the `NO_PROTON` refusal, which names what to install"
+    ),
+    ("steam.py", "client_executable"): (
+        "8.8. Globs a client folder the user already chose and Yu'lon already validated, "
+        "to pick `WoW.exe` out of the three executables such a folder holds. Nothing is "
+        "written there - the answer becomes a path INSIDE a Steam entry - and a folder "
+        "that lists as empty falls back to the conventional name in the folder the user "
+        "named, which is a path they can see and correct"
+    ),
     ("catalog/native.py", "_listing"): (
         "the write decision itself: it translates the OSError into a refusal, because the "
         "caller's next move on 'empty' is a clone whose seam removes what it finds"
@@ -2333,6 +2366,51 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "`native._listing()` from here because that raises `InstallerError` while every "
         "caller of this one translates `ApplyError`; filed in `pyplan/checklist.md`"
     ),
+    ("apply.py", "module_updates"): (
+        "lists `modules/` to say how far behind each installed module is (checklist 8.7a); it "
+        "decides no write at all - every clone it names is then FETCHED into and nothing else - "
+        "and an unreadable or absent folder is the ordinary answer for the three CMaNGOS games, "
+        "which have no `modules/` at all, so the OSError is logged and answers an empty tuple "
+        "rather than a refusal"
+    ),
+    ("purge.py", "folder_bytes"): (
+        "measures the server folder for the uninstall dialog; every OSError per entry is "
+        "skipped and the total is short rather than absent, because a folder whose size "
+        "cannot be read still has to be offerable for removal - it decides no write, only a "
+        "number in a sentence"
+    ),
+    ("purge.py", "_clear_read_only"): (
+        "walks the tree the uninstall is about to delete, to add the write bit back to "
+        "everything in it. It IS reached on the way to a write, and it is the one place that "
+        "is right: the delete has ALREADY failed once when this runs, so the folder is one "
+        "the user asked to remove and `remove_tree()` re-raises against the tree if the "
+        "retry still cannot finish. A failure on any single entry is skipped here on purpose "
+        "- the report belongs to the rmtree that follows, not to one chmod"
+    ),
+    ("purge.py", "_remove_unenterable"): (
+        "walks the same tree, after the same first failure, to find the entries the walk "
+        "cannot ENTER - on Windows a WSL-made symlink the clone container left as an LX "
+        "reparse point, on POSIX a directory whose mode refuses scandir - and `os.rmdir`s "
+        "each one where it stands, which removes a link rather than following it. It "
+        "decides no write on its own: the folder is one the user asked to remove and the "
+        "delete has already failed once, and an rmdir it cannot do is left for the retry "
+        "to name against the tree"
+    ),
+    ("party.py", "deploy"): (
+        "lists the app's OWN bundled `lua/` tree to find the bridge families in it, not "
+        "anything of the user's, and the folder it goes on to write is created by the same "
+        "call - so no emptiness verdict about somebody's directory is reached. Its OSError is "
+        "translated into `NothingToDeploy` on purpose and is the opposite of an exoneration: "
+        "the Rust launcher reported a success envelope when this listing found nothing, and "
+        "My Party then silently did not work (`rust-main:bridge.rs:56-70`)"
+    ),
+    ("party.py", "read_facts"): (
+        "lists the bridge directory under the server dir to say WHICH of the five scripts are "
+        "there, and decides no write at all - My Party never writes into that folder, `deploy()` "
+        "does. An unreadable folder answers an empty tuple, which draws the `deployed` "
+        "precondition's own sentence; reporting a scripts-are-there when the folder could not "
+        "be read is the one thing that would be worse, and this cannot"
+    ),
     ("apply.py", "_undeploy"): (
         "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
         "removes exactly those names; reads a folder this app filled, decides no write into it"
@@ -2343,6 +2421,26 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ),
     ("apply.py", "_run_sql"): (
         "resolves a manifest's `sql path` glob the same way, with the same by-name refusal"
+    ),
+    ("apply.py", "_pending_sql"): (
+        "resolves a `db-import` step's glob so the file count on `PendingSql` is one this run "
+        "actually took -- reads the clone this app just made, decides no write anywhere, and "
+        "runs nothing. Its emptiness verdict is deliberate and is NOT a refusal: upstream's "
+        "own updater joins `<module>/data/sql` and skips what is not there "
+        "(`UpdateFetcher.cpp:159-186`), so a module that brought no SQL is normal. The verdict "
+        "it must not give is a confident zero for a path it could not resolve, which is why a "
+        "`{key}` in the path answers `files=None` instead of globbing the literal braces"
+    ),
+    ("docker.py", "allowed_modules"): (
+        "lists `<server>/modules` to name the modules the database importer may apply SQL for; "
+        "decides no write to that folder and never touches it. Its `except OSError` logs and "
+        "answers `all`, which is upstream's own default (the modules COMPILED into the image), "
+        "so an unreadable folder leaves the install doing exactly what it did before. The one "
+        'answer it must never give is `""`: measured on the real ac-db-import image '
+        "2026-09-07, an empty value means `Loading modules: none` and switches module updates "
+        "off, so 'nothing readable' and 'nothing to allow' must not collapse into one string. "
+        "Nothing is written on the strength of it either way -- the answer travels in argv "
+        "to a container that then decides file by file"
     ),
     ("docker.py", "_first_populated_ancestor"): (
         "walks up a path looking for a directory that HAS something in it, to tell a real "
@@ -2363,6 +2461,22 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"
+    ),
+    ("module_source.py", "_conf_steps"): (
+        "lists the top level of a derived module's conf/ to find the .conf.dist files the "
+        "manifest will name; decides no write, and a conf it cannot see is simply one "
+        "Applier._conf() never activates"
+    ),
+    ("module_source.py", "_sql_steps"): (
+        "lists a derived module's data/sql/ to map each database directory to a deferred "
+        "db-import step; its emptiness verdict is deliberate and is NOT a refusal - a module "
+        "that brought no SQL is normal, the same argument apply.py::_pending_sql already makes"
+    ),
+    ("module_source.py", "_rewrite_index"): (
+        "lists the user manifest directory to REBUILD its index from the files that are "
+        "actually there, never appending to it - which is why a crash between the item write "
+        "and the index write leaves a file the next persist picks up rather than an index "
+        "naming a file that is not there"
     ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.

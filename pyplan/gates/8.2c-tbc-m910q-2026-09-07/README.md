@@ -41,7 +41,7 @@ that is asserted, so a future change that started writing one would be caught he
 | The tab reads verified with the time | `Command channel: verified as YULON_37F13213 at 2026-09-07 10:05 UTC.` |
 | The account exists at this tree's own level 3 | `106  YULON_37F13213  3`, on the account row; no access table exists or is looked for |
 | The reply text, **from the host** | `CMaNGOS/0.18 … Using World DB: TBC-DB 1.11.0 'Vengeance One: A Cmangos Story' … Online players: 0 (max: 0)` |
-| Nothing listening on 8888 or 3443 inside the container | `[7878, 8085, 35773]` — both silent. **Recorded rather than changed:** the playerbot command server is off by compiled default on this tree, measured before the press (`8085` alone) rather than assumed |
+| Nothing listening on 8888 or 3443 inside the container | `[7878, 8085, 35773]` — both silent. **Recorded rather than changed:** the playerbot command server is off by compiled default on this tree, **The pre-press reading is NOT in this folder** — both port readings here (transcript.txt:158, :181) come from the read-only re-run at 10:12Z, after the 09:13:41Z press, and the stage label "before" on them is stale. So 8888 is silent AFTER the press, and what it was before was never recorded on this tree (audit, 2026-09-08) |
 | A wrong credential reads refused, and the repair returns it without a second account | refused → repaired, **1 account before and after**, round trip `answered` |
 | An occupied 7878 rolls back and the server still starts | the tab's sentence, `SOAP.Enabled` back to `0`, `SOAP.IP` back to `127.0.0.1`, port released, world running |
 

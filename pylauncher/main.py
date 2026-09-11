@@ -18,7 +18,11 @@ from yulon import platform
 from yulon.log import configure, file_log_problem, get_logger, use_utf8_streams
 
 if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay for it.
+    from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget
+
     from yulon.state import AppState
+    from yulon.ui.catalog_view import CatalogView
+    from yulon.ui.widgets.log_panel import LogPanel
 
 logger = get_logger(__name__)
 
@@ -41,6 +45,61 @@ this the tile text clips mid-word and the Install button leaves the viewport.
 It is a floor for the splitter, not a preference -- the pane is free to be
 wider, and the user is free to drag it.
 """
+
+
+def build_catalog_tab(
+    window: QMainWindow, catalog_view: CatalogView, log_panel: LogPanel
+) -> tuple[QTabWidget, QLabel, QSplitter]:
+    """Wire the window's central widget, tab bar and the Catalog tab's splitter.
+
+    Extracted out of `build_window()` (T28 round 2 review) so a test can lay
+    the real catalog tiles out inside the SAME chrome the running app gives
+    them, rather than a bare `QSplitter` that skips it. The width a tile
+    actually gets is not just "half the window": the tab bar's own frame, the
+    central widget's `QVBoxLayout`, and the splitter's `setCollapsible(0,
+    False)` / stretch-factor / `setMinimumWidth(_CATALOG_MIN_WIDTH)` rules all
+    eat into or bound that budget before a single tile is measured, and a
+    fixture that reconstructs only the splitter is measuring a window that
+    does not exist (round 1's mistake — it happened not to matter for the
+    first two tests, and there was no reason to expect that to keep holding).
+
+    Returns `(tabs, banner, splitter)`. `build_window()` itself only needs the
+    first two afterwards — `tabs` to add controller tabs and record on the
+    window's `tabs` property, `banner` for the update-check banner host —
+    but a test needs the `splitter` too, to drive it across the width range
+    the user can actually drag it to (`test_catalog_view.py`'s width matrix).
+    `central` and `column` are wiring with nothing left to read once this
+    returns.
+    """
+    from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
+
+    tabs = QTabWidget(window)
+    central = QWidget(window)
+    column = QVBoxLayout(central)
+    banner = QLabel(central)
+    banner.setOpenExternalLinks(True)
+    banner.setVisible(False)
+    column.addWidget(banner)
+    column.addWidget(tabs, 1)
+    window.setCentralWidget(central)
+
+    splitter = QSplitter()
+    splitter.addWidget(catalog_view)
+    splitter.addWidget(log_panel)
+    # The catalog is the thing the window is for; it may shrink, never vanish.
+    # A bare QSplitter honours whatever minimum its children ask for, so one
+    # widget with a wide size hint can squeeze the other to nothing -- which is
+    # exactly what an unwrapped status label did on 2026-09-02, leaving the
+    # tiles clipped mid-word and their buttons unreachable. That label now
+    # wraps, which is the fix; this is the floor, so the next widget with a wide
+    # hint cannot do it again. Stretch goes to the log because it is the pane
+    # whose content grows.
+    splitter.setCollapsible(0, False)
+    splitter.setStretchFactor(0, 0)
+    splitter.setStretchFactor(1, 1)
+    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
+    tabs.addTab(splitter, "Catalog")
+    return tabs, banner, splitter
 
 
 def _warn_about_the_log_file(parent: Any) -> None:
@@ -92,15 +151,7 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
     from PySide6.QtCore import QObject, QThread, Signal, Slot
-    from PySide6.QtWidgets import (
-        QLabel,
-        QMainWindow,
-        QMessageBox,
-        QSplitter,
-        QTabWidget,
-        QVBoxLayout,
-        QWidget,
-    )
+    from PySide6.QtWidgets import QMainWindow, QMessageBox, QWidget
 
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
@@ -135,15 +186,6 @@ def build_window() -> object:
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
-    tabs = QTabWidget(window)
-    central = QWidget(window)
-    column = QVBoxLayout(central)
-    banner = QLabel(central)
-    banner.setOpenExternalLinks(True)
-    banner.setVisible(False)
-    column.addWidget(banner)
-    column.addWidget(tabs, 1)
-    window.setCentralWidget(central)
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -164,22 +206,7 @@ def build_window() -> object:
         # about. Same list `add_controller()` just built the tabs from.
         installed_games=state.installed_dirs(),
     )
-    splitter = QSplitter()
-    splitter.addWidget(catalog_view)
-    splitter.addWidget(log_panel)
-    # The catalog is the thing the window is for; it may shrink, never vanish.
-    # A bare QSplitter honours whatever minimum its children ask for, so one
-    # widget with a wide size hint can squeeze the other to nothing -- which is
-    # exactly what an unwrapped status label did on 2026-09-02, leaving the
-    # tiles clipped mid-word and their buttons unreachable. That label now
-    # wraps, which is the fix; this is the floor, so the next widget with a wide
-    # hint cannot do it again. Stretch goes to the log because it is the pane
-    # whose content grows.
-    splitter.setCollapsible(0, False)
-    splitter.setStretchFactor(0, 0)
-    splitter.setStretchFactor(1, 1)
-    catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
-    tabs.addTab(splitter, "Catalog")
+    tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the
     # distro comparison both reach into `services` and `console_log`.
@@ -191,20 +218,25 @@ def build_window() -> object:
 
         Same reason as that function: a `QThread` destroyed while running ABORTS
         the process (0xC0000409, verified), so the view's own `shutdown()` and
-        its console panel's stop+join have to happen BEFORE the widget leaves
+        its log panels' stop+join have to happen BEFORE the widget leaves
         the tab bar. The three registries are cleaned out with it, because a
         stale entry in any of them is what `_stop_background_threads()` would
         later call `shutdown()`/`wait()` on at exit.
         """
         view = controllers.pop(key)
         view.shutdown()
-        panel = view.console_log
-        panel.stop()
-        panel.wait(5000)
+        # EVERY panel the view owns, not the console one by name. It grew a
+        # second (the rebuild's) on 2026-09-08, and a panel this loop cannot see
+        # is a QThread nobody joins - the abort this function exists to prevent.
+        # `log_panels()` is the view's own list, so a third is picked up here
+        # without an edit.
+        for panel in view.log_panels():
+            panel.stop()
+            panel.wait(5000)
+            if panel in panels:
+                panels.remove(panel)
         if view in controller_views:
             controller_views.remove(view)
-        if panel in panels:
-            panels.remove(panel)
         index = tabs.indexOf(view)
         if index != -1:
             tabs.removeTab(index)
@@ -212,6 +244,45 @@ def build_window() -> object:
         # this the discarded view stays alive for the life of the process, and
         # it is a whole ControllerView (six sub-tabs, a LogPanel, a QTimer).
         view.deleteLater()
+
+    def _forget_live_record(game: str, server_dir: Path) -> Any:
+        """`state.forget()` over the window's own state object, persisted. No Qt."""
+        from yulon.state import save_state
+
+        def forget() -> None:
+            state.forget(game, server_dir)
+            save_state(state)
+
+        return forget
+
+    def on_uninstalled(game: str, server_dir: object) -> None:
+        """An install is gone (8.9a): drop its tab, and recompute its Catalog tile.
+
+        `state.forget()` again, and deliberately: it is a filter, so calling it
+        twice costs nothing, and it is what makes this handler correct on its
+        own rather than only when it follows a purge that already did it. The
+        SAVE is not repeated - the purge's own last step did that, and reported
+        it if it could not.
+
+        `drop_controller()` and not a second teardown: a QThread destroyed while
+        running aborts the process, and that function already does the whole
+        dangerous part in the right order. It runs here rather than in the view
+        because the view is what it destroys.
+
+        The tile is recomputed from the SURVIVING installs, never cleared:
+        `installed_dirs()` is one folder per game, so purging one of two WotLK
+        installs must leave the tile saying "Installed" and naming the other.
+        """
+        folder = Path(str(server_dir))
+        state.forget(game, folder)
+        key = (game, folder)
+        if key in controllers:
+            drop_controller(key)
+            # What tells two tabs apart is the shortest tail they do NOT share,
+            # which is a fact about the SET - so removing one can make another's
+            # title longer than it needs to be.
+            retitle_controller_tabs(tabs, controllers.values())
+        catalog_view.forget_installed(game, state.installed_dirs())
 
     def add_controller(
         game: str,
@@ -268,7 +339,22 @@ def build_window() -> object:
             drop_controller(key)
         entry = catalog.get(game)
         services = ControllerServices.for_wotlk(entry, server_dir, client_dir, wsl_distro)
+        if services.uninstall is not None:
+            # 8.9a. The record is the LAST thing an uninstall forgets, and in a
+            # running window "the record" is this closure's live `AppState` -
+            # every tab writes into it. The factory's default seam re-reads
+            # `state.json`, which is right for a tab built outside a window and
+            # wrong here: it would forget this install and silently undo
+            # whatever else the session had remembered.
+            #
+            # No Qt in the seam. It runs on the purge's worker thread, and
+            # `_warn_unless_remembered()` opens a QMessageBox - which off the
+            # GUI thread is the abort every other note in this file is about.
+            # `save_state()`'s `OSError` is caught by `purge.run()` and reported
+            # as a warning on a finished uninstall.
+            services.uninstall.forget = _forget_live_record(game, server_dir)
         view = ControllerView(entry, services)
+        view.uninstalled.connect(on_uninstalled)
         # Every failure this view reports also lands in the app log. Each one is
         # already shown on its own tab, but the log is what a user pastes into a
         # bug report, and until now none of them reached it (review, 2026-08-22).
@@ -277,7 +363,7 @@ def build_window() -> object:
         )
         controllers[key] = view
         controller_views.append(view)
-        panels.append(view.console_log)
+        panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,

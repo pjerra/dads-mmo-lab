@@ -165,11 +165,24 @@ fixtures with genuinely different volume names comparable in the same vocabulary
 stops one pairing's allowance from silently applying to the other."""
 
 NATIVE_ONLY_ENV: frozenset[tuple[str, str]] = frozenset(
-    {("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO")}
+    {
+        ("ac-db-import", "AC_PLAYERBOTS_DATABASE_INFO"),
+        ("ac-db-import", "AC_UPDATES_ALLOWED_MODULES"),
+    }
 )
-"""(service, key) the native stack carries and the proven script install lacks: the importer
-is told about the playerbots schema, which the repair gate recorded as missing upstream. The
-service is half the key on purpose — the same variable on another service is a different fact."""
+"""(service, key) the native stack carries and the proven script install lacks. The service is
+half the key on purpose — the same variable on another service is a different fact.
+
+* `AC_PLAYERBOTS_DATABASE_INFO` — the importer is told about the playerbots schema, which the
+  repair gate recorded as missing upstream.
+* `AC_UPDATES_ALLOWED_MODULES` — which modules the importer may apply SQL for. Its ABSENCE from
+  the script capture is the whole of the defect Lane C was opened on: with no such key the
+  option falls back to `"all"`, which is `AC_MODULES_LIST` — the modules that were on disk when
+  the image was COMPILED — so a module installed afterwards has its SQL skipped for ever. The
+  native file renders it as `${AC_UPDATES_ALLOWED_MODULES:-all}`, which behaves exactly as the
+  script install does until something sets the variable. **A bash-built server that Yu'lon
+  merely adopted still has no such key**, and nothing in this app rewrites its compose file, so
+  for those installs the value has to travel in argv instead — `docker.apply_module_sql()`."""
 
 _COMPARED_FIELDS: tuple[str, ...] = (
     "container_name",

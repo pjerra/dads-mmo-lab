@@ -277,3 +277,49 @@ def test_a_source_may_pin_a_full_commit_sha_and_nothing_else() -> None:
     for bad in ("v1.0", "main", "0123456", "0123456789ABCDEF0123456789ABCDEF01234567"):
         with pytest.raises(ValidationError):
             Source(repo="a/b", rev=bad)
+
+
+def test_a_folder_origin_module_needs_no_source_and_a_link_one_still_does() -> None:
+    """The `source`-required rule relaxes by exactly one clause, for exactly one shape.
+
+    A module derived from a folder on the user's own disk has nothing to clone
+    from — a path is not a clone URL, and `Source.url` feeds `git.CloneSpec`. A
+    module derived from a LINK has a source and must still carry it, so the
+    relaxation cannot be reached by omitting the field and claiming an origin.
+    """
+    sourceless = {k: v for k, v in README_EXAMPLE.items() if k != "source"}
+
+    folder = parse_manifest(
+        {
+            **sourceless,
+            "origin": {"kind": "folder", "path": "/home/pk/mod-x", "added": "2026-09-08"},
+        }
+    )
+    assert folder.source is None
+    assert folder.origin is not None and folder.origin.kind == "folder"
+
+    with pytest.raises(ValidationError, match="source"):
+        parse_manifest({**sourceless, "origin": {"kind": "link", "added": "2026-09-08"}})
+    for kind in ("ale", "keg"):
+        with pytest.raises(ValidationError, match="source"):
+            parse_manifest(
+                {
+                    **sourceless,
+                    "type": kind,
+                    "origin": {"kind": "folder", "path": "/x", "added": "2026-09-08"},
+                }
+            )
+
+
+def test_origin_is_optional_and_every_shipped_manifest_has_none() -> None:
+    """`origin` says "this app derived me"; a manifest the project ships never did.
+
+    Asserted over the tree rather than trusted: a shipped file that grew an
+    `origin` would be a custom module sitting in the bundled index, which the
+    store's shadow rule would then have to reason about for no reason.
+    """
+    assert parse_manifest(README_EXAMPLE).origin is None
+    for index_file in _index_files():
+        item_dir = index_file.with_suffix("")
+        for item_file in sorted(item_dir.glob("*.json")) if item_dir.is_dir() else []:
+            assert parse_manifest(json.loads(item_file.read_text(encoding="utf-8"))).origin is None

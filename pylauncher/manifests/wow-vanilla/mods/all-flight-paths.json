@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "all-flight-paths",
+  "name": "All Flight Paths Known",
+  "type": "mod",
+  "game": "wow-vanilla",
+  "description": "Every flight master is already discovered on a new character.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "AllFlightPaths",
+          "default": "1",
+          "note": "applies to characters created after the restart, not to existing ones"
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^AllFlightPaths[ \\t]*=.*$",
+      "replace": "AllFlightPaths = 0",
+      "regex": true,
+      "when": "remove"
+    }
+  ],
+  "notes": [
+    "mangos-classic reads the key at `src/game/World/World.cpp:569`",
+    "(CONFIG_BOOL_ALL_TAXI_PATHS, default false) and ships the line at",
+    "`etc/mangosd.conf:838`; both read on ~/vanilla-75b, 2026-09-08.",
+    "The anchor matters here for a reason it does not on TBC: `LongFlightPathsPersistence`",
+    "sits directly above it in this conf, and an unanchored `FlightPaths` would catch it.",
+    "No prompt: the key is a flag, and a mod you install to turn something on has already",
+    "been asked its question by being installed."
+  ]
+}

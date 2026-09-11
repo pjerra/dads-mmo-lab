@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "id": "perf-report",
+  "name": "Performance Stats",
+  "type": "mod",
+  "game": "wow-tortoise",
+  "description": "Turn on the worldserver's own timing instrumentation, so `.perf cpu` and `.perf memory` report real numbers, and set how often its interval timer fires.",
+  "build": {
+    "rebuild": false,
+    "restart": true
+  },
+  "conf": [
+    {
+      "file": "etc/mangosd.conf",
+      "keys": [
+        {
+          "key": "Perf.Enable",
+          "default": "1",
+          "note": "World.cpp:1562 reads this into CONFIG_BOOL_PERFORMANCE_ENABLE; World.cpp:846 copies it into g_bEnableStatGather, which is what XStatTimer::Begin/End check before recording anything (Timer.h:189-190). THIS is the key with the visible effect."
+        },
+        {
+          "key": "Perf.ReportInterval",
+          "default": "{interval}",
+          "note": "seconds between interval reports; World.cpp:1575, and `.perf intervalreport` with no argument prints it back. See the notes: the handler it fires is empty on this fork."
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Perf\\.Enable[ \\t]*=.*$",
+      "replace": "Perf.Enable = 1",
+      "regex": true,
+      "when": "remove",
+      "note": "the line this fork ships at /opt/tortoise/etc/mangosd.conf:2193"
+    },
+    {
+      "file": "etc/mangosd.conf",
+      "find": "^Perf\\.ReportInterval[ \\t]*=.*$",
+      "replace": "Perf.ReportInterval = 600",
+      "regex": true,
+      "when": "remove",
+      "note": "the line this fork ships at /opt/tortoise/etc/mangosd.conf:2196"
+    }
+  ],
+  "prompts": [
+    {
+      "key": "interval",
+      "question": "Seconds between performance reports",
+      "kind": "int",
+      "default": "120"
+    }
+  ],
+  "notes": [
+    "The one manifest on this fork whose key the running server states back on its own",
+    "console. `.perf intervalreport` with no argument prints `Performance report interval is",
+    "<n>` from sWorld.getConfig(CONFIG_UINT32_PERFORMANCE_REPORT_INTERVAL)",
+    "(src/game/Commands/Commands.cpp:19146-19154), and its command row is",
+    "{ \"intervalreport\", SEC_ADMINISTRATOR, true, ... } (src/game/Chat/Chat.cpp:837) -- the",
+    "`true` is allowConsole, so the mangosd console answers with no client and no character.",
+    "It prints the value and THEN returns false, so the console follows it with `Incorrect",
+    "syntax.`; that second line is the fork's own and is not an error about the value.",
+    "WHAT EACH KEY REALLY DOES, measured on m910q 2026-09-08 rather than assumed from the name:",
+    "`Perf.Enable` is the load-bearing one. It becomes g_bEnableStatGather (World.cpp:846), which",
+    "XStatTimer::Begin/End check before recording (Timer.h:189-190), so with it off `.perf cpu`",
+    "and `.perf memory` report nothing. With it on they report real per-map update, movement and",
+    "spell timings -- that is this item's visible effect, and it needs no client.",
+    "`Perf.ReportInterval` sets the timer that fires PerformanceMonitor::ReportPerformanceToDB(),",
+    "and ON THIS FORK'S HEAD THAT FUNCTION IS EMPTY (PerformanceMonitor.cpp:180-183). So changing",
+    "the interval today changes what the console reports and nothing else. It is still worth",
+    "setting -- it is the value the server states back, and it is what the number will mean when",
+    "upstream fills the function in -- but do not expect periodic lines in the log because of it.",
+    "This fork has NO `.server motd` command at all (its serverCommandTable is",
+    "corpses/exit/idlerestart/idleshutdown/info/resetallraids/restart/shutdown,",
+    "src/game/Chat/Chat.cpp:700-711), which is why the TBC set's `motd` could not be this",
+    "game's proof and this item was written instead.",
+    "mangosd reads etc/mangosd.conf at startup, so the value arrives on the restart this item",
+    "asks for. `.reload config` also exists on this fork (Chat.cpp:553) and re-runs",
+    "LoadConfigSettingsFromFile, so a restart is sufficient rather than the only route."
+  ]
+}

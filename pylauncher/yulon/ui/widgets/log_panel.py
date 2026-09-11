@@ -16,7 +16,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from yulon import runner
@@ -72,39 +72,122 @@ class _StreamWorker(QObject):
         super().__init__()
         self._source = source
         self._stop = False
+        self._ident: int | None = None
 
     @Slot()
     def run(self) -> None:
         ok = True
         message = "done"
+        # Published BEFORE the source is touched, because that is the only
+        # moment at which this thread's ident is knowable to `request_stop()`
+        # while the source can still be reached: everything after this line may
+        # block for hours. See `request_stop()` for what it is for.
+        self._ident = threading.get_ident()
         try:
+            # The flag read that costs nothing and closes the narrowest window
+            # there is: `thread.start()` returns before the OS schedules this
+            # slot, so a Stop pressed in between used to arrive at a worker that
+            # had not begun, do nothing, and be followed by a source that then
+            # blocked with nobody left to ask.
+            if self._stop:
+                self.finished.emit(True, "stopped")
+                self._quit_own_thread()
+                return
             for text in self._source():
                 if self._stop:
-                    message = "stopped"
                     break
                 self.line.emit(text)
         except Exception as exc:  # boundary: anything the job raises becomes a UI message
             ok = False
             message = f"{type(exc).__name__}: {exc}"
-            logger.warning(f"log panel job failed: {message}")
+            if self._stop:
+                # A SOURCE THAT RAISES AFTER A STOP IS THE STOP TAKING EFFECT.
+                # `request_stop()` ends the job's children, and a terminated
+                # child exits non-zero, so `runner.stream()` raises
+                # `CalledProcessError` on the way out — exit 143 on the live box
+                # (the last line of the 7.10 probe's own log). Reporting that as
+                # `ok=False` would put a refusal on screen for a button the user
+                # pressed, which is the twin of the "finished: stopped" bug
+                # `_on_finished` exists to fix. The text is kept in the log, at
+                # debug, so a genuine failure that happened to land in the same
+                # millisecond is not lost.
+                logger.debug(f"log panel job ended after a stop was asked for: {message}")
+                ok, message = True, "stopped"
+            else:
+                logger.warning(f"log panel job failed: {message}")
+        if self._stop:
+            # Said HERE and not only in the loop above, so all three ways out
+            # agree. The break reports a stop; a source that returned on its own
+            # cancel (`runner.interact()`) reached the end of its iterator and
+            # would otherwise have reported "done"; and a source killed with it
+            # came through the `except`.
+            message = "stopped"
         self.finished.emit(ok, message)
-        # Emit first, then end our own thread's event loop from inside it.
-        # `finished` is also connected to `thread.quit`, but the QThread OBJECT
-        # lives in the main thread, so that connection is queued — and the one
-        # caller that most needs the join is `main._stop_background_threads()`,
-        # which runs after `app.exec()` has returned and then blocks in
-        # `wait()`. Nothing pumps the main thread's queue there, so `quit()` was
-        # never delivered, `wait(5000)` timed out (measured: `wait(3000)` ->
-        # False with the worker long finished) and Qt was torn down with the
-        # QThread still running — the 0xC0000409 abort that function's own
-        # docstring says it prevents. Called here it is direct, and the queued
-        # copy stays as it was (review, 2026-08-23).
+        self._quit_own_thread()
+
+    def _quit_own_thread(self) -> None:
+        """End our own thread's event loop from inside it, after `finished` was emitted.
+
+        `finished` is also connected to `thread.quit`, but the QThread OBJECT
+        lives in the main thread, so that connection is queued — and the one
+        caller that most needs the join is `main._stop_background_threads()`,
+        which runs after `app.exec()` has returned and then blocks in
+        `wait()`. Nothing pumps the main thread's queue there, so `quit()` was
+        never delivered, `wait(5000)` timed out (measured: `wait(3000)` ->
+        False with the worker long finished) and Qt was torn down with the
+        QThread still running — the 0xC0000409 abort that function's own
+        docstring says it prevents. Called here it is direct, and the queued
+        copy stays as it was (review, 2026-08-23).
+
+        Its own method because `run()` now has two exits — the ordinary one and
+        the "stopped before it started" one — and an exit that emitted
+        `finished` without this call would leave the thread running for exactly
+        that reason.
+
+        **OUR thread, never the GUI one.** `run()` is called directly, on the
+        calling thread, by anything that drives a worker without moving it —
+        which is exactly how the "stopped before it started" ordering is proved,
+        because `QThread::started` is delivered on the new thread and the GUI
+        thread cannot hold it back. Without the guard below that call quits the
+        MAIN event loop, and nothing looks wrong until the next nested loop:
+        `QInputDialog.getText()` then returns `ok=False` having shown no dialog
+        at all, so a question the installer is blocked on reads as "the user
+        dismissed it". Measured 2026-09-09 — one unit test in this file left the
+        main loop quit and `tests/test_prompt.py`'s real-dialog test read `None`
+        where a `y` had been typed; green apart, red together, on the GitHub
+        runner and again outside pytest on yulon-fedora.
+        """
         thread = self.thread()
-        if thread is not None:
+        app = QCoreApplication.instance()
+        if thread is not None and (app is None or thread is not app.thread()):
             thread.quit()
 
     def request_stop(self) -> None:
+        """Ask this job to stop, and END WHAT IT STARTED so a blocked read can return.
+
+        The flag alone cannot do it. `run()` reads it between lines, and a source
+        blocked in `readline()` on a child that has gone quiet produces no next
+        line — measured through the panel's real Stop button on `yulon-ubuntu2`
+        2026-09-08: `worker._stop=True` for 120 seconds with the panel still
+        running, against 0.02 s for a synthetic source that kept yielding
+        (`pyplan/gates/7.10-rerun-ubuntu2-2026-09-08/log-panel-stop-probe.txt`).
+
+        So the flag is set AND every `runner.stream()` child this thread started
+        is ended. Keyed on the thread rather than on a cancel token because the
+        panel does not build its source's subprocesses and cannot reach them:
+        the Console tab's source is `docker.follow_logs()` behind a zero-argument
+        lambda, and it takes no cancel to hand one. `runner.end_streams_started_on()`
+        carries the rest of the reasoning, including what it deliberately cannot
+        reach.
+
+        Called on the GUI thread while this object's own thread is blocked; it
+        touches only `_stop` (a bool the worker re-reads) and `_ident` (written
+        once, before the source was entered), and it returns without waiting for
+        any child to die.
+        """
         self._stop = True
+        if self._ident is not None:
+            runner.end_streams_started_on(self._ident)
 
 
 class LogPanel(QWidget):
@@ -348,6 +431,16 @@ class LogPanel(QWidget):
         Without the guard a panel that had finished its job cleanly ended the
         session reporting `cancelled is True` beside a header reading "finished:
         done" (review, 2026-08-23).
+
+        **Three things, because two of them are not enough on their own.** The
+        panel's `cancel` event stops a source that polls one (`installer.run()`,
+        the rebuild engine) and is None for the source that does not — the
+        Console tab's log follow. The worker's flag stops a source between
+        lines, and a quiet `docker logs -f` has no next line. What closes the
+        gap is `_StreamWorker.request_stop()`, which also ends the stream
+        children that job started; the measurement that made it necessary is
+        recorded there. None of the three waits: this method returns at once
+        and the panel finds out through `run_finished`.
         """
         if not self.running:
             return

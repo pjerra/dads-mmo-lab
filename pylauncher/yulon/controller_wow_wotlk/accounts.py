@@ -71,7 +71,7 @@ import hashlib
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 
 from yulon.apply import ApplyError, DockerSql
 from yulon.controller_wow_wotlk import docker_ctl
@@ -188,6 +188,58 @@ the insert, reading the level, writing the level. Everything else -- the
 validation, the id lookup, the realmcharacters seeding, the convergence rules --
 is the same on all of them.
 """
+
+KNOWN_SCHEMES = ", ".join(get_args(Scheme))
+"""The scheme names every refusal in this module prints, from the alias itself.
+
+Hand-typed until 2026-09-09, in one message that one test pinned verbatim: a
+fourth `Scheme` value would have been the one value the list failed to mention,
+and nothing would have failed to say so. Derived here, the alias above is the
+only place a scheme name is written down.
+"""
+
+
+def _unknown_scheme(scheme: str, what: str, done: str = "nothing was written") -> AccountError:
+    """The refusal every scheme dispatch in this module ends with.
+
+    One function rather than four sentences so the four cannot drift, and so
+    each of them names what it was asked to do: a fall-through is only readable
+    as a bug once the message says which write did not happen.
+    """
+    return AccountError(
+        f"{scheme!r} is not an account scheme this app knows how to {what}, so "
+        f"{done}. Known: {KNOWN_SCHEMES}."
+    )
+
+
+def checked_scheme(declared: Scheme | None, game: str) -> Scheme:
+    """The entry's declared scheme, or a refusal — never a default.
+
+    The shared half of what `controller_wow_tortoise.accounts.scheme()` does for
+    its own entry, for the callers that hold a `CatalogEntry` instead of a game
+    package: `ui/controller_view.py` reached this module with
+    `entry.accounts.scheme or "azerothcore"`, which is the same guess spelled as
+    a fallback.
+
+    There is nothing safe to guess. Writing AzerothCore's `salt`/`verifier` into
+    a table that has neither column fails loudly, but writing `sha_pass_hash`
+    into a core that expects SRP6 succeeds and produces an account that can
+    never authenticate.
+
+    Raises:
+        NotImplementedError: the entry declares no scheme, so the account row's
+            shape has not been measured for this core. `NotImplementedError`
+            rather than `AccountError` because it is not a bad request from the
+            user -- it is a core this app has not learned yet, and the caller
+            must send them to the worldserver console instead.
+    """
+    if declared is None:
+        raise NotImplementedError(
+            f"{game} declares no account scheme, so this app does not know which columns "
+            "its `account` table has. Nothing was written. Create the account at the "
+            "worldserver console instead."
+        )
+    return declared
 
 
 def mangos_password_hash(username: str, password: str) -> str:
@@ -316,6 +368,7 @@ def create_account(
     *,
     gm_level: int = NO_GM,
     scheme: Scheme = "azerothcore",
+    max_gm_level: int = MAX_GM_LEVEL,
 ) -> AccountResult:
     """Create one game account, or bring an existing one up to what was asked for.
 
@@ -362,7 +415,9 @@ def create_account(
 
     Raises:
         AccountError: the username or password is unusable, `gm_level` is out
-            of range, or a statement failed. The seam's own `ApplyError` (no
+            of range (above `max_gm_level` -- AzerothCore's 3 by default, the tree's
+            own `accounts.level.max_level` where a wrapper passes it: Tortoise's is 4,
+            measured 2026-09-08), or a statement failed. The seam's own `ApplyError` (no
             Docker, MySQL refused the statement, the connection dropped) is
             translated here rather than left to escape, so this is the only
             type a caller has to handle — it used to leak out of the lookup and
@@ -371,8 +426,8 @@ def create_account(
     """
     name = _checked_username(username)
     _check_password(password)
-    if not NO_GM <= gm_level <= MAX_GM_LEVEL:
-        raise AccountError(f"GM level must be between {NO_GM} and {MAX_GM_LEVEL}, got {gm_level}")
+    if not NO_GM <= gm_level <= max_gm_level:
+        raise AccountError(f"GM level must be between {NO_GM} and {max_gm_level}, got {gm_level}")
 
     account_id, created = _account_row(sql, name, password, scheme)
     # AccountMgr::CreateAccount runs LOGIN_INS_REALM_CHARACTERS_INIT right after
@@ -420,6 +475,30 @@ def reset_own_password(
     than refusing. That rule is right, and it is why this is a separate seam
     with a narrower target: the `WHERE` names one account and the guard above
     makes sure it is ours.
+
+    A new password takes effect at the account's NEXT login; the account's
+    `rank` would not. Measured on a live tortoise server 2026-09-09
+    (`pyplan/gates/tortoise-soap-yulon-arch-2026-09-09/`, `rank-cache-test3.log`):
+    this tree reads `account.rank` at worldserver startup, so an account granted
+    rank 4 while the world runs is still refused by SOAP until a restart. Two
+    columns on one table, two different rules -- a repair that rotates the
+    password is complete on its own, and one that also had to raise a level
+    would not be.
+
+    Raises:
+        AccountError: the name is not this app's own, the password is one the
+            server would refuse, or `scheme` is not one this function knows.
+            **There is no fall-through scheme here.** The keyword default stays AzerothCore
+            for its own callers; an unrecognised scheme is refused, not defaulted.
+            Until 2026-09-09 anything that
+            was not `mangos_srp6` was written as AzerothCore, and a default that
+            reaches for another core's columns is not a fallback -- it is a
+            statement that cannot run. Tortoise (`mangos_sha`) is the tree that
+            proved it: the Repair press died with `ERROR 1054 Unknown column
+            'salt' in 'SET'`
+            (`pyplan/gates/tortoise-upgrade-m910q-2026-09-09/channel-ask.log`),
+            and the only way to a working channel that night was to delete the
+            app's account and make it again.
     """
     if not name.startswith(APP_ACCOUNT_PREFIX) or name != name.upper():
         raise AccountError(
@@ -437,9 +516,22 @@ def reset_own_password(
     if scheme == "mangos_srp6":
         s_hex, v_hex = mangos_srp6_credentials(name, password)
         columns = f"v = {_text_literal(v_hex)}, s = {_text_literal(s_hex)}"
-    else:
+    elif scheme == "mangos_sha":
+        # The one column this core's credential is, and the same value
+        # `_account_row()` writes into it -- `SHA1(UPPER(name):UPPER(password))`
+        # through the same `fold()`, which is why a password rotated here and
+        # one set at creation are indistinguishable to the auth server. `v`/`s`
+        # stay NULL; that core derives them on first login, and writing them
+        # here would hand it a pair it did not choose.
+        columns = f"sha_pass_hash = {_text_literal(mangos_password_hash(name, password))}"
+    elif scheme == "azerothcore":
         salt, verifier = registration_data(name, password)
         columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
+    else:
+        # Named, not defaulted. See this function's `Raises:` block: the branch
+        # this replaces wrote AzerothCore's columns for every scheme it did not
+        # recognise, which is how `mangos_sha` reached `Unknown column 'salt'`.
+        raise _unknown_scheme(scheme, "re-password")
     sql.run_statement(
         _ACCOUNTS_DB,
         f"UPDATE account SET {columns} WHERE username = {_text_literal(name)};",
@@ -462,39 +554,17 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
     refusing (`tests/integration/test_accounts_live.py` checks that against a
     real database).
     """
+    # Built before the lookup, so a scheme this module does not know refuses
+    # having asked the database nothing at all rather than after a SELECT. The
+    # cost is a salt derived for a name that turns out to be taken, which is a
+    # SHA1 and a modular exponentiation nobody waits for.
+    statement = _insert_statement(name, password, scheme)
     existing = _account_id(sql, name)
     if existing is not None:
         logger.info(f"account {name} already exists (id {existing}), keeping its password")
         return existing, False
 
     logger.info(f"creating account {name}")  # never the password
-    if scheme == "mangos_srp6":
-        # Only the four columns this core has no default for. `gmlevel` is left
-        # at its own default and raised by `_grant_gm()` when asked, so an
-        # ordinary account is never briefly an administrator.
-        s_hex, v_hex = mangos_srp6_credentials(name, password)
-        statement = (
-            "INSERT INTO account (username, v, s, joindate)"
-            f" VALUES ({_text_literal(name)}, {_text_literal(v_hex)},"
-            f" {_text_literal(s_hex)}, NOW())"
-        )
-    elif scheme == "mangos_sha":
-        # Byte for byte what the core's own `account create` emits, columns and
-        # all: it names only these three, and every other column on that table
-        # has a default. Adding `expansion` or `email` here would be this app
-        # inventing a row shape the core does not write.
-        statement = (
-            "INSERT INTO account(username,sha_pass_hash,joindate)"
-            f" VALUES({_text_literal(name)},"
-            f"{_text_literal(mangos_password_hash(name, password))},NOW())"
-        )
-    else:
-        salt, verifier = registration_data(name, password)
-        statement = (
-            "INSERT INTO account (username, salt, verifier, expansion, reg_mail, email, joindate)"
-            f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
-            f" {EXPANSION}, '', '', NOW())"
-        )
     try:
         sql.run_statement(_ACCOUNTS_DB, statement)
     except ApplyError as exc:
@@ -520,6 +590,46 @@ def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tupl
         # the wrong account.
         raise AccountError(f"account {name} was inserted but cannot be read back")
     return account_id, True
+
+
+def _insert_statement(name: str, password: str, scheme: Scheme) -> str:
+    """The `account` INSERT this core wants — or a refusal naming the scheme.
+
+    The columns ARE the scheme, so there is no shape to fall back to: until
+    2026-09-09 the last branch here was an `else`, and every scheme this module
+    did not recognise was written as AzerothCore. On a mangos-shaped table that
+    dies with `Unknown column 'salt'`; on a table that happens to carry `salt`
+    and `verifier` it inserts a row nobody can ever log in to (T12, and the
+    same defect T9 closed in `reset_own_password`).
+    """
+    if scheme == "mangos_srp6":
+        # Only the four columns this core has no default for. `gmlevel` is left
+        # at its own default and raised by `_grant_gm()` when asked, so an
+        # ordinary account is never briefly an administrator.
+        s_hex, v_hex = mangos_srp6_credentials(name, password)
+        return (
+            "INSERT INTO account (username, v, s, joindate)"
+            f" VALUES ({_text_literal(name)}, {_text_literal(v_hex)},"
+            f" {_text_literal(s_hex)}, NOW())"
+        )
+    if scheme == "mangos_sha":
+        # Byte for byte what the core's own `account create` emits, columns and
+        # all: it names only these three, and every other column on that table
+        # has a default. Adding `expansion` or `email` here would be this app
+        # inventing a row shape the core does not write.
+        return (
+            "INSERT INTO account(username,sha_pass_hash,joindate)"
+            f" VALUES({_text_literal(name)},"
+            f"{_text_literal(mangos_password_hash(name, password))},NOW())"
+        )
+    if scheme == "azerothcore":
+        salt, verifier = registration_data(name, password)
+        return (
+            "INSERT INTO account (username, salt, verifier, expansion, reg_mail, email, joindate)"
+            f" VALUES ({_text_literal(name)}, {_hex_literal(salt)}, {_hex_literal(verifier)},"
+            f" {EXPANSION}, '', '', NOW())"
+        )
+    raise _unknown_scheme(scheme, "write an account row for")
 
 
 def _ensure_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> int:
@@ -559,13 +669,18 @@ def _grant_gm(sql: SqlSeam, account_id: int, gm_level: int, scheme: Scheme) -> N
             f"grant GM level {gm_level} to account {account_id}",
         )
         return
-    _run(
-        sql,
-        f"INSERT INTO account_access (id, gmlevel, RealmID)"
-        f" VALUES ({account_id}, {gm_level}, {ALL_REALMS})"
-        f" ON DUPLICATE KEY UPDATE gmlevel = {gm_level}",
-        f"grant GM level {gm_level} to account {account_id}",
-    )
+    if scheme == "azerothcore":
+        _run(
+            sql,
+            f"INSERT INTO account_access (id, gmlevel, RealmID)"
+            f" VALUES ({account_id}, {gm_level}, {ALL_REALMS})"
+            f" ON DUPLICATE KEY UPDATE gmlevel = {gm_level}",
+            f"grant GM level {gm_level} to account {account_id}",
+        )
+        return
+    # `account_access` is AzerothCore's table alone, so it is a branch and not a
+    # destination for everything unrecognised (T12).
+    raise _unknown_scheme(scheme, "grant a GM level on")
 
 
 def _one_int(rows: list[str], what: str) -> int | None:
@@ -614,13 +729,19 @@ def _gm_level(sql: SqlSeam, account_id: int, scheme: Scheme) -> int:
         )
         level = _one_int(rows, f"read the GM level of account {account_id}")
         return NO_GM if level is None else level
-    rows = _query_rows(
-        sql,
-        f"SELECT gmlevel FROM account_access WHERE id = {account_id} AND RealmID = {ALL_REALMS}",
-        f"read the GM level of account {account_id}",
-    )
-    level = _one_int(rows, f"read the GM level of account {account_id}")
-    return NO_GM if level is None else level
+    if scheme == "azerothcore":
+        rows = _query_rows(
+            sql,
+            f"SELECT gmlevel FROM account_access WHERE id = {account_id}"
+            f" AND RealmID = {ALL_REALMS}",
+            f"read the GM level of account {account_id}",
+        )
+        level = _one_int(rows, f"read the GM level of account {account_id}")
+        return NO_GM if level is None else level
+    # The read half of the same dispatch. Its refusal says "read" rather than
+    # "written": no write was in question here, and a sentence claiming one
+    # sends the reader looking for a row that was never attempted (T12).
+    raise _unknown_scheme(scheme, "read a GM level from", "nothing was read")
 
 
 def _run(sql: SqlSeam, statement: str, what: str) -> None:
