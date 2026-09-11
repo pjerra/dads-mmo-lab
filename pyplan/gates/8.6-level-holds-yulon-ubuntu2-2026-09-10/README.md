@@ -490,7 +490,7 @@ than re-read the table (memory note `mutation-testing-pycache-trap`, fourth trap
 directory named for this task, never a shared scratch path.
 
 T5's own level tests are all still green, and one of them was **rewritten rather than kept**:
-`test_a_level_the_group_table_does_not_show_afterwards_is_not_reported_as_set` pinned the sentence
+the test formerly named for "the group table does not show the level afterwards" (no longer in the tree under that name) pinned the sentence
 this folder overturns, so it is now
 `test_a_level_the_written_row_still_disagrees_with_is_not_reported_as_set` and pins the new one, with
 the reason in its own docstring. That is a deviation and section 12 names it.
