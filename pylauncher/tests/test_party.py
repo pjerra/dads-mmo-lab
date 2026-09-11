@@ -3292,7 +3292,7 @@ def test_the_seam_remembers_a_character_it_added_and_then_counts_it(tmp_path: Pa
 
 
 def test_a_remembered_character_that_left_the_party_is_forgotten(tmp_path: Path) -> None:
-    """"Dropped when the character leaves the party": the store is pruned
+    """The record is dropped when the character leaves the party: it is pruned
     against the group table on every successful read, so a name nobody removed
     through the app does not sit in the file for ever."""
     chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
@@ -3307,6 +3307,7 @@ def test_a_group_read_that_failed_forgets_nothing(tmp_path: Path) -> None:
     """A read that could not be done says nothing about who is in the party,
     and pruning on it would throw the record away on a database hiccup."""
     chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+
     class _BrokenGroupRead(_Sql):
         def query(self, db: str, statement: str) -> str:
             if "group_member" in statement:
