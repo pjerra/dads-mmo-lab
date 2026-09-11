@@ -1,0 +1,33 @@
+[15:50:37Z] press start; image yulon.local/cmangos-tortoise-server:pr491-soap-on
+[15:50:43Z] db healthy after ~8s
+[15:50:51Z] schemas: create_databases.sql ok (418 tables)
+[15:51:18Z] world base: 191 files into tw_world in 33s
+[15:51:18Z] accounts: PR491ADMIN rank 4, PR491LOW rank 1 (created BEFORE start: this core reads rank at startup)
+8:RealmID = 1
+12:DataDir = "/opt/tortoise/data"
+16:LogsDir = "/tmp"
+47:Database.AutoUpdate.Enabled = 1
+48:Database.AutoUpdate.Path = "/opt/tortoise/sql/database_updates/"
+1999:Console.Enable = 0
+2131:SOAP.Enabled = 1
+2132:SOAP.IP = 0.0.0.0
+2133:SOAP.Port = 7878
+[15:51:43Z] world: ready after 25s; ready line: World server is up and running! Loading time: 0 minutes 19 seconds
+27377:SOAP: remote command interface bound to http://0.0.0.0:7878
+[15:51:47Z] curl admin -> HTTP 200 :: <result>Core revision: e04f4959c0f6d47fe4a5 / 2026-09-11 15:04:43 +0200 / Linux_x64 (little-endian)&#xD;Players online: 0. Max online: 0.&#xD;Server uptime: 11 Seconds.
+[15:51:47Z] curl wrongpw -> HTTP 401 :: <faultstring>Error 401: HTTP 401 Unauthorized</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+[15:51:47Z] curl lowrank -> HTTP 403 :: <faultstring>Error 403: HTTP 403 Forbidden</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+[15:51:47Z] curl nouser -> HTTP 401 :: <faultstring>Error 401: HTTP 401 Unauthorized</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+[15:51:47Z] --- Yu'lon soap.py (the app's own client, namespace urn:MaNGOS)
+soap.py PR491ADMIN 'server info' -> outcome=answered http=200 text='Core revision: e04f4959c0f6d47fe4a5 / 2026-09-11 15:04:43 +0200 / Linux_x64 (little-endian)\r\nPlayers online: 0. Max online: 0.\r\nServer uptime: 12 Seconds.\r\nServer Time: Fri, 11.09.2026 15:51:47\r\n'
+soap.py PR491ADMIN 'account create PR491VIASOAP Passw0rd' -> outcome=answered http=200 text='Account created: PR491VIASOAP\r\n'
+soap.py PR491ADMIN 'thiscommanddoesnotexist' -> outcome=refused http=500 text='There is no such command\r\n'
+soap.py PR491ADMIN 'server info' -> outcome=unauthorised http=401 text='the server did not accept this account and password'
+soap.py PR491LOW 'server info' -> outcome=forbidden http=403 text='the account exists but its GM level is below administrator, which SOAP requires'
+id	username	rank
+4	PR491ADMIN	4
+5	PR491LOW	1
+6	PR491VIASOAP	0
+[15:51:50Z] graceful stop: 3s, exit code 0
+[15:51:50Z] press done
+[15:51:50Z] cleanup: stopping and removing pr491-* containers, volume, network

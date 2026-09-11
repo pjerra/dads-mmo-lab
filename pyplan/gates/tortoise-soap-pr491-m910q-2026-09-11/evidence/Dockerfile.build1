@@ -1,0 +1,44 @@
+# PR 491 verification build: tortoise-wow/tortoise-wow main + the two SOAP commits
+# (pjerra:soap-optional). Rendered from Yu'lon's wow-tortoise Dockerfile.tmpl with
+# CORE_DIR=/opt/tortoise, MAKE_JOBS=4, and the playerbots flags dropped because
+# upstream main carries no modules/mod-playerbots. Everything else is the template's.
+FROM ubuntu:24.04 AS builder
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config ca-certificates \
+    libace-dev default-libmysqlclient-dev libmysqlclient-dev \
+    libssl-dev zlib1g-dev libbz2-dev \
+    libboost-thread-dev libboost-filesystem-dev libboost-system-dev \
+    mariadb-client gosu \
+    && rm -rf /var/lib/apt/lists/*
+COPY src/tortoise-wow /src
+RUN git config --system http.version HTTP/1.1
+WORKDIR /src/_build
+ARG ENABLE_SOAP=ON
+RUN cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/opt/tortoise \
+        -DUSE_EXTRACTORS=ON -DUSE_SCRIPTS=ON -DUSE_STD_MALLOC=ON \
+        -DDEBUG_SYMBOLS=OFF -DUSE_ANTICHEAT=OFF -DALLOW_TURTLE_ADDONS=ON \
+        -DMODULES=disabled \
+        -DENABLE_SOAP=${ENABLE_SOAP} \
+    && grep -E '^ENABLE_SOAP' CMakeCache.txt
+RUN make -j4 && make install
+RUN mkdir -p /opt/tortoise/sql /opt/tortoise/src/tools && \
+    cp -r /src/sql/. /opt/tortoise/sql/ && \
+    cp -r /src/tools/mmap /opt/tortoise/src/tools/mmap
+RUN sed -i 's/^\(\s*\)INSERT INTO/\1INSERT IGNORE INTO/' \
+    /opt/tortoise/sql/database_updates/world/20260903063722_world.sql
+
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libace-dev default-libmysqlclient-dev libmysqlclient-dev \
+    libssl-dev zlib1g-dev libbz2-dev \
+    libboost-thread-dev libboost-filesystem-dev libboost-system-dev \
+    mariadb-client gosu ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/tortoise /opt/tortoise
+WORKDIR /opt/tortoise/bin
+CMD ["./mangosd"]

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:ns1="urn:MaNGOS"><SOAP-ENV:Body><ns1:executeCommandResponse><result>Core revision: e04f4959c0f6d47fe4a5 / 2026-09-11 15:04:43 +0200 / Linux_x64 (little-endian)&#xD;
+Players online: 0. Max online: 0.&#xD;
+Server uptime: 11 Seconds.&#xD;
+Server Time: Fri, 11.09.2026 15:51:46&#xD;
+</result></ns1:executeCommandResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>

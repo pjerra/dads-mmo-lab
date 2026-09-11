@@ -1,0 +1,28 @@
+# build 1: main + PR, ENABLE_SOAP=ON (~/pr491/build-on.log)
+#10 DONE 0.1s
+#11 1.097 ENABLE_SOAP:BOOL=ON
+#11 DONE 1.3s
+#12 590.7 [100%] Built target mangosd
+#12 591.4 [ 92%] Built target mangosd
+#12 DONE 592.3s
+#13 DONE 0.7s
+#14 DONE 0.2s
+#15 DONE 0.8s
+#16 DONE 0.0s
+#17 naming to yulon.local/cmangos-tortoise-server:pr491-soap-on done
+#17 DONE 24.1s
+
+# build 3: bot-helpers + PR + TortoiseBots (~/pr491-bh/build-bh.log)
+#10 0.663 --   TortoiseBots: static (MODULE_TORTOISEBOTS=static)
+#10 DONE 1.4s
+#11 1317.5 [100%] Built target mangosd
+#11 1318.8 [ 96%] Built target mangosd
+#11 DONE 1320.3s
+#12 DONE 0.7s
+#13 DONE 0.2s
+#15 DONE 0.7s
+#16 DONE 0.2s
+#17 DONE 0.1s
+#18 naming to yulon.local/cmangos-tortoise-server:pr491-bh-soap-on
+#18 naming to yulon.local/cmangos-tortoise-server:pr491-bh-soap-on done
+#18 DONE 12.1s
