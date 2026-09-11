@@ -227,7 +227,14 @@ person's character would be a worse defect than this one.
 Four tests, four named mutations, **4/4 caught**, and the mutation table's own
 `sha256 before`/`after` are both `ff84f58c7104c990`, which is the committed
 file's (`12-mutations.txt`). `--checks` on m910q: **ALL GREEN**, 4153 passed, 6
-skipped, mypy on three platforms, ruff and black clean (`13-checks-m910q.txt`).
+skipped, mypy on three platforms, ruff and black clean
+(`13-checks-m910q.txt`). The transcript kept is the one taken with **nothing
+uncommitted**: its first line reads `==> syncing hand-t26 (79033d4f) to m910q`
+and there is no `overlaying N uncommitted file(s)` line under it, so the 4153
+passed are the bytes this folder ships beside. An earlier run of the same gate
+was RED on black alone — one call in `party_members` that black wanted on one
+line — which `eb2e24ee` fixed; that is the only red this lane's gate ever
+reported.
 
 Round 1 is kept rather than deleted: `04-alt-round1.log`,
 `05-guild-round1.log`, `06-link-round1.log`. A folder showing only the run that
