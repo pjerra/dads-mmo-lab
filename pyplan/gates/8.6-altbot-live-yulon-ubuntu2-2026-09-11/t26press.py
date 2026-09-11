@@ -24,7 +24,10 @@ the read-backs around them.
     addnamed <master> <name>     InstallParty.add_named(...) -- THE PRESS
     linkplan <master> <account>  InstallParty.link_plan(...) -- the first press
     linkaccount <master> <acct>  InstallParty.link_account(...) -- the write
+    state <master>               InstallParty.state -- what the PANEL draws
+    remembered <master>          the names this app is keeping for that master
     dismiss <master> <bot>       InstallParty.remove -- the app's own uninvite
+    removeall <master>           InstallParty.remove_all -- "Dismiss all"
     mkaccount <name> [gmlevel]   the Accounts tab's own create_account; the
                                  password comes from $T26_PW and is never in
                                  argv, never printed and never logged
@@ -89,6 +92,9 @@ def build() -> tuple[party.InstallParty, object, object]:
         container=spec.world,
         world_running=lambda: docker.container_state(spec.world).settled,
         link_writer=sql,
+        # T26 round 2: the same two lines `controller_view` wires, so the press
+        # is the panel's own object and not a narrower one.
+        altbots=party.AltbotMemory(party.altbot_store_path(), install_id),
     )
     return seam, sql, channel.live_channel()
 
@@ -244,6 +250,43 @@ def main() -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915 - one verb per branc
             f"other_account={result.other_account!r}"
         )
         print(f"    blocker : {result.blocker!r}")
+        print(f"    sentence: {result.sentence}")
+        return 0
+
+    if verb == "state":
+        # The PANEL's own reading: the preconditions, then the party it draws.
+        # `summary` below is the sentence `party_panel.py:639-643` prints under
+        # the report line -- the one that said "no bots in it yet" in round 1.
+        state = seam.state(args[1])
+        print(f"{stamp()}  InstallParty.state({args[1]!r})")
+        print(f"    ready={state.ready} blocker={state.blocker!r} problem={state.problem!r}")
+        print(f"    members : {state.members}")
+        count = len(state.members)
+        summary = (
+            "This character's party has no bots in it yet."
+            if not count
+            else f"{count} {'bot' if count == 1 else 'bots'} in this party."
+        )
+        print(f"    the panel's summary line: {summary}")
+        print(f"    remembered by this app  : {seam.remembered_altbots(args[1])}")
+        return 0
+
+    if verb == "remembered":
+        print(f"{seam.remembered_altbots(args[1])}")
+        return 0
+
+    if verb == "removeall":
+        rows = seam.members(args[1])
+        if isinstance(rows, str):
+            print(f"the party could not be read: {rows}")
+            return 1
+        confirmed = tuple(row.guid for row in rows)
+        print(f"{stamp()}  InstallParty.remove_all({args[1]!r}, {confirmed})")
+        result = seam.remove_all(args[1], confirmed)
+        print(f"{stamp()}  attempted={result.attempted} blocker={result.blocker!r}")
+        for one in result.dismissals:
+            print(f"    {one.bot}: removed={one.removed} logged_out={one.logged_out}")
+            print(f"      {one.sentence}")
         print(f"    sentence: {result.sentence}")
         return 0
 

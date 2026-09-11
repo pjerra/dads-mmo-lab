@@ -1,5 +1,17 @@
 # T26 live half — a named character added as a bot, from a real player's own session
-### yulon-ubuntu2 and the Hyper-V host, 2026-09-11, 01:30:06–02:29:10 CEST (the box's own clock, read by `date` inside the script that wrote each line — `lib.sh:32`)
+### yulon-ubuntu2 and the Hyper-V host, 2026-09-11, 01:30:06–03:26:08 CEST (the box's own clock, read by `date` inside the script that wrote each line — `lib.sh:32`)
+
+**A cold review of this folder returned REWORK with three must-fixes; they are
+answered in sections 13 to 17, pressed between 02:59 and 03:26.** The four
+claims stood. What did not was the client files this lane rewrites on the
+owner's own machine and never captured putting back, and two places where the
+app contradicted itself about the party it had just filled. Section 13 is the
+measurement the fix turns on, and its answer is a negative one: this server
+records a `bot add` nowhere an app can read.
+
+*(The words "round 1" and "round 2" below mean the two PRESS passes of
+02:04–02:09 and 02:18–02:21, which is what they meant before the review. The
+review's own work is always called "the review round".)*
 
 **Is the ticket's live half done? Yes, and it took two rounds, because the first
 one found a defect in the unit half that no unit test could have found.** All
@@ -49,7 +61,7 @@ the fix added.
 | 06 | 02:09:32 | **round 1**: the linked account | `06-link-round1.log` |
 | — | 02:12–02:16 | the fix, its four tests, its four mutations, the gate | `12-mutations.txt`, `13-checks-m910q.txt` |
 | 07 | 02:17:41–02:18:05 | the box put back to where step 02 left it | `07-reset.log` |
-| 04 | 02:18:22 / 02:19:39 | **round 2**: the picker, the alt, the online refusal | `04-alt-round2a.log`, `04-alt.log`, `shots/11-claim1-and-4-client.png` |
+| 04 | 02:18:22 / 02:19:39 | **round 2**: the picker, the alt, the online refusal | `04-alt-round2a.log`, `04-alt.log`, `shots/11-claim1-round2-client.png` |
 | 05 | 02:20:22 | **round 2**: the guild mate | `05-guild.log`, `shots/12-claim2-client.png` |
 | 06 | 02:21:02 | **round 2**: the linked account | `06-link.log`, `shots/13-claim3-client.png` |
 | 08 | 02:22:45–02:23:03 | the bots, the guild and the link undone | `08-teardown.log`, `shots/14-after-teardown-client.png` |
@@ -57,12 +69,23 @@ the fix added.
 | 10 | 02:27:41 / 02:28:35 | this lane's directories off the box; the box's own activity log | `10-cleanup.log`, `10-activity-terminal.txt` |
 | 11 | 02:28:08–02:28:47 | the Hyper-V host put back | `11-vmhost-as-found.log` |
 | 14 | 02:29:10 | this folder grepped for secrets | `14-no-secrets.txt` |
+| 20 | 03:00:07–03:01:29 | **the review round**: the host as found, the client files restored, the portproxy repointed | `20-host-before.log` |
+| 21 | 03:00:54–03:01:03 | the three accounts and four characters re-made | `21-stage.log` |
+| 22 | 03:04:20–03:04:37 | **is there a discriminator on the box?** | `22-discriminator.log` |
+| 23 | 03:21:57–03:22:43 | **must-fixes 2 and 3 pressed**: the panel's party, the dismissal, Dismiss all | `23-panel.log`, `23-panel-firstrun.log` |
+| 25 | 03:25:14–03:25:29 | the box put back, and every step-01 number read back again | `25-box-as-found.log` |
+| 26 | 03:24:35–03:26:00 | the client files restored and the portproxy put back | `26-host-as-found.log`, `t26client-round2.log` |
+| 27 | 03:25:51 | this lane's directories off the box again | `27-cleanup.log` |
+| 24 | 03:26:08 | the box's own activity log for the review round | `24-activity-terminal-round2.txt` |
+| 28 | 03:2x | `--checks` on m910q for the review round | `28-checks-m910q.txt` |
+| 29 | 03:2x | this folder grepped for secrets again | `29-no-secrets.txt` |
 
 Scripts, and they are what ran: `lib.sh`, `01-ground.sh`, `02-stage.sh`,
 `03-client.sh`, `04-alt.sh`, `05-guild.sh`, `06-link.sh`, `07-reset.sh`,
-`08-teardown.sh`, `09-box-as-found.sh`, the box-side driver `t26press.py`, the
-client-side driver `t26client.ps1` with its launcher `t26run.ps1`, and the
-mutation harness `12-mut-t26.py`.
+`08-teardown.sh`, `09-box-as-found.sh`, `22-discriminator.sh`, `23-panel.sh`,
+`25-box-as-found.sh`, the box-side driver `t26press.py`, the client-side driver
+`t26client.ps1` with its launcher `t26run.ps1`, and the mutation harness
+`12-mut-t26.py`. `21-stage.log` is `02-stage.sh` run a second time.
 
 ---
 
@@ -79,24 +102,41 @@ sent this lane to the host instead, and all three are in this folder:
   session 1 at 01:34 as a renderer probe; two minutes later
   `MainWindowHandle` was `0` and `Logs\gx.log` was **0 bytes**, which it still
   is (`03a-win11-probe.log`, the Logs block). The in-guest screenshot shows the
-  desktop with the client's taskbar button and no client window
-  (`shots/win11-probe-in-session.png`).
+  desktop with the client's taskbar button and no client window at all
+  (`shots/win11-probe-taskbar-no-window.png`, the taskbar strip of that frame).
 * **`vmshot.ps1` does not photograph that box's desktop.**
   `ssh vmhost 'C:\Users\PK\vmshot.ps1 -VMName yulon-win11'` returned an
   all-black 1024×768 frame (`shots/win11-probe-vmshot-black.png`, 4.6 KB) at the
   same moment the guest's own `CopyFromScreen` returned a 1920×1080 desktop
-  (`shots/win11-probe-in-session.png`, 1.5 MB).
+  whose taskbar is `shots/win11-probe-taskbar-no-window.png`.
 
 The host has the 3.3.5a client 8.4a and 8.5a drove into the world,
 `C:\clients\WoW-WotLK-3.3.5a-min`, and it has a real display. Copying a 16 GB
 client onto a box that had just failed to draw a smaller one was not worth the
 hour. **What this costs:** the client ran on the owner's own desktop rather than
-on a test VM, and every client frame in `shots/` is that desktop.
+on a test VM. **Every frame in `shots/` is cropped to the game window** (1024×768
+at 450,145 of the 1920×1080 screen) — round 1 shipped three frames of the whole
+desktop with the owner's own icons in them, which is the review's first note;
+they are re-saved cropped and the folder carries no desktop.
 
-**The client was left exactly as it was found.** `03b-client-before.txt` is the
-three realmlist files and the whole of `WTF\Config.wtf` read before anything was
-written; `11-vmhost-as-found.log` shows all three back at
-`set realmlist 172.30.48.189` and `Config.wtf` restored line for line.
+**The client files this lane rewrites, and how they are put back.** The `config`
+stage writes three files that belong to the owner's own client:
+`realmlist.wtf`, `Data\enUS\realmlist.wtf` and `WTF\Config.wtf` (the realmlist
+respelled, and `gxMaximize`, `gxResolution` and `chatLog` added).
+`03b-client-before.txt` is all three read BEFORE anything was written.
+
+**Round 1 put them back by hand over ssh and then cited a capture that held not
+one line of them** — the cold review's must-fix 1, and it was right:
+`11-vmhost-as-found.log` is a portproxy table and nothing else. Round 2 gave the
+restore to the script instead: `t26client.ps1 -Stage restore` carries the
+original content of all three files in its own source, prints all three before it
+writes and all three after, and writes them with `Set-Content -Encoding ascii`,
+which is what wrote them before this lane (8.4a's `client-login.ps1` uses it).
+It ran twice — at 03:00:08 before round 2 touched anything
+(`20-host-before.log:13-95`, all three already back at `set realmlist
+172.30.48.189` / `SET realmlist "172.30.48.189"` and no added key) and again at
+03:24:37 after round 2's client session (`26-host-as-found.log:51-94`, the same
+three files with the same content).
 
 **One change was made on the host and put back.** Its portproxy listeners for
 3724 and 8085 pointed at `172.30.48.189`, a lease `yulon-ubuntu2` no longer
@@ -105,7 +145,13 @@ been sent to a world that never answered. The realm row is
 `100.99.204.5|100.99.204.5|255.255.255.0` (`01-ground.log:72`), which is the
 host's own Tailscale address, so the world had to be reachable *there*. Both
 listeners were pointed at `172.26.8.248` for the run and set back to
-`172.30.48.189` afterwards (`11-vmhost-as-found.log`, the before/after blocks).
+`172.30.48.189` afterwards. **The as-found table is a command capture and not a
+sentence** (the review's last note): `netsh interface portproxy show v4tov4`
+read at 03:00:07, before round 2 changed anything
+(`20-host-before.log:3-11`), the same command after the change
+(`20-host-before.log`, its last block), and again after it was put back
+(`26-host-as-found.log`, the `=== the portproxy put back ===` block). Round 1's
+`11-vmhost-as-found.log` holds the same table for that round.
 **The realm row itself was never read for writing and never touched**
 (`01-ground.log:72` and `09-box-as-found.log:81` are the same three values).
 
@@ -273,7 +319,7 @@ hold none before the press (`:87`, `:96`). `Tsixalt` went online `0 → 1`
 `InstallParty.party_members('Tsixmaster') -> (Member(name='Tsixalt', guid=1003,
 klass=1, level=1),)` (`:108-109`).
 
-**And in the master's own game window** (`shots/11-claim1-and-4-client.png`):
+**And in the master's own game window** (`shots/11-claim1-round2-client.png`):
 `add: Tsixalt - ok` / `[Tsixalt] whispers: Hello` / `Tsixalt joins the party.`,
 with `Tsixalt` standing beside `Tsixmaster` in the world.
 
@@ -410,7 +456,7 @@ permission rule.
 | the six bridge scripts | six md5s (`01:32-37`) | the same six (`09`, the bridge block, `dml_botadd.lua` at `:101`) |
 | the world answers | `DML-BRIDGE-READY` (`01`, §"the world answers") | `DML-BRIDGE-READY` (`09:109`) |
 | the module clone | `b949b50b…`, unmodified (`01:20`) | identical (`09:115`) |
-| the panel's nine preconditions | all `ok`, `ready: True` (`01:126-127`) | all `ok`, `ready: True` (`09`, last block) |
+| the panel's nine preconditions | all nine `ok`, `ready: True` (`04-alt.log:18-27`) | all nine `ok`, `ready: True` (`09`, last block; and `25-box-as-found.log`, last block) |
 
 **Everything this lane made was removed.** The three throwaway accounts were
 deleted with the server's own `.account delete`, which takes their characters
@@ -492,6 +538,14 @@ commit: 4 passed.
   about; the pool case goes through `add_bot` and is 8.6's.
 * **A second install, a second core, or any other tree.** WotLK/AzerothCore
   `413bea61`, `mod-playerbots` `b949b50b`, `mod-ale`, this box, this build.
+* **What the party list says about an altbot this app did not add.** The record
+  is the app's own, so a character somebody added with `.playerbots bot add`
+  typed into the game is in neither arm of `members()` and is not drawn. That is
+  the cost of the server keeping no record (section 13), it is the same cost
+  round 1 paid for every altbot, and nothing here measures it.
+* **The record surviving a config directory that cannot be written.** The code
+  answers an unwritable store as an empty record and a test pins it; no live
+  press was made against a read-only `config_dir()`.
 
 ## 12. Deviations, named
 
@@ -523,3 +577,195 @@ commit: 4 passed.
 9. **The client's chat log is empty.** §1. The chat evidence is the frames.
 10. **The trailer on this lane's commits is `Co-Authored-By: Claude Opus 5`**,
     as the brief asks, with no session line and no generated-with footer.
+11. **The review round re-made everything round 1 had deleted**, so its accounts
+    are 119-121 and its characters 1006-1009 rather than 116-118 and 1002-1005.
+    Section 17 reads the same numbers back against the same step 01.
+12. **A second code change was made mid-lane**, so the four claims of sections
+    5 to 8 were pressed against `9151f8cc…` and the panel's own party against
+    `745364e8…`. Nothing in sections 5 to 8 depends on the second change: it
+    adds rows to `members()`, and `add_named`'s own poll does not read
+    `members()`.
+13. **`forget()` was written and then deleted** because `members()`'s prune
+    already did its work and no mutation could kill it; section 16 names it.
+14. **The staging in the review round used `.group disband`'s replacement.**
+    `.group disband` is `Console::No` on this core (`cs_group.cpp:39`), so the
+    lingering two-row group from the measurement step was left through the
+    CLIENT (`/script LeaveParty()` typed into the master's chat) rather than
+    over the channel. It is staging and not a claim.
+15. **Three round-1 frames were re-saved cropped rather than re-captured.** The
+    events they photograph are gone; the crop is a rectangle of the same file
+    (1024×768 at 450,145), taken on the host with `System.Drawing`. The win11
+    probe's desktop frame is kept only as its taskbar strip.
+
+---
+
+## 13. THE REVIEW ROUND, and the measurement it turns on: the server records nothing an app can read
+
+Must-fixes 2 and 3 are both "`members()` cannot see a character this app added
+as a bot", and the review asked the right question first: **is there a
+discriminator the WORLD holds?** `22-discriminator.sh` put it to the box with
+one add in the middle and read every place an answer could be, before and after.
+The answer is no, and it is a diff rather than an argument:
+
+* **Not one row moved in any `acore_playerbots` table.** All thirty are listed
+  with their counts before the add (`22-discriminator.log:38-67`) and again
+  after it (`:229-258`), and every count is identical —
+  `playerbots_random_bots` 4166 both times (`:190`, `:228`),
+  `playerbots_account_links` empty both times (`:188`, `:226`).
+* **The module writes nothing on the add path.** Every `PlayerbotsDatabase`
+  statement in `PlayerbotMgr.cpp` is listed from its own source on the box
+  (`:113-119`): `PlayerbotMgr.cpp:193` and `:1890` are `SELECT`s, and `:1833`,
+  `:1877`, `:1880` and `:1931` are the key read-back, the two link inserts and
+  the unlink delete. There is no other write, and `AddPlayerBot` is printed in
+  full underneath (`:121-150`) with nothing persisted in it.
+* **`.playerbots bot list` cannot be reached from here.** It is `Console::No`,
+  and the app's own channel gets the USAGE list of the three `Console::Yes`
+  siblings — before the add (`:127-133`) and, with a bot standing in the party,
+  again after it (`:272-276`). So the module's own list is not an option either.
+* **In `acore_characters` the only column that moves is `online`.** `Tsixalt`
+  reads `online 0` before (`:197`) and `online 1` after (`:265`), with
+  `logout_time` restamped and nothing else different — which is exactly what a
+  person logging in moves. `group_member.memberFlags`, `subgroup` and `roles`
+  are `0` for the master and the bot alike (`:266-268`), and `groups` carries
+  nothing about bots (`:269-270`).
+* **`account.online` does not separate a bot session from a real one.**
+  `RNDBOT0` reads `online 1` (`:283-284`) while every character on it is a module
+  bot; and the master's own account is `online 1` because of the master, with
+  the alt that is a bot sitting on that same account. Either way it answers the
+  wrong question.
+
+**So the app keeps its own record**, which is the review's own fallback.
+`AltbotMemory` is a per-install, per-master file under `platform.config_dir()` —
+`/home/pk/.local/share/yulon/party-altbots.json` on this box
+(`23-panel.log:140-141`), keyed by the install id, holding a name from the
+moment `add_named` has SEEN the character join and pruned against the group
+table on every successful read. `group_rows_sql` gains `also`: the bot marker's
+clause OR those names, with the master dropped by guid so the union can never
+return him. A human in the party is in neither arm.
+
+## 14. MUST-FIX 2 — the party the panel draws holds what the panel just added
+
+`23-panel.log`, 03:22:11–03:22:18, against `party.py` md5
+`745364e8aaf78ed342c86d470189c93f` (`:7`, printed before anything was sent).
+
+Before the add, `InstallParty.state('Tsixmaster')` reads `members : ()` and the
+panel's own summary line is *"This character's party has no bots in it yet."*
+(`:20-24`) — correct, the party is empty. `add_named` then puts `Tsixalt` in it:
+`added=True joined=True`, *"Tsixalt joined the party."* (`:30-33`), the world's
+`[dml_botadd] Tsixmaster ran: .playerbots bot add Tsixalt` in a window proved to
+hold none before the press (`:27`, `:34`), and `group_member` holding group 9
+with guids 1006 and 1007 (`:35-37`).
+
+**And the state the panel draws underneath that sentence now says the same
+thing:**
+
+```
+    members : (Member(name='Tsixalt', guid=1007, klass=1, level=1),)
+    the panel's summary line: 1 bot in this party.
+    remembered by this app  : ('Tsixalt',)
+```
+
+(`:41-45`.) Round 1's panel printed *"Tsixalt joined the party."* and *"This
+character's party has no bots in it yet."* one line apart. With two altbots
+standing it reads `2 bots in this party.` (`:102-106`), and with the party empty
+again it is back to the "no bots in it yet" line (`:131-135`) — the sentence is
+still reachable and now only when it is true.
+
+The record survives the process: every `$PRESS` line above is a separate
+`t26press.py` run, and the `remembered by this app` reading comes out of the
+file each time.
+
+## 15. MUST-FIX 3 — the dismissal watches a row leave, and "Dismiss all" empties the party
+
+Same log, 03:22:18–03:22:43.
+
+**The dismissal, with the group table read by hand either side.** Before the
+press `group_member` holds `9 1006 Tsixmaster` and `9 1007 Tsixalt` (`:49-51`);
+`InstallParty.remove('Tsixmaster', 'Tsixalt')` answers `removed=True
+logged_out=True`, *"Tsixalt left the party."* (`:53-54`); after it the same
+query returns nothing at all (`:55-56`), and the world logged
+`[dml_uninvite] removed Tsixalt from group` and the logout whisper in a window
+proved empty of both first (`:48`, `:56-57`). The readback watched the row go.
+
+**The same press again is where round 1 answered `removed=True` with nothing to
+read back**, and now it is refused before anything is sent:
+
+> Tsixalt is not in Tsixmaster's party, so nothing was sent. A dismissal is read
+> back by watching the row leave the group table, and there is no row to watch.
+
+(`:68-69`, `removed=False`), and the world's log for that window holds no `dml_`
+line at all (`:70-71`).
+
+**"Dismiss all" with two altbots standing.** `Tsixalt` (own account) and
+`Tsixmate` (the guild, staged again at `:74-83`) both joined (`:87-94`);
+`group_member` held group 10 with all three guids (`:97-100`); the panel's party
+read `2 bots in this party.` (`:102-106`). `InstallParty.remove_all` was handed
+the confirmed guids `(1007, 1008)` — read from that same set, which is the whole
+point — and reported `attempted=2` with both `removed=True logged_out=True` and
+*"2 bots left the party: Tsixalt, Tsixmate."* (`:111-117`); the world logged both
+uninvites and both logout whispers (`:119-122`); `group_member` is `0`
+afterwards (`:123-124`) and both characters are offline (`:125-129`). Round 1's
+`remove_all` handed `dismiss_all` an empty list and reported success over a
+party it had not touched (`07-reset.log:19-23`, `08-teardown.log`).
+
+`23-panel-firstrun.log` is the same step run once before, at 03:20:38, and is
+kept because it is the run whose section 7 read the record file at the wrong
+path (`~/.config/yulon`, where this app's config directory is
+`~/.local/share/yulon`); the step was corrected and re-pressed and
+`23-panel.log` is the run this section cites.
+
+## 16. The code the review round changed, and what kills it
+
+`group_rows_sql(…, also=…)` — the union, with the master dropped by guid;
+`AltbotMemory` and `altbot_store_path` — the record and where it lives;
+`InstallParty.members()` — the union read and the prune; `add_named` — remember
+on the join; `InstallParty.remove()` — the ground read; and one wiring line in
+`controller_view.py` so the file outlives the panel.
+
+**Eleven mutations, 11/11 caught** (`12-mutations.txt`), and the table's own
+`sha256 before` / `after` are the committed file's. M5 is the union arm, M6 the
+master's exclusion from it, M7 the name check on the one value that reaches a
+quoted literal off disk, M8 remembering on the join, M9 the prune, M10 pruning
+on a read that did NOT answer, M11 the dismissal's ground read — the mutation
+that puts round 1's vacuous success back — and M1-M4 are the first fix's.
+
+Two things that did not survive the writing and are named rather than hidden:
+a `forget()` call after a successful dismissal, which no mutation could kill
+because `members()`'s own prune had already dropped the name, was **deleted**
+rather than kept with a mutation that always passes; and M12, its mutation, went
+with it. M10's first spelling survived too — the test it pointed at raises from
+the reader, which returns before the prune's guard is ever reached — so a second
+test was written for the shape that does reach it (a row that does not parse,
+which `read_members` reports rather than skips) and M10 points at that.
+
+## 17. The box and the host, as the review round left them
+
+`25-box-as-found.log` against `01-ground.log`, the same table as section 9 and
+the same numbers: accounts 103, `account_access` 3, characters 1001, online 500,
+guilds 20, `guild_member` 300, `groups`/`group_member` 0/0, both playerbots link
+tables 0, the pools 50/50, the three containers on the same `StartedAt` with
+`restarts=0`, `PERZI.last_login` and `Pakka` and the realm row and `LootPet2.lua`
+and `Logger.ALE` and `playerbots.conf` identical, the six bridge scripts with the
+same md5s, `DML-BRIDGE-READY`, and `b949b50b` unmodified. The review round's own
+accounts (119-121) and characters (1006-1009) were deleted with `.account
+delete` and leave no row in `group_member`, `guild_member`, `account_access`,
+`realmcharacters` or `characters` (`25-box-as-found.log`, the orphans block).
+
+**This lane's one new file on the box went with them.**
+`/home/pk/.local/share/yulon/party-altbots.json` did not exist before 03:20 and
+does not exist now; the same capture prints it, its content (`{"243c46e3": {}}`,
+empty of names), the removal, and the three directories that were in that folder
+before and still are. `~/t26-live` is gone and read back as gone
+(`27-cleanup.log`), and the box's own clone still reads `182fc92a` with the one
+pre-existing modification it has carried all along.
+
+**The host** (`26-host-as-found.log`): the client closed, all three client files
+restored and printed, both portproxy listeners back at `172.30.48.189`,
+`pw.txt` deleted, `C:\Users\PK\t26` removed and the `T26Client` task deleted
+(`schtasks /query` answers *"The system cannot find the file specified"*).
+`yulon-win11` and `yulon-arch` were OFF for the whole review round and nothing
+was done to either.
+
+The activity terminal on the box carried every action of the review round too —
+`24-activity-terminal-round2.txt`, 03:00 to 03:26:08, and its last line counts
+the windows: **1**.

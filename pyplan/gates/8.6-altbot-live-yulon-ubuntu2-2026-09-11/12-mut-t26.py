@@ -9,10 +9,16 @@ re-run and record green. A row is only evidence if the mutant was in the file
 and was executed, so the harness asserts the mutant is in the file before it
 runs anything.
 
-The change is `party_rows_sql` + `InstallParty.party_members`, and `add_named`
-being handed the second of those instead of `members`. Four mutations, one for
-each way the fix could be wrong: the clause it drops, the clause it keeps, the
-seam it is wired to, and the anchor it reads from.
+Round 1's change is `party_rows_sql` + `InstallParty.party_members`, and
+`add_named` being handed the second of those instead of `members` (M1-M4: the
+clause it drops, the clause it keeps, the seam it is wired to, and the anchor it
+reads from).
+
+Round 2's change is the union in `group_rows_sql`, `AltbotMemory` behind it, and
+the ground read `InstallParty.remove` now takes (M5-M12: the union arm, the
+master's exclusion from it, the name check on a value that comes off disk,
+remembering on the join, pruning against the party, NOT pruning on a failed
+read, and the dismissal ground read).
 """
 
 from __future__ import annotations
@@ -30,8 +36,9 @@ MUTATIONS = [
     (
         "M1 the master's own row is not dropped from the named route's party read",
         PARTY,
-        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n",
-        "        \"\"\n",
+        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n"
+        "        \"ORDER BY c.name\"\n",
+        "        \"ORDER BY c.name\"\n",
         "test_the_named_routes_party_read_does_not_filter_by_the_bot_marker",
     ),
     (
@@ -44,18 +51,75 @@ MUTATIONS = [
     (
         "M3 members() loses the bot marker too -- the fix made too wide",
         PARTY,
-        "                \"characters\", group_rows_sql(self.entry, answer.marker, master_guid=guid) + \";\"\n",
-        "                \"characters\", party_rows_sql(self.entry, master_guid=guid) + \";\"\n",
+        "                group_rows_sql(\n"
+        "                    self.entry,\n"
+        "                    answer.marker,\n"
+        "                    master_guid=guid,\n"
+        "                    also=self._altbots.names(master),\n"
+        "                )\n",
+        "                party_rows_sql(self.entry, master_guid=guid)\n",
         "test_the_bot_routes_party_read_still_filters_by_the_bot_marker",
+    ),
+    (
+        "M5 the party read drops the names this app remembers adding",
+        PARTY,
+        "        clause = f\"({clause}) OR c.name IN ({names})\"\n",
+        "        clause = f\"({clause})\"\n",
+        "test_the_group_read_counts_a_name_this_app_remembers_adding",
+    ),
+    (
+        "M6 the party read no longer drops the master by guid, so the union can return him",
+        PARTY,
+        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n"
+        "        f\"AND ({clause}) \"\n",
+        "        f\"AND ({clause}) \"\n",
+        "test_the_group_read_never_counts_the_master_himself",
+    ),
+    (
+        "M7 a remembered name goes into the query without being checked",
+        PARTY,
+        "    remembered = tuple(name for name in also if valid_name(name))\n",
+        "    remembered = tuple(also)\n",
+        "test_a_remembered_name_that_is_not_a_character_name_is_refused_not_quoted",
+    ),
+    (
+        "M8 add_named does not remember the character it saw join",
+        PARTY,
+        "            self._altbots.remember(master, result.name)\n",
+        "            pass\n",
+        "test_the_seam_remembers_a_character_it_added_and_then_counts_it",
+    ),
+    (
+        "M9 the record is never pruned against the group table",
+        PARTY,
+        "            self._altbots.keep_only(master, [row.name for row in rows])\n",
+        "            pass\n",
+        "test_a_remembered_character_that_left_the_party_is_forgotten",
+    ),
+    (
+        "M10 the record is pruned on a read that FAILED too",
+        PARTY,
+        "        rows = read_members(raw)\n        if not isinstance(rows, str):\n",
+        "        rows = read_members(raw)\n        if True:\n",
+        "test_a_party_row_that_did_not_parse_forgets_nothing_either",
+    ),
+    (
+        "M11 the seam's dismissal ground read is thrown away -- round 1's vacuous success",
+        PARTY,
+        "        if all(row.name != bot for row in standing):\n",
+        "        if False:\n",
+        "test_the_seam_refuses_to_dismiss_a_character_that_is_not_in_the_party",
     ),
     (
         "M4 the named route's read is anchored on the master's GUID, not his group",
         PARTY,
         "        f\"WHERE gm.guid = (SELECT guid FROM {chars}.group_member \"\n"
         "        f\"WHERE memberGuid = {int(master_guid)} LIMIT 1) \"\n"
-        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n",
+        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n"
+        "        \"ORDER BY c.name\"\n",
         "        f\"WHERE gm.guid = {int(master_guid)} \"\n"
-        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n",
+        "        f\"AND gm.memberGuid <> {int(master_guid)} \"\n"
+        "        \"ORDER BY c.name\"\n",
         "test_the_named_routes_party_read_is_anchored_on_the_masters_own_group",
     ),
 ]

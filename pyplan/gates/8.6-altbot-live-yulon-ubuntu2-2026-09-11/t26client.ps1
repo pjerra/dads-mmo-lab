@@ -167,6 +167,83 @@ switch ($Stage) {
     Get-Content $config | ForEach-Object { Say "  Config.wtf: $_" }
   }
 
+
+  'restore' {
+    # MUST-FIX 1, the cold review of round 1. The `config` stage above REWRITES
+    # three files that belong to the owner's own client, and round 1 put them
+    # back by hand over ssh and then cited a capture that did not hold a single
+    # line of them. This stage owns the restore instead: the original content is
+    # in the script, byte for byte as `03b-client-before.txt` read it BEFORE
+    # anything was written, and the stage prints all three files before it
+    # writes and all three after -- so the claim and its evidence are the same
+    # command.
+    #
+    # `Set-Content -Encoding ascii` is what wrote these files before this lane
+    # (8.4a's `client-login.ps1` uses it), so the line endings it produces are
+    # the ones they had.
+    $original = @{
+      "$ClientDir\realmlist.wtf"           = @('set realmlist 172.30.48.189')
+      "$ClientDir\Data\enUS\realmlist.wtf" = @('set realmlist 172.30.48.189')
+      "$ClientDir\WTF\Config.wtf"          = @(
+      'SET locale "enUS"',
+      'SET hwDetect "0"',
+      'SET gxRefresh "60"',
+      'SET gxMultisampleQuality "0.000000"',
+      'SET gxFixLag "0"',
+      'SET videoOptionsVersion "3"',
+      'SET Gamma "1.000000"',
+      'SET showToolsUI "1"',
+      'SET Sound_OutputDriverName "System Default"',
+      'SET Sound_MusicVolume "0"',
+      'SET Sound_AmbienceVolume "0.60000002384186"',
+      'SET farclip "397"',
+      'SET specular "1"',
+      'SET groundEffectDensity "24"',
+      'SET projectedTextures "1"',
+      'SET portal "en"',
+      'SET gxVSync "0"',
+      'SET accounttype "LK"',
+      'SET realmName "Yulon ubuntu2"',
+      'SET mouseSpeed "1"',
+      'SET gameTip "13"',
+      'SET checkAddonVersion "0"',
+      'SET showGameTips "0"',
+      'SET Sound_VoiceChatInputDriverName "System Default"',
+      'SET Sound_VoiceChatOutputDriverName "System Default"',
+      'SET Sound_MasterVolume "0.30000001192093"',
+      'SET uiScale "0.70999997854233"',
+      'SET useUiScale "1"',
+      'SET timingTestError "0"',
+      'SET Sound_EnableSFX "0"',
+      'SET Sound_EnableAmbience "0"',
+      'SET Sound_EnableMusic "0"',
+      'SET gxWindow "1"',
+      'SET readTOS "1"',
+      'SET readEULA "1"',
+      'SET movie "0"',
+      'SET realmlist "172.30.48.189"'
+      )
+    }
+    Say "--- the three files BEFORE this restore ---"
+    foreach ($path in $original.Keys | Sort-Object) {
+      if (Test-Path $path) {
+        Say "  $path :"
+        Get-Content $path | ForEach-Object { Say "    $_" }
+      } else {
+        Say "  $path : NOT PRESENT"
+      }
+    }
+    foreach ($path in $original.Keys | Sort-Object) {
+      Set-Content -Path $path -Value $original[$path] -Encoding ascii
+      Say "restored $path"
+    }
+    Say "--- the three files AFTER this restore ---"
+    foreach ($path in $original.Keys | Sort-Object) {
+      Say "  $path :"
+      Get-Content $path | ForEach-Object { Say "    $_" }
+    }
+  }
+
   'launch' {
     Get-Process wow -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 1
