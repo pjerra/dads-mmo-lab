@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -2419,12 +2421,15 @@ class ControllerView(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
         )
         self.start_button = QPushButton("Start", tab)
+        self.start_button.setProperty("primary", True)
         self.stop_button = QPushButton("Stop", tab)
+        self.stop_button.setProperty("danger", True)
         self.refresh_button = QPushButton("Refresh", tab)
         # Deliberate, per checklist 6.5: nothing removes a container today, and
         # whatever does must not be a stray click next to Stop. It arms on the
         # first press and acts on the second, and anything else disarms it.
         self.remove_button = QPushButton(REMOVE_IDLE, tab)
+        self.remove_button.setProperty("danger", True)
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
         # pressed by accident, and this one is only ever right for a broken
@@ -2436,6 +2441,7 @@ class ControllerView(QWidget):
         # and refusing while leaving the user to go and find the other install
         # themselves is correct and unhelpful. This is the offer to do it.
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
+        self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
@@ -2461,6 +2467,7 @@ class ControllerView(QWidget):
         self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
         self.keep_characters_check.setVisible(False)
         self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
+        self.uninstall_confirm_button.setProperty("danger", True)
         self.uninstall_confirm_button.setVisible(False)
         self.uninstall_label = QLabel("", tab)
         self.uninstall_label.setWordWrap(True)
@@ -3852,6 +3859,8 @@ class ControllerView(QWidget):
         existing = QGroupBox("Accounts on this server", tab)
         existing_box = QVBoxLayout(existing)
         self.account_list = QListWidget(existing)
+        self.account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.account_list.customContextMenuRequested.connect(self._show_account_context_menu)
         self.account_list.currentRowChanged.connect(self._account_chosen)
         self.refresh_accounts_button = QPushButton("Refresh the list", existing)
         self.refresh_accounts_button.clicked.connect(self.refresh_accounts)
@@ -3920,6 +3929,8 @@ class ControllerView(QWidget):
         people = QGroupBox("Characters on this server", tab)
         people_box = QVBoxLayout(people)
         self.character_list = QListWidget(people)
+        self.character_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.character_list.customContextMenuRequested.connect(self._show_character_context_menu)
         self.character_list.currentRowChanged.connect(self._character_chosen)
         self.refresh_characters_button = QPushButton("Refresh the list", people)
         self.refresh_characters_button.clicked.connect(self.refresh_characters)
@@ -4496,6 +4507,8 @@ class ControllerView(QWidget):
         self.bot_summary = QLabel("", browse)
         self.bot_summary.setWordWrap(True)
         self.bot_list = QListWidget(browse)
+        self.bot_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bot_list.customContextMenuRequested.connect(self._show_bot_context_menu)
         row = QHBoxLayout()
         self.bot_filter = QLineEdit(browse)
         self.bot_filter.setPlaceholderText("name begins with…")
@@ -4678,6 +4691,8 @@ class ControllerView(QWidget):
         top.addStretch(1)
 
         self.backup_list = QListWidget(tab)
+        self.backup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.backup_list.customContextMenuRequested.connect(self._show_backup_context_menu)
         self.backup_list.currentItemChanged.connect(self._backup_selection_changed)
 
         actions = QHBoxLayout()
@@ -4885,6 +4900,8 @@ class ControllerView(QWidget):
         tab = QWidget(self)
         box = QVBoxLayout(tab)
         self.module_list = QListWidget(tab)
+        self.module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.module_list.customContextMenuRequested.connect(self._show_module_context_menu)
         self.module_report = QPlainTextEdit(tab)
         self.module_report.setReadOnly(True)
         self.install_module_button = QPushButton("Install selected", tab)
@@ -5688,6 +5705,105 @@ class ControllerView(QWidget):
         self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
         self.action_failed.emit(str(exc))
         self.apply_button.setEnabled(True)
+
+    # -------------------------------------------------------- context menus
+
+    @staticmethod
+    def _copy_to_clipboard(text: str) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+
+    def _show_account_context_menu(self, pos: QPoint) -> None:
+        item = self.account_list.itemAt(pos)
+        if item is None:
+            return
+        username = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Username ({username})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(username))
+        menu.addSeparator()
+        if self.set_password_button.isEnabled():
+            pw_action = menu.addAction("Set Password…")
+            pw_action.triggered.connect(self.set_selected_password)
+        if self.set_gm_button.isEnabled():
+            gm_action = menu.addAction("Set GM Level…")
+            gm_action.triggered.connect(self.set_selected_gm_level)
+        menu.exec(self.account_list.mapToGlobal(pos))
+
+    def _show_character_context_menu(self, pos: QPoint) -> None:
+        item = self.character_list.itemAt(pos)
+        if item is None:
+            return
+        name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Character Name ({name})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(name))
+        menu.addSeparator()
+        if self.revive_button.isEnabled():
+            revive_act = menu.addAction(f"Revive {name}")
+            revive_act.triggered.connect(self.revive_character)
+        if self.teleport_button.isEnabled():
+            teleport_act = menu.addAction(f"Teleport {name}…")
+            teleport_act.triggered.connect(self.teleport_character)
+        if self.set_level_button.isEnabled():
+            level_act = menu.addAction(f"Set Level of {name}…")
+            level_act.triggered.connect(self.set_character_level)
+        if self.mail_gold_button.isEnabled():
+            gold_act = menu.addAction(f"Send Gold to {name}…")
+            gold_act.triggered.connect(self.mail_gold)
+        if self.send_gear_button.isEnabled():
+            gear_act = menu.addAction(f"Send Worn Gear to {name}…")
+            gear_act.triggered.connect(self.send_gear_set)
+        if self.rename_button.isEnabled():
+            rename_act = menu.addAction(f"Rename {name} at Next Login")
+            rename_act.triggered.connect(self.rename_character)
+        menu.exec(self.character_list.mapToGlobal(pos))
+
+    def _show_bot_context_menu(self, pos: QPoint) -> None:
+        item = self.bot_list.itemAt(pos)
+        if item is None:
+            return
+        text = item.text()
+        name = text.split(" — ")[0].strip() if " — " in text else text.strip()
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Bot Name ({name})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(name))
+        menu.exec(self.bot_list.mapToGlobal(pos))
+
+    def _show_backup_context_menu(self, pos: QPoint) -> None:
+        item = self.backup_list.itemAt(pos)
+        if item is None:
+            return
+        path = cast(Path, item.data(Qt.ItemDataRole.UserRole))
+        menu = QMenu(self)
+        if self.plan_restore_button.isEnabled():
+            plan_act = menu.addAction("Show Restore Plan…")
+            plan_act.triggered.connect(self.show_restore_plan)
+        if self.restore_button.isEnabled():
+            rest_act = menu.addAction("Restore Database from this Backup…")
+            rest_act.triggered.connect(self.run_restore)
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy Backup File Name")
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(path.name))
+        menu.exec(self.backup_list.mapToGlobal(pos))
+
+    def _show_module_context_menu(self, pos: QPoint) -> None:
+        item = self.module_list.itemAt(pos)
+        if item is None:
+            return
+        mid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        if self.install_module_button.isEnabled():
+            inst_act = menu.addAction("Install Selected Module")
+            inst_act.triggered.connect(lambda: self._module_action("install"))
+        if self.remove_module_button.isEnabled():
+            rem_act = menu.addAction("Remove Selected Module")
+            rem_act.triggered.connect(lambda: self._module_action("remove"))
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy Module ID")
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(mid))
+        menu.exec(self.module_list.mapToGlobal(pos))
 
 
 # ------------------------------------------------------------- formatting

@@ -74,6 +74,7 @@ def build_catalog_tab(
     from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     tabs = QTabWidget(window)
+    tabs.setTabPosition(QTabWidget.TabPosition.West)
     central = QWidget(window)
     column = QVBoxLayout(central)
     banner = QLabel(central)
@@ -150,8 +151,9 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
-    from PySide6.QtCore import QObject, QThread, Signal, Slot
-    from PySide6.QtWidgets import QMainWindow, QMessageBox, QWidget
+    from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
+    from PySide6.QtGui import QDesktopServices, QGuiApplication
+    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QWidget
 
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
@@ -160,6 +162,7 @@ def build_window() -> object:
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.tab_titles import retitle_controller_tabs
+    from yulon.ui.theme import apply_warcraft_theme
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -186,6 +189,7 @@ def build_window() -> object:
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
+    apply_warcraft_theme(window)
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -207,6 +211,40 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
     )
     tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+
+    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+        tab_bar = tabs.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index < 0:
+            return
+        menu = QMenu(tab_bar)
+        if index == 0:
+            act = menu.addAction("Catalog (Store)")
+            act.setEnabled(False)
+        else:
+            widget = tabs.widget(index)
+            if isinstance(widget, ControllerView):
+                cv = widget
+                sd = cv.services.controller.server_dir
+                open_dir_act = menu.addAction("Open Server Folder in File Manager")
+                open_dir_act.triggered.connect(
+                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
+                )
+                copy_path_act = menu.addAction("Copy Server Path")
+                copy_path_act.triggered.connect(
+                    lambda: QGuiApplication.clipboard().setText(str(sd))
+                )
+                menu.addSeparator()
+                if cv.start_button.isEnabled() and cv.start_button.isVisible():
+                    start_act = menu.addAction("Start Server")
+                    start_act.triggered.connect(cv.start_server)
+                if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
+                    stop_act = menu.addAction("Stop Server")
+                    stop_act.triggered.connect(cv.stop_server)
+        menu.exec(tab_bar.mapToGlobal(pos))
+
+    tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    tabs.tabBar().customContextMenuRequested.connect(_on_tab_bar_context_menu)
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the
     # distro comparison both reach into `services` and `console_log`.
@@ -488,6 +526,7 @@ def build_window() -> object:
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(*DEFAULT_WINDOW_SIZE)
+    window.setMinimumSize(850, 550)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
@@ -619,7 +658,10 @@ def main() -> int:
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
+    from yulon.ui.theme import apply_warcraft_theme
+
     app = QApplication(sys.argv)
+    apply_warcraft_theme(app)
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a
     # `QThread` (`ui/widgets/log_panel.py`), and `SetThreadExecutionState` is

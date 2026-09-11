@@ -15,13 +15,15 @@ from collections.abc import Callable, Mapping
 from enum import Enum
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -379,6 +381,10 @@ class CatalogView(QWidget):
     def _tile(self, entry: CatalogEntry) -> QFrame:
         frame = QFrame(self)
         frame.setFrameShape(QFrame.Shape.StyledPanel)
+        frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        frame.customContextMenuRequested.connect(
+            lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
+        )
         box = QVBoxLayout(frame)
         box.addWidget(self._tile_text(f"<b>{entry.name}</b> <i>({entry.status})</i>", frame))
         box.addWidget(self._tile_text(entry.description, frame))
@@ -388,6 +394,7 @@ class CatalogView(QWidget):
         box.addWidget(self._tile_text(f"Emulator: {entry.emulator.name}", frame))
         button = QPushButton("Install", frame)
         button.setObjectName(f"install-{entry.id}")
+        button.setProperty("primary", True)
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
         box.addWidget(button)
         self._buttons[entry.id] = button
@@ -460,6 +467,37 @@ class CatalogView(QWidget):
         button.setToolTip(
             f"Already installed in {self._installed_dirs[game_id]} — its own tab manages it."
         )
+
+    def _show_tile_context_menu(
+        self, pos: QPoint, entry: CatalogEntry, frame: QWidget
+    ) -> None:
+        menu = QMenu(frame)
+        if entry.id not in self._installed_dirs and entry.install.supports(self._platform_id()):
+            install_action = menu.addAction("Install Server…")
+            install_action.triggered.connect(lambda: self.start_install(entry))
+
+        existing_action = menu.addAction("Use Existing Server…")
+        existing_action.triggered.connect(lambda: self.attach_existing(entry))
+
+        if self._wsl_distros():
+            wsl_action = menu.addAction("Find in WSL…")
+            wsl_action.triggered.connect(lambda: self.adopt_from_wsl(entry))
+
+        menu.addSeparator()
+        copy_action = menu.addAction("Copy Server Details")
+        copy_action.triggered.connect(
+            lambda: self._copy_text(
+                f"{entry.name} ({entry.emulator.name}) - "
+                f"Client: {entry.client.version} (build {entry.client.build})"
+            )
+        )
+        menu.exec(frame.mapToGlobal(pos))
+
+    @staticmethod
+    def _copy_text(text: str) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
 
     def _remember_installed(self, game_id: str, server_dir: Path) -> None:
         """Record an install this view just produced, and grey its button."""
