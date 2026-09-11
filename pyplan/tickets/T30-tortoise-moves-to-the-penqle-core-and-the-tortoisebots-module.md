@@ -56,3 +56,7 @@ Report on the final message as usual. Two rounds; the reviewer is a cold Opus (l
 ## Owner, 2026-09-11 12:40 CEST — SOAP comes back
 
 "The soap update is not yet in the penqle repo, but I have asked him to add it; it will probably be added soon." So point 5 is a temporary switch: attach for the pinned rev, nothing SOAP-shaped deleted, the way back one edit (the four `operations` keys and the three `SOAP.*` conf keys), named in the hand's report. Follow-up when the SOAP rev lands: re-pin the core, flip the channel back, press the same surfaces once — filed as T31 when the rev exists.
+
+## Owner, 2026-09-11 13:10 CEST — the model for this ticket
+
+"Use claude-opus-4-6[1m] on T30 wherever Opus gets used in the flow, only on this ticket." Half 2's running hand finishes on Opus 5 (the owner's choice: "after Half 2 reports"). From then on every Opus role on T30 — the cold reviewer, any round 2, later halves — runs as the `t30-opus46` agent (`~/.claude/agents/t30-opus46.md`, `model: claude-opus-4-6[1m]`), which needs a session restart to load; the trailer for its commits is `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`. Other tickets stay on the usual models.
