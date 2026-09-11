@@ -3,6 +3,7 @@
 Every release of Yu'lon, newest first. The **Unreleased** section is titled by the lead when a release is cut; until then it collects what has landed on the working branch since the last tag. Entries say what a player or operator can now do, and cite the gate folder under `pyplan/gates/` that proved it on a real machine — a line here without a folder behind it is a claim, not a change.
 
 ## Unreleased
+- My Party adds a named character of your own, a guild mate or a linked account's character as a bot, from a real client session; an online character is refused in the module's words; the party the app draws counts the altbots it added, so dismiss and dismiss-all see them and a dismissal watches the row leave (T26, live).
 - Steam on Linux, measured twice more on `yulon-arch`: Big Picture's *Resume* on a plain X11 desktop raises nothing (Steam's, not Yu'lon's); under gamescope the server entry launches into focus and the running-game card exists; a Tortoise server adopted behind the entries and the client entry logging into it (T29, evidence only).
 - Activating a module's conf that wrote or replaced a file the running world reads now recommends the restart and says the world reads it at its next start; an identical conf recommends nothing (T27).
 - The catalog's two tile columns come out equal at every width the window allows; the tab and splitter are built by one function the app and its tests share (T28).

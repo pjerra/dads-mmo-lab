@@ -1,6 +1,6 @@
 # T26 — My Party adds a chosen existing character as a bot (own alts, other accounts, friends' and family's characters)
 
-**Status:** unit half MERGED `235ed010` (2026-09-10 21:28 CEST; gate ALL GREEN on m910q behind it); the live half waits for a client seat on `yulon-win11`
+**Status:** CLOSED — unit half merged `235ed010`, live half merged `c3df68ab` (2026-09-11)
 **Filed:** 2026-09-10 18:26 CEST by the lead (Fable), from the owner's answer on 8.6 through the question tool: "want to be able to choose alts, that way we can play with altbots there … Alts also from another account, or friends/family chars. This is only for AzerothCore as I know of."
 **Hand:** Opus (a feature with a live half), worktree branched from `yulon-phase8b`
 **Box:** `yulon-ubuntu2` (WotLK; the AzerothCore playerbots module is the only tree with the route), after T13's live half and T23
@@ -82,3 +82,7 @@ The four claims stand (each with the admitting rule in the picker, a stamped pre
 ## Live half round 2 and the lead's check (2026-09-11 08:30 CEST)
 
 `99331564` … `6718d075`: **no world-side discriminator exists** — `22-discriminator.log` reads all thirty `acore_playerbots` tables identical before and after an add, every `PlayerbotsDatabase` statement in `PlayerbotMgr.cpp` listed from the box's source (nothing on the add path), `.playerbots bot list` `Console::No`, only `characters.online` moves — so the app keeps `AltbotMemory` (`party-altbots.json` in the state dir, per install and per master, written on the join, pruned against the group table on every successful read; a ledger row). `members()` unions it with the marker-bots; the panel reads "1 bot in this party." after the press and "2 bots" with two; `remove()` watches the row leave (`group_member` before/after, both bridge lines in a window proved empty) and refuses a character not in the party with nothing sent; "Dismiss all" with two standing removes both. Eleven mutations 11/11 (M11 puts round 1's vacuous success back). The owner's three client files on the host restored by a `restore` stage that prints all three before and after, at the start and the end of the round; portproxy as-found a `netsh` capture; nine frames cropped to the game window. Gate ALL GREEN (4165), transcript with nothing uncommitted. Lead's check: 203 party tests and 250 ledger/controller tests green; M11 applied by hand → exactly 1 failed, restored → 203; no-secrets test green; a cropped frame opened (game window only, both adds in the chat); the restore capture read. **ACCEPT** at the cap.
+
+## Closed (lead, 2026-09-11 09:20 CEST)
+
+Merged `--no-ff` as `c3df68ab`; gate on m910q behind the merge `=== --checks: ALL GREEN ===` (the first run was killed by the laptop's memory at the mypy step; the re-run went through); pushed. 8.6 ticked on the four folders. Worktree and branch removed.
