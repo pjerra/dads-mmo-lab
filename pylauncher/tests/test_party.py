@@ -781,6 +781,7 @@ def _install(
     running: bool = True,
     level_setter: party.LevelSetter | None = None,
     link_writer: object | None = None,
+    altbots: party.AltbotMemory | None = None,
 ) -> party.InstallParty:
     return party.InstallParty(
         WOTLK,
@@ -792,6 +793,7 @@ def _install(
         engine=lambda: party.BinaryRead(True, "in"),
         level_setter=level_setter,
         link_writer=link_writer,  # type: ignore[arg-type]
+        altbots=altbots,
     )
 
 
@@ -3130,3 +3132,265 @@ def test_a_link_write_that_answers_something_else_is_reported_and_not_parsed_pas
     assert isinstance(party.read_link_write("row\t1\t2\n"), str), "no row count is no answer"
     seam, _ = _linkable(tmp_path, "1\tPERZI", "2\tFRIEND", "", wrote="what?\n")
     assert seam.link_account("Pakka", "FRIEND").linked is False
+
+
+# -- T26 live half: the named route reads the party WITHOUT the bot marker ----
+
+
+def test_the_named_routes_party_read_does_not_filter_by_the_bot_marker() -> None:
+    """Measured on `yulon-ubuntu2`, 2026-09-11 02:04:38, and it is the whole
+    defect the live half found.
+
+    `group_rows_sql` keeps only rows the BOT MARKER recognises, which is right
+    for `add_bot`: `addclass` logs in a character out of the module's own pool,
+    on an account whose username begins with `RandomBotAccountPrefix`. This
+    route's characters are the opposite by definition -- somebody's own alt, a
+    guild mate's character, a friend's -- and every one of them is on a PERSON's
+    account. Pressed live, `Tsixalt` logged in and stood in the party (the
+    module's own `add: Tsixalt - ok` / `Tsixalt joins the party.` in the
+    master's client, and `group_member` holding group 2 with both guids), and
+    this app said "no bot by that name joined the party within 6 seconds"
+    because the poll could not see it. So the named route reads the party with
+    the marker's clause left out, and drops the master by guid instead -- which
+    is the only row the marker was keeping out on this path.
+    """
+    sql = party.party_rows_sql(WOTLK, master_guid=1001)
+    assert dbreads.bot_clause(WOTLK, RNDBOT) not in sql
+    assert "RNDBOT" not in sql.upper()
+    assert "memberGuid=1001" in sql.replace(" ", "")
+    assert "memberGuid<>1001" in sql.replace(" ", "")
+    assert "ORDER BY" in sql.upper()
+
+
+def test_the_named_routes_party_read_is_anchored_on_the_masters_own_group() -> None:
+    """The same sub-select `group_rows_sql` is anchored on: `group_member.guid`
+    is the GROUP and `memberGuid` is the member, so without it this reads every
+    group on the server."""
+    sql = party.party_rows_sql(WOTLK, master_guid=1001)
+    assert "group_member" in sql
+    # Three, and each of them is a different job: the JOIN onto `characters`,
+    # the sub-select that turns the master's guid into his GROUP's id, and the
+    # one clause this read has instead of the bot marker's.
+    assert sql.count("memberGuid") == 3
+    assert "LIMIT 1" in sql
+    assert "c.guid = gm.memberGuid" in sql
+
+
+def test_the_seam_polls_the_named_add_with_the_unfiltered_party_read(tmp_path: Path) -> None:
+    """The press, end to end, with the poll's own statement read back out of the
+    seam: a character on an account the bot marker does NOT recognise is the
+    case this route is for, and the statement the poll sends must not carry the
+    marker's clause."""
+    chan = _Chan(
+        {
+            "dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping"),
+            "dml_botadd": _issued("Pakka", "Nore"),
+        }
+    )
+    sql = _Sql(
+        "1001\n",  # the precondition read: Pakka is online
+        "1001\n",  # the ground read's own guid lookup
+        "",  # the party is empty before the press
+        "1001\n",
+        "Nore\t2\t8\t60\n",  # and holds Nore after it
+    )
+    result = _install(_ready_install(tmp_path), sql, chan).add_named("Pakka", "Nore")
+    assert result.joined is True
+    party_reads = [asked for asked in sql.asked if "group_member" in asked]
+    assert party_reads, "the named add never read the group table"
+    for asked in party_reads:
+        assert "RNDBOT" not in asked.upper()
+        assert "memberGuid <> 1001" in asked
+
+
+def test_the_bot_routes_party_read_still_filters_by_the_bot_marker(tmp_path: Path) -> None:
+    """The other half of the same change, so the fix cannot be "drop the clause
+    everywhere": `members()` is what the panel draws and what `remove_all`
+    confirms, and a party list that offered to dismiss a real person's character
+    would be a worse defect than the one being fixed."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "Bottom\t777\t8\t1\n")
+    seam = _install(_ready_install(tmp_path), sql, chan)
+    assert seam.members("Pakka") == (party.Member("Bottom", 777, 8, 1),)
+    assert "RNDBOT" in sql.asked[1].upper()
+
+
+# -- T26 round 2: members() counts the altbots this app added ----------------
+#
+# Measured on `yulon-ubuntu2` 2026-09-11 03:04 (`22-discriminator.log`): the
+# server records a `bot add` NOWHERE this app can read. All thirty tables in
+# `acore_playerbots` hold the same row counts before and after an add,
+# `playerbots_random_bots` included; the only `PlayerbotsDatabase` writes in
+# `PlayerbotMgr.cpp` are the four account-link statements; `.playerbots bot
+# list` is `Console::No` and answers the SOAP caller with the USAGE list of its
+# three `Console::Yes` siblings both before and after; and in
+# `acore_characters` the only column that moves for the added character is
+# `online`, which is what a person logging in moves too. `account.online` is 1
+# for `RNDBOT0` as well, so it does not separate a bot session from a real one
+# either. So the app keeps its own record.
+
+
+def test_the_group_read_counts_a_name_this_app_remembers_adding() -> None:
+    """The union. `dbreads.bot_clause` answers for the module's own pool; this
+    route's characters are on people's accounts and no marker will ever match
+    one, so the names this app added through `add_named` are asked for by
+    name."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001, also=("Tsixalt", "Tsixmate"))
+    assert dbreads.bot_clause(WOTLK, RNDBOT) in sql
+    assert "c.name IN ('Tsixalt', 'Tsixmate')" in sql
+
+
+def test_the_group_read_never_counts_the_master_himself() -> None:
+    """The master has a `group_member` row of his own, and the union arm would
+    return him the moment his own name were remembered. He is dropped by guid,
+    which is the one thing the marker's clause was doing on this path."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001, also=("Tsixmaster",))
+    assert "memberGuid<>1001" in sql.replace(" ", "")
+
+
+def test_the_group_read_with_nothing_remembered_is_the_marker_clause_alone() -> None:
+    """A human in the party is neither a marker bot nor a name this app added,
+    so nothing about the union can let one in: with nothing remembered the
+    query is what it always was."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001)
+    assert "c.name IN" not in sql
+    assert dbreads.bot_clause(WOTLK, RNDBOT) in sql
+
+
+def test_a_remembered_name_that_is_not_a_character_name_is_refused_not_quoted() -> None:
+    """`dbreads._SAFE_PREFIX`'s rule, on the one value here that reaches a
+    quoted literal from a stored file rather than from a press."""
+    sql = party.group_rows_sql(WOTLK, RNDBOT, master_guid=1001, also=("Bad'; DROP --",))
+    assert "DROP" not in sql
+    assert "c.name IN" not in sql
+
+
+def test_the_seam_remembers_a_character_it_added_and_then_counts_it(tmp_path: Path) -> None:
+    """The whole of must-fix 2, end to end: after a successful `add_named` the
+    party the panel draws holds the character, where round 1's panel printed
+    "X joined the party." and "This character's party has no bots in it yet."
+    under it."""
+    chan = _Chan(
+        {
+            "dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping"),
+            "dml_botadd": _issued("Pakka", "Nore"),
+        }
+    )
+    sql = _Sql(
+        "1001\n",  # precondition: Pakka is online
+        "1001\n",  # the ground read's guid lookup
+        "",  # the party is empty before the press
+        "1001\n",
+        "Nore\t2\t8\t60\n",  # and holds Nore after it
+    )
+    seam = _install(_ready_install(tmp_path), sql, chan, altbots=party.AltbotMemory(None))
+    assert seam.add_named("Pakka", "Nore").joined is True
+    assert seam.remembered_altbots("Pakka") == ("Nore",)
+    sql.answers = ["1001\n", "Nore\t2\t8\t60\n"]
+    assert seam.members("Pakka") == (party.Member("Nore", 2, 8, 60),)
+    assert "'Nore'" in sql.asked[-1]
+
+
+def test_a_remembered_character_that_left_the_party_is_forgotten(tmp_path: Path) -> None:
+    """The record is dropped when the character leaves the party: it is pruned
+    against the group table on every successful read, so a name nobody removed
+    through the app does not sit in the file for ever."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    memory = party.AltbotMemory(None)
+    memory.remember("Pakka", "Nore")
+    seam = _install(_ready_install(tmp_path), _Sql("1001\n", ""), chan, altbots=memory)
+    assert seam.members("Pakka") == ()
+    assert memory.names("Pakka") == ()
+
+
+def test_a_group_read_that_failed_forgets_nothing(tmp_path: Path) -> None:
+    """A read that could not be done says nothing about who is in the party,
+    and pruning on it would throw the record away on a database hiccup."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+
+    class _BrokenGroupRead(_Sql):
+        def query(self, db: str, statement: str) -> str:
+            if "group_member" in statement:
+                raise RuntimeError("docker is not running")
+            return super().query(db, statement)
+
+    memory = party.AltbotMemory(None)
+    memory.remember("Pakka", "Nore")
+    seam = _install(_ready_install(tmp_path), _BrokenGroupRead("1001\n"), chan, altbots=memory)
+    assert isinstance(seam.members("Pakka"), str)
+    assert memory.names("Pakka") == ("Nore",)
+
+
+def test_a_party_row_that_did_not_parse_forgets_nothing_either(tmp_path: Path) -> None:
+    """The other shape of a read that did not answer, and the one that reaches
+    the prune's guard: `read_members` REPORTS an unparsable row rather than
+    skipping it, so `members()` returns a sentence with the rows unread. Pruning
+    on that would drop the record because of one malformed line."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    memory = party.AltbotMemory(None)
+    memory.remember("Pakka", "Nore")
+    sql = _Sql("1001\n", "Nore\tnot-a-guid\n")
+    seam = _install(_ready_install(tmp_path), sql, chan, altbots=memory)
+    answer = seam.members("Pakka")
+    assert isinstance(answer, str)
+    assert "not a group member" in answer
+    assert memory.names("Pakka") == ("Nore",)
+
+
+def test_the_altbot_record_survives_a_new_object_over_the_same_file(tmp_path: Path) -> None:
+    """It is a per-install record on disk and not a process's memory: the panel
+    is rebuilt on every tab switch and the app is restarted between sessions."""
+    path = party.altbot_store_path(tmp_path)
+    first = party.AltbotMemory(path, "wow-wotlk-243c46e3")
+    first.remember("Pakka", "Nore")
+    assert party.AltbotMemory(path, "wow-wotlk-243c46e3").names("Pakka") == ("Nore",)
+    assert party.AltbotMemory(path, "another-install").names("Pakka") == ()
+
+
+def test_an_unreadable_altbot_store_is_an_empty_record_and_not_a_crash(tmp_path: Path) -> None:
+    """The panel must draw. A store that cannot be parsed is the same as one
+    that has nothing in it."""
+    path = party.altbot_store_path(tmp_path)
+    path.write_text("{not json")
+    memory = party.AltbotMemory(path, "wow-wotlk-243c46e3")
+    assert memory.names("Pakka") == ()
+    memory.remember("Pakka", "Nore")
+    assert memory.names("Pakka") == ("Nore",)
+
+
+# -- T26 round 2: the dismissal readback is not vacuous ----------------------
+
+
+def test_the_seam_refuses_to_dismiss_a_character_that_is_not_in_the_party(
+    tmp_path: Path,
+) -> None:
+    """Must-fix 3. `dismiss()` polls for a name to VANISH, so a name that was
+    never in the read it polls comes back `removed=True` on the first read
+    having had nothing to observe -- the false-success shape T21 deletes. The
+    seam reads the party first and sends nothing when the character is not in
+    it, exactly as `add_named` refuses a character that already is."""
+    chan = _Chan({"dml_bridge_ping": Answer("yes", "DML-BRIDGE-READY dml_bridge_ping")})
+    sql = _Sql("1001\n", "")  # online, and an empty party
+    result = _install(_ready_install(tmp_path), sql, chan).remove("Pakka", "Nore")
+    assert result.removed is False
+    assert "not in Pakka's party" in result.sentence
+    assert chan.sent == [], "nothing may be sent for a party nobody is in"
+
+
+def test_the_seam_dismisses_a_character_the_party_read_does_hold(tmp_path: Path) -> None:
+    """The other side of the same read: a character the group table holds is
+    uninvited and the readback watches it go."""
+    chan = _Chan()
+    sql = _Sql(
+        "1001\n",  # the ground read's guid lookup
+        "Nore\t2\t8\t60\n",  # the party holds Nore
+        "1001\n",
+        "",  # and does not, after the uninvite
+    )
+    memory = party.AltbotMemory(None)
+    memory.remember("Pakka", "Nore")
+    seam = _install(_ready_install(tmp_path), sql, chan, altbots=memory)
+    result = seam.remove("Pakka", "Nore")
+    assert result.removed is True
+    assert "dml_uninvite Pakka Nore" in chan.sent
+    assert memory.names("Pakka") == (), "a dismissed character is forgotten"

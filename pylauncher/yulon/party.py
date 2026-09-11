@@ -55,11 +55,12 @@ module's `conf/mod_ale.conf.dist` nor its `ALEConfig.cpp`.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -1013,7 +1014,9 @@ class Member:
     level: int
 
 
-def group_rows_sql(entry: CatalogEntry, marker: dbreads.Marker, *, master_guid: int) -> str:
+def group_rows_sql(
+    entry: CatalogEntry, marker: dbreads.Marker, *, master_guid: int, also: tuple[str, ...] = ()
+) -> str:
     """The bot members of the group `master_guid` is in.
 
     Two things this query is careful about, and both are the reason it is not
@@ -1029,17 +1032,83 @@ def group_rows_sql(entry: CatalogEntry, marker: dbreads.Marker, *, master_guid: 
       two-armed clause the Bots tab counts with — registry OR account prefix —
       so a party of bots cannot read back as empty the way `preset-save`'s
       registry-only version did (`rust-main:.../party.rs:277`).
+    * **`also` is the second arm, and T26's live half is why it exists.** The
+      marker answers for the module's own pool -- a bot-registry entry, or an
+      account whose username begins with `RandomBotAccountPrefix`. The
+      characters `add_named` puts in a party are the opposite by definition:
+      somebody's own alt, a guild mate's, a friend's, every one of them on a
+      PERSON's account that no marker will ever match. Measured on
+      `yulon-ubuntu2` 2026-09-11 03:04
+      (`8.6-altbot-live-yulon-ubuntu2-2026-09-11/22-discriminator.log`), the
+      server records such an add NOWHERE this app can read: all thirty
+      `acore_playerbots` tables hold identical row counts before and after one,
+      the module's only `PlayerbotsDatabase` writes are its four account-link
+      statements, `.playerbots bot list` is `Console::No` and answers a SOAP
+      caller with the USAGE list of its three `Console::Yes` siblings, and the
+      only `characters` column that moves is `online` -- which is what a person
+      logging in moves too. So the names this app itself added come in by name,
+      out of `AltbotMemory`, and the master is dropped by GUID as well, so the
+      union can never hand back the master's own row.
+
+    A name that is not a character's name is DROPPED rather than escaped, which
+    is `dbreads._SAFE_PREFIX`'s rule: this is the one value in the query that
+    reaches a quoted literal out of a file on disk rather than out of a press.
     """
     schemas = entry.schema_map()
     chars = schemas["characters"]
     clause = dbreads.bot_clause(entry, marker)
+    remembered = tuple(name for name in also if valid_name(name))
+    if remembered:
+        names = ", ".join(f"'{name}'" for name in remembered)
+        clause = f"({clause}) OR c.name IN ({names})"
     return (
         "SELECT c.name, c.guid, c.class, c.level "
         f"FROM {chars}.group_member gm "
         f"JOIN {chars}.characters c ON c.guid = gm.memberGuid "
         f"WHERE gm.guid = (SELECT guid FROM {chars}.group_member "
         f"WHERE memberGuid = {int(master_guid)} LIMIT 1) "
+        f"AND gm.memberGuid <> {int(master_guid)} "
         f"AND ({clause}) "
+        "ORDER BY c.name"
+    )
+
+
+def party_rows_sql(entry: CatalogEntry, *, master_guid: int) -> str:
+    """EVERY member of the group `master_guid` is in, except the master.
+
+    **The same query as `group_rows_sql` with the bot marker's clause taken
+    out**, and it exists because of what the live half measured on
+    `yulon-ubuntu2` on 2026-09-11 (`pyplan/gates/8.6-altbot-live-yulon-ubuntu2-
+    2026-09-11/`, §4): `add_named`'s poll could not see the character it had
+    just added.
+
+    `dbreads.bot_clause` asks "is this row on an account the bot marker
+    recognises" -- a registry entry, or a username beginning with
+    `RandomBotAccountPrefix`. For `add_bot` that is exactly right: `addclass`
+    logs in a character out of the module's own pool and those characters live
+    on `RNDBOT*` accounts. For THIS route it is exactly wrong: the characters it
+    adds are the owner's own alt, a guild mate's, a friend's -- every one of them
+    on a PERSON's account, which no bot marker will ever match. Pressed live,
+    `Tsixalt` came online, the module answered `add: Tsixalt - ok` and
+    `Tsixalt joins the party.` in the master's own client, `group_member` held
+    the master and the alt in one group -- and this app said "no bot by that name
+    joined the party within 6 seconds", because the row was filtered out of the
+    read it was polling.
+
+    The master's own row is what the marker was keeping out on this path
+    (`group_rows_sql`'s docstring says so), so it is dropped by guid instead.
+    That is the whole difference: no clause about accounts, one clause about the
+    master.
+    """
+    schemas = entry.schema_map()
+    chars = schemas["characters"]
+    return (
+        "SELECT c.name, c.guid, c.class, c.level "
+        f"FROM {chars}.group_member gm "
+        f"JOIN {chars}.characters c ON c.guid = gm.memberGuid "
+        f"WHERE gm.guid = (SELECT guid FROM {chars}.group_member "
+        f"WHERE memberGuid = {int(master_guid)} LIMIT 1) "
+        f"AND gm.memberGuid <> {int(master_guid)} "
         "ORDER BY c.name"
     )
 
@@ -2794,6 +2863,111 @@ The read half is all that is wanted (`run_statement` is not reachable through
 it), which is exactly what `dbreads.SqlReader` already is."""
 
 
+ALTBOT_STORE = "party-altbots.json"
+"""The app's own record of the characters it added as bots through `add_named`.
+
+**It exists because the server keeps no such record anywhere readable**, which
+was measured rather than assumed -- `group_rows_sql`'s `also` paragraph carries
+the readings and the capture. Without it the one control this ticket ships
+contradicts itself: the panel says "X joined the party." and, under it, "This
+character's party has no bots in it yet.", because the party it draws is
+marker-filtered and X is on a person's account.
+
+It lives under `platform.config_dir()` and not in the server folder: it is this
+app's bookkeeping, not the install's, so an uninstall has nothing extra to purge
+and a server directory nobody gave us gains no dotfile."""
+
+
+def altbot_store_path(config_dir: Path | None = None) -> Path:
+    """Where `AltbotMemory` keeps its file. `dbsecret.py:127`'s shape."""
+    root = config_dir if config_dir is not None else platform.config_dir()
+    return root / ALTBOT_STORE
+
+
+class AltbotMemory:
+    """Which characters this app added as bots, per install and per master.
+
+    A name goes in when `add_named` has SEEN it join the group table -- never
+    when the command was merely issued -- and comes out when the group table no
+    longer holds it or when the app dismisses it. So it is a record of what this
+    app believes is standing in a party right now, pruned against the world on
+    every successful read, and not a history.
+
+    `path=None` is a memory that lives as long as the object, which is what the
+    tests use and what an install with no config directory falls back to. A file
+    that cannot be read or written is an EMPTY record and never an exception:
+    the panel has to draw either way, and the cost of a lost record is a party
+    row the marker cannot see -- the same place this started, not worse.
+    """
+
+    def __init__(self, path: Path | None, install_id: str = "") -> None:
+        self._path = path
+        self._install = install_id or "unknown"
+        self._loose: dict[str, list[str]] = {}
+
+    def _table(self) -> dict[str, dict[str, list[str]]]:
+        if self._path is None:
+            return {self._install: self._loose}
+        try:
+            raw = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            logger.warning(f"could not read {self._path}: {exc}")
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _save(self, table: dict[str, dict[str, list[str]]], masters: dict[str, list[str]]) -> None:
+        if self._path is None:
+            self._loose = masters
+            return
+        table[self._install] = masters
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(table, indent=2, sort_keys=True))
+        except OSError as exc:
+            logger.warning(f"could not write {self._path}: {exc}")
+
+    def _masters(self, table: dict[str, dict[str, list[str]]]) -> dict[str, list[str]]:
+        mine = table.get(self._install)
+        return dict(mine) if isinstance(mine, dict) else {}
+
+    def names(self, master: str) -> tuple[str, ...]:
+        """The characters this app added to `master`'s party, in the order kept."""
+        held = self._masters(self._table()).get(master)
+        return tuple(name for name in held if isinstance(name, str)) if held else ()
+
+    def remember(self, master: str, name: str) -> None:
+        table = self._table()
+        masters = self._masters(table)
+        held = list(masters.get(master, ()))
+        if name not in held:
+            held.append(name)
+        masters[master] = held
+        self._save(table, masters)
+
+    def keep_only(self, master: str, present: Iterable[str]) -> None:
+        """Drop every remembered name that is not in `present`.
+
+        Called with the group table's own rows after a read that SUCCEEDED, and
+        never after one that failed: a read that could not be done says nothing
+        about who is in the party, and pruning on it would throw the record away
+        on a database hiccup.
+        """
+        keeping = set(present)
+        held = self.names(master)
+        kept = [name for name in held if name in keeping]
+        if len(kept) == len(held):
+            return
+        table = self._table()
+        masters = self._masters(table)
+        if kept:
+            masters[master] = kept
+        else:
+            masters.pop(master, None)
+        self._save(table, masters)
+
+
 @dataclass(frozen=True)
 class PartyState:
     """What the My Party group shows: the rows, or which precondition stopped it.
@@ -2839,6 +3013,7 @@ class InstallParty:
         engine: Callable[[], BinaryRead] | None = None,
         level_setter: LevelSetter | None = None,
         link_writer: SqlWriter | None = None,
+        altbots: AltbotMemory | None = None,
     ) -> None:
         self.entry = entry
         self.server_dir = server_dir
@@ -2857,6 +3032,14 @@ class InstallParty:
         # a second seam beside `sql` rather than a wider `sql`, so the read half
         # keeps the guarantee its own type makes.
         self._link_writer = link_writer
+        # T26 round 2. The record `members()` unions with the bot marker, and
+        # the reason it is a seam is the reason `link_writer` is one: the tests
+        # for every sentence this object says must not be tests that need a
+        # config directory. `None` is a record that lives as long as this
+        # object, which is honest rather than convenient -- the panel is rebuilt
+        # on every tab switch, so a factory that forgets to wire the file loses
+        # the party list the moment the tab is left. `controller_view` wires it.
+        self._altbots = altbots or AltbotMemory(None)
         # 8.6/T5. The level goes through the Characters tab's own seam, built
         # here over the same four things it would be built over in the factory —
         # a bot is a character, and a second `character level` would be a second
@@ -2959,7 +3142,21 @@ class InstallParty:
         return int(text) if text.isdigit() else None
 
     def members(self, master: str) -> tuple[Member, ...] | str:
-        """The bots in `master`'s party, or the sentence saying why not."""
+        """The bots in `master`'s party, or the sentence saying why not.
+
+        **The marker's bots UNION the characters this app added through
+        `add_named`** (T26 round 2). One set, and every caller reads this one:
+        `state()` draws it, `remove_all` confirms against it, `remove()` reads
+        its ground from it and `candidates()` counts it. Round 1 shipped a
+        control whose party list could not contain what the control had just
+        added, so the panel said "X joined the party." and "This character's
+        party has no bots in it yet." in the same breath, and `remove_all`
+        handed `dismiss_all` an empty list while the altbots stood in the party.
+
+        A human in the party is in neither arm and is never in this list --
+        `group_rows_sql`'s two clauses are "on a bot account" and "a name this
+        app put there", and a person is neither.
+        """
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
             return answer.problem or "this install's bot marker is unreadable"
@@ -2968,8 +3165,43 @@ class InstallParty:
             return _not_online(master)
         try:
             raw = self._sql.query(
-                "characters", group_rows_sql(self.entry, answer.marker, master_guid=guid) + ";"
+                "characters",
+                group_rows_sql(
+                    self.entry,
+                    answer.marker,
+                    master_guid=guid,
+                    also=self._altbots.names(master),
+                )
+                + ";",
             )
+        except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
+            logger.warning(f"could not read {master}'s party: {exc}")
+            return f"could not read this character's party: {exc}"
+        rows = read_members(raw)
+        if not isinstance(rows, str):
+            # Only after a read that succeeded: `keep_only`'s docstring says why.
+            self._altbots.keep_only(master, [row.name for row in rows])
+        return rows
+
+    def remembered_altbots(self, master: str) -> tuple[str, ...]:
+        """The names this app is keeping for `master` -- the record, not the party."""
+        return self._altbots.names(master)
+
+    def party_members(self, master: str) -> tuple[Member, ...] | str:
+        """Everyone in `master`'s party except `master`, bot marker or not.
+
+        The read `add_named` polls, and `members()`'s docstring says why it is
+        not that one: this route adds characters on people's accounts, which the
+        bot marker cannot recognise and must not have to. `members()` stays as
+        it is -- it is what the panel draws and what `remove_all` confirms, and a
+        party list that offered to dismiss a real person's character would be a
+        worse defect than the one this fixes.
+        """
+        guid = self.online_guid(master)
+        if guid is None:
+            return _not_online(master)
+        try:
+            raw = self._sql.query("characters", party_rows_sql(self.entry, master_guid=guid) + ";")
         except Exception as exc:  # noqa: BLE001 - one answer for every seam failure
             logger.warning(f"could not read {master}'s party: {exc}")
             return f"could not read this character's party: {exc}"
@@ -3083,10 +3315,33 @@ class InstallParty:
         `tuple[Member, ...] | str` it actually is, not `_rows_only`'s "empty
         party" reading of a failure (T21): this poll needs to tell a row that
         cleared apart from a table it could not read.
+
+        **The party is read BEFORE anything is sent** (T26 round 2, must-fix 3).
+        `dismiss()` polls for a name to VANISH, so a name that was not in the
+        read it polls comes back `removed=True` on the first read having watched
+        nothing at all -- the false-success shape T21 exists to delete, which is
+        what round 1's own teardown printed for every altbot it dismissed. The
+        ground read makes the readback mean something: either the character is
+        there and the poll watches it go, or it is not and nothing is sent. It
+        is `add_named`'s "already in the party" refusal, from the other end.
         """
         send = self._send_or_none()
         if send is None:
             return Dismissal(False, False, _no_channel())
+        standing = self.members(master)
+        if isinstance(standing, str):
+            return Dismissal(False, False, standing, bot=bot, unreadable=True)
+        if all(row.name != bot for row in standing):
+            stop = (
+                f"{bot} is not in {master}'s party, so nothing was sent. A dismissal is read "
+                "back by watching the row leave the group table, and there is no row to watch."
+            )
+            return Dismissal(False, False, stop, bot=bot)
+        # Nothing is "forgotten" here on purpose: `dismiss()`'s poll goes
+        # through `members()`, whose prune drops every remembered name the group
+        # table no longer holds -- so the character this call removes is out of
+        # the record by the time the poll has seen it leave. A second call that
+        # did the same thing would be a line no mutation could kill.
         return dismiss(
             player=master,
             bot=bot,
@@ -3165,12 +3420,22 @@ class InstallParty:
             return NamedAddition(False, False, name, _no_channel(), blocker=_no_channel())
         # The module-level function, not this method: the press and the poll are
         # testable without an install, exactly as `add_bot` and `dismiss` are.
-        return add_named(
+        result = add_named(
             master=master,
             name=name,
             send=send,
-            members=lambda: self.members(master),
+            # `party_members`, not `members`: the poll asks whether THIS named
+            # character arrived, and there is nothing remembered about it yet --
+            # that is what this press decides. `members()` answers the other
+            # question, "what is standing in the party", and reads the union.
+            members=lambda: self.party_members(master),
         )
+        if result.joined:
+            # Remembered on the JOIN and never on the send: the command being
+            # issued says nothing, and every one of the module's refusals goes
+            # to the master's game window (`add_named`'s docstring).
+            self._altbots.remember(master, result.name)
+        return result
 
     def link_plan(self, master: str, account: str) -> AccountLink:
         """What "Link an account" WOULD write, named in full, writing nothing."""

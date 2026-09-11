@@ -1165,6 +1165,18 @@ def _for_wotlk(
             # cannot be called through it. Without this line the control could
             # only ever say it has no route.
             link_writer=sql,
+            # T26 round 2, and the second line of this factory the ticket needs.
+            # `members()` unions the bot marker's rows with the characters this
+            # app added through `add_named`, and that record has to outlive the
+            # panel -- it is rebuilt on every tab switch and the app is closed
+            # between sessions. Keyed by install id under `config_dir()`, so two
+            # installs on one machine do not read each other's parties. Without
+            # this line the panel forgets an altbot the moment the tab is left,
+            # and says "This character's party has no bots in it yet." under the
+            # sentence that just reported one joining.
+            altbots=party.AltbotMemory(
+                party.altbot_store_path(), composegen.install_id(server_dir)
+            ),
         ),
         # 8.9a. WotLK first, and Vanilla in 8.9b; the four seams this needs are
         # the ones every install has. `forget` is the default that reads and
