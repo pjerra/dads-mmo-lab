@@ -71,7 +71,7 @@ def build_catalog_tab(
     `central` and `column` are wiring with nothing left to read once this
     returns.
     """
-    from PySide6.QtCore import QSize
+    from PySide6.QtCore import QSize, Qt
     from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
     from yulon.ui.icons import get_tab_icon
@@ -79,6 +79,12 @@ def build_catalog_tab(
     tabs = QTabWidget(window)
     tabs.setTabPosition(QTabWidget.TabPosition.West)
     tabs.setIconSize(QSize(18, 18))
+    # The sidebar grows by one tab per remembered install; once there are more
+    # than the window's height can show, Qt's default is to shrink every tab
+    # until the text clips rather than scroll. Scroll buttons keep each tab at
+    # its styled size and let the rail scroll instead, on any window height.
+    tabs.setUsesScrollButtons(True)
+    tabs.setElideMode(Qt.TextElideMode.ElideRight)
     central = QWidget(window)
     column = QVBoxLayout(central)
     banner = QLabel(central)
@@ -194,7 +200,7 @@ def build_window() -> object:
     catalog = load_catalog()
     state = load_state()
     window = _Window()
-    window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
+    window.setWindowTitle(f"Dad's MMO Lab launcher — Yu'lon {__version__}")
     apply_warcraft_theme(window)
 
     log_panel = LogPanel()

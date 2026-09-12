@@ -124,19 +124,22 @@ QTabBar::tab:selected {{
     padding-bottom: 8px;
 }}
 
-/* West (Left Sidebar) Tabs */
+/* West (Left Sidebar) Tabs — kept narrow so the sidebar reads as a rail,
+   not a second panel; icon-size (18px, main.py) plus this padding is what
+   actually sets the rail's width, since QTabBar sizes itself from its tabs. */
 QTabBar::tab:west {{
     border-top-left-radius: 5px;
     border-bottom-left-radius: 5px;
     border-top-right-radius: 0px;
     border-bottom-right-radius: 0px;
-    padding: 12px 20px;
+    padding: 8px 10px;
     margin-bottom: 4px;
     margin-right: 0px;
     border: 1.5px solid {COLOR_BRASS_DEEP};
     border-right: 2px solid {COLOR_BRASS_DARK};
-    min-height: 26px;
-    min-width: 120px;
+    min-height: 22px;
+    min-width: 68px;
+    max-width: 96px;
     text-align: left;
 }}
 
@@ -144,12 +147,30 @@ QTabBar::tab:west:selected {{
     border: 2px solid {COLOR_GOLD_BRASS};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
     border-right: 2px solid {COLOR_BG_CONTAINER};
-    padding-right: 22px;
+    padding-left: 9px;
 }}
 
 QTabBar::tab:disabled {{
     background-color: #12100E;
     color: #4A443C;
+    border-color: #24201A;
+}}
+
+/* Scroll buttons for tab bars with more tabs than fit — the sidebar once a
+   few servers are added, and ControllerView's top tab strip on a narrow
+   window (`setUsesScrollButtons(True)` in main.py / controller_view.py). */
+QTabBar QToolButton {{
+    background-color: {COLOR_BG_PARCHMENT};
+    border: 1.5px solid {COLOR_BRASS_DARK};
+    border-radius: 3px;
+}}
+
+QTabBar QToolButton:hover {{
+    border-color: {COLOR_GOLD_BRIGHT};
+    background-color: {COLOR_BG_PARCHMENT_LIGHT};
+}}
+
+QTabBar QToolButton:disabled {{
     border-color: #24201A;
 }}
 
@@ -187,6 +208,13 @@ QPushButton:hover {{
 }}
 
 QPushButton:pressed {{
+    /* The "sunken" look comes from the darker fill and flipped border
+       shading only — NOT from a padding shift. A padding shift here used to
+       nudge the button's content 1px down-and-right without a matching
+       change on the other two sides, so a pressed button's box did not line
+       up with its un-pressed neighbours in the same row (their shared
+       border edge stopped being one straight line). Padding stays identical
+       to the base QPushButton rule in every state. */
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #120A04, stop:0.5 #1C1208, stop:1 #2E1F10
@@ -197,8 +225,6 @@ QPushButton:pressed {{
     border-left: 2px solid #1A1208;
     border-right: 2px solid {COLOR_BRASS_DARK};
     border-bottom: 2px solid {COLOR_BRASS_DARK};
-    padding-top: 9px;
-    padding-left: 17px;
 }}
 
 QPushButton:disabled {{
@@ -291,7 +317,13 @@ QLabel#tile-warning {{
     color: {COLOR_TEXT_WARNING};
 }}
 
-/* --- Input Fields & Spinners --- */
+/* --- Input Fields & Spinners ---
+   Single-line controls get an explicit min-height so they never collapse to
+   the text's own line-height (no room for the padding, so the caret and
+   selection highlight clipped) — the defect "every textbox is properly
+   sized (currently not)" describes. Multi-line controls (log/report boxes)
+   get a much taller floor so they read as a panel, not a stray line, but
+   are left free to grow with their layout's stretch factor. */
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {COLOR_BG_INPUT};
     color: {COLOR_TEXT_PRIMARY};
@@ -300,6 +332,15 @@ QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     padding: 7px 10px;
     selection-background-color: #523E1E;
     selection-color: {COLOR_GOLD_LIGHT};
+}}
+
+QLineEdit, QSpinBox, QComboBox {{
+    min-height: 20px;
+    min-width: 60px;
+}}
+
+QTextEdit, QPlainTextEdit {{
+    min-height: 90px;
 }}
 
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{

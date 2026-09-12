@@ -2299,6 +2299,13 @@ class ControllerView(QWidget):
         self._console_pending = False
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
+        # 8 sub-tabs across the top; on a window narrowed toward the 850px
+        # floor (`main.py`'s `setMinimumSize`) the default behaviour shrinks
+        # every tab's text until it clips instead of scrolling the strip.
+        # Scroll buttons keep each tab at its styled width and let the whole
+        # bar scroll on a narrow window instead.
+        self._tabs.setUsesScrollButtons(True)
+        self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
 
