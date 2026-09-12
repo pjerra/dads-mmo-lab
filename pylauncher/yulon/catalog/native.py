@@ -5207,7 +5207,7 @@ class StagedInstaller:
 
         def work() -> None:
             try:
-                outcome.append(call(lambda line: queued.put(lines.relayed(line, stage=stage))))
+                outcome.append(call(lambda line: _put_all(queued, line, stage)))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)
             finally:
@@ -5329,6 +5329,18 @@ the extraction has left. The number is read from `runner` rather than typed
 here a second time: `_SHUTDOWN_TIMEOUT_SECONDS` answers the same question one
 layer down, and `test_spine.py` pins that the two agree.
 """
+
+
+def _put_all(queued: queue.Queue[str | None], line: str, stage: str) -> None:
+    """Push every record `lines.relayed()` makes of one relayed line onto the bridge.
+
+    A named function and not a lambda because a relayed line is now one OR two
+    records — the line itself, and the reading taken out of it — and a
+    comprehension inside a lambda reads as a trick where this reads as what it
+    is. `cmangos._stream()` has the same two lines for the same reason.
+    """
+    for record in lines.relayed(line, stage=stage):
+        queued.put(record)
 
 
 def stop_abandoned_worker(

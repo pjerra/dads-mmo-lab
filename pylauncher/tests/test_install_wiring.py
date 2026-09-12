@@ -1031,11 +1031,14 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
 
     So every line a run used to write is byte for byte what it writes now: the
     stage lines and the engine's own sentences are untouched by definition, a
-    `TOOL` line loses its marker and nothing else, and a `PROGRESS` line is
-    written as its own text.
+    `TOOL` line loses its marker and nothing else, and a `PROGRESS` reading is
+    not written at all — it is a header field, its raw line is written beside
+    it, and a transcript with both holds a rephrased copy of every one of a
+    CMaNGOS install's 8005 tile lines.
 
-    Mutation: write `line` instead of `lines.parse(line).text` and the first
-    three assertions below fail with the marker still on.
+    Mutations: write `line` instead of the parsed text and the first three
+    assertions fail with the marker still on; drop the `progress` skip and
+    `this map` appears in the transcript.
     """
     recorded: list[str] = []
     monkeypatch.setattr(install_wiring.logger, "info", lambda fmt, *a: recorded.append(fmt % a))
@@ -1055,8 +1058,10 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
         ) -> Iterator[str]:
             yield "Step 1 of 9 (11%): clone-core"
             yield "--- clone-core"
-            yield lines.TOOL + "#10 [builder 5/8] RUN cmake --build ."
-            yield lines.PROGRESS + "mmaps 66 Map 230 · tile 8 of 12"
+            # The shape a relay really produces since the 2026-09-12 review:
+            # the raw line, then the reading taken out of it.
+            yield lines.TOOL + "[Map 000] Building tile [22,52] (01 / 741)"
+            yield lines.PROGRESS + "mmaps 0 Map 000 · tile 1 of 741 (this map)"
             yield "Sources are in place."
 
     monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
@@ -1066,15 +1071,19 @@ def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shap
     assert written == [
         "Step 1 of 9 (11%): clone-core",
         "--- clone-core",
-        "#10 [builder 5/8] RUN cmake --build .",
-        "Map 230 · tile 8 of 12",
+        # BYTE-IDENTICAL, and this is the line the T30 gate grepped out of its
+        # own log. The reading that came with it is not here: it is a header
+        # field, and writing it would put a rephrased copy beside each of the
+        # 8005 tile lines a CMaNGOS install produces.
+        "[Map 000] Building tile [22,52] (01 / 741)",
         "Sources are in place.",
     ]
     assert not any("\x1e" in line for line in written)
+    assert not any("this map" in line for line in written)
     # The file gets the same text, because the file is the other half of the
     # transcript and the two must not disagree about what a run said.
-    assert [line for line in recorded if "clone-core" in line or "cmake" in line] == [
+    assert [line for line in recorded if "clone-core" in line or "Map" in line] == [
         "Step 1 of 9 (11%): clone-core",
         "--- clone-core",
-        "#10 [builder 5/8] RUN cmake --build .",
+        "[Map 000] Building tile [22,52] (01 / 741)",
     ]

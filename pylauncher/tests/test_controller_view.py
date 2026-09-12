@@ -55,6 +55,7 @@ from yulon.manifest import Build, Manifest, ManifestType, Source, parse_manifest
 from yulon.manifest_store import ManifestStore
 from yulon.networking import NetworkPlan, NetworkReport
 from yulon.ui import controller_view as controller_view_module
+from yulon.ui import lines as log_lines
 from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
@@ -6711,3 +6712,35 @@ def test_the_steam_seam_is_built_on_linux_and_carries_the_client_folder(
     assert seam is not None
     assert seam.client_dir == tmp_path / "client"
     assert seam.game == WOTLK.name
+
+
+def test_neither_one_line_sink_can_show_a_control_character(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T35's markers must never reach a `QLabel` or the module report.
+
+    These two sinks are the reason the marking is done at the install engine's
+    bridges and not inside `docker.run_attached()`: they are fed by the same
+    `run_attached()` calls the install uses, and neither is a `LogPanel` — one
+    is a one-line status label, the other a plain report pane — so neither
+    strips anything. `\\x1e` renders as a box glyph in both.
+
+    Belt on top of braces, and asserted because the cost of being wrong is a
+    box glyph in front of every line of a database import with nothing on
+    screen to explain it.
+
+    **Asserted as equality and not as "no `\x1e` in it"**, which was the first
+    version of this test and let the mutation through. `\x1e` is WHITESPACE to
+    Python: `"\x1etool >> x".strip()` is `"tool >> x"`, so the slot that only
+    stripped removed the separator and left the kind's name standing in front of
+    every line. Measured while this test was written, against the real slot.
+
+    Mutation: drop `lines.parse()` from either slot and that half fails with
+    `tool ` in front of the line.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view._import_line(log_lines.TOOL + ">> Applying update 2026_01_01_00.sql")
+    view._module_sql_line(log_lines.TOOL + ">> Applying mod-playerbots.sql")
+
+    assert view.problem_label.text().splitlines()[-1] == ">> Applying update 2026_01_01_00.sql"
+    assert view.module_report.toPlainText().splitlines()[-1] == ">> Applying mod-playerbots.sql"

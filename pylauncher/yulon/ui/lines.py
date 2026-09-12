@@ -132,12 +132,19 @@ def parse(line: str) -> Parsed:
     return Parsed(_tone(line) or "sentence", line)
 
 
-_BUILDKIT_STEP = re.compile(r"^#\d+ \[[^\]]* (\d+)/(\d+)\]")
+_BUILDKIT_STEP = re.compile(r"^#\d+ \[(?:[^\]]* )?(\d+)/(\d+)\]")
 """BuildKit's own progress, which is a step count and never a percentage.
 
-`#12 [5/8] RUN cmake --build .` — the number of the Dockerfile step being run
-out of that stage's total. It is the only figure a `docker compose build
---progress plain` produces, and the build is the longest stage an install has.
+The number of the Dockerfile step being run out of that stage's total, and the
+only figure a `docker compose build --progress plain` produces. The build is the
+longest stage an install has.
+
+**Both spellings, because the stage's name is optional.** A multi-stage
+Dockerfile prints `#10 [builder 5/8]` and a single-stage one prints `#5 [2/4]`.
+Every template this app generates today is multi-stage, so every step line in
+`pyplan/gates/` carries a name — but requiring the space that follows one made
+the other shape unreadable for no reason at all, and a template that grew a
+single-stage variant would have gone silently unread (review, 2026-09-12).
 """
 
 _COMPILER_PERCENT = re.compile(r"\[\s*(\d+)%\]")
@@ -170,29 +177,53 @@ def _percent_of(part: str, whole: str) -> int | None:
     return None if total <= 0 else int(part) * 100 // total
 
 
-def relayed(line: str, *, stage: str) -> str:
-    """One line of a subprocess's output, marked for the panel.
+def relayed(line: str, *, stage: str) -> list[str]:
+    """One line of a subprocess's output, as the records the panel should get for it.
 
-    `TOOL` by default, because most of what a build, an extractor or a database
-    import prints is chatter that should read as chatter. Where the line carries
-    a number that says how far along something is, it becomes a `PROGRESS` line
-    instead and moves the header strip rather than scrolling past: the T30
-    install wrote 97 minutes of tile lines into the panel at the weight of the
-    engine's own sentences, which is the report this ticket came from.
+    Always the line itself, marked `TOOL`, because most of what a build, an
+    extractor or a database import prints is chatter that should read as chatter
+    — and because a line is not consumed by having a number in it. Then, where
+    the line does carry a figure saying how far along something is, a second
+    `PROGRESS` record that moves the header strip. In that order: the panel
+    shows the line before the strip claims to describe it.
 
-    Three sources have such a number, and they are tried in that order with the
+    **Two records and not one, which is the review finding of 2026-09-12.** This
+    returned the `PROGRESS` record ALONE, and it cost the raw line twice over:
+    gone from the panel, because progress records are not appended, and gone
+    from the gate transcript, because `install_wiring` writes the display text
+    of what the engine yields — so `[Map 000] Building tile [22,52] (01 / 741)`,
+    which the T30 gate grepped out of its log, was deleted by the change meant
+    to make it readable. Keeping both costs one dimmed line per reading, which
+    is what the dimming is for.
+
+    Three sources carry a figure, and they are tried in that order with the
     LATER winning — see each pattern for what it reads and why the compiler's
     beats BuildKit's.
 
-    `stage` names what is being relayed, for the progress line's own field. It
+    `stage` names what is being relayed, for the progress record's own field. It
     is deliberately NOT the family's `Stage` name, which the relay cannot know
     (the family binds it), and nothing reads it as one.
     """
+    reading = _reading(line, stage)
+    return [TOOL + line] if reading is None else [TOOL + line, reading]
+
+
+def _reading(line: str, stage: str) -> str | None:
+    """The `PROGRESS` record `line` carries, or None if it carries no figure."""
     tile = _MMAP_TILE.search(line)
     if tile is not None:
         percent = _percent_of(tile.group(1), tile.group(2))
         if percent is not None:
-            said = f"tile {int(tile.group(1))} of {int(tile.group(2))}"
+            # `(this map)` is not decoration. The generator never says how many
+            # maps it will do — `MmapPlan` carries an argv, a file floor and a
+            # `required` flag, and MoveMapGen discovers the maps from
+            # `data/maps` itself and skips the ones it already has output for —
+            # so this figure is a fraction of ONE map and the bar goes back to
+            # zero at the next. Measured in the 7.7 Tortoise transcript: map 000
+            # ends at 741 tiles, map 001 starts at 1 of 1018. Without those two
+            # words a reader watches a stage bar fall from 99% to 0% forty times
+            # and reads each as a failure (review, 2026-09-12).
+            said = f"tile {int(tile.group(1))} of {int(tile.group(2))} (this map)"
             found_map = _MMAP_MAP.search(line)
             if found_map is not None:
                 said = f"Map {found_map.group(1)} · {said}"
@@ -204,9 +235,7 @@ def relayed(line: str, *, stage: str) -> str:
     compiler = _COMPILER_PERCENT.search(line)
     if compiler is not None:
         percent = int(compiler.group(1))
-    if percent is None:
-        return TOOL + line
-    return PROGRESS + f"{stage} {percent} {line}"
+    return None if percent is None else PROGRESS + f"{stage} {percent} {line}"
 
 
 def parse_step(line: str) -> Step | None:

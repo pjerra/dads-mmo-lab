@@ -1024,7 +1024,7 @@ def test_stream_progress_splits_gits_carriage_returns_into_separate_fragments(
     assert not any("\n" in line for line in got)
 
 
-def test_stream_progress_carries_stdout_and_stderr_in_the_order_they_arrived(
+def test_stream_progress_carries_both_pipes_keeping_the_order_within_each(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both pipes, live, on two threads — which is the difference from `stream()`.
@@ -1033,11 +1033,19 @@ def test_stream_progress_carries_stdout_and_stderr_in_the_order_they_arrived(
     clone that is the whole output: git says nothing at all on stdout, so the
     panel would have had the entire progress arrive after the clone finished.
 
-    Mutation: drop the stderr reader and only the stdout line comes back.
+    **Nothing here depends on the order BETWEEN the pipes**, because two
+    independent reader threads cannot promise one: what is asserted is that
+    every fragment arrives, and that each pipe's own fragments keep their order.
+    The test claimed cross-pipe arrival order until the 2026-09-12 review found
+    the docstring promising what the implementation cannot.
+
+    Mutation: drop the stderr reader and the two stderr fragments are missing.
     """
     _serving(monkeypatch, out=b"one\ntwo\n", err=b"first\rsecond\n")
     got = list(runner.stream_progress(["git", "fetch"]))
     assert sorted(got) == ["first", "one", "second", "two"]
+    assert got.index("one") < got.index("two"), "stdout's own order was not kept"
+    assert got.index("first") < got.index("second"), "stderr's own order was not kept"
 
 
 def test_stream_progress_raises_on_a_non_zero_exit_like_stream_does(
@@ -1121,3 +1129,35 @@ def test_stream_progress_asks_for_binary_pipes_so_the_carriage_returns_survive(
     assert not asked.get("text")
     assert not asked.get("universal_newlines")
     assert asked.get("encoding") is None
+
+
+def test_stream_progress_hands_the_child_the_environment_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`env` goes through `child_env()`, exactly as `run()`'s does.
+
+    The caller that needs it is the streamed git clone: `_no_prompt_env()` is
+    what stops a credential prompt turning a headless clone into a wait with no
+    end, and `run()` has carried it since the beginning. This took no `env` at
+    all until the 2026-09-12 review, so the one git call that can block forever
+    was the one running without the guard.
+
+    Through `child_env()` and not straight into `Popen`, because that is the
+    function that takes the bundle's `LD_LIBRARY_PATH` back out — a frozen
+    launcher whose git loads the bundle's libraries is the measured failure in
+    `child_env()`'s own docstring.
+
+    Mutation: drop the parameter (or pass it past `child_env()`) and this fails.
+    """
+    asked: dict[str, object] = {}
+
+    class _Spy(_Recorded):
+        def __init__(self, *a: object, **kw: object) -> None:
+            asked.update(kw)
+            super().__init__(*a, **kw)
+
+    _Recorded.out, _Recorded.err, _Recorded.code = b"", b"", 0
+    monkeypatch.setattr(runner.subprocess, "Popen", _Spy)
+    list(runner.stream_progress(["git", "clone", "x"], env={"GIT_TERMINAL_PROMPT": "0"}))
+
+    assert asked.get("env") == {"GIT_TERMINAL_PROMPT": "0"}

@@ -3074,7 +3074,7 @@ def follow_logs(container: str, tail: int = 200, *, wsl_distro: str | None = Non
             # and the tab stops looking like the app is saying these things.
             # `recent` keeps the UNMARKED line, because it is read by
             # `wsl.missing_distro_problem()` and not by a reader.
-            yield lines.relayed(line, stage="console")
+            yield from lines.relayed(line, stage="console")
     except subprocess.CalledProcessError as exc:
         # The streaming half of what `_run()` does for buffered calls. Without
         # it the Console tab showed wsl.exe's UTF-16 complaint as NUL-riddled
