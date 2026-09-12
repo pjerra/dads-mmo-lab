@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -1693,18 +1694,50 @@ def _client_dir_for_addons(client_dir: Path | None) -> Path | None:
 
 
 def _client_dir_row_text(client_dir: Path | None) -> str:
-    """The Server tab's client-folder sentence, in the same three states `_client_dir_for_addons()`
+    """The Server tab's client-folder sentence, in the same states `_client_dir_for_addons()`
     answers (T36) -- but read with no log line, because this runs on every five-second poll and a
     client extracted but never started would print its info line forever.
+
+    A missing folder is its own sentence rather than falling into the
+    "no `Interface/`" one below: that sentence tells the owner to start the
+    game, which is no help at all when the folder itself is gone (round 2
+    review, non-blocking) -- a moved or deleted client says so, plainly.
     """
     if client_dir is None:
         return "Client folder: none — addons and Play need one"
+    if not client_dir.is_dir():
+        return f"Client folder: {client_dir} — the folder is missing"
     if not (client_dir / ADDONS_PARENT).is_dir():
         return (
             f"Client folder: {client_dir} — no {ADDONS_PARENT}/ folder yet — start the game "
             "once before installing addons"
         )
     return f"Client folder: {client_dir}"
+
+
+def _check_sentence(check: preflight.Check) -> str:
+    """One `preflight.Check` as the paragraph a user reads -- `Report.message()`'s own join,
+    for a single check `change_client_dir()` shows outside a refusal (a warning, or the
+    zero-archive case `preflight.Report.message()` never sees because it is not a refusal).
+    """
+    return f"{check.name}: {check.detail} {check.remedy}".rstrip()
+
+
+_MPQ_COUNT_RE = re.compile(r"^(\d+) ")
+"""`_mpq_check()`'s own count, at the front of its `detail` (`"0 MPQ archives ..."`)."""
+
+
+def _mpq_archive_count(check: preflight.Check) -> int | None:
+    """The MPQ check's archive count, read off its own `detail` rather than re-walking `Data/`.
+
+    Round 2 review: an empty `Data/` answers `warn`, same as "a few too few", and the press used
+    to let a Yes through either. The ticket's rule is "no archives is a refusal" -- and the count
+    the CHECK already computed is the one number that cannot disagree with what it decided,
+    where a second `mpq_files()` call over the same folder could (a file appearing or vanishing
+    between the two walks, a symlink resolving differently the second time).
+    """
+    match = _MPQ_COUNT_RE.match(check.detail)
+    return int(match.group(1)) if match else None
 
 
 def _for_tortoise(
@@ -3119,6 +3152,14 @@ class ControllerView(QWidget):
                 self.forget_install_button.setEnabled(False)
             self.uninstall_confirm_button.setEnabled(False)
             self.keep_characters_check.setEnabled(False)
+            # T36's client-folder row: a write during any other action races
+            # `main.py`'s rebuild (T36 round 2 review) — the tab this press
+            # would drop and reopen is the very tab a rebuild, an import or a
+            # module install is running ON.
+            if self.set_client_dir_button is not None:
+                self.set_client_dir_button.setEnabled(False)
+            if self.forget_client_dir_button is not None:
+                self.forget_client_dir_button.setEnabled(False)
             self.rebuild_button.setEnabled(False)
             # And the updates press, for the importer's reason above rather than
             # for symmetry: it reaches the same `import` stage against the same
@@ -3173,6 +3214,10 @@ class ControllerView(QWidget):
                 self.forget_install_button.setEnabled(True)
             self.uninstall_confirm_button.setEnabled(True)
             self.keep_characters_check.setEnabled(True)
+            if self.set_client_dir_button is not None:
+                self.set_client_dir_button.setEnabled(True)
+            if self.forget_client_dir_button is not None:
+                self.forget_client_dir_button.setEnabled(True)
             self.rebuild_button.setEnabled(self.services.rebuild is not None)
             # Back to what this install can do, never unconditionally: three of
             # the four games have no such phase and must not be handed a live
@@ -3608,6 +3653,26 @@ class ControllerView(QWidget):
         self.action_failed.emit(message)
         QMessageBox.warning(self, f"{self.entry.name}", message)
 
+    def _client_dir_busy(self) -> bool:
+        """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
+
+        A write here does two things a running action must not race: it
+        replaces `state.json`'s record, and it makes `main.py` drop this tab
+        and rebuild it. `_set_busy()` locks the buttons; this is the second
+        half a disabled `QPushButton` does not give for free -- a press
+        already queued in Qt's event loop, or one this method is called from
+        directly in a test, still has to be told no.
+        """
+        if not self._busy:
+            return False
+        QMessageBox.information(
+            self,
+            "Something else is running",
+            "This server is busy with another action — wait for it to finish on the "
+            "Server tab, then press this again. Nothing was changed.",
+        )
+        return True
+
     @Slot()
     def change_client_dir(self) -> None:
         """Set, change or leave this install's client folder (T36).
@@ -3619,17 +3684,30 @@ class ControllerView(QWidget):
         press and a fresh install cannot disagree about what a client folder
         has to look like. WotLK's entry carries none -- AzerothCore extracts
         nothing from a client, so nothing has ever validated its folder -- and
-        the folder is accepted as chosen; the ONE question that still applies
-        to it, whether it has an `Interface/` to write an addon into, is the
-        row's own and not this press's (`_client_dir_row_text()`).
+        a minimal rule stands in for it (round 2 review): the folder must
+        exist and hold a `Data/` directory, the one thing every WoW client
+        ships regardless of expansion. The ONE further question, whether it
+        has an `Interface/` to write an addon into, is the row's own and not
+        this press's (`_client_dir_row_text()`).
 
         Nothing is written on a refusal. A warning is put to the user as
         "Use it anyway?" and answered through `said_yes()` (T33) rather than
-        blocking, because every warning here (too few MPQs, no locale
-        archives, the repack smell, low free space) is `families/clientdir.py`'s
-        own tri-state discipline saying extraction usually still works.
+        blocking, because every remaining warning here (too few but not zero
+        MPQs, no locale archives, the repack smell, low free space) is
+        `families/clientdir.py`'s own tri-state discipline saying extraction
+        usually still works. Zero archives is pulled out of that and refused
+        outright (round 2 review): an empty `Data/` is not "usually still
+        works", it is the folder holding nothing to extract from at all.
+
+        Round 2 review's third rule, ahead of every other check: the server
+        folder, or anything inside it, is refused before `clientdir.validate()`
+        is ever asked -- Uninstall deletes that whole tree, and a client
+        folder living there would be removed out from under the game the
+        first time this install is uninstalled.
         """
         if self.services.set_client_dir is None:
+            return
+        if self._client_dir_busy():
             return
         chosen = self._pick_client_dir(
             self,
@@ -3638,17 +3716,27 @@ class ControllerView(QWidget):
         )
         if chosen is None:
             return
+        server_dir = self.services.controller.server_dir
+        if chosen.resolve().is_relative_to(server_dir.resolve()):
+            self._client_dir_refused(
+                f"The client folder cannot be the server folder or inside it ({server_dir}): "
+                "Uninstall removes that whole tree."
+            )
+            return
         spec = preflight.client_spec_for(self.entry)
         if spec is not None:
-            report = preflight.Report(
-                checks=clientdir.validate(chosen, spec, free_bytes=preflight.free_bytes)
-            )
+            checks = clientdir.validate(chosen, spec, free_bytes=preflight.free_bytes)
+            report = preflight.Report(checks=checks)
             if not report.ok():
                 self._client_dir_refused(report.message())
                 return
+            mpq_check = next((c for c in checks if c.name == clientdir.MPQ_CHECK), None)
+            if mpq_check is not None and _mpq_archive_count(mpq_check) == 0:
+                self._client_dir_refused(_check_sentence(mpq_check))
+                return
             warnings = report.warnings()
             if warnings:
-                text = "\n".join(f"{c.name}: {c.detail} {c.remedy}".rstrip() for c in warnings)
+                text = "\n".join(_check_sentence(c) for c in warnings)
                 answer = QMessageBox.question(
                     self,
                     "Use this client folder anyway?",
@@ -3658,6 +3746,12 @@ class ControllerView(QWidget):
                 )
                 if not said_yes(answer):
                     return
+        elif not (chosen / clientdir.DATA_DIR).is_dir():
+            self._client_dir_refused(
+                f"{chosen} has no {clientdir.DATA_DIR}/ folder, so it is not a WoW client. "
+                "Nothing was changed."
+            )
+            return
         try:
             self.services.set_client_dir(chosen)
         except OSError as exc:
@@ -3677,6 +3771,8 @@ class ControllerView(QWidget):
         server nobody can get back.
         """
         if self.services.set_client_dir is None:
+            return
+        if self._client_dir_busy():
             return
         try:
             self.services.set_client_dir(None)
