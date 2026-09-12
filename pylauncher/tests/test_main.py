@@ -717,9 +717,7 @@ def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
     assert str(tmp_path) not in titles[0]
 
 
-def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(
-    window: Any, tmp_path: Any
-) -> None:
+def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_path: Any) -> None:
     """The rail is narrow, so a long install name elides — the full server dir
     must stay reachable on hover, or elision becomes information loss."""
     server_dir = tmp_path / "DadsMmoLab"
