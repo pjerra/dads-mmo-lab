@@ -204,6 +204,7 @@ class AzerothCoreInstaller(StagedInstaller):
                 service, ctx.server_dir, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="import",
         )
         self._check_run(run, "the server-data download", ctx.cancel, DOWNLOAD_CANCEL_NOTE)
         yield "Server data is in place."
