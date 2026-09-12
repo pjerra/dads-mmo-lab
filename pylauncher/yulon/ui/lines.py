@@ -132,6 +132,83 @@ def parse(line: str) -> Parsed:
     return Parsed(_tone(line) or "sentence", line)
 
 
+_BUILDKIT_STEP = re.compile(r"^#\d+ \[[^\]]* (\d+)/(\d+)\]")
+"""BuildKit's own progress, which is a step count and never a percentage.
+
+`#12 [5/8] RUN cmake --build .` — the number of the Dockerfile step being run
+out of that stage's total. It is the only figure a `docker compose build
+--progress plain` produces, and the build is the longest stage an install has.
+"""
+
+_COMPILER_PERCENT = re.compile(r"\[\s*(\d+)%\]")
+"""CMake's own counter, and it moves INSIDE one BuildKit step.
+
+`[ 43%] Building CXX object src/x.cpp.o`. One BuildKit step covers the whole
+`RUN cmake --build`, which on this project is hours, so where both numbers are
+in one line this is the finer of the two and is read second.
+"""
+
+_MMAP_TILE = re.compile(r"Building tile \[\d+,\d+\] \((\d+) / (\d+)\)")
+_MMAP_MAP = re.compile(r"\[Map (\d+)\]")
+"""The mmap generator's tile counter, per map.
+
+`[Map 000] Building tile [22,52] (01 / 741)` — 8005 of them in
+`pyplan/gates/7.7-win11-tortoise/tortoise77.log`, and 97 minutes of them in the
+T30 install this ticket was filed from. The percentage is within the MAP,
+because that is what the two numbers in the line are; the generator never says
+how many maps there are.
+"""
+
+
+def _percent_of(part: str, whole: str) -> int | None:
+    """`part` of `whole` as a whole percentage, or None when there is no whole.
+
+    `[0/0]` is a real BuildKit line for a stage with nothing to do, and a
+    division here would raise on the output thread of a running install.
+    """
+    total = int(whole)
+    return None if total <= 0 else int(part) * 100 // total
+
+
+def relayed(line: str, *, stage: str) -> str:
+    """One line of a subprocess's output, marked for the panel.
+
+    `TOOL` by default, because most of what a build, an extractor or a database
+    import prints is chatter that should read as chatter. Where the line carries
+    a number that says how far along something is, it becomes a `PROGRESS` line
+    instead and moves the header strip rather than scrolling past: the T30
+    install wrote 97 minutes of tile lines into the panel at the weight of the
+    engine's own sentences, which is the report this ticket came from.
+
+    Three sources have such a number, and they are tried in that order with the
+    LATER winning — see each pattern for what it reads and why the compiler's
+    beats BuildKit's.
+
+    `stage` names what is being relayed, for the progress line's own field. It
+    is deliberately NOT the family's `Stage` name, which the relay cannot know
+    (the family binds it), and nothing reads it as one.
+    """
+    tile = _MMAP_TILE.search(line)
+    if tile is not None:
+        percent = _percent_of(tile.group(1), tile.group(2))
+        if percent is not None:
+            said = f"tile {int(tile.group(1))} of {int(tile.group(2))}"
+            found_map = _MMAP_MAP.search(line)
+            if found_map is not None:
+                said = f"Map {found_map.group(1)} · {said}"
+            return PROGRESS + f"{stage} {percent} {said}"
+    percent = None
+    step = _BUILDKIT_STEP.match(line)
+    if step is not None:
+        percent = _percent_of(step.group(1), step.group(2))
+    compiler = _COMPILER_PERCENT.search(line)
+    if compiler is not None:
+        percent = int(compiler.group(1))
+    if percent is None:
+        return TOOL + line
+    return PROGRESS + f"{stage} {percent} {line}"
+
+
 def parse_step(line: str) -> Step | None:
     """The stage line's own three fields, or None for any other line.
 

@@ -694,14 +694,33 @@ class RunnerGit:
             return None
         return _parse_count(proc.stdout)
 
-    def clone(self, spec: CloneSpec) -> None:
+    def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
+        """Clone or update `spec`. With `clear_only`, stop once the destination is ready.
+
+        **The flag has one caller and one reason, and the reason is bookkeeping
+        rather than design.** `shutil.rmtree` at a clone destination is a WRITE:
+        `pyplan/write-ledger.md` lists it, and the walk that keeps that list
+        honest (`tests/write_sites.py`) keys a write by the function it sits in.
+        A copy of it in `clone_lines()` would therefore be a SECOND destructive
+        code path at the same destination — exactly the thing the ledger exists
+        to make visible — so the streamed path asks this one to clear the
+        destination and then runs the clone itself.
+
+        It stops in two places, because "ready" means two different things: a
+        checkout that is already there needs nothing done to it at all, and one
+        that is not needs the leftover gone and the parent made.
+        """
         if (spec.dest / ".git").is_dir():
+            if clear_only:
+                return
             self._update(spec)
             self._pin(spec)
             return
         if spec.dest.exists():
             shutil.rmtree(spec.dest)  # a non-git leftover; wow-manage.sh does the same
         spec.dest.parent.mkdir(parents=True, exist_ok=True)
+        if clear_only:
+            return
         if spec.sparse_path is None:
             argv = [
                 "git",
@@ -750,9 +769,7 @@ class RunnerGit:
         if spec.sparse_path is not None:
             self.clone(spec)
             return
-        if spec.dest.exists():
-            shutil.rmtree(spec.dest)
-        spec.dest.parent.mkdir(parents=True, exist_ok=True)
+        self.clone(spec, clear_only=True)
         argv = [
             "git",
             *_LINE_ENDING_ARGS,
@@ -1089,8 +1106,11 @@ class ContainerGit:
             return None
         return _parse_count(proc.stdout)
 
-    def clone(self, spec: CloneSpec) -> None:
+    def clone(self, spec: CloneSpec, *, clear_only: bool = False) -> None:
+        """See `RunnerGit.clone()` for what `clear_only` is and why it exists."""
         if (spec.dest / ".git").is_dir():
+            if clear_only:
+                return
             try:
                 self._run(
                     spec,
@@ -1121,6 +1141,8 @@ class ContainerGit:
         if spec.dest.exists():
             shutil.rmtree(spec.dest)
         spec.dest.mkdir(parents=True, exist_ok=True)
+        if clear_only:
+            return
         argv = [
             "clone",
             *_LINE_ENDING_CONFIG,
@@ -1472,9 +1494,7 @@ class ContainerGit:
                 raise
             self._pin(spec)
             return
-        if spec.dest.exists():
-            shutil.rmtree(spec.dest)
-        spec.dest.mkdir(parents=True, exist_ok=True)
+        self.clone(spec, clear_only=True)
         argv = [
             "clone",
             "--progress",

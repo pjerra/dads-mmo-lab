@@ -48,6 +48,7 @@ from yulon.catalog.installer import (
     installer_for,
 )
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError
+from yulon.ui import lines as log_lines
 
 ORDER = ("clone-sources", "build", "import", "up")
 CANARY = "hunter2-a2-canary"
@@ -1704,11 +1705,18 @@ def test_an_unfillable_ready_marker_is_a_sentence_not_a_traceback() -> None:
 def test_pumped_output_arrives_in_order_and_before_the_stage_ends(
     tmp_path: Path,
 ) -> None:
-    """`_pump` streams a push-style docker call; nothing is collected into a list first."""
+    """`_pump` streams a push-style docker call; nothing is collected into a list first.
+
+    The compiler's line is marked as tool output since T35 and the engine's own
+    two sentences around it are not, which is the ordering AND the distinction
+    in one assertion: `--- build` is the spine's marker, `compiling` is the
+    build talking, `The build finished.` is the engine again.
+    """
     rec = Recorder(images=False)
     lines = install(rec, tmp_path / "wow")
-    assert lines.index("compiling") < lines.index("The build finished.")
-    assert lines.index("--- build") < lines.index("compiling")
+    compiling = log_lines.TOOL + "compiling"
+    assert lines.index(compiling) < lines.index("The build finished.")
+    assert lines.index("--- build") < lines.index(compiling)
 
 
 # -- SELinux ----------------------------------------------------------------
@@ -3288,8 +3296,8 @@ def test_abandoning_the_pump_stops_its_worker_with_no_cancel_from_the_caller() -
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=cancel)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=cancel, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     assert PUMP_THREAD in _live_pump_workers(), "the worker should be running at this point"
 
     generator.close()
@@ -3316,7 +3324,9 @@ def test_finishing_the_pump_normally_does_not_set_the_cancel_event() -> None:
         sink("building")
         return docker.AttachedRun(0, ("built",))
 
-    assert list(_pumping(Recorder())._pump(call, cancel=cancel)) == ["building"]
+    assert list(_pumping(Recorder())._pump(call, cancel=cancel, stage="build")) == [
+        log_lines.TOOL + "building"  # marked as a subprocess's line since T35
+    ]
     assert not cancel.is_set()
 
 
@@ -3411,8 +3421,8 @@ def test_an_interrupt_thrown_into_the_pump_stops_its_worker_too() -> None:
         assert cancel.wait(HANG_BOUND), "the worker was never cancelled"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=cancel)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=cancel, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     try:
         with pytest.raises(KeyboardInterrupt):
             generator.throw(KeyboardInterrupt())
@@ -3446,8 +3456,8 @@ def test_abandoning_the_pump_with_no_cancel_event_leaves_the_worker_and_says_so(
         assert release.wait(HANG_BOUND), "the test never released the worker"
         return docker.AttachedRun(0, ("built",))
 
-    generator = _pumping(Recorder())._pump(call, cancel=None)
-    assert next(generator) == "building"
+    generator = _pumping(Recorder())._pump(call, cancel=None, stage="build")
+    assert next(generator) == log_lines.TOOL + "building"
     try:
         with caplog.at_level(logging.WARNING, logger="yulon.catalog.native"):
             started = time.monotonic()
@@ -3496,3 +3506,35 @@ def test_no_wall_clock_bound_in_this_file_is_written_as_a_bare_number() -> None:
     runs this audit, not only here.
     """
     assert spelled_bounds(__file__) == {"HANG_BOUND", "time.monotonic()"}
+
+
+def test_the_tail_a_refusal_quotes_is_never_marked(tmp_path: Path) -> None:
+    """T35 marks what the PANEL shows, and a refusal is a sentence, not a panel line.
+
+    `run_attached()` keeps a bounded tail for the failure message and appends to
+    it BEFORE handing the line to the sink, so the marking `_pump()` does cannot
+    reach it. That separation is what keeps "its last words were: …" readable: a
+    control character inside a `QLabel`'s sentence is a box glyph, and the same
+    sentence goes into `yulon.log`.
+
+    Mutation: mark inside `run_attached()`'s relay loop before `tail.append()`
+    and the refusal below carries `\\x1etool ` in the middle of it.
+    """
+    engine = _pumping(Recorder())
+    failed = docker.AttachedRun(1, ("cmake: error: no such file",))
+    got: list[docker.AttachedRun] = []
+
+    def call(sink: docker.OutputSink) -> docker.AttachedRun:
+        sink("cmake: error: no such file")
+        return failed
+
+    def drive() -> Iterator[str]:
+        got.append((yield from engine._pump(call, cancel=None, stage="build")))
+
+    pumped = list(drive())
+    assert pumped == [log_lines.TOOL + "cmake: error: no such file"]
+    assert got == [failed]
+    with pytest.raises(InstallerError) as raised:
+        engine._check_run(got[0], "the build", None, "nothing was kept")
+    assert "\x1e" not in str(raised.value)
+    assert "cmake: error: no such file" in str(raised.value)

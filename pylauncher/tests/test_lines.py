@@ -142,3 +142,116 @@ def test_the_two_prefixes_share_one_control_character_no_engine_line_can_hold() 
     assert lines.PROGRESS == "\x1eprogress "
     assert lines.TOOL == "\x1etool "
     assert lines.PROGRESS.startswith("\x1e") and lines.TOOL.startswith("\x1e")
+
+
+# ---------------------------------------------------------------------------
+# T35 point 4: a relayed line is marked as a tool's, and a number in it moves
+# the strip instead of scrolling past.
+
+
+def test_a_relayed_line_with_no_number_in_it_is_tool_output() -> None:
+    """The default, and most of a build is this.
+
+    Mutation: return the line unmarked and the panel cannot tell a compiler's
+    chatter from the engine's own sentences, which is the state T35 was filed
+    about.
+    """
+    marked = lines.relayed(">> Applying update 2026_01_01_00.sql", stage="import")
+    assert marked == lines.TOOL + ">> Applying update 2026_01_01_00.sql"
+    assert lines.parse(marked).kind == "tool"
+
+
+def test_buildkits_step_count_becomes_a_percent() -> None:
+    """`#12 [5/8]` is five steps of eight, which is the only progress a build reports.
+
+    BuildKit prints no percentage of its own. What it prints is a step number
+    out of a total, per stage of the Dockerfile, and that is what moves.
+
+    The sample is a real line, taken from the 7.7 WotLK gate's build transcript
+    (`pyplan/gates/`): every step line there carries its stage's NAME before the
+    count -- `#10 [builder 3/6]`, `#10 [ac-authserver skeleton 3/4]` -- because
+    every Dockerfile this app generates is multi-stage.
+
+    Mutation: drop the BuildKit rule and this line comes back as `tool`, so the
+    bar never moves during the longest stage of the install.
+    """
+    parsed = lines.parse(lines.relayed("#10 [builder 5/8] RUN cmake --build .", stage="build"))
+    assert parsed.kind == "progress"
+    assert parsed.percent == 62  # 5 * 100 // 8
+    assert parsed.stage == "build"
+    assert parsed.text == "#10 [builder 5/8] RUN cmake --build ."
+
+
+def test_the_compiler_reports_from_inside_a_buildkit_step() -> None:
+    """The finer of the two numbers, on the line BuildKit really prints it on.
+
+    Also a real shape from the same transcript: `#13 0.242 [  0%] Building C
+    object dep/src/bzip2/...`. BuildKit prefixes a step's OWN OUTPUT with the
+    step number and an elapsed time, so such a line matches the compiler's
+    pattern and not the step-count one — which is why a build shows step
+    progress between steps and compiler progress during them.
+
+    Mutation: drop the compiler rule and the bar stands still for the whole of
+    `RUN cmake --build`, which is hours.
+    """
+    parsed = lines.parse(
+        lines.relayed("#13 0.242 [ 43%] Building C object dep/src/x.c.o", stage="build")
+    )
+    assert parsed.kind == "progress"
+    assert parsed.percent == 43
+
+
+def test_the_compilers_percent_wins_where_a_line_carries_both() -> None:
+    """Contrived, and pinned anyway, because the precedence is a choice.
+
+    No line in the gate transcripts carries both numbers. If one ever does, the
+    compiler's figure is the one that means something: a BuildKit step covers a
+    whole `RUN cmake --build` and moves once an hour.
+
+    Mutation: read the compiler's percent BEFORE BuildKit's step count and the
+    step's figure wins instead.
+    """
+    parsed = lines.parse(
+        lines.relayed("#10 [builder 5/8] RUN [ 43%] Building CXX object", stage="build")
+    )
+    assert parsed.percent == 43
+
+
+def test_the_mmap_generators_tile_count_becomes_a_percent_and_a_short_sentence() -> None:
+    """The 97 minutes of tile lines the T30 install wrote, as one moving field.
+
+    Measured from `pyplan/gates/7.7-win11-tortoise/tortoise77.log`, which holds
+    8005 of these: `[Map 000] Building tile [22,52] (01 / 741)`. The percentage
+    is within the map, because that is what the numbers in the line are, and the
+    text is rewritten short — the tile's own coordinates are noise at one line
+    per second.
+
+    Mutation: drop the mmap rule and the strip shows nothing for the longest
+    stage a CMaNGOS install has, with the tile lines back in the panel.
+    """
+    parsed = lines.parse(lines.relayed("[Map 230] Building tile [32,32] (08 / 12)", stage="mmaps"))
+    assert parsed.kind == "progress"
+    assert parsed.percent == 66  # 8 * 100 // 12
+    assert parsed.text == "Map 230 · tile 8 of 12"
+
+
+def test_a_tile_line_with_no_map_in_it_still_moves_the_bar() -> None:
+    """The count is the reading; the map is the label. A line with only one is not lost."""
+    parsed = lines.parse(lines.relayed("Building tile [1,2] (03 / 10)", stage="mmaps"))
+    assert parsed.kind == "progress"
+    assert parsed.percent == 30
+    assert parsed.text == "tile 3 of 10"
+
+
+def test_a_relayed_line_that_divides_by_nothing_is_tool_output() -> None:
+    """A total of zero is not a percentage, and must not be a crash either.
+
+    Defensive rather than observed: no `0/0` appears in any gate transcript in
+    `pyplan/gates/`. It is guarded because the cost of being wrong is not a
+    wrong reading — it is a `ZeroDivisionError` on the thread carrying a running
+    install's output.
+
+    Mutation: compute `k * 100 // m` without the guard and this raises instead
+    of answering.
+    """
+    assert lines.parse(lines.relayed("#1 [internal 0/0] load", stage="build")).kind == "tool"

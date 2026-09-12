@@ -58,7 +58,7 @@ from yulon.catalog.installer import (
     cancelled_install_message,
     installer_for,
 )
-from yulon.ui import lines
+from yulon.ui import lines as log_lines
 
 STAGE_NAMES = AzerothCoreInstaller.STAGE_NAMES
 
@@ -324,7 +324,8 @@ def test_a_fresh_install_runs_every_stage_in_order(tmp_path: Path) -> None:
         "query",
         "sql",
     ]
-    assert "compiling" in lines  # the build's output is streamed, not buffered
+    # Marked as the compiler talking since T35; the panel strips it from `text()`.
+    assert log_lines.TOOL + "compiling" in lines  # streamed, not buffered
     state = native.read_state(server_dir, valid=STAGE_NAMES)
     assert state is not None
     assert state.completed == (
@@ -2317,12 +2318,12 @@ def test_the_clone_stage_relays_gits_own_progress_under_this_stages_name(
 
         def clone_lines(self, spec: git.CloneSpec, *, stage: str = "clone") -> Iterator[str]:
             self.clone(spec)
-            yield lines.PROGRESS + f"{stage} 42 Receiving objects:  42% (420/1000)"
+            yield log_lines.PROGRESS + f"{stage} 42 Receiving objects:  42% (420/1000)"
 
     rec = Recorder()
     said = install(rec, server_dir, clone=Talkative().clone)
 
-    progress = [lines.parse(line) for line in said if line.startswith(lines.PROGRESS)]
+    progress = [log_lines.parse(line) for line in said if line.startswith(log_lines.PROGRESS)]
     assert progress, "the clone stage relayed nothing a strip could move on"
     assert {one.stage for one in progress} == {"clone-core", "clone-modules"}
     assert {one.percent for one in progress} == {42}

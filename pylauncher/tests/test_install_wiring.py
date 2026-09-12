@@ -31,6 +31,7 @@ from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.installer import InstallEngine, InstallerError, InstallOptions
 from yulon.controller_wow_wotlk import repair as wotlk_repair
 from yulon.controller_wow_wotlk.maintenance import DockerMysql
+from yulon.ui import lines
 
 WOTLK = load_catalog().get("wow-wotlk")
 
@@ -1015,3 +1016,65 @@ def test_a_harness_run_that_could_not_open_its_log_says_so_rather_than_dying(
         "the sentence never reached the terminal, so the harness DOES need a reporter of "
         "its own and the decision not to give it one is unsupported"
     )
+
+
+def test_the_harness_writes_the_display_text_so_a_gate_transcript_keeps_its_shape(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """T35's markers come off HERE, at the one site that writes the transcripts.
+
+    `pyplan/gates/` captures are this stream and the rotating log file beside
+    it, and the gate scripts, the log captures and the interrupted-import
+    watchers all grep them. A `\\x1e` in front of every relayed line would be
+    greppable by nothing that greps them today — and a control character in a
+    file somebody opens in `less` is a box glyph on every line of a build.
+
+    So every line a run used to write is byte for byte what it writes now: the
+    stage lines and the engine's own sentences are untouched by definition, a
+    `TOOL` line loses its marker and nothing else, and a `PROGRESS` line is
+    written as its own text.
+
+    Mutation: write `line` instead of `lines.parse(line).text` and the first
+    three assertions below fail with the marker still on.
+    """
+    recorded: list[str] = []
+    monkeypatch.setattr(install_wiring.logger, "info", lambda fmt, *a: recorded.append(fmt % a))
+
+    class _Engine:
+        def preflight(
+            self, options: InstallOptions, cancel: object = None, *, ask: object = None
+        ) -> None:
+            return None
+
+        def run(
+            self,
+            options: InstallOptions | None = None,
+            *,
+            cancel: object = None,
+            ask: object = None,
+        ) -> Iterator[str]:
+            yield "Step 1 of 9 (11%): clone-core"
+            yield "--- clone-core"
+            yield lines.TOOL + "#10 [builder 5/8] RUN cmake --build ."
+            yield lines.PROGRESS + "mmaps 66 Map 230 · tile 8 of 12"
+            yield "Sources are in place."
+
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
+    assert install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)]) == 0
+
+    written = capsys.readouterr().out.splitlines()
+    assert written == [
+        "Step 1 of 9 (11%): clone-core",
+        "--- clone-core",
+        "#10 [builder 5/8] RUN cmake --build .",
+        "Map 230 · tile 8 of 12",
+        "Sources are in place.",
+    ]
+    assert not any("\x1e" in line for line in written)
+    # The file gets the same text, because the file is the other half of the
+    # transcript and the two must not disagree about what a run said.
+    assert [line for line in recorded if "clone-core" in line or "cmake" in line] == [
+        "Step 1 of 9 (11%): clone-core",
+        "--- clone-core",
+        "#10 [builder 5/8] RUN cmake --build .",
+    ]

@@ -91,6 +91,7 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ownership import Ownership as Ownership
+from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -4559,6 +4560,7 @@ class StagedInstaller:
                 ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="build",
         )
         self._check_run(run, "the build", ctx.cancel, BUILD_CANCEL_NOTE)
         yield "The build finished."
@@ -4702,6 +4704,7 @@ class StagedInstaller:
                 service, ctx.server_dir, sink=sink, cancel=ctx.cancel
             ),
             cancel=ctx.cancel,
+            stage="import",
         )
         if run.returncode == docker.CANCELLED_RETURNCODE:
             raise InstallerError(_cancelled_message("the database import", IMPORT_CANCEL_NOTE))
@@ -5170,6 +5173,7 @@ class StagedInstaller:
         call: Callable[[docker.OutputSink], docker.AttachedRun],
         *,
         cancel: threading.Event | None,
+        stage: str,
     ) -> Generator[str, None, docker.AttachedRun]:
         """Turn a push-style docker call into yielded lines, without buffering the run.
 
@@ -5185,24 +5189,35 @@ class StagedInstaller:
         reason `_check_run()` gives about its own note: a default here is the
         shape of the mistake, because the call site that forgets it is exactly
         the one whose worker is left running.
+
+        **Everything that comes through here is a subprocess talking**, which is
+        what makes this the place to mark it (T35). The panel dims tool output
+        and moves its strip on a number in it, and the engine's OWN sentences —
+        which the stage bodies `yield` directly, never through this queue — stay
+        unmarked. Marked on the sink rather than on the way out for the reason
+        `cmangos._stream()` must: that bridge carries both kinds on one queue,
+        and the two have to be distinguishable somewhere.
+
+        `stage` names the activity for the progress line's field; see
+        `lines.relayed()`.
         """
-        lines: queue.Queue[str | None] = queue.Queue()
+        queued: queue.Queue[str | None] = queue.Queue()
         outcome: list[docker.AttachedRun] = []
         failure: list[BaseException] = []
 
         def work() -> None:
             try:
-                outcome.append(call(lines.put))
+                outcome.append(call(lambda line: queued.put(lines.relayed(line, stage=stage))))
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)
             finally:
-                lines.put(None)
+                queued.put(None)
 
         worker = threading.Thread(target=work, daemon=True, name="yulon-install-output")
         worker.start()
         try:
             while True:
-                item = lines.get()
+                item = queued.get()
                 if item is None:
                     break
                 yield item
