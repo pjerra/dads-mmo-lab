@@ -3538,3 +3538,87 @@ def test_the_tail_a_refusal_quotes_is_never_marked(tmp_path: Path) -> None:
         engine._check_run(got[0], "the build", None, "nothing was kept")
     assert "\x1e" not in str(raised.value)
     assert "cmake: error: no such file" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# T35 point 5: nothing greppable moved. The two line shapes below are matched by
+# gate scripts, by log captures and by the interrupted-import watchers -- 7.2's
+# `finished-watcher.sh` greps `^--- \|^Step `, and 7.4c's `watch_74c.py` greps
+# `^--- import\s*$`, which also forbids anything after the stage's name.
+
+STEP_SHAPE = "Step {} of {} ({}%): {}"
+MARKER_SHAPE = "--- {}"
+"""The two formats the spine yields, pinned as the templates they are written as.
+
+Pinned rather than described, because every reader of them is outside this
+repository's test suite: a shell script on a gate box, a watcher parsing a log
+file three days after the install, the owner grepping a transcript. None of
+those fails a test when the format moves -- they just quietly stop matching, and
+one run WAS missed that way on 2026-09-03 by a watcher armed for a stage it
+could no longer see (`_staged()`'s own docstring records it).
+"""
+
+
+def _yielded_templates(module: object) -> list[str]:
+    """Every f-string this module yields, as `{}`-for-each-field templates.
+
+    Over the syntax tree and not over the text: the step line is written as two
+    adjacent f-strings, which is one `ast.JoinedStr` and two different greps.
+    """
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))  # type: ignore[attr-defined]
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Yield) or not isinstance(node.value, ast.JoinedStr):
+            continue
+        found.append(
+            "".join(
+                part.value if isinstance(part, ast.Constant) else "{}" for part in node.value.values
+            )
+        )
+    return found
+
+
+def test_the_two_greppable_shapes_are_yielded_exactly_once_each_and_unchanged() -> None:
+    """The formats are byte-identical to what they were, and there is one of each.
+
+    One of each is half the claim: `_staged()` is "the ONE progress reporter",
+    and the reason it was extracted from `run()` is that a second loop printing
+    a nearly identical marker is a second place for the format to drift.
+
+    Mutation: add a field to either template -- `f"--- {stage.name} ({number})"`
+    is the tempting one -- and this fails naming the new shape.
+    """
+    templates = _yielded_templates(native)
+    steps = [one for one in templates if one.startswith("Step ")]
+    markers = [one for one in templates if one.startswith("--- ")]
+    assert steps == [STEP_SHAPE]
+    assert markers == [MARKER_SHAPE]
+
+
+def test_a_real_run_writes_those_two_shapes_and_no_marker_ever_carries_a_prefix(
+    tmp_path: Path,
+) -> None:
+    """The other direction: what a run actually writes, asserted against the greppers.
+
+    `^--- import\\s*$` is 7.4c's watcher, so the marker has to be the stage's
+    name and NOTHING after it -- T35's markers included. The step line is
+    matched by `^Step ` and read by eye.
+
+    Mutation: prefix the spine's own lines with `lines.TOOL` (the change T35 did
+    not make) and every assertion here fails at once.
+    """
+    rec = Recorder(images=False)
+    written = install(rec, tmp_path / "wow")
+
+    steps = [line for line in written if line.startswith("Step ")]
+    markers = [line for line in written if line.startswith("--- ")]
+    assert steps and markers
+    for line in steps:
+        assert re.fullmatch(r"Step \d+ of \d+ \(\d+%\): \S+", line), line
+    for line in markers:
+        assert re.fullmatch(r"--- \S+", line), line
+    assert not any("\x1e" in line for line in steps + markers)
+    # And the spine's own shapes still classify as what the panel draws them as.
+    assert {log_lines.parse(line).kind for line in steps} == {"stage"}
+    assert {log_lines.parse(line).kind for line in markers} == {"marker"}
+    assert [log_lines.parse(line).text for line in steps + markers] == steps + markers
