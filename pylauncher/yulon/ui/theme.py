@@ -42,8 +42,9 @@ COLOR_LEGENDARY = "#FF8000" # Sunwell / Orange
 COLOR_ARTIFACT = "#E6CC80"  # Gold
 COLOR_DANGER = "#C41E3A"    # Crimson Red
 COLOR_TEXT_PRIMARY = "#F0E6D2"  # Parchment White
-COLOR_TEXT_MUTED = "#8A8275"    # Aged Text
+COLOR_TEXT_MUTED = "#A69C88"    # Aged Text (lightened from #8A8275 for legibility)
 COLOR_TEXT_GOLD = "#F0C050"     # Warm Gold
+COLOR_TEXT_WARNING = "#FFB86B"  # Amber warning (unsupported platform, refusals)
 
 # Font Hierarchies
 FONT_FAMILY_TITLE = (
@@ -129,19 +130,21 @@ QTabBar::tab:west {{
     border-bottom-left-radius: 5px;
     border-top-right-radius: 0px;
     border-bottom-right-radius: 0px;
-    padding: 10px 16px;
-    margin-bottom: 3px;
+    padding: 12px 20px;
+    margin-bottom: 4px;
     margin-right: 0px;
     border: 1.5px solid {COLOR_BRASS_DEEP};
     border-right: 2px solid {COLOR_BRASS_DARK};
-    min-height: 24px;
+    min-height: 26px;
+    min-width: 120px;
+    text-align: left;
 }}
 
 QTabBar::tab:west:selected {{
     border: 2px solid {COLOR_GOLD_BRASS};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
     border-right: 2px solid {COLOR_BG_CONTAINER};
-    padding-right: 18px;
+    padding-right: 22px;
 }}
 
 QTabBar::tab:disabled {{
@@ -163,11 +166,11 @@ QPushButton {{
     border-right: 2px solid {COLOR_BRASS_DEEP};
     border-bottom: 2px solid {COLOR_BRASS_DEEP};
     border-radius: 4px;
-    padding: 6px 14px;
+    padding: 8px 16px;
     font-family: {FONT_FAMILY_TITLE};
-    font-size: 12px;
+    font-size: 13px;
     font-weight: bold;
-    min-height: 20px;
+    min-height: 22px;
 }}
 
 QPushButton:hover {{
@@ -194,13 +197,13 @@ QPushButton:pressed {{
     border-left: 2px solid #1A1208;
     border-right: 2px solid {COLOR_BRASS_DARK};
     border-bottom: 2px solid {COLOR_BRASS_DARK};
-    padding-top: 7px;
-    padding-left: 15px;
+    padding-top: 9px;
+    padding-left: 17px;
 }}
 
 QPushButton:disabled {{
     background-color: #17181C;
-    color: #555555;
+    color: #7A7A7A;
     border: 1.5px solid #2C2C32;
 }}
 
@@ -241,14 +244,14 @@ QGroupBox {{
     background-color: {COLOR_BG_PARCHMENT};
     border: 1.5px solid {COLOR_BRASS_DARK};
     border-radius: 6px;
-    margin-top: 20px;
-    padding: 14px 10px 10px 10px;
+    margin-top: 22px;
+    padding: 18px 14px 14px 14px;
 }}
 
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top center;
-    padding: 2px 14px;
+    padding: 3px 16px;
     background-color: {COLOR_BG_DARK};
     color: {COLOR_GOLD_BRIGHT};
     font-family: {FONT_FAMILY_TITLE};
@@ -264,13 +267,37 @@ QFrame[frameShape="5"], QFrame[frameShape="StyledPanel"] {{
     border-radius: 5px;
 }}
 
+/* --- Catalog Tile Text Hierarchy --- */
+QLabel#tile-title {{
+    font-family: {FONT_FAMILY_TITLE};
+    font-size: 15px;
+    font-weight: bold;
+    color: {COLOR_GOLD_BRIGHT};
+}}
+
+QLabel#tile-desc {{
+    font-size: 13px;
+    color: {COLOR_TEXT_PRIMARY};
+}}
+
+QLabel#tile-meta {{
+    font-size: 12px;
+    color: {COLOR_TEXT_MUTED};
+}}
+
+QLabel#tile-warning {{
+    font-size: 12px;
+    font-style: italic;
+    color: {COLOR_TEXT_WARNING};
+}}
+
 /* --- Input Fields & Spinners --- */
 QLineEdit, QSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
     background-color: {COLOR_BG_INPUT};
     color: {COLOR_TEXT_PRIMARY};
     border: 1.5px solid {COLOR_BRASS_DARK};
     border-radius: 3px;
-    padding: 5px 8px;
+    padding: 7px 10px;
     selection-background-color: #523E1E;
     selection-color: {COLOR_GOLD_LIGHT};
 }}
@@ -308,10 +335,11 @@ QListWidget, QTableWidget, QTreeWidget, QTreeView, QTableView {{
     gridline-color: #26211A;
     color: {COLOR_TEXT_PRIMARY};
     alternate-background-color: #11141B;
+    font-size: 13px;
 }}
 
 QListWidget::item, QTableWidget::item, QTreeWidget::item {{
-    padding: 4px 6px;
+    padding: 7px 10px;
     border-bottom: 1px solid #1E1A14;
 }}
 
@@ -437,7 +465,7 @@ QToolTip {{
     padding: 8px 12px;
     border-radius: 4px;
     font-family: {FONT_FAMILY_BODY};
-    font-size: 12px;
+    font-size: 13px;
 }}
 
 /* --- Checkboxes & Radio Buttons --- */
@@ -496,7 +524,7 @@ QMenu::item {{
     padding: 6px 18px 6px 12px;
     border-radius: 2px;
     font-family: {FONT_FAMILY_BODY};
-    font-size: 12px;
+    font-size: 13px;
 }}
 
 QMenu::item:selected {{

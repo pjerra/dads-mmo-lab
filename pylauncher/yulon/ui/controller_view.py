@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import QPoint, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -102,6 +102,8 @@ from yulon.manifest import Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui.answers import said_yes
+from yulon.ui.icons import get_tab_icon, warcraft_icon
+from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
@@ -2296,6 +2298,7 @@ class ControllerView(QWidget):
         self._custom_install_pending = False
         self._console_pending = False
         self._tabs = QTabWidget(self)
+        self._tabs.setIconSize(QSize(16, 16))
         layout = QVBoxLayout(self)
         layout.addWidget(self._tabs)
 
@@ -2421,14 +2424,18 @@ class ControllerView(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
         )
         self.start_button = QPushButton("Start", tab)
+        self.start_button.setIcon(warcraft_icon("play", COLOR_GOLD_LIGHT, 14))
         self.start_button.setProperty("primary", True)
         self.stop_button = QPushButton("Stop", tab)
+        self.stop_button.setIcon(warcraft_icon("stop", "#FFB8B8", 14))
         self.stop_button.setProperty("danger", True)
         self.refresh_button = QPushButton("Refresh", tab)
+        self.refresh_button.setIcon(warcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
         # Deliberate, per checklist 6.5: nothing removes a container today, and
         # whatever does must not be a stray click next to Stop. It arms on the
         # first press and acts on the second, and anything else disarms it.
         self.remove_button = QPushButton(REMOVE_IDLE, tab)
+        self.remove_button.setIcon(warcraft_icon("trash", "#FFB8B8", 14))
         self.remove_button.setProperty("danger", True)
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
@@ -2535,7 +2542,7 @@ class ControllerView(QWidget):
         if self.forget_install_button is not None:
             box.addWidget(self.forget_install_button)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Server")
+        self._tabs.addTab(tab, get_tab_icon("server"), "Server")
 
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
@@ -3731,7 +3738,7 @@ class ControllerView(QWidget):
         box.addWidget(self.console_log, 1)
         box.addLayout(cmd_row)
         box.addWidget(self.console_note)
-        self._tabs.addTab(tab, "Console")
+        self._tabs.addTab(tab, get_tab_icon("console"), "Console")
 
     @Slot()
     def follow_logs(self) -> None:
@@ -3912,7 +3919,7 @@ class ControllerView(QWidget):
         box.addWidget(existing)
         box.addWidget(self.account_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Accounts")
+        self._tabs.addTab(tab, get_tab_icon("accounts"), "Accounts")
 
     def _build_characters_tab(self) -> None:
         """8.4a. Every action drawn only where this tree has the command, and
@@ -4017,7 +4024,7 @@ class ControllerView(QWidget):
         box.addWidget(actions)
         box.addWidget(self.character_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Characters")
+        self._tabs.addTab(tab, get_tab_icon("characters"), "Characters")
 
     def _set_level_command(self) -> str | None:
         """This tree's set-level verb, or None where its console has no route.
@@ -4536,7 +4543,7 @@ class ControllerView(QWidget):
         self._show_page_buttons()
         box.addWidget(browse)
         box.addWidget(self._build_my_party_group(tab))
-        self._tabs.addTab(tab, "Bots")
+        self._tabs.addTab(tab, get_tab_icon("bots"), "Bots")
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -4716,7 +4723,7 @@ class ControllerView(QWidget):
         box.addWidget(self.backup_list, 2)
         box.addLayout(actions)
         box.addWidget(self.maintenance_report, 1)
-        self._tabs.addTab(tab, "Maintenance")
+        self._tabs.addTab(tab, get_tab_icon("maintenance"), "Maintenance")
         self.refresh_backups()
 
     def _selected_backup(self) -> Path | None:
@@ -5011,7 +5018,7 @@ class ControllerView(QWidget):
         box.addLayout(row)
         box.addWidget(self.module_report, 1)
         box.addWidget(self.rebuild_log, 2)
-        self._tabs.addTab(tab, "Modules")
+        self._tabs.addTab(tab, get_tab_icon("modules"), "Modules")
         self._manifests: dict[str, Manifest] = {}
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
@@ -5650,7 +5657,7 @@ class ControllerView(QWidget):
         row.addWidget(self.apply_button)
         box.addLayout(row)
         box.addWidget(self.network_text, 1)
-        self._tabs.addTab(tab, "Networking")
+        self._tabs.addTab(tab, get_tab_icon("networking"), "Networking")
         self._plan: NetworkPlan | None = None
 
     def network_mode(self) -> Mode:

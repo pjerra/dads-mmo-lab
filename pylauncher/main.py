@@ -71,10 +71,14 @@ def build_catalog_tab(
     `central` and `column` are wiring with nothing left to read once this
     returns.
     """
+    from PySide6.QtCore import QSize
     from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
+
+    from yulon.ui.icons import get_tab_icon
 
     tabs = QTabWidget(window)
     tabs.setTabPosition(QTabWidget.TabPosition.West)
+    tabs.setIconSize(QSize(18, 18))
     central = QWidget(window)
     column = QVBoxLayout(central)
     banner = QLabel(central)
@@ -100,6 +104,7 @@ def build_catalog_tab(
     splitter.setStretchFactor(1, 1)
     catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")
+    tabs.setTabIcon(tabs.indexOf(splitter), get_tab_icon("catalog"))
     return tabs, banner, splitter
 
 
@@ -161,6 +166,7 @@ def build_window() -> object:
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
+    from yulon.ui.icons import get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
     from yulon.ui.theme import apply_warcraft_theme
     from yulon.ui.widgets.log_panel import LogPanel
@@ -416,6 +422,7 @@ def build_window() -> object:
         controller_views.append(view)
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
+        tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,
         # so two installs under different parents both read "WoW WotLK —

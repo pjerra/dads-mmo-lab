@@ -93,12 +93,27 @@ The Yu'lon launcher manages private offline WoW and classic MMO servers. The UI 
   - Backup List: Right-click to preview restore plan, trigger database restore, or copy backup filename.
   - Main Window Tab Bar: Right-click realm tabs to open server directory in file manager, copy server path, start server, or stop server.
 
+### 2.11 Iconography (`yulon/ui/icons.py`)
+- Self-contained FontAwesome-derived SVG path data rendered on-the-fly via `QSvgRenderer` + `QPainter` — no external font/network runtime dependency, no bundled font asset.
+- `warcraft_icon(name, color, size)` renders a tinted `QIcon` from a named vector glyph (server, play, stop, refresh, terminal, users, robot, puzzle, network, database, trash, wrench, copy, folder, download, steam, sword, skull, teleport, coins, shield, sparkles, catalog, check).
+- `get_tab_icon(tab_name)` maps a tab's label to its themed icon and color (Catalog → gold, Console → arcane blue, Accounts → fel green, Bots → arcane blue, Maintenance/Modules → warm gold), used consistently across the left-hand realm rail and every `ControllerView` sub-tab.
+- Icons are also used inline on primary/danger buttons (Install, Start, Stop, Remove, Refresh) and on the "Use existing…" / "Find in WSL…" catalog tile actions, so an icon and its label always travel together.
+
+### 2.12 Spacing, Sizing & Readability Pass
+- Catalog grid: 14px inter-tile spacing, 6px outer margin, 14px inner tile padding, 8px vertical rhythm between tile lines — no more edge-to-edge crowding.
+- Buttons: padding increased to 8px/16px (from 6px/14px) with a matching pressed-state offset, so labels and icons have consistent breathing room at every state.
+- Group boxes: padding increased to 18/14/14/14px and title margin to 22px, giving engraved panel titles more clearance from their border.
+- Inputs (`QLineEdit`/`QSpinBox`/`QComboBox`/`QTextEdit`/`QPlainTextEdit`): padding increased to 7px/10px for a less cramped runic input feel.
+- List/table rows: padding increased to 7px/10px with an explicit 12px list font-size, improving legibility of account/character/module rows.
+- Left-hand realm rail tabs: padding increased to 12px/20px, a 120px minimum width, and left-aligned text so icon + label read as one unit rather than being centered awkwardly against the icon.
+
 ---
 
 ## 3. Architecture & Separation of Concerns
 
 Following `style-guide.md` §1–§5:
 - `yulon/ui/theme.py`: Owns all QSS rules, color constants, font stacks, and `apply_warcraft_theme()`.
+- `yulon/ui/icons.py`: Owns the FontAwesome-derived SVG glyph table and the two rendering entry points (`warcraft_icon()`, `get_tab_icon()`) — no other module renders an icon by hand.
 - Theme is applied globally at application launch, with modular widget-specific classes for reusable ornaments.
 - Preserves all existing geometry floors (`_CATALOG_MIN_WIDTH`, `DEFAULT_WINDOW_SIZE`, splitter proportions, object names).
 - Tested with dedicated unit tests in `tests/test_theme.py`.

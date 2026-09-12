@@ -43,6 +43,8 @@ from yulon.catalog.installer import (
 )
 from yulon.log import get_logger
 from yulon.ui.answers import said_yes
+from yulon.ui.icons import warcraft_icon
+from yulon.ui.theme import COLOR_TEXT_GOLD, COLOR_TEXT_MUTED
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.prompt import InputPrompter
 
@@ -321,6 +323,8 @@ class CatalogView(QWidget):
         self._prompter: InputPrompter | None = None
 
         grid = QGridLayout()
+        grid.setSpacing(14)
+        grid.setContentsMargins(6, 6, 6, 6)
         for index, entry in enumerate(catalog.games):
             grid.addWidget(self._tile(entry), index // 2, index % 2)
         # Equal columns (T28). `index % 2` never addresses a third column, so
@@ -357,7 +361,7 @@ class CatalogView(QWidget):
     # -- tiles ----------------------------------------------------------
 
     @staticmethod
-    def _tile_text(text: str, frame: QFrame) -> QLabel:
+    def _tile_text(text: str, frame: QFrame, role: str = "") -> QLabel:
         """A line of tile text that gives way instead of widening the tile.
 
         A QLabel without `setWordWrap` demands its longest line, so every tile
@@ -373,9 +377,16 @@ class CatalogView(QWidget):
         Every line goes through here rather than only the long ones, because
         which line is longest is a property of `catalog.json` — the next entry
         someone adds must not be able to push the buttons off screen again.
+
+        `role` names an objectName the theme styles (`tile-title`, `tile-desc`,
+        `tile-meta`, `tile-warning`) so the tile reads as a hierarchy — a bold
+        gold heading, a legible body line, and small muted metadata — instead
+        of four identical-looking lines.
         """
         label = QLabel(text, frame)
         label.setWordWrap(True)
+        if role:
+            label.setObjectName(role)
         return label
 
     def _tile(self, entry: CatalogEntry) -> QFrame:
@@ -386,13 +397,29 @@ class CatalogView(QWidget):
             lambda pos, e=entry, f=frame: self._show_tile_context_menu(pos, e, f)
         )
         box = QVBoxLayout(frame)
-        box.addWidget(self._tile_text(f"<b>{entry.name}</b> <i>({entry.status})</i>", frame))
-        box.addWidget(self._tile_text(entry.description, frame))
+        box.setSpacing(8)
+        box.setContentsMargins(14, 14, 14, 14)
         box.addWidget(
-            self._tile_text(f"Client: {entry.client.version} (build {entry.client.build})", frame)
+            self._tile_text(
+                f"{entry.name} <span style='color:{COLOR_TEXT_MUTED}; font-style:italic;'>"
+                f"({entry.status})</span>",
+                frame,
+                role="tile-title",
+            )
         )
-        box.addWidget(self._tile_text(f"Emulator: {entry.emulator.name}", frame))
+        box.addWidget(self._tile_text(entry.description, frame, role="tile-desc"))
+        box.addWidget(
+            self._tile_text(
+                f"Client: {entry.client.version} (build {entry.client.build})",
+                frame,
+                role="tile-meta",
+            )
+        )
+        box.addWidget(
+            self._tile_text(f"Emulator: {entry.emulator.name}", frame, role="tile-meta")
+        )
         button = QPushButton("Install", frame)
+        button.setIcon(warcraft_icon("download", "#FFF1A8", 14))
         button.setObjectName(f"install-{entry.id}")
         button.setProperty("primary", True)
         button.clicked.connect(lambda _checked=False, e=entry: self.start_install(e))
@@ -404,9 +431,10 @@ class CatalogView(QWidget):
             # elsewhere works on every platform.
             box.addWidget(
                 self._tile_text(
-                    f"<i>Installer needs {platform_names(entry.install.platforms)} — "
-                    "not available on this platform yet.</i>",
+                    f"Installer needs {platform_names(entry.install.platforms)} — "
+                    "not available on this platform yet.",
                     frame,
+                    role="tile-warning",
                 )
             )
             button.setEnabled(False)
@@ -414,6 +442,7 @@ class CatalogView(QWidget):
             self._gated.add(entry.id)
         self._show_installed(entry.id)
         existing = QPushButton("Use existing…", frame)
+        existing.setIcon(warcraft_icon("folder", COLOR_TEXT_GOLD, 14))
         existing.setObjectName(f"existing-{entry.id}")
         existing.setToolTip(
             "Manage a server that is already installed (by a script, or before this app)."
@@ -428,6 +457,7 @@ class CatalogView(QWidget):
         # one check covers every case.
         if self._wsl_distros():
             adopt = QPushButton("Find in WSL…", frame)
+            adopt.setIcon(warcraft_icon("network", COLOR_TEXT_GOLD, 14))
             adopt.setObjectName(f"adopt-wsl-{entry.id}")
             adopt.setToolTip(
                 "Adopt a server that lives inside a WSL distro — for example one the "
