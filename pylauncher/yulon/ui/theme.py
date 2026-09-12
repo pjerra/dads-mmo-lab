@@ -36,14 +36,14 @@ COLOR_BRASS_DEEP = "#3C2D14"
 # Quality & State Accents
 COLOR_COMMON = "#FFFFFF"
 COLOR_UNCOMMON = "#1EFF00"  # Fel / Green
-COLOR_RARE = "#0070FF"      # Arcane / Blue
-COLOR_EPIC = "#A335EE"      # Nether / Purple
-COLOR_LEGENDARY = "#FF8000" # Sunwell / Orange
+COLOR_RARE = "#0070FF"  # Arcane / Blue
+COLOR_EPIC = "#A335EE"  # Nether / Purple
+COLOR_LEGENDARY = "#FF8000"  # Sunwell / Orange
 COLOR_ARTIFACT = "#E6CC80"  # Gold
-COLOR_DANGER = "#C41E3A"    # Crimson Red
+COLOR_DANGER = "#C41E3A"  # Crimson Red
 COLOR_TEXT_PRIMARY = "#F0E6D2"  # Parchment White
-COLOR_TEXT_MUTED = "#A69C88"    # Aged Text (lightened from #8A8275 for legibility)
-COLOR_TEXT_GOLD = "#F0C050"     # Warm Gold
+COLOR_TEXT_MUTED = "#A69C88"  # Aged Text (lightened from #8A8275 for legibility)
+COLOR_TEXT_GOLD = "#F0C050"  # Warm Gold
 COLOR_TEXT_WARNING = "#FFB86B"  # Amber warning (unsupported platform, refusals)
 
 # Font Hierarchies
@@ -51,12 +51,8 @@ FONT_FAMILY_TITLE = (
     "'Cinzel', 'Beaufort for LOL', 'Friz Quadrata', 'FrizQuadrata BT', "
     "'Palatino Linotype', 'Book Antiqua', 'Georgia', serif"
 )
-FONT_FAMILY_BODY = (
-    "'Segoe UI', 'Ubuntu', 'Helvetica Neue', 'Arial', sans-serif"
-)
-FONT_FAMILY_MONO = (
-    "'Consolas', 'Fira Code', 'JetBrains Mono', 'DejaVu Sans Mono', monospace"
-)
+FONT_FAMILY_BODY = "'Segoe UI', 'Ubuntu', 'Helvetica Neue', 'Arial', sans-serif"
+FONT_FAMILY_MONO = "'Consolas', 'Fira Code', 'JetBrains Mono', 'DejaVu Sans Mono', monospace"
 
 # Qt's QSS cannot scale font sizes relatively (`em`, `%` and the CSS keywords
 # all resolve to a fixed value — measured on PySide6 6.11.2). So the theme is
@@ -147,7 +143,8 @@ QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north, QTabWidget:not(#sidebar-tabs
     margin-right: 0px;
 }}
 
-QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover, QTabWidget:not(#sidebar-tabs) QTabBar::tab:hover {{
+QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover,
+QTabWidget:not(#sidebar-tabs) QTabBar::tab:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
@@ -160,7 +157,8 @@ QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover, QTabWidget
     border-bottom: 2px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected, QTabWidget:not(#sidebar-tabs) QTabBar::tab:selected {{
+QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected,
+QTabWidget:not(#sidebar-tabs) QTabBar::tab:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
@@ -216,7 +214,8 @@ QTabBar::tab:west:hover, QTabBar::tab:left:hover, QTabWidget#sidebar-tabs QTabBa
     border-right: none;
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:selected, QTabBar::tab:west:selected, QTabBar::tab:left:selected {{
+QTabWidget#sidebar-tabs QTabBar::tab:selected, QTabBar::tab:west:selected,
+QTabBar::tab:left:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
