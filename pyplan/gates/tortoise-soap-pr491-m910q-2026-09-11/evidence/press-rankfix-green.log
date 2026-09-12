@@ -1,0 +1,24 @@
+[11:20:30Z] press green start; image pr491fix-builder:fix (647d134e0187)
+[11:20:38Z] db healthy after ~8s
+[11:20:46Z] schemas ok
+[11:21:13Z] world base: 191 files in 33s
+[11:21:13Z] accounts before start: P491FEARLY rank 4 only (control). P491FADMIN is inserted AFTER the world is up.
+[11:21:39Z] world: ready after 26s; ready line: World server is up and running! Loading time: 0 minutes 20 seconds
+27375:SOAP: remote command interface bound to http://0.0.0.0:7878
+[11:21:42Z] PASS curl early-admin -> HTTP 200 (expected 200) :: <result>Core revision: e04f4959c0f6d47fe4a5 / 2026-09-11 15:04:43 +0200 / Linux_x64 (lit
+id	username	rank
+4	P491FEARLY	4
+5	P491FADMIN	4
+[11:21:42Z] P491FADMIN rank 4 inserted by SQL with the world running
+[11:21:42Z] PASS curl late-admin -> HTTP 200 (expected 200) :: <result>Core revision: e04f4959c0f6d47fe4a5 / 2026-09-11 15:04:43 +0200 / Linux_x64 (lit
+[11:21:42Z] PASS curl late-admin-wrongpw -> HTTP 401 (expected 401) :: <faultstring>Error 401: HTTP 401 Unauthorized</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body><
+[11:21:43Z] P491FADMIN demoted to rank 1 by SQL
+[11:21:43Z] PASS curl late-demoted -> HTTP 403 (expected 403) :: <faultstring>Error 403: HTTP 403 Forbidden</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SO
+[11:21:43Z] P491FADMIN rank set to 99 by SQL (outside the enum)
+[11:21:43Z] PASS curl late-rank99 -> HTTP 403 (expected 403) :: <faultstring>Error 403: HTTP 403 Forbidden</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SO
+[11:21:43Z] P491FEARLY (loaded at start as 4) demoted to rank 1 by SQL
+[11:21:43Z] PASS curl early-demoted -> HTTP 403 (expected 403) :: <faultstring>Error 403: HTTP 403 Forbidden</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SO
+[11:21:46Z] graceful stop: 3s, exit code 0
+[11:21:46Z] press green done: 6 PASS, 0 FAIL
+[11:21:46Z] cleanup: removing p491f-* containers, volume, network
+[11:21:47Z] p491f-* containers left: 0

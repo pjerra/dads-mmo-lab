@@ -1,0 +1,62 @@
+diff --git a/src/game/AccountMgr.cpp b/src/game/AccountMgr.cpp
+index 3b5c277..16a5298 100644
+--- a/src/game/AccountMgr.cpp
++++ b/src/game/AccountMgr.cpp
+@@ -255,6 +255,27 @@ AccountTypes AccountMgr::GetSecurity(uint32 acc_id)
+     return it->second;
+ }
+ 
++AccountTypes AccountMgr::GetSecurityFromDatabase(uint32 acc_id)
++{
++    std::unique_ptr<QueryResult> result(LoginDatabase.PQuery("SELECT `rank` FROM `account` WHERE `id` = '%u'", acc_id));
++    if (!result)
++        return SEC_PLAYER;
++
++    AccountTypes const secu = AccountTypes(result->Fetch()[0].GetUInt32());
++    switch (secu)
++    {
++    case SEC_OBSERVER:
++    case SEC_MODERATOR:
++    case SEC_DEVELOPER:
++    case SEC_ADMINISTRATOR:
++    case SEC_SIGMACHAD:
++        return secu;
++    default:
++        // Same set LoadGmLevels accepts; any other value is a player.
++        return SEC_PLAYER;
++    }
++}
++
+ void AccountMgr::SetSecurity(uint32 accId, AccountTypes sec)
+ {
+     m_accountSecurity[accId] = sec;
+diff --git a/src/game/AccountMgr.h b/src/game/AccountMgr.h
+index f26ec8e..0d6bd3b 100644
+--- a/src/game/AccountMgr.h
++++ b/src/game/AccountMgr.h
+@@ -108,6 +108,10 @@ class AccountMgr
+ 
+         void Load();
+         AccountTypes GetSecurity(uint32 acc_id);
++        // Reads the rank from the account row instead of the cache LoadGmLevels
++        // fills at startup: callers outside the game (SOAP) must see a row that
++        // was inserted or changed by SQL while the world runs.
++        AccountTypes GetSecurityFromDatabase(uint32 acc_id);
+         void SetSecurity(uint32 accId, AccountTypes sec);
+ 
+         void LoadGmLevels();
+diff --git a/src/mangosd/MaNGOSsoap.cpp b/src/mangosd/MaNGOSsoap.cpp
+index ff00e42..176c235 100644
+--- a/src/mangosd/MaNGOSsoap.cpp
++++ b/src/mangosd/MaNGOSsoap.cpp
+@@ -110,7 +110,9 @@ int ns1__executeCommand(struct soap* soap, char* command, char** result)
+     if (!sAccountMgr.CheckPassword(accountId, soap->passwd))
+         return 401;
+ 
+-    if (sAccountMgr.GetSecurity(accountId) < SOAPThread::MinLevel)
++    // The rank cache is filled at startup and by .account set gmlevel; an account
++    // inserted or promoted by SQL while the world runs is not in it. Read the row.
++    if (sAccountMgr.GetSecurityFromDatabase(accountId) < SOAPThread::MinLevel)
+         return 403;
+ 
+     if (!command || !*command)

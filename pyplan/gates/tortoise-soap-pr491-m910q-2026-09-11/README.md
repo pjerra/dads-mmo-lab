@@ -139,3 +139,30 @@ client — not a candidate), `~/vanilla-75b` 2.8 GB, `~/yulon-run` 1.1 GB, `~/yu
 `dml.local/ac-wotlk-*:native-5272511d` (3.1 GB), `…tortoise-server:rollback-2026-09-08` (965 MB — the
 8th's rollback), `dml/tortoise-wow:local` (748 MB), `fw41ssh`/`fw41img` (1.2 GB), `cmangos-vanilla-server:native-0baff6f3`
 (385 MB), `fedora:41` (242 MB); `/var/log/journal` 513 MB, `/var/cache/apt` 145 MB. `r6` (the owner's) untouched.
+
+## 2026-09-12 — finding 3 fixed on the PR: SOAP reads the rank from the row (`c90a3c0`)
+
+Owner's ask (2026-09-12, 13:00 CEST): fix the "also worth knowing" item and add it to the PR. Done as a
+third commit on `pjerra:soap-optional`: `AccountMgr::GetSecurityFromDatabase` (one `SELECT rank` per
+request, the same accepted set as `LoadGmLevels`, anything else a player) and `ns1__executeCommand` calls
+it instead of the cached `GetSecurity`. No cache write from the SOAP thread; in-game callers untouched.
+`evidence/rankfix-c90a3c0.diff` is the change.
+
+Measured on `m910q` with `evidence/press-rankfix.sh` (builder-stage image of the unpatched head, then the
+patch applied in that container and `make` run incrementally: `AccountMgr.cpp`, `MaNGOSsoap.cpp`, their
+dependents, relink; 2 min): `press-rankfix-red.log` and `press-rankfix-green.log`.
+
+| request | `e04f495` (red) | `c90a3c0` (green) |
+|---|---|---|
+| admin created before start | 200 | 200 |
+| admin inserted by SQL after the world is up | **403** | **200** |
+| that admin, wrong password | 401 | 401 |
+| that admin demoted to rank 1 by SQL | 403 | 403 |
+| that admin set to rank 99 by SQL | 403 | 403 |
+| the before-start admin demoted to rank 1 by SQL | **200** | **403** |
+
+So the cache was also keeping a demoted admin in; both directions now follow the row. The PR body's
+"Also worth knowing" paragraph is replaced by a "rank fix" section with this table. For Yu'lon this means
+`channel_setup` no longer has to create the SOAP account before the server starts on this tree once the
+PR merges; the pre-start ordering stays correct and harmless. Box left as before: images, clone and
+build cache removed, `~/pr491fix/press-*/` and `build-base.log` kept (114 MB), `r6` untouched.
