@@ -147,7 +147,10 @@ QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north, QTabWidget:not(#sidebar-tabs
     margin-right: 0px;
 }}
 
-QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover, QTabWidget:not(#sidebar-tabs) QTabBar::tab:hover {{
+QTabBar::tab:hover,
+QTabBar::tab:top:hover,
+QTabBar::tab:north:hover,
+QTabWidget:not(#sidebar-tabs) QTabBar::tab:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
@@ -160,7 +163,10 @@ QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover, QTabWidget
     border-bottom: 2px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected, QTabWidget:not(#sidebar-tabs) QTabBar::tab:selected {{
+QTabBar::tab:selected,
+QTabBar::tab:top:selected,
+QTabBar::tab:north:selected,
+QTabWidget:not(#sidebar-tabs) QTabBar::tab:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
@@ -179,7 +185,9 @@ QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected, Q
    window. Missing its right-hand border so it seamlessly connects and merges
    into the central container pane on its right. Targets both the :west selector
    and the #sidebar-tabs objectName for reliable matching. */
-QTabBar::tab:west, QTabBar::tab:left, QTabWidget#sidebar-tabs QTabBar::tab {{
+QTabBar::tab:west,
+QTabBar::tab:left,
+QTabWidget#sidebar-tabs QTabBar::tab {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #25201A, stop:0.5 #1A1612, stop:1 #100D0A
@@ -203,7 +211,9 @@ QTabBar::tab:west, QTabBar::tab:left, QTabWidget#sidebar-tabs QTabBar::tab {{
     text-align: left;
 }}
 
-QTabBar::tab:west:hover, QTabBar::tab:left:hover, QTabWidget#sidebar-tabs QTabBar::tab:hover {{
+QTabBar::tab:west:hover,
+QTabBar::tab:left:hover,
+QTabWidget#sidebar-tabs QTabBar::tab:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
@@ -216,7 +226,9 @@ QTabBar::tab:west:hover, QTabBar::tab:left:hover, QTabWidget#sidebar-tabs QTabBa
     border-right: none;
 }}
 
-QTabWidget#sidebar-tabs QTabBar::tab:selected, QTabBar::tab:west:selected, QTabBar::tab:left:selected {{
+QTabWidget#sidebar-tabs QTabBar::tab:selected,
+QTabBar::tab:west:selected,
+QTabBar::tab:left:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
