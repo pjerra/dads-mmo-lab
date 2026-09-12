@@ -3849,6 +3849,11 @@ class ControllerView(QWidget):
         box = QVBoxLayout(tab)
         accounts = QGroupBox("Create account", tab)
         form = QFormLayout(accounts)
+        # Fields fill the panel rather than staying at their size hint: a form
+        # pinned to `FieldsStayAtSizeHint` leaves the text boxes their narrowest
+        # default and drops the spare width into the gap between the label and
+        # the field, which reads as a broken form inside a two-column panel.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.account_name = QLineEdit(accounts)
         self.account_password = QLineEdit(accounts)
         self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -3879,6 +3884,7 @@ class ControllerView(QWidget):
         self.refresh_accounts_button = QPushButton("Refresh the list", existing)
         self.refresh_accounts_button.clicked.connect(self.refresh_accounts)
         change = QFormLayout()
+        change.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.selected_password = QLineEdit(existing)
         self.selected_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.set_password_button = QPushButton("Set password", existing)
@@ -3922,8 +3928,17 @@ class ControllerView(QWidget):
             )
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.addWidget(accounts)
-        box.addWidget(existing)
+        # Two panels side by side: create on the left, the server's existing
+        # accounts (list + change) on the right. On a wide window the list
+        # gets room without pushing the form off screen; on a narrow one each
+        # panel shrinks to its own minimum and the window scrolls rather than
+        # clipping. `existing` is hidden for a game with no account seam, and
+        # a hidden group box hands its whole column back to `accounts`.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(accounts, 1)
+        columns.addWidget(existing, 1)
+        box.addLayout(columns)
         box.addWidget(self.account_report)
         box.addStretch(1)
         self._tabs.addTab(tab, get_tab_icon("accounts"), "Accounts")
@@ -3953,6 +3968,9 @@ class ControllerView(QWidget):
 
         actions = QGroupBox("What to do", tab)
         form = QFormLayout(actions)
+        # As the Accounts form: the text box and spin box grow to fill the
+        # action column, and the buttons beside them sit on a shared baseline.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.teleport_where = QLineEdit(actions)
         self.teleport_where.setPlaceholderText("a place this server knows, like Stormwind")
         self.teleport_button = QPushButton("Teleport", actions)
@@ -4027,8 +4045,16 @@ class ControllerView(QWidget):
             control.setVisible(wired)
         self._character_chosen(-1)
 
-        box.addWidget(people)
-        box.addWidget(actions)
+        # Two panels side by side: the roster on the left, the actions that
+        # act on the chosen character on the right. The roster list is the
+        # column whose content grows (hundreds of characters), so it sits in
+        # its own panel; the action form is short and fixed. Both shrink on a
+        # narrow window and the page scrolls rather than clipping.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(people, 3)
+        columns.addWidget(actions, 2)
+        box.addLayout(columns)
         box.addWidget(self.character_report)
         box.addStretch(1)
         self._tabs.addTab(tab, get_tab_icon("characters"), "Characters")
@@ -4548,8 +4574,15 @@ class ControllerView(QWidget):
         self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
         self._show_page_buttons()
-        box.addWidget(browse)
-        box.addWidget(self._build_my_party_group(tab))
+        # Two panels side by side: the bot roster on the left, My Party on the
+        # right. Both are group boxes already; giving them columns rather than a
+        # stack lets a long roster and a full party panel share the tab without
+        # either pushing the other off the bottom.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(browse, 3)
+        columns.addWidget(self._build_my_party_group(tab), 2)
+        box.addLayout(columns)
         self._tabs.addTab(tab, get_tab_icon("bots"), "Bots")
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
@@ -4724,12 +4757,32 @@ class ControllerView(QWidget):
         self.maintenance_report = QPlainTextEdit(tab)
         self.maintenance_report.setReadOnly(True)
 
+        # Two panels: the backup list with its buttons on the left, the restore
+        # plan/result on the right. The interrupted-restore warning is a
+        # full-width band above both, because it is about neither panel.
+        backups = QGroupBox("Backups", tab)
+        self.backup_button.setParent(backups)
+        self.refresh_backups_button.setParent(backups)
+        self.backup_list.setParent(backups)
+        self.plan_restore_button.setParent(backups)
+        self.restore_button.setParent(backups)
+        backups_box = QVBoxLayout(backups)
+        backups_box.addLayout(top)
+        backups_box.addWidget(self.backup_list, 2)
+        backups_box.addLayout(actions)
+
+        restore = QGroupBox("Restore", tab)
+        self.maintenance_report.setParent(restore)
+        restore_box = QVBoxLayout(restore)
+        restore_box.addWidget(self.maintenance_report, 1)
+
         box.addWidget(self.interrupted_label)
         box.addWidget(self.forget_button)
-        box.addLayout(top)
-        box.addWidget(self.backup_list, 2)
-        box.addLayout(actions)
-        box.addWidget(self.maintenance_report, 1)
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(backups, 3)
+        columns.addWidget(restore, 2)
+        box.addLayout(columns)
         self._tabs.addTab(tab, get_tab_icon("maintenance"), "Maintenance")
         self.refresh_backups()
 
@@ -5021,10 +5074,29 @@ class ControllerView(QWidget):
         row.addWidget(self.adopt_button)
         row.addWidget(self.updates_button)
         row.addWidget(self.rebuild_button)
-        box.addWidget(self.module_list, 2)
+        # Two panels below a full-width action toolbar: the module list on the
+        # left (the thing you select from), the result and long-job output on
+        # the right. The toolbar stays full-width because it mixes actions on
+        # the selection with actions on the whole install (rebuild, updates,
+        # adopt), and a narrow left column would shrink nine buttons illegibly.
+        modules = QGroupBox("Modules", tab)
+        self.module_list.setParent(modules)
+        modules_box = QVBoxLayout(modules)
+        modules_box.addWidget(self.module_list, 1)
+
+        output = QWidget(tab)
+        self.module_report.setParent(output)
+        self.rebuild_log.setParent(output)
+        output_box = QVBoxLayout(output)
+        output_box.addWidget(self.module_report, 1)
+        output_box.addWidget(self.rebuild_log, 2)
+
         box.addLayout(row)
-        box.addWidget(self.module_report, 1)
-        box.addWidget(self.rebuild_log, 2)
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(modules, 3)
+        columns.addWidget(output, 2)
+        box.addLayout(columns)
         self._tabs.addTab(tab, get_tab_icon("modules"), "Modules")
         self._manifests: dict[str, Manifest] = {}
         # The importer talks from a worker thread for however long it runs, and

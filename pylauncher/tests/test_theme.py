@@ -53,6 +53,40 @@ def test_warcraft_theme_qss_covers_essential_controls() -> None:
     assert "QLabel#tile-desc" in WARCRAFT_THEME_QSS
     assert "QLabel#tile-meta" in WARCRAFT_THEME_QSS
     assert "QLabel#tile-warning" in WARCRAFT_THEME_QSS
+    assert "QTabBar QToolButton" in WARCRAFT_THEME_QSS
+
+
+def test_input_controls_carry_explicit_minimum_sizes() -> None:
+    # The shared input block must give single-line controls a real height floor
+    # (so the caret/selection are never clipped by the padding) and multi-line
+    # panels a taller one (so a log/report box reads as a panel, not a stray
+    # line). Guarded as QSS text because the floor is set in the theme, not in
+    # per-widget Python.
+    assert "min-height: 20px" in WARCRAFT_THEME_QSS
+    assert "min-width: 60px" in WARCRAFT_THEME_QSS
+    assert "min-height: 90px" in WARCRAFT_THEME_QSS
+
+
+def test_the_pressed_button_state_does_not_shift_padding() -> None:
+    # A pressed button's sunken look must come from the fill and border shading
+    # only — the old asymmetric `padding-top: 9px; padding-left: 17px` nudged
+    # the content and broke the shared border edge with its neighbours. The
+    # pressed rule must declare no padding property at all (a prose "padding"
+    # in the explanatory comment is fine; a `padding-` declaration is not).
+    pressed = WARCRAFT_THEME_QSS.split("QPushButton:pressed")[1].split("}")[0]
+    assert "padding-top:" not in pressed
+    assert "padding-left:" not in pressed
+    assert "padding-bottom:" not in pressed
+    assert "padding-right:" not in pressed
+    assert "padding:" not in pressed
+
+
+def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
+    # The West sidebar reads as a rail, not a second panel: `max-width` caps it
+    # near the icon-plus-padding width, so adding server tabs cannot widen it.
+    west = WARCRAFT_THEME_QSS.split("QTabBar::tab:west")[1].split("}")[0]
+    assert "max-width: 96px" in west
+    assert "min-width: 68px" in west
 
 
 def test_muted_text_color_is_lightened_for_legibility() -> None:

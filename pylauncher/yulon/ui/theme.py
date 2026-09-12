@@ -83,6 +83,9 @@ QTabWidget::pane {{
     background-color: {COLOR_BG_CONTAINER};
     border-radius: 4px;
     top: -2px;
+    /* Breathing room around the page content, so panels and lists do not sit
+       flush against the pane border on any tab, at any window size. */
+    padding: 10px;
 }}
 
 QTabBar::tab {{
