@@ -99,6 +99,7 @@ from yulon.log import get_logger
 from yulon.manifest import Manifest, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
+from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
@@ -3654,7 +3655,12 @@ class ControllerView(QWidget):
         accumulating in a window that may stay open for days is the defect this
         change exists to avoid rather than one to introduce elsewhere.
         """
-        text = line.strip()
+        # Through `lines.parse()` before anything else: these two sinks are the
+        # reason T35's markers are NOT applied inside `run_attached()`, and a
+        # belt on top of that braces. `QLabel` renders `\x1e` as a box glyph,
+        # and a future caller wiring a marked stream in here would leave one in
+        # front of every line with nothing to say what it was.
+        text = lines.parse(line).text.strip()
         if not text:
             return
         if len(text) > _IMPORT_LINE_CHARS:
@@ -5314,7 +5320,7 @@ class ControllerView(QWidget):
         `--rm` deletes the container when it exits, so `docker compose logs`
         has nothing to add afterwards. What is on screen is what there is.
         """
-        text = line.rstrip()
+        text = lines.parse(line).text.rstrip()  # see `_import_line()` for why
         if not text:
             return
         self.module_report.appendPlainText(text)
