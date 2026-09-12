@@ -28,7 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -104,12 +106,30 @@ from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.ui import lines
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker
+from yulon.ui.icons import get_tab_icon, warcraft_icon
+from yulon.ui.theme import COLOR_GOLD_LIGHT, COLOR_TEXT_GOLD
 from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.warcraft_decorations import WarcraftRealmBadge
 
 logger = get_logger(__name__)
+
+
+def _realm_badge_status(status: InstallStatus) -> str:
+    """The `WarcraftRealmBadge` state for an `InstallStatus` (Server tab).
+
+    Maps the three-container reading onto the badge's four visual states: all
+    up reads "online", some up reads "starting" (a realm still coming up), and
+    none up reads "offline". The start/stop transitions set "starting"/"stopping"
+    directly, since a poll has not yet seen the change.
+    """
+    if status.all_running:
+        return "running"
+    if status.any_running:
+        return "starting"
+    return "stopped"
 
 
 class UnsupportedGameError(RuntimeError):
@@ -2388,8 +2408,23 @@ class ControllerView(QWidget):
         # had no selection to lose.
         self._custom_install_pending = False
         self._console_pending = False
+        # The panel name shown in the header above the tab strip, for the panel
+        # currently open. The tabs themselves are icon-only; their text is the
+        # tooltip, and the header carries the full readable name instead of a
+        # clipped strip.
+        self._panel_title = QLabel("", self)
+        self._panel_title.setObjectName("panel-title")
+        self._tab_titles: dict[int, str] = {}
         self._tabs = QTabWidget(self)
+        self._tabs.setIconSize(QSize(16, 16))
+        self._tabs.setUsesScrollButtons(True)
+        self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tabs.setDocumentMode(False)
+        self._tabs.tabBar().setExpanding(True)
+        self._tabs.currentChanged.connect(self._sync_panel_title)
         layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.addWidget(self._panel_title)
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
@@ -2436,6 +2471,9 @@ class ControllerView(QWidget):
         self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
+        # The first panel's name is shown without a tab-change signal, because
+        # the default current index (0) never emits `currentChanged`.
+        self._sync_panel_title(self._tabs.currentIndex())
 
         # What the channel says needs no daemon, no database and no network:
         # it is read from the credential file, so it is shown whether or not
@@ -2459,6 +2497,24 @@ class ControllerView(QWidget):
             # server has stopped accepting reads as verified straight off the
             # disk, and until something asks, the repair is never offered.
             self._check_the_channel()
+
+    # ------------------------------------------------------------- sub-tabs
+
+    def _add_panel_tab(self, tab: QWidget, icon_name: str, title: str) -> None:
+        """Add an icon-only sub-tab whose full name lives in the tooltip and header.
+
+        The strip is icon-only: a text label here clips (8 tabs into a narrow
+        bar), so the full name goes into the tooltip and the header label shows
+        the open panel's name via `_sync_panel_title`.
+        """
+        index = self._tabs.addTab(tab, get_tab_icon(icon_name), "")
+        self._tabs.setTabToolTip(index, title)
+        self._tab_titles[index] = title
+
+    @Slot(int)
+    def _sync_panel_title(self, index: int) -> None:
+        """Show the open panel's full name in the header above the tab strip."""
+        self._panel_title.setText(self._tab_titles.get(index, ""))
 
     # ------------------------------------------------------------ server tab
 
@@ -2543,12 +2599,19 @@ class ControllerView(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse  # so the remedy can be copied
         )
         self.start_button = QPushButton("Start", tab)
+        self.start_button.setIcon(warcraft_icon("play", COLOR_GOLD_LIGHT, 14))
+        self.start_button.setProperty("primary", True)
         self.stop_button = QPushButton("Stop", tab)
+        self.stop_button.setIcon(warcraft_icon("stop", "#FFB8B8", 14))
+        self.stop_button.setProperty("danger", True)
         self.refresh_button = QPushButton("Refresh", tab)
+        self.refresh_button.setIcon(warcraft_icon("refresh", COLOR_TEXT_GOLD, 14))
         # Deliberate, per checklist 6.5: nothing removes a container today, and
         # whatever does must not be a stray click next to Stop. It arms on the
         # first press and acts on the second, and anything else disarms it.
         self.remove_button = QPushButton(REMOVE_IDLE, tab)
+        self.remove_button.setIcon(warcraft_icon("trash", "#FFB8B8", 14))
+        self.remove_button.setProperty("danger", True)
         # Hidden unless the database has said there is an unfinished import to
         # finish. A destructive action that is always on screen is one that gets
         # pressed by accident, and this one is only ever right for a broken
@@ -2560,6 +2623,7 @@ class ControllerView(QWidget):
         # and refusing while leaving the user to go and find the other install
         # themselves is correct and unhelpful. This is the offer to do it.
         self.stop_other_button = QPushButton("Stop the other server and start this one", tab)
+        self.stop_other_button.setProperty("primary", True)
         self.stop_other_button.setVisible(False)
         self.repair_label = QLabel("", tab)
         self.repair_label.setWordWrap(True)
@@ -2585,6 +2649,7 @@ class ControllerView(QWidget):
         self.keep_characters_check.setChecked(False)  # owner answer 2: unticked by default
         self.keep_characters_check.setVisible(False)
         self.uninstall_confirm_button = QPushButton("Uninstall this server", tab)
+        self.uninstall_confirm_button.setProperty("danger", True)
         self.uninstall_confirm_button.setVisible(False)
         self.uninstall_label = QLabel("", tab)
         self.uninstall_label.setWordWrap(True)
@@ -2631,7 +2696,22 @@ class ControllerView(QWidget):
             row.addWidget(b)
         if self.steam_button is not None:
             row.addWidget(self.steam_button)
-        box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
+        # The actions keep their natural size instead of stretching to fill the
+        # row: a Start button drawn 226px wide beside a 95px word looks like a
+        # broken border, not a button. The spare width goes to a trailing gap.
+        row.addStretch(1)
+        # The header line: the install's name and path, with the realm's live
+        # status as a glowing gem badge on the right. `WarcraftRealmBadge` is
+        # the one decoration that had a natural home in the view but was only
+        # ever exercised by tests.
+        name_row = QHBoxLayout()
+        name_row.addWidget(
+            QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}")
+        )
+        name_row.addStretch(1)
+        self.realm_badge = WarcraftRealmBadge("stopped", tab)
+        name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        box.addLayout(name_row)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addWidget(self.client_dir_label)
@@ -2657,7 +2737,7 @@ class ControllerView(QWidget):
         if self.forget_install_button is not None:
             box.addWidget(self.forget_install_button)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Server")
+        self._add_panel_tab(tab, "server", "Server")
 
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
@@ -2924,6 +3004,7 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
+        self.realm_badge.set_status(_realm_badge_status(status))
         self._update_forget_visibility()
         self._update_client_dir_row()
         self._ask_about_the_import(status)
@@ -3114,6 +3195,7 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self.status_label.setText(f"status: Docker not reachable ({exc})")
+        self.realm_badge.set_status("stopped")
 
     def _set_busy(self, busy: bool) -> None:
         """Lock the Server buttons while an action of ours is running.
@@ -3236,6 +3318,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
+        self.realm_badge.set_status("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
@@ -3244,6 +3327,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
+        self.realm_badge.set_status("starting")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
     @Slot(object)
@@ -3419,6 +3503,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping the other server…")
+        self.realm_badge.set_status("starting")
         self._run(
             self.services.controller.stop_conflicting_and_start,
             self._server_action_done,
@@ -4016,7 +4101,7 @@ class ControllerView(QWidget):
         box.addWidget(self.console_log, 1)
         box.addLayout(cmd_row)
         box.addWidget(self.console_note)
-        self._tabs.addTab(tab, "Console")
+        self._add_panel_tab(tab, "console", "Console")
 
     @Slot()
     def follow_logs(self) -> None:
@@ -4120,6 +4205,11 @@ class ControllerView(QWidget):
         box = QVBoxLayout(tab)
         accounts = QGroupBox("Create account", tab)
         form = QFormLayout(accounts)
+        # Fields fill the panel rather than staying at their size hint: a form
+        # pinned to `FieldsStayAtSizeHint` leaves the text boxes their narrowest
+        # default and drops the spare width into the gap between the label and
+        # the field, which reads as a broken form inside a two-column panel.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.account_name = QLineEdit(accounts)
         self.account_password = QLineEdit(accounts)
         self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
@@ -4144,10 +4234,13 @@ class ControllerView(QWidget):
         existing = QGroupBox("Accounts on this server", tab)
         existing_box = QVBoxLayout(existing)
         self.account_list = QListWidget(existing)
+        self.account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.account_list.customContextMenuRequested.connect(self._show_account_context_menu)
         self.account_list.currentRowChanged.connect(self._account_chosen)
         self.refresh_accounts_button = QPushButton("Refresh the list", existing)
         self.refresh_accounts_button.clicked.connect(self.refresh_accounts)
         change = QFormLayout()
+        change.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.selected_password = QLineEdit(existing)
         self.selected_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.set_password_button = QPushButton("Set password", existing)
@@ -4191,11 +4284,20 @@ class ControllerView(QWidget):
             )
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.addWidget(accounts)
-        box.addWidget(existing)
+        # Two panels side by side: create on the left, the server's existing
+        # accounts (list + change) on the right. On a wide window the list
+        # gets room without pushing the form off screen; on a narrow one each
+        # panel shrinks to its own minimum and the window scrolls rather than
+        # clipping. `existing` is hidden for a game with no account seam, and
+        # a hidden group box hands its whole column back to `accounts`.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(accounts, 1)
+        columns.addWidget(existing, 1)
+        box.addLayout(columns)
         box.addWidget(self.account_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Accounts")
+        self._add_panel_tab(tab, "accounts", "Accounts")
 
     def _build_characters_tab(self) -> None:
         """8.4a. Every action drawn only where this tree has the command, and
@@ -4212,6 +4314,8 @@ class ControllerView(QWidget):
         people = QGroupBox("Characters on this server", tab)
         people_box = QVBoxLayout(people)
         self.character_list = QListWidget(people)
+        self.character_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.character_list.customContextMenuRequested.connect(self._show_character_context_menu)
         self.character_list.currentRowChanged.connect(self._character_chosen)
         self.refresh_characters_button = QPushButton("Refresh the list", people)
         self.refresh_characters_button.clicked.connect(self.refresh_characters)
@@ -4220,6 +4324,9 @@ class ControllerView(QWidget):
 
         actions = QGroupBox("What to do", tab)
         form = QFormLayout(actions)
+        # As the Accounts form: the text box and spin box grow to fill the
+        # action column, and the buttons beside them sit on a shared baseline.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.teleport_where = QLineEdit(actions)
         self.teleport_where.setPlaceholderText("a place this server knows, like Stormwind")
         self.teleport_button = QPushButton("Teleport", actions)
@@ -4294,11 +4401,19 @@ class ControllerView(QWidget):
             control.setVisible(wired)
         self._character_chosen(-1)
 
-        box.addWidget(people)
-        box.addWidget(actions)
+        # Two panels side by side: the roster on the left, the actions that
+        # act on the chosen character on the right. The roster list is the
+        # column whose content grows (hundreds of characters), so it sits in
+        # its own panel; the action form is short and fixed. Both shrink on a
+        # narrow window and the page scrolls rather than clipping.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(people, 3)
+        columns.addWidget(actions, 2)
+        box.addLayout(columns)
         box.addWidget(self.character_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, "Characters")
+        self._add_panel_tab(tab, "characters", "Characters")
 
     def _set_level_command(self) -> str | None:
         """This tree's set-level verb, or None where its console has no route.
@@ -4788,6 +4903,8 @@ class ControllerView(QWidget):
         self.bot_summary = QLabel("", browse)
         self.bot_summary.setWordWrap(True)
         self.bot_list = QListWidget(browse)
+        self.bot_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.bot_list.customContextMenuRequested.connect(self._show_bot_context_menu)
         row = QHBoxLayout()
         self.bot_filter = QLineEdit(browse)
         self.bot_filter.setPlaceholderText("name begins with…")
@@ -4798,7 +4915,11 @@ class ControllerView(QWidget):
         self.previous_bots_button.clicked.connect(self.previous_bot_page)
         self.next_bots_button = QPushButton("Next", browse)
         self.next_bots_button.clicked.connect(self.next_bot_page)
-        row.addWidget(self.bot_filter)
+        # The filter is the row's one input, so it takes the spare width; the
+        # three buttons stay at their own size. Without the stretch the line
+        # edit collapsed to its minimum (~60px), which reads as a too-small,
+        # hard-to-see textbox inside a two-column panel.
+        row.addWidget(self.bot_filter, 1)
         row.addWidget(self.filter_bots_button)
         row.addWidget(self.previous_bots_button)
         row.addWidget(self.next_bots_button)
@@ -4813,9 +4934,16 @@ class ControllerView(QWidget):
         self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
         self._show_page_buttons()
-        box.addWidget(browse)
-        box.addWidget(self._build_my_party_group(tab))
-        self._tabs.addTab(tab, "Bots")
+        # Two panels side by side: the bot roster on the left, My Party on the
+        # right. Both are group boxes already; giving them equal columns lets a
+        # long roster and a full party panel share the tab comfortably with
+        # ample room for all inputs and dropdowns.
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(browse, 1)
+        columns.addWidget(self._build_my_party_group(tab), 1)
+        box.addLayout(columns)
+        self._add_panel_tab(tab, "bots", "Bots")
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -4970,6 +5098,8 @@ class ControllerView(QWidget):
         top.addStretch(1)
 
         self.backup_list = QListWidget(tab)
+        self.backup_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.backup_list.customContextMenuRequested.connect(self._show_backup_context_menu)
         self.backup_list.currentItemChanged.connect(self._backup_selection_changed)
 
         actions = QHBoxLayout()
@@ -4987,13 +5117,33 @@ class ControllerView(QWidget):
         self.maintenance_report = QPlainTextEdit(tab)
         self.maintenance_report.setReadOnly(True)
 
+        # Two panels: the backup list with its buttons on the left, the restore
+        # plan/result on the right. The interrupted-restore warning is a
+        # full-width band above both, because it is about neither panel.
+        backups = QGroupBox("Backups", tab)
+        self.backup_button.setParent(backups)
+        self.refresh_backups_button.setParent(backups)
+        self.backup_list.setParent(backups)
+        self.plan_restore_button.setParent(backups)
+        self.restore_button.setParent(backups)
+        backups_box = QVBoxLayout(backups)
+        backups_box.addLayout(top)
+        backups_box.addWidget(self.backup_list, 2)
+        backups_box.addLayout(actions)
+
+        restore = QGroupBox("Restore", tab)
+        self.maintenance_report.setParent(restore)
+        restore_box = QVBoxLayout(restore)
+        restore_box.addWidget(self.maintenance_report, 1)
+
         box.addWidget(self.interrupted_label)
         box.addWidget(self.forget_button)
-        box.addLayout(top)
-        box.addWidget(self.backup_list, 2)
-        box.addLayout(actions)
-        box.addWidget(self.maintenance_report, 1)
-        self._tabs.addTab(tab, "Maintenance")
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(backups, 3)
+        columns.addWidget(restore, 2)
+        box.addLayout(columns)
+        self._add_panel_tab(tab, "maintenance", "Maintenance")
         self.refresh_backups()
 
     def _selected_backup(self) -> Path | None:
@@ -5177,6 +5327,8 @@ class ControllerView(QWidget):
         tab = QWidget(self)
         box = QVBoxLayout(tab)
         self.module_list = QListWidget(tab)
+        self.module_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.module_list.customContextMenuRequested.connect(self._show_module_context_menu)
         self.module_report = QPlainTextEdit(tab)
         self.module_report.setReadOnly(True)
         self.install_module_button = QPushButton("Install selected", tab)
@@ -5271,22 +5423,48 @@ class ControllerView(QWidget):
         # before.
         self.rebuild_log.run_started.connect(self._rebuild_started)
         self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        row = QHBoxLayout()
-        row.addWidget(self.install_module_button)
-        row.addWidget(self.remove_module_button)
-        row.addWidget(self.module_link_button)
-        row.addWidget(self.module_folder_button)
-        row.addWidget(self.module_sql_button)
-        row.addWidget(self.module_updates_button)
-        row.addStretch(1)
-        row.addWidget(self.adopt_button)
-        row.addWidget(self.updates_button)
-        row.addWidget(self.rebuild_button)
-        box.addWidget(self.module_list, 2)
-        box.addLayout(row)
-        box.addWidget(self.module_report, 1)
-        box.addWidget(self.rebuild_log, 2)
-        self._tabs.addTab(tab, "Modules")
+        # Two toolbars rather than one, because nine buttons side by side ask
+        # for ~1400px where the tab has under a thousand — and a single row
+        # clipped each button's text mid-word and let their borders run
+        # together. The split follows the order the tab is read in: the four
+        # that act on the selection (or add to it) on the first row, the five
+        # that act on the whole install on the second.
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(self.install_module_button)
+        selection_row.addWidget(self.remove_module_button)
+        selection_row.addWidget(self.module_link_button)
+        selection_row.addWidget(self.module_folder_button)
+        selection_row.addStretch(1)
+
+        install_row = QHBoxLayout()
+        install_row.addWidget(self.module_sql_button)
+        install_row.addWidget(self.module_updates_button)
+        install_row.addStretch(1)
+        install_row.addWidget(self.adopt_button)
+        install_row.addWidget(self.updates_button)
+        install_row.addWidget(self.rebuild_button)
+        # Two panels below the toolbars: the module list on the left (the thing
+        # you select from), the result and long-job output on the right.
+        modules = QGroupBox("Modules", tab)
+        self.module_list.setParent(modules)
+        modules_box = QVBoxLayout(modules)
+        modules_box.addWidget(self.module_list, 1)
+
+        output = QWidget(tab)
+        self.module_report.setParent(output)
+        self.rebuild_log.setParent(output)
+        output_box = QVBoxLayout(output)
+        output_box.addWidget(self.module_report, 1)
+        output_box.addWidget(self.rebuild_log, 2)
+
+        box.addLayout(selection_row)
+        box.addLayout(install_row)
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+        columns.addWidget(modules, 3)
+        columns.addWidget(output, 2)
+        box.addLayout(columns)
+        self._add_panel_tab(tab, "modules", "Modules")
         self._manifests: dict[str, Manifest] = {}
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
@@ -5925,7 +6103,7 @@ class ControllerView(QWidget):
         row.addWidget(self.apply_button)
         box.addLayout(row)
         box.addWidget(self.network_text, 1)
-        self._tabs.addTab(tab, "Networking")
+        self._add_panel_tab(tab, "networking", "Networking")
         self._plan: NetworkPlan | None = None
 
     def network_mode(self) -> Mode:
@@ -5980,6 +6158,105 @@ class ControllerView(QWidget):
         self.network_text.appendPlainText(f"\nAPPLY FAILED: {exc}")
         self.action_failed.emit(str(exc))
         self.apply_button.setEnabled(True)
+
+    # -------------------------------------------------------- context menus
+
+    @staticmethod
+    def _copy_to_clipboard(text: str) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+
+    def _show_account_context_menu(self, pos: QPoint) -> None:
+        item = self.account_list.itemAt(pos)
+        if item is None:
+            return
+        username = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Username ({username})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(username))
+        menu.addSeparator()
+        if self.set_password_button.isEnabled():
+            pw_action = menu.addAction("Set Password…")
+            pw_action.triggered.connect(self.set_selected_password)
+        if self.set_gm_button.isEnabled():
+            gm_action = menu.addAction("Set GM Level…")
+            gm_action.triggered.connect(self.set_selected_gm_level)
+        menu.exec(self.account_list.mapToGlobal(pos))
+
+    def _show_character_context_menu(self, pos: QPoint) -> None:
+        item = self.character_list.itemAt(pos)
+        if item is None:
+            return
+        name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Character Name ({name})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(name))
+        menu.addSeparator()
+        if self.revive_button.isEnabled():
+            revive_act = menu.addAction(f"Revive {name}")
+            revive_act.triggered.connect(self.revive_character)
+        if self.teleport_button.isEnabled():
+            teleport_act = menu.addAction(f"Teleport {name}…")
+            teleport_act.triggered.connect(self.teleport_character)
+        if self.set_level_button.isEnabled():
+            level_act = menu.addAction(f"Set Level of {name}…")
+            level_act.triggered.connect(self.set_character_level)
+        if self.mail_gold_button.isEnabled():
+            gold_act = menu.addAction(f"Send Gold to {name}…")
+            gold_act.triggered.connect(self.mail_gold)
+        if self.send_gear_button.isEnabled():
+            gear_act = menu.addAction(f"Send Worn Gear to {name}…")
+            gear_act.triggered.connect(self.send_gear_set)
+        if self.rename_button.isEnabled():
+            rename_act = menu.addAction(f"Rename {name} at Next Login")
+            rename_act.triggered.connect(self.rename_character)
+        menu.exec(self.character_list.mapToGlobal(pos))
+
+    def _show_bot_context_menu(self, pos: QPoint) -> None:
+        item = self.bot_list.itemAt(pos)
+        if item is None:
+            return
+        text = item.text()
+        name = text.split(" — ")[0].strip() if " — " in text else text.strip()
+        menu = QMenu(self)
+        copy_action = menu.addAction(f"Copy Bot Name ({name})")
+        copy_action.triggered.connect(lambda: self._copy_to_clipboard(name))
+        menu.exec(self.bot_list.mapToGlobal(pos))
+
+    def _show_backup_context_menu(self, pos: QPoint) -> None:
+        item = self.backup_list.itemAt(pos)
+        if item is None:
+            return
+        path = cast(Path, item.data(Qt.ItemDataRole.UserRole))
+        menu = QMenu(self)
+        if self.plan_restore_button.isEnabled():
+            plan_act = menu.addAction("Show Restore Plan…")
+            plan_act.triggered.connect(self.show_restore_plan)
+        if self.restore_button.isEnabled():
+            rest_act = menu.addAction("Restore Database from this Backup…")
+            rest_act.triggered.connect(self.run_restore)
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy Backup File Name")
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(path.name))
+        menu.exec(self.backup_list.mapToGlobal(pos))
+
+    def _show_module_context_menu(self, pos: QPoint) -> None:
+        item = self.module_list.itemAt(pos)
+        if item is None:
+            return
+        mid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        menu = QMenu(self)
+        if self.install_module_button.isEnabled():
+            inst_act = menu.addAction("Install Selected Module")
+            inst_act.triggered.connect(lambda: self._module_action("install"))
+        if self.remove_module_button.isEnabled():
+            rem_act = menu.addAction("Remove Selected Module")
+            rem_act.triggered.connect(lambda: self._module_action("remove"))
+        menu.addSeparator()
+        copy_act = menu.addAction("Copy Module ID")
+        copy_act.triggered.connect(lambda: self._copy_to_clipboard(mid))
+        menu.exec(self.module_list.mapToGlobal(pos))
 
 
 # ------------------------------------------------------------- formatting

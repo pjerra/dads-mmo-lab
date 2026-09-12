@@ -80,3 +80,8 @@ def retitle_controller_tabs(tabs: QTabWidget, views: Iterable[ControllerView]) -
         index = tabs.indexOf(view)
         if index != -1:
             tabs.setTabText(index, title)
+            # The rail is narrow (theme's `QTabBar::tab:west` max-width), so the
+            # title elides for longer install names. The full server dir is the
+            # one thing the short title leaves out, and the tooltip carries it
+            # so a hover recovers what elision hides.
+            tabs.setTabToolTip(index, str(view.services.controller.server_dir))
