@@ -1,6 +1,6 @@
 # T36 — a client folder can be set, changed or cleared on an install after the fact
 
-**Status:** OPEN
+**Status:** CLOSED 2026-09-12 04:03 CEST — merged `2292f86a`, gate green, pushed; the live press on `yulon-win11` recorded
 **Filed:** 2026-09-12 01:52 CEST by the lead (Fable), from the owner: "do we have a way to point yulon to the clients? example for when it needed to drop something into the addon folder?" — the answer today is no.
 **Hand:** Sonnet. Worktree `.claude/worktrees/t36`, branch `hand-t36` from `yulon-phase8b`. Reviewer: Codex adversarial (or a cold Opus). Unit; a live press on `yulon-win11` (a WotLK install with no client folder, the 3.3.5a client on the host share) is the lead's. **Do not edit `pylauncher/yulon/ui/widgets/log_panel.py`, `runner.py`, `git.py`, `docker.py`'s relay sites or `families/extract.py`: T35's hand owns those in parallel.**
 
@@ -36,3 +36,7 @@ Three must-fixes, all accepted by the lead, plus one the lead added from the non
 ## Round 2 (hand, `hand-t36` at `aa49fd8b`) and the lead's check (2026-09-12 02:50 CEST)
 
 (1) `_set_busy()` disables the three client-folder buttons; `_client_dir_busy()` guards both handlers with the "Something else is running… Nothing was changed." dialog (two tests, two mutations). (2) `_mpq_archive_count()` reads the MPQ check's own detail; zero archives refused before the warnings dialog, even with a Yes-answering fake. (3) `chosen.resolve().is_relative_to(server_dir.resolve())` → `The client folder cannot be the server folder or inside it ({server_dir}): Uninstall removes that whole tree.` before validation (the server dir and a subfolder refused, a sibling accepted). (4) A game with no `ClientSpec` needs `Data/`: `{dir} has no Data/ folder, so it is not a WoW client. Nothing was changed.` Non-blocking taken: a recorded folder that is gone reads `— the folder is missing`. Four pre-existing tests re-seeded for the new rules. Gate `=== --checks: ALL GREEN ===` (4246 passed). Lead's check: ACCEPT by the two-round rule; merged `--no-ff`, gate behind the merge running; the live press on `yulon-win11` follows the build.
+
+## Live half and close (lead, 2026-09-12 04:03 CEST)
+
+`pyplan/gates/t36-client-folder-yulon-win11-2026-09-12/`: the owner's own WotLK install (made through the app at 02:34 with `client_dir: null`) on the `e71a74a4` build; `Set client folder…` → the native picker → `D:\clients\WoW-WotLK-3.3.5a-min` → `state.json` read back with the folder and the tab rebuilt reading `Client folder: D:\clients\WoW-WotLK-3.3.5a-min` with Change and Forget; the BMAH keg's Install selected refused while the world ran (the T7 guard), then with the world stopped through the app: `install bmah: 5 step(s), 0 skipped` (the database started alone) and `BlackMarketUI` (25 files) in the client's `Interface/AddOns`; the world started again through the app afterwards. The client reached the VM through a VHDX (Hyper-V's `Copy-VMFile` stalled on large files; an HTTP route was refused by the session's gate); its enUS locale files are still partial. CLOSED; merged `2292f86a`; to upstream with T35.
