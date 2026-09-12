@@ -2297,16 +2297,25 @@ class ControllerView(QWidget):
         # had no selection to lose.
         self._custom_install_pending = False
         self._console_pending = False
+        # The panel name shown in the header above the tab strip, for the panel
+        # currently open. The tabs themselves are icon-only; their text is the
+        # tooltip, and the header carries the full readable name instead of a
+        # clipped strip.
+        self._panel_title = QLabel("", self)
+        self._panel_title.setObjectName("panel-title")
+        self._tab_titles: dict[int, str] = {}
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
-        # 8 sub-tabs across the top; on a window narrowed toward the 850px
-        # floor (`main.py`'s `setMinimumSize`) the default behaviour shrinks
-        # every tab's text until it clips instead of scrolling the strip.
-        # Scroll buttons keep each tab at its styled width and let the whole
-        # bar scroll on a narrow window instead.
+        # Icon-only tabs: the full name is elided to nothing in a strip this
+        # crowded (8 sub-tabs), and clipped titles are unreadable. Each tab's
+        # text becomes its tooltip, so hovering still names it, and the header
+        # label above shows the open panel's full name.
         self._tabs.setUsesScrollButtons(True)
         self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tabs.currentChanged.connect(self._sync_panel_title)
         layout = QVBoxLayout(self)
+        layout.setSpacing(4)
+        layout.addWidget(self._panel_title)
         layout.addWidget(self._tabs)
 
         self._restore_plan: wotlk_maintenance.RestorePlan | None = None
@@ -2353,6 +2362,9 @@ class ControllerView(QWidget):
         self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
+        # The first panel's name is shown without a tab-change signal, because
+        # the default current index (0) never emits `currentChanged`.
+        self._sync_panel_title(self._tabs.currentIndex())
 
         # What the channel says needs no daemon, no database and no network:
         # it is read from the credential file, so it is shown whether or not
@@ -2376,6 +2388,24 @@ class ControllerView(QWidget):
             # server has stopped accepting reads as verified straight off the
             # disk, and until something asks, the repair is never offered.
             self._check_the_channel()
+
+    # ------------------------------------------------------------- sub-tabs
+
+    def _add_panel_tab(self, tab: QWidget, icon_name: str, title: str) -> None:
+        """Add an icon-only sub-tab whose full name lives in the tooltip and header.
+
+        The strip is icon-only: a text label here clips (8 tabs into a narrow
+        bar), so the full name goes into the tooltip and the header label shows
+        the open panel's name via `_sync_panel_title`.
+        """
+        index = self._tabs.addTab(tab, get_tab_icon(icon_name), "")
+        self._tabs.setTabToolTip(index, title)
+        self._tab_titles[index] = title
+
+    @Slot(int)
+    def _sync_panel_title(self, index: int) -> None:
+        """Show the open panel's full name in the header above the tab strip."""
+        self._panel_title.setText(self._tab_titles.get(index, ""))
 
     # ------------------------------------------------------------ server tab
 
@@ -2528,6 +2558,10 @@ class ControllerView(QWidget):
             row.addWidget(b)
         if self.steam_button is not None:
             row.addWidget(self.steam_button)
+        # The actions keep their natural size instead of stretching to fill the
+        # row: a Start button drawn 226px wide beside a 95px word looks like a
+        # broken border, not a button. The spare width goes to a trailing gap.
+        row.addStretch(1)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
@@ -2549,7 +2583,7 @@ class ControllerView(QWidget):
         if self.forget_install_button is not None:
             box.addWidget(self.forget_install_button)
         box.addStretch(1)
-        self._tabs.addTab(tab, get_tab_icon("server"), "Server")
+        self._add_panel_tab(tab, "server", "Server")
 
     def busy_reason(self) -> str | None:
         """Why this tab must not be torn down yet, or None.
@@ -3745,7 +3779,7 @@ class ControllerView(QWidget):
         box.addWidget(self.console_log, 1)
         box.addLayout(cmd_row)
         box.addWidget(self.console_note)
-        self._tabs.addTab(tab, get_tab_icon("console"), "Console")
+        self._add_panel_tab(tab, "console", "Console")
 
     @Slot()
     def follow_logs(self) -> None:
@@ -3941,7 +3975,7 @@ class ControllerView(QWidget):
         box.addLayout(columns)
         box.addWidget(self.account_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, get_tab_icon("accounts"), "Accounts")
+        self._add_panel_tab(tab, "accounts", "Accounts")
 
     def _build_characters_tab(self) -> None:
         """8.4a. Every action drawn only where this tree has the command, and
@@ -4057,7 +4091,7 @@ class ControllerView(QWidget):
         box.addLayout(columns)
         box.addWidget(self.character_report)
         box.addStretch(1)
-        self._tabs.addTab(tab, get_tab_icon("characters"), "Characters")
+        self._add_panel_tab(tab, "characters", "Characters")
 
     def _set_level_command(self) -> str | None:
         """This tree's set-level verb, or None where its console has no route.
@@ -4559,7 +4593,11 @@ class ControllerView(QWidget):
         self.previous_bots_button.clicked.connect(self.previous_bot_page)
         self.next_bots_button = QPushButton("Next", browse)
         self.next_bots_button.clicked.connect(self.next_bot_page)
-        row.addWidget(self.bot_filter)
+        # The filter is the row's one input, so it takes the spare width; the
+        # three buttons stay at their own size. Without the stretch the line
+        # edit collapsed to its minimum (~60px), which reads as a too-small,
+        # hard-to-see textbox inside a two-column panel.
+        row.addWidget(self.bot_filter, 1)
         row.addWidget(self.filter_bots_button)
         row.addWidget(self.previous_bots_button)
         row.addWidget(self.next_bots_button)
@@ -4575,15 +4613,15 @@ class ControllerView(QWidget):
         self._bot_total: int | None = None
         self._show_page_buttons()
         # Two panels side by side: the bot roster on the left, My Party on the
-        # right. Both are group boxes already; giving them columns rather than a
-        # stack lets a long roster and a full party panel share the tab without
-        # either pushing the other off the bottom.
+        # right. Both are group boxes already; giving them equal columns lets a
+        # long roster and a full party panel share the tab comfortably with
+        # ample room for all inputs and dropdowns.
         columns = QHBoxLayout()
         columns.setSpacing(12)
-        columns.addWidget(browse, 3)
-        columns.addWidget(self._build_my_party_group(tab), 2)
+        columns.addWidget(browse, 1)
+        columns.addWidget(self._build_my_party_group(tab), 1)
         box.addLayout(columns)
-        self._tabs.addTab(tab, get_tab_icon("bots"), "Bots")
+        self._add_panel_tab(tab, "bots", "Bots")
 
     def _build_my_party_group(self, tab: QWidget) -> QGroupBox:
         """My Party's panel, or the one line saying why this game has none (8.6).
@@ -4783,7 +4821,7 @@ class ControllerView(QWidget):
         columns.addWidget(backups, 3)
         columns.addWidget(restore, 2)
         box.addLayout(columns)
-        self._tabs.addTab(tab, get_tab_icon("maintenance"), "Maintenance")
+        self._add_panel_tab(tab, "maintenance", "Maintenance")
         self.refresh_backups()
 
     def _selected_backup(self) -> Path | None:
@@ -5063,22 +5101,28 @@ class ControllerView(QWidget):
         # before.
         self.rebuild_log.run_started.connect(self._rebuild_started)
         self.rebuild_log.run_finished.connect(self._rebuild_finished)
-        row = QHBoxLayout()
-        row.addWidget(self.install_module_button)
-        row.addWidget(self.remove_module_button)
-        row.addWidget(self.module_link_button)
-        row.addWidget(self.module_folder_button)
-        row.addWidget(self.module_sql_button)
-        row.addWidget(self.module_updates_button)
-        row.addStretch(1)
-        row.addWidget(self.adopt_button)
-        row.addWidget(self.updates_button)
-        row.addWidget(self.rebuild_button)
-        # Two panels below a full-width action toolbar: the module list on the
-        # left (the thing you select from), the result and long-job output on
-        # the right. The toolbar stays full-width because it mixes actions on
-        # the selection with actions on the whole install (rebuild, updates,
-        # adopt), and a narrow left column would shrink nine buttons illegibly.
+        # Two toolbars rather than one, because nine buttons side by side ask
+        # for ~1400px where the tab has under a thousand — and a single row
+        # clipped each button's text mid-word and let their borders run
+        # together. The split follows the order the tab is read in: the four
+        # that act on the selection (or add to it) on the first row, the five
+        # that act on the whole install on the second.
+        selection_row = QHBoxLayout()
+        selection_row.addWidget(self.install_module_button)
+        selection_row.addWidget(self.remove_module_button)
+        selection_row.addWidget(self.module_link_button)
+        selection_row.addWidget(self.module_folder_button)
+        selection_row.addStretch(1)
+
+        install_row = QHBoxLayout()
+        install_row.addWidget(self.module_sql_button)
+        install_row.addWidget(self.module_updates_button)
+        install_row.addStretch(1)
+        install_row.addWidget(self.adopt_button)
+        install_row.addWidget(self.updates_button)
+        install_row.addWidget(self.rebuild_button)
+        # Two panels below the toolbars: the module list on the left (the thing
+        # you select from), the result and long-job output on the right.
         modules = QGroupBox("Modules", tab)
         self.module_list.setParent(modules)
         modules_box = QVBoxLayout(modules)
@@ -5091,13 +5135,14 @@ class ControllerView(QWidget):
         output_box.addWidget(self.module_report, 1)
         output_box.addWidget(self.rebuild_log, 2)
 
-        box.addLayout(row)
+        box.addLayout(selection_row)
+        box.addLayout(install_row)
         columns = QHBoxLayout()
         columns.setSpacing(12)
         columns.addWidget(modules, 3)
         columns.addWidget(output, 2)
         box.addLayout(columns)
-        self._tabs.addTab(tab, get_tab_icon("modules"), "Modules")
+        self._add_panel_tab(tab, "modules", "Modules")
         self._manifests: dict[str, Manifest] = {}
         # The importer talks from a worker thread for however long it runs, and
         # this is what carries its lines to the GUI one. Same mechanism as the
@@ -5736,7 +5781,7 @@ class ControllerView(QWidget):
         row.addWidget(self.apply_button)
         box.addLayout(row)
         box.addWidget(self.network_text, 1)
-        self._tabs.addTab(tab, get_tab_icon("networking"), "Networking")
+        self._add_panel_tab(tab, "networking", "Networking")
         self._plan: NetworkPlan | None = None
 
     def network_mode(self) -> Mode:

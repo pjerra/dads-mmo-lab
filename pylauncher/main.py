@@ -26,8 +26,12 @@ if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay
 
 logger = get_logger(__name__)
 
-DEFAULT_WINDOW_SIZE = (1100, 750)
+DEFAULT_WINDOW_SIZE = (1280, 720)
 """The size the window opens at, and the width every tab has to fit into.
+
+The reference resolution the whole theme scales from (owner answer): font sizes
+and control spacing are sized for this width and scale proportionally when the
+window is narrower or wider (`yulon/ui/theme.py`'s responsive scale).
 
 A named constant rather than a literal at the `resize()` call because it is the
 budget the catalog tiles are measured against: `test_catalog_view.py` asserts
@@ -174,7 +178,7 @@ def build_window() -> object:
     from yulon.ui.controller_view import ControllerServices, ControllerView
     from yulon.ui.icons import get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
-    from yulon.ui.theme import apply_warcraft_theme
+    from yulon.ui.theme import apply_warcraft_theme, scale_for_width
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -197,11 +201,30 @@ def build_window() -> object:
         yulon_controllers: list[QWidget]
         yulon_log_panels: list[LogPanel]
 
+        def resizeEvent(self, event: object) -> None:
+            """Re-scale the theme's font sizes with the window width.
+
+            The theme is authored at a reference width (1280px); narrower or
+            wider windows re-generate the stylesheet so every label, button,
+            tab and input scales with the window rather than staying fixed and
+            clipping or sprawling. Debounced on the last scale actually applied
+            so a single resize event that lands on the same scale does not pay
+            for a stylesheet reparse.
+            """
+            super().resizeEvent(event)  # type: ignore[arg-type]
+            scale = scale_for_width(self.width())
+            last = getattr(self, "_theme_scale", None)
+            if scale == last:
+                return
+            self._theme_scale = scale
+            apply_warcraft_theme(self, width=self.width())
+
     catalog = load_catalog()
     state = load_state()
     window = _Window()
     window.setWindowTitle(f"Dad's MMO Lab launcher — Yu'lon {__version__}")
     apply_warcraft_theme(window)
+    window._theme_scale = 1.0  # matches the unscaled theme just applied
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -539,7 +562,7 @@ def build_window() -> object:
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(*DEFAULT_WINDOW_SIZE)
-    window.setMinimumSize(850, 550)
+    window.setMinimumSize(960, 600)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels

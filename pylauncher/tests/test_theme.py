@@ -81,12 +81,65 @@ def test_the_pressed_button_state_does_not_shift_padding() -> None:
     assert "padding:" not in pressed
 
 
+def test_the_button_base_state_draws_a_visible_right_and_bottom_border() -> None:
+    # The base QPushButton rule used COLOR_BRASS_DEEP (#3C2D14) for the right
+    # and bottom edges — a dark brown nearly identical to the button's own
+    # fill, so those two borders read as MISSING. All four edges must use a
+    # colour that is visibly distinct from the fill (the brass, and the gold
+    # on the lit top/left).
+    base = WARCRAFT_THEME_QSS.split("QPushButton {")[1].split("}")[0]
+    # The f-string has already interpolated the color constants, so assert the
+    # resolved hex: right/bottom must be the visible brass, not the near-black
+    # deep brown.
+    assert "border-right: 2px solid #785A28;" in base
+    assert "border-bottom: 2px solid #785A28;" in base
+    assert "border-right: 2px solid #3C2D14;" not in base
+    assert "border-bottom: 2px solid #3C2D14;" not in base
+
+
+def test_the_tab_base_state_draws_a_visible_right_and_bottom_border() -> None:
+    # `QTabBar::tab` / `QTabBar::tab:top` must draw visible brass borders on
+    # right and bottom, not the near-black #3C2D14 (which blended into the dark
+    # background and read as missing right-hand borders).
+    tab_rule = WARCRAFT_THEME_QSS.split("QTabBar::tab,")[1].split("}")[0]
+    assert "border-right: 2px solid #785A28;" in tab_rule
+    assert "border-bottom: 2px solid #785A28;" in tab_rule
+    assert "#3C2D14" not in tab_rule
+
+
 def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
-    # The West sidebar reads as a rail, not a second panel: `max-width` caps it
-    # near the icon-plus-padding width, so adding server tabs cannot widen it.
+    # The West sidebar reads as an icon-first rail, not a second panel:
+    # `max-width` caps it near the icon-plus-padding width, so adding server
+    # tabs cannot widen it, `min-width` keeps it from collapsing to the
+    # icon alone, and `border-right: none` lets it seamlessly connect to the pane.
     west = WARCRAFT_THEME_QSS.split("QTabBar::tab:west")[1].split("}")[0]
-    assert "max-width: 96px" in west
-    assert "min-width: 68px" in west
+    assert "max-width: 60px" in west
+    assert "min-width: 48px" in west
+    assert "border-right: none;" in west
+
+
+def test_the_tab_text_font_is_on_the_widget_not_the_subcontrol() -> None:
+    # `QTabBar::tab { font-family: ... }` does not reach the painted tab text
+    # (the `::tab` sub-control ignores font properties — measured), so the title
+    # font lives on the `QTabBar` widget rule, where it does reach the text.
+    assert "QTabBar {" in WARCRAFT_THEME_QSS
+    # The single-family fallback is what makes the serif actually apply; the
+    # comma-separated stack broke on the tab rule and left a thin default font.
+    from yulon.ui.theme import FONT_TITLE_SINGLE
+
+    assert "," not in FONT_TITLE_SINGLE
+
+
+def test_the_theme_scales_font_sizes_with_window_width() -> None:
+    # The theme is generated per window width: a narrower window shrinks the
+    # base font sizes and a wider one grows them, so text stays in proportion
+    # to the controls instead of clipping or sprawling.
+    from yulon.ui.theme import REFERENCE_WIDTH, _build_qss, scale_for_width
+
+    assert "font-size: 13px" in _build_qss(1.0)
+    assert "font-size: 10px" in _build_qss(scale_for_width(960))
+    assert scale_for_width(REFERENCE_WIDTH) == 1.0
+    assert scale_for_width(960) < 1.0 < scale_for_width(1600)
 
 
 def test_muted_text_color_is_lightened_for_legibility() -> None:

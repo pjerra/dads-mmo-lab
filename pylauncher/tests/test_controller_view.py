@@ -232,6 +232,26 @@ def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
     return fake
 
 
+def test_the_sub_tabs_are_icon_only_and_name_the_open_panel_in_a_header(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The internal tab strip is icon-only: eight labels crowded into a narrow
+    bar clip and overlap. Each tab's full name goes into its tooltip, and a
+    header above the strip carries the name of the panel currently open.
+    """
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    # Icon-only: every tab's text is empty, its tooltip holds the name.
+    for i in range(view._tabs.count()):
+        assert view._tabs.tabText(i) == "", f"tab {i} still carries a clipped label"
+        assert view._tabs.tabToolTip(i) != "", f"tab {i} lost its full name"
+
+    # The header shows the open panel's name, and follows the selection.
+    assert view._panel_title.text() == "Server"
+    view._tabs.setCurrentIndex(2)
+    assert view._panel_title.text() == "Accounts"
+
+
 def test_server_tab_status_start_and_port_conflict_message(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -4250,7 +4270,7 @@ def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: 
         WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
     )
 
-    assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
+    assert [view._tabs.tabToolTip(i) for i in range(view._tabs.count())].count("Bots") == 0
 
 
 # -- 8.6: My Party's surface -------------------------------------------------
@@ -4325,7 +4345,7 @@ def test_my_party_is_on_the_bots_tab_and_a_press_reaches_the_seam(
         WOTLK, _with_party(ps, tmp_path, seam), status_poll_ms=0, job_runner=run_inline
     )
 
-    assert "Bots" in [view._tabs.tabText(i) for i in range(view._tabs.count())]
+    assert "Bots" in [view._tabs.tabToolTip(i) for i in range(view._tabs.count())]
     assert view.party_panel is not None
     assert seam.added == [], "the ground: nothing has been asked of the server yet"
     view.party_panel.character.setText("Pakka")

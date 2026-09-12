@@ -58,8 +58,34 @@ FONT_FAMILY_MONO = (
     "'Consolas', 'Fira Code', 'JetBrains Mono', 'DejaVu Sans Mono', monospace"
 )
 
+# Qt's QSS cannot scale font sizes relatively (`em`, `%` and the CSS keywords
+# all resolve to a fixed value — measured on PySide6 6.11.2). So the theme is
+# *generated*: every font size is a base size at the reference width, multiplied
+# by a scale the window recomputes on resize. The reference width is the default
+# window (`DEFAULT_WINDOW_SIZE` in main.py), so the default view renders exactly
+# the base sizes and a narrower/wider window scales every label, button, tab and
+# input proportionally.
+REFERENCE_WIDTH = 1280
+"""The width (px) the base font sizes are authored against."""
 
-WARCRAFT_THEME_QSS = f"""
+# The QTabBar widget honours `font-family`/`font-weight`, but the `::tab`
+# sub-control does not (measured: `QTabBar::tab { font-family: ... }` leaves the
+# tab text at the default sans-serif). The title font is therefore set on the
+# `QTabBar` widget itself, and the `::tab` rule only carries colour and layout.
+FONT_TITLE_SINGLE = "Georgia"
+"""A single family name for QSS: a comma-separated fallback list is accepted by
+the `QWidget`/`QMainWindow` rules but breaks on the `QTabBar` rule, so tabs fell
+back to a thin default font. Georgia is the last-resort serif in
+`FONT_FAMILY_TITLE` and is present on every supported platform."""
+
+
+def _px(base: int, scale: float) -> str:
+    """A font size at `scale`, clamped so text never becomes unreadable."""
+    return f"{max(8, round(base * scale))}px"
+
+
+def _build_qss(scale: float) -> str:
+    return f"""
 /* ==========================================================================
    Yu'lon Warcraft & World of Warcraft Desktop Theme
    ========================================================================== */
@@ -69,12 +95,13 @@ QMainWindow, QDialog, QWidget#centralWidget {{
     background-color: {COLOR_BG_DARK};
     color: {COLOR_TEXT_PRIMARY};
     font-family: {FONT_FAMILY_BODY};
-    font-size: 13px;
+    font-size: {_px(13, scale)};
 }}
 
 QWidget {{
     color: {COLOR_TEXT_PRIMARY};
     font-family: {FONT_FAMILY_BODY};
+    font-size: {_px(13, scale)};
 }}
 
 /* --- Tab Widget & Spellbook Style Tab Bar --- */
@@ -88,34 +115,50 @@ QTabWidget::pane {{
     padding: 10px;
 }}
 
-QTabBar::tab {{
+/* The tab text font is set on the QTabBar WIDGET, not on `::tab`: the `::tab`
+   sub-control does not honour `font-family`/`font-weight` (measured), so the
+   title font belongs here where it reaches the text actually painted. */
+QTabBar {{
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(13, scale)};
+    font-weight: bold;
+}}
+
+/* Top (North) Tab Bar — used in ControllerView and general tabs.
+   Full 4-sided borders around each tab, with the right-hand border fully visible. */
+QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #25201A, stop:0.5 #1A1612, stop:1 #100D0A
     );
     color: {COLOR_TEXT_MUTED};
-    border: 1.5px solid {COLOR_BRASS_DEEP};
+    border: 2px solid {COLOR_BRASS_DARK};
+    border-top: 2px solid {COLOR_GOLD_BORDER};
+    border-left: 2px solid {COLOR_GOLD_BORDER};
+    border-right: 2px solid {COLOR_BRASS_DARK};
     border-bottom: 2px solid {COLOR_BRASS_DARK};
     border-top-left-radius: 5px;
     border-top-right-radius: 5px;
+    border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px;
     padding: 7px 16px;
     margin-right: 3px;
-    font-family: {FONT_FAMILY_TITLE};
-    font-size: 13px;
-    font-weight: bold;
-    min-width: 80px;
 }}
 
-QTabBar::tab:hover {{
+QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
     );
     color: {COLOR_GOLD_LIGHT};
-    border-color: {COLOR_GOLD_BRASS};
+    border: 2px solid {COLOR_GOLD_BRIGHT};
+    border-top: 2px solid #FFF8D0;
+    border-left: 2px solid #FFF8D0;
+    border-right: 2px solid {COLOR_GOLD_BRASS};
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabBar::tab:selected {{
+QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
@@ -123,34 +166,66 @@ QTabBar::tab:selected {{
     color: {COLOR_GOLD_BRIGHT};
     border: 2px solid {COLOR_GOLD_BRASS};
     border-top: 3px solid {COLOR_GOLD_BRIGHT};
+    border-left: 2px solid {COLOR_GOLD_BRASS};
+    border-right: 2px solid {COLOR_GOLD_BRASS};
     border-bottom: 2px solid {COLOR_BG_CONTAINER};
     padding-bottom: 8px;
+    margin-bottom: -2px;
 }}
 
-/* West (Left Sidebar) Tabs — kept narrow so the sidebar reads as a rail,
-   not a second panel; icon-size (18px, main.py) plus this padding is what
-   actually sets the rail's width, since QTabBar sizes itself from its tabs. */
-QTabBar::tab:west {{
+/* West (Left Sidebar) Tabs — distinct navigation rail on the left side of the
+   window. Missing its right-hand border so it seamlessly connects and merges
+   into the central container pane on its right. */
+QTabBar::tab:west, QTabBar::tab:left {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #25201A, stop:0.5 #1A1612, stop:1 #100D0A
+    );
+    color: {COLOR_TEXT_MUTED};
     border-top-left-radius: 5px;
     border-bottom-left-radius: 5px;
     border-top-right-radius: 0px;
     border-bottom-right-radius: 0px;
-    padding: 8px 10px;
+    padding: 6px 8px;
     margin-bottom: 4px;
     margin-right: 0px;
-    border: 1.5px solid {COLOR_BRASS_DEEP};
-    border-right: 2px solid {COLOR_BRASS_DARK};
-    min-height: 22px;
-    min-width: 68px;
-    max-width: 96px;
+    border: 2px solid {COLOR_BRASS_DARK};
+    border-top: 2px solid {COLOR_GOLD_BORDER};
+    border-left: 2px solid {COLOR_GOLD_BORDER};
+    border-bottom: 2px solid {COLOR_BRASS_DARK};
+    border-right: none;
+    min-height: 20px;
+    min-width: 48px;
+    max-width: 60px;
     text-align: left;
 }}
 
-QTabBar::tab:west:selected {{
+QTabBar::tab:west:hover, QTabBar::tab:left:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
+    );
+    color: {COLOR_GOLD_LIGHT};
+    border: 2px solid {COLOR_GOLD_BRIGHT};
+    border-top: 2px solid #FFF8D0;
+    border-left: 2px solid #FFF8D0;
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
+    border-right: none;
+}}
+
+QTabBar::tab:west:selected, QTabBar::tab:left:selected {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
+    );
+    color: {COLOR_GOLD_BRIGHT};
     border: 2px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid {COLOR_GOLD_BRIGHT};
     border-left: 3px solid {COLOR_GOLD_BRIGHT};
-    border-right: 2px solid {COLOR_BG_CONTAINER};
-    padding-left: 9px;
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
+    border-right: none;
+    padding-left: 7px;
+    margin-right: -2px;
 }}
 
 QTabBar::tab:disabled {{
@@ -187,12 +262,12 @@ QPushButton {{
     border: 2px solid {COLOR_BRASS_DARK};
     border-top: 2px solid {COLOR_GOLD_BORDER};
     border-left: 2px solid {COLOR_GOLD_BORDER};
-    border-right: 2px solid {COLOR_BRASS_DEEP};
-    border-bottom: 2px solid {COLOR_BRASS_DEEP};
+    border-right: 2px solid {COLOR_BRASS_DARK};
+    border-bottom: 2px solid {COLOR_BRASS_DARK};
     border-radius: 4px;
     padding: 8px 16px;
-    font-family: {FONT_FAMILY_TITLE};
-    font-size: 13px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(13, scale)};
     font-weight: bold;
     min-height: 22px;
 }}
@@ -223,11 +298,11 @@ QPushButton:pressed {{
         stop:0 #120A04, stop:0.5 #1C1208, stop:1 #2E1F10
     );
     color: {COLOR_GOLD_BRASS};
-    border: 2px solid {COLOR_BRASS_DEEP};
+    border: 2px solid {COLOR_BRASS_DARK};
     border-top: 2px solid #1A1208;
     border-left: 2px solid #1A1208;
-    border-right: 2px solid {COLOR_BRASS_DARK};
-    border-bottom: 2px solid {COLOR_BRASS_DARK};
+    border-right: 2px solid {COLOR_GOLD_BORDER};
+    border-bottom: 2px solid {COLOR_GOLD_BORDER};
 }}
 
 QPushButton:disabled {{
@@ -243,9 +318,37 @@ QPushButton[primary="true"], QPushButton#start-server, QPushButton#install-btn {
         stop:0 #5C4119, stop:0.45 #3D2B11, stop:0.55 #2B1E0C, stop:1 #171006
     );
     color: {COLOR_GOLD_LIGHT};
+    border: 2px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid #FFF8D0;
+    border-left: 2px solid #FFF8D0;
+    border-right: 2px solid {COLOR_GOLD_BRASS};
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
+}}
+
+QPushButton[primary="true"]:hover, QPushButton#start-server:hover, QPushButton#install-btn:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #75521E, stop:0.45 #4D3716, stop:0.55 #38280F, stop:1 #1F1508
+    );
+    color: #FFFFFF;
     border: 2px solid {COLOR_GOLD_BRIGHT};
-    border-top: 2px solid #FFF1A8;
-    border-left: 2px solid #FFF1A8;
+    border-top: 2px solid #FFFFFF;
+    border-left: 2px solid #FFFFFF;
+    border-right: 2px solid {COLOR_GOLD_BRIGHT};
+    border-bottom: 2px solid {COLOR_GOLD_BRIGHT};
+}}
+
+QPushButton[primary="true"]:pressed {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1F1508, stop:0.5 #38280F, stop:1 #4D3716
+    );
+    color: {COLOR_GOLD_BRASS};
+    border: 2px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid #1F1508;
+    border-left: 2px solid #1F1508;
+    border-right: 2px solid {COLOR_GOLD_BRIGHT};
+    border-bottom: 2px solid {COLOR_GOLD_BRIGHT};
 }}
 
 QPushButton[danger="true"], QPushButton#stop-server, QPushButton#purge-btn {{
@@ -254,9 +357,11 @@ QPushButton[danger="true"], QPushButton#stop-server, QPushButton#purge-btn {{
         stop:0 #4A1212, stop:0.5 #2E0B0B, stop:1 #1A0606
     );
     color: #FFB8B8;
-    border: 2px solid #962828;
-    border-top: 2px solid #C43A3A;
-    border-left: 2px solid #C43A3A;
+    border: 2px solid #A82828;
+    border-top: 2px solid #E04848;
+    border-left: 2px solid #E04848;
+    border-right: 2px solid #A82828;
+    border-bottom: 2px solid #A82828;
 }}
 
 QPushButton[danger="true"]:hover, QPushButton#stop-server:hover, QPushButton#purge-btn:hover {{
@@ -265,7 +370,24 @@ QPushButton[danger="true"]:hover, QPushButton#stop-server:hover, QPushButton#pur
         stop:0 #661A1A, stop:0.5 #421010, stop:1 #260909
     );
     color: #FFFFFF;
-    border-color: #E84141;
+    border: 2px solid #E84141;
+    border-top: 2px solid #FF8080;
+    border-left: 2px solid #FF8080;
+    border-right: 2px solid #E84141;
+    border-bottom: 2px solid #E84141;
+}}
+
+QPushButton[danger="true"]:pressed {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1A0606, stop:0.5 #2E0B0B, stop:1 #4A1212
+    );
+    color: #FF8080;
+    border: 2px solid #A82828;
+    border-top: 2px solid #1A0606;
+    border-left: 2px solid #1A0606;
+    border-right: 2px solid #E04848;
+    border-bottom: 2px solid #E04848;
 }}
 
 /* --- Group Boxes & Frames --- */
@@ -283,8 +405,8 @@ QGroupBox::title {{
     padding: 3px 16px;
     background-color: {COLOR_BG_DARK};
     color: {COLOR_GOLD_BRIGHT};
-    font-family: {FONT_FAMILY_TITLE};
-    font-size: 13px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(13, scale)};
     font-weight: bold;
     border: 1.5px solid {COLOR_BRASS_DARK};
     border-radius: 4px;
@@ -298,26 +420,36 @@ QFrame[frameShape="5"], QFrame[frameShape="StyledPanel"] {{
 
 /* --- Catalog Tile Text Hierarchy --- */
 QLabel#tile-title {{
-    font-family: {FONT_FAMILY_TITLE};
-    font-size: 15px;
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(15, scale)};
     font-weight: bold;
     color: {COLOR_GOLD_BRIGHT};
 }}
 
 QLabel#tile-desc {{
-    font-size: 13px;
+    font-size: {_px(13, scale)};
     color: {COLOR_TEXT_PRIMARY};
 }}
 
 QLabel#tile-meta {{
-    font-size: 12px;
+    font-size: {_px(12, scale)};
     color: {COLOR_TEXT_MUTED};
 }}
 
 QLabel#tile-warning {{
-    font-size: 12px;
+    font-size: {_px(12, scale)};
     font-style: italic;
     color: {COLOR_TEXT_WARNING};
+}}
+
+/* The header shown above the ControllerView's sub-tabs: the full name of the
+   panel currently open, because the tab strip itself is icon-only. */
+QLabel#panel-title {{
+    font-family: {FONT_TITLE_SINGLE};
+    font-size: {_px(16, scale)};
+    font-weight: bold;
+    color: {COLOR_GOLD_BRIGHT};
+    padding: 2px 0px;
 }}
 
 /* --- Input Fields & Spinners ---
@@ -379,7 +511,7 @@ QListWidget, QTableWidget, QTreeWidget, QTreeView, QTableView {{
     gridline-color: #26211A;
     color: {COLOR_TEXT_PRIMARY};
     alternate-background-color: #11141B;
-    font-size: 13px;
+    font-size: {_px(13, scale)};
 }}
 
 QListWidget::item, QTableWidget::item, QTreeWidget::item {{
@@ -407,7 +539,7 @@ QHeaderView::section {{
         stop:0 #2C2318, stop:1 #17120B
     );
     color: {COLOR_GOLD_BRASS};
-    font-family: {FONT_FAMILY_TITLE};
+    font-family: {FONT_TITLE_SINGLE};
     font-weight: bold;
     padding: 5px;
     border: 1px solid {COLOR_BRASS_DEEP};
@@ -490,7 +622,7 @@ QProgressBar {{
     text-align: center;
     color: {COLOR_TEXT_PRIMARY};
     font-weight: bold;
-    font-size: 11px;
+    font-size: {_px(11, scale)};
 }}
 
 QProgressBar::chunk {{
@@ -509,7 +641,7 @@ QToolTip {{
     padding: 8px 12px;
     border-radius: 4px;
     font-family: {FONT_FAMILY_BODY};
-    font-size: 13px;
+    font-size: {_px(13, scale)};
 }}
 
 /* --- Checkboxes & Radio Buttons --- */
@@ -568,7 +700,7 @@ QMenu::item {{
     padding: 6px 18px 6px 12px;
     border-radius: 2px;
     font-family: {FONT_FAMILY_BODY};
-    font-size: 13px;
+    font-size: {_px(13, scale)};
 }}
 
 QMenu::item:selected {{
@@ -604,6 +736,11 @@ QLabel#updateBanner {{
 """
 
 
+WARCRAFT_THEME_QSS = _build_qss(1.0)
+"""The theme at scale 1.0 (the reference width). Tests assert against this;
+`apply_warcraft_theme` re-generates it per window size at runtime."""
+
+
 def build_warcraft_palette() -> QPalette:
     """Build a QPalette matching the dark Warcraft obsidian and gold color scheme."""
     from PySide6.QtGui import QColor, QPalette
@@ -622,15 +759,36 @@ def build_warcraft_palette() -> QPalette:
     palette.setColor(QPalette.ColorRole.Link, QColor(COLOR_RARE))
     palette.setColor(QPalette.ColorRole.Highlight, QColor(COLOR_GOLD_BRASS))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(COLOR_BG_DARK))
+    # Placeholder text (QLineEdit hint like "name begins with…") would
+    # otherwise fall back to a near-black default that is invisible on the
+    # dark input background. Muted-but-legible, matching the aged-text tone.
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(COLOR_TEXT_MUTED))
     return palette
 
 
-def apply_warcraft_theme(target: QApplication | QWidget) -> None:
-    """Apply the Warcraft theme stylesheet and palette to a QApplication or QWidget."""
+def scale_for_width(width: int) -> float:
+    """The font scale for a window of `width` px, against `REFERENCE_WIDTH`.
+
+    Linear, so a window at half the reference width gets half-size text, but
+    clamped so it never drops below a legible floor or grows absurdly. The
+    reference width is the default window size, so the default view renders at
+    exactly scale 1.0.
+    """
+    return max(0.7, min(1.4, width / REFERENCE_WIDTH))
+
+
+def apply_warcraft_theme(target: QApplication | QWidget, *, width: int | None = None) -> None:
+    """Apply the Warcraft theme stylesheet and palette to a QApplication or QWidget.
+
+    `width` re-generates the stylesheet at a font scale derived from the window
+    width (`scale_for_width`), so text grows/shrinks with the window. Omit it
+    (or pass None) for the reference scale 1.0.
+    """
     from PySide6.QtWidgets import QApplication
 
+    qss = _build_qss(scale_for_width(width) if width is not None else 1.0)
     if isinstance(target, QApplication):
         target.setPalette(build_warcraft_palette())
-        target.setStyleSheet(WARCRAFT_THEME_QSS)
+        target.setStyleSheet(qss)
     else:
-        target.setStyleSheet(WARCRAFT_THEME_QSS)
+        target.setStyleSheet(qss)
