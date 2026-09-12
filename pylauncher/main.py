@@ -27,8 +27,12 @@ if TYPE_CHECKING:  # `yulon.state` pulls in pydantic; `--provision` must not pay
 
 logger = get_logger(__name__)
 
-DEFAULT_WINDOW_SIZE = (1100, 750)
+DEFAULT_WINDOW_SIZE = (1280, 720)
 """The size the window opens at, and the width every tab has to fit into.
+
+The reference resolution the whole theme scales from (owner answer): font sizes
+and control spacing are sized for this width and scale proportionally when the
+window is narrower or wider (`yulon/ui/theme.py`'s responsive scale).
 
 A named constant rather than a literal at the `resize()` call because it is the
 budget the catalog tiles are measured against: `test_catalog_view.py` asserts
@@ -72,11 +76,30 @@ def build_catalog_tab(
     `central` and `column` are wiring with nothing left to read once this
     returns.
     """
+    from PySide6.QtCore import QSize, Qt
     from PySide6.QtWidgets import QLabel, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
+    from yulon.ui.icons import get_tab_icon
+
     tabs = QTabWidget(window)
+    tabs.setObjectName("sidebar-tabs")
+    tabs.setTabPosition(QTabWidget.TabPosition.West)
+    tabs.setIconSize(QSize(18, 18))
+    # The sidebar grows by one tab per remembered install; once there are more
+    # than the window's height can show, Qt's default is to shrink every tab
+    # until the text clips rather than scroll. Scroll buttons keep each tab at
+    # its styled size and let the rail scroll instead, on any window height.
+    tabs.setUsesScrollButtons(True)
+    tabs.setElideMode(Qt.TextElideMode.ElideRight)
     central = QWidget(window)
     column = QVBoxLayout(central)
+    # The app's identity banner, styled like a Warcraft III / WoW title bar
+    # with golden filigree and a realm gem. `WarcraftHeader` was authored as a
+    # decoration but was only ever exercised by tests; this is its home.
+    from yulon.ui.widgets.warcraft_decorations import WarcraftHeader
+
+    header = WarcraftHeader(parent=central)
+    column.addWidget(header)
     banner = QLabel(central)
     banner.setOpenExternalLinks(True)
     banner.setVisible(False)
@@ -100,6 +123,7 @@ def build_catalog_tab(
     splitter.setStretchFactor(1, 1)
     catalog_view.setMinimumWidth(_CATALOG_MIN_WIDTH)
     tabs.addTab(splitter, "Catalog")
+    tabs.setTabIcon(tabs.indexOf(splitter), get_tab_icon("catalog"))
     return tabs, banner, splitter
 
 
@@ -151,8 +175,9 @@ def _warn_unless_remembered(app_state: AppState, parent: Any) -> bool:
 
 def build_window() -> object:
     """Create the main window (imports Qt lazily so `--help`-style tooling stays cheap)."""
-    from PySide6.QtCore import QObject, QThread, Signal, Slot
-    from PySide6.QtWidgets import QMainWindow, QMessageBox, QWidget
+    from PySide6.QtCore import QObject, QPoint, Qt, QThread, QUrl, Signal, Slot
+    from PySide6.QtGui import QDesktopServices, QGuiApplication
+    from PySide6.QtWidgets import QMainWindow, QMenu, QMessageBox, QWidget
 
     from yulon import __version__
     from yulon.catalog.catalog import load_catalog
@@ -160,7 +185,9 @@ def build_window() -> object:
     from yulon.state import KnownInstall, load_state
     from yulon.ui.catalog_view import CatalogView
     from yulon.ui.controller_view import ControllerServices, ControllerView
+    from yulon.ui.icons import get_tab_icon
     from yulon.ui.tab_titles import retitle_controller_tabs
+    from yulon.ui.theme import apply_warcraft_theme, scale_for_width
     from yulon.ui.widgets.log_panel import LogPanel
     from yulon.update import UpdateCheck, check_for_update
 
@@ -183,10 +210,30 @@ def build_window() -> object:
         yulon_controllers: list[QWidget]
         yulon_log_panels: list[LogPanel]
 
+        def resizeEvent(self, event: object) -> None:
+            """Re-scale the theme's font sizes with the window width.
+
+            The theme is authored at a reference width (1280px); narrower or
+            wider windows re-generate the stylesheet so every label, button,
+            tab and input scales with the window rather than staying fixed and
+            clipping or sprawling. Debounced on the last scale actually applied
+            so a single resize event that lands on the same scale does not pay
+            for a stylesheet reparse.
+            """
+            super().resizeEvent(event)  # type: ignore[arg-type]
+            scale = scale_for_width(self.width())
+            last = getattr(self, "_theme_scale", None)
+            if scale == last:
+                return
+            self._theme_scale = scale
+            apply_warcraft_theme(self, width=self.width())
+
     catalog = load_catalog()
     state = load_state()
     window = _Window()
-    window.setWindowTitle(f"Yu'lon — Dad's MMO Lab launcher {__version__}")
+    window.setWindowTitle(f"Dad's MMO Lab launcher — Yu'lon {__version__}")
+    apply_warcraft_theme(window)
+    window._theme_scale = 1.0  # matches the unscaled theme just applied
 
     log_panel = LogPanel()
     panels: list[LogPanel] = [log_panel]
@@ -208,6 +255,40 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
     )
     tabs, banner, _splitter = build_catalog_tab(window, catalog_view, log_panel)
+
+    def _on_tab_bar_context_menu(pos: QPoint) -> None:
+        tab_bar = tabs.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index < 0:
+            return
+        menu = QMenu(tab_bar)
+        if index == 0:
+            act = menu.addAction("Catalog (Store)")
+            act.setEnabled(False)
+        else:
+            widget = tabs.widget(index)
+            if isinstance(widget, ControllerView):
+                cv = widget
+                sd = cv.services.controller.server_dir
+                open_dir_act = menu.addAction("Open Server Folder in File Manager")
+                open_dir_act.triggered.connect(
+                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(sd)))
+                )
+                copy_path_act = menu.addAction("Copy Server Path")
+                copy_path_act.triggered.connect(
+                    lambda: QGuiApplication.clipboard().setText(str(sd))
+                )
+                menu.addSeparator()
+                if cv.start_button.isEnabled() and cv.start_button.isVisible():
+                    start_act = menu.addAction("Start Server")
+                    start_act.triggered.connect(cv.start_server)
+                if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
+                    stop_act = menu.addAction("Stop Server")
+                    stop_act.triggered.connect(cv.stop_server)
+        menu.exec(tab_bar.mapToGlobal(pos))
+
+    tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    tabs.tabBar().customContextMenuRequested.connect(_on_tab_bar_context_menu)
 
     # Typed as the concrete view, not QWidget: `drop_controller()` and the
     # distro comparison both reach into `services` and `console_log`.
@@ -441,6 +522,7 @@ def build_window() -> object:
         controller_views.append(view)
         panels.extend(view.log_panels())
         tabs.addTab(view, entry.name)
+        tabs.setTabIcon(tabs.indexOf(view), get_tab_icon("server"))
         # The leaf folder alone was the title, and it is the one part of the
         # path that repeats: the installer suggests the same name every time,
         # so two installs under different parents both read "WoW WotLK —
@@ -551,6 +633,7 @@ def build_window() -> object:
     window.setProperty("update_worker", update_worker)
     update_thread.start()
     window.resize(*DEFAULT_WINDOW_SIZE)
+    window.setMinimumSize(960, 600)
     window.setProperty("tabs", tabs)
     # The live lists themselves, not a copy of either - see `_Window`.
     window.yulon_log_panels = panels
@@ -682,7 +765,10 @@ def main() -> int:
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
+    from yulon.ui.theme import apply_warcraft_theme
+
     app = QApplication(sys.argv)
+    apply_warcraft_theme(app)
     # THIS thread runs the event loop, so it is the one thread that must never
     # hold the Windows keep-awake assertion: every install is handed to a
     # `QThread` (`ui/widgets/log_panel.py`), and `SetThreadExecutionState` is
