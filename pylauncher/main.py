@@ -81,6 +81,7 @@ def build_catalog_tab(
     from yulon.ui.icons import get_tab_icon
 
     tabs = QTabWidget(window)
+    tabs.setObjectName("sidebar-tabs")
     tabs.setTabPosition(QTabWidget.TabPosition.West)
     tabs.setIconSize(QSize(18, 18))
     # The sidebar grows by one tab per remembered install; once there are more
@@ -91,6 +92,13 @@ def build_catalog_tab(
     tabs.setElideMode(Qt.TextElideMode.ElideRight)
     central = QWidget(window)
     column = QVBoxLayout(central)
+    # The app's identity banner, styled like a Warcraft III / WoW title bar
+    # with golden filigree and a realm gem. `WarcraftHeader` was authored as a
+    # decoration but was only ever exercised by tests; this is its home.
+    from yulon.ui.widgets.warcraft_decorations import WarcraftHeader
+
+    header = WarcraftHeader(parent=central)
+    column.addWidget(header)
     banner = QLabel(central)
     banner.setOpenExternalLinks(True)
     banner.setVisible(False)

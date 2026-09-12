@@ -40,7 +40,7 @@ def test_warcraft_theme_qss_covers_essential_controls() -> None:
     assert "QMainWindow" in WARCRAFT_THEME_QSS
     assert "QTabWidget" in WARCRAFT_THEME_QSS
     assert "QTabBar::tab" in WARCRAFT_THEME_QSS
-    assert "QTabBar::tab:west" in WARCRAFT_THEME_QSS
+    assert "QTabWidget#sidebar-tabs QTabBar::tab" in WARCRAFT_THEME_QSS
     assert "QMenu" in WARCRAFT_THEME_QSS
     assert "QMenu::item" in WARCRAFT_THEME_QSS
     assert "QPushButton" in WARCRAFT_THEME_QSS
@@ -98,21 +98,20 @@ def test_the_button_base_state_draws_a_visible_right_and_bottom_border() -> None
 
 
 def test_the_tab_base_state_draws_a_visible_right_and_bottom_border() -> None:
-    # `QTabBar::tab` / `QTabBar::tab:top` must draw visible brass borders on
+    # The base `QTabBar::tab` (top bar) must draw visible brass borders on
     # right and bottom, not the near-black #3C2D14 (which blended into the dark
     # background and read as missing right-hand borders).
-    tab_rule = WARCRAFT_THEME_QSS.split("QTabBar::tab,")[1].split("}")[0]
+    tab_rule = WARCRAFT_THEME_QSS.split("QTabBar::tab {")[1].split("}")[0]
     assert "border-right: 2px solid #785A28;" in tab_rule
     assert "border-bottom: 2px solid #785A28;" in tab_rule
     assert "#3C2D14" not in tab_rule
 
 
 def test_the_sidebar_tab_is_bounded_to_a_narrow_rail() -> None:
-    # The West sidebar reads as an icon-first rail, not a second panel:
-    # `max-width` caps it near the icon-plus-padding width, so adding server
-    # tabs cannot widen it, `min-width` keeps it from collapsing to the
-    # icon alone, and `border-right: none` lets it seamlessly connect to the pane.
-    west = WARCRAFT_THEME_QSS.split("QTabBar::tab:west")[1].split("}")[0]
+    # The West sidebar (objectName "sidebar-tabs") reads as an icon-first rail:
+    # `max-width` caps it near the icon-plus-padding width, `min-width` keeps it
+    # from collapsing, and `border-right: none` lets it merge into the pane.
+    west = WARCRAFT_THEME_QSS.split("QTabWidget#sidebar-tabs QTabBar::tab {")[1].split("}")[0]
     assert "max-width: 60px" in west
     assert "min-width: 48px" in west
     assert "border-right: none;" in west

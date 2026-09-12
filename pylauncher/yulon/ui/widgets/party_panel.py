@@ -75,6 +75,7 @@ from typing import Protocol, cast
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -413,6 +414,7 @@ class PartyPanel(QWidget):
         self.link_button.clicked.connect(self.link_account)
 
         self.member_list = QListWidget(self)
+        self.member_list.setMinimumHeight(110)
         self.member_list.currentRowChanged.connect(self._member_chosen)
         self.dismiss_button = QPushButton(DISMISS_NOTHING, self)
         self.dismiss_button.clicked.connect(self.dismiss_bot)
@@ -420,6 +422,7 @@ class PartyPanel(QWidget):
         self.dismiss_all_button.clicked.connect(self.dismiss_all)
 
         self.check_list = QListWidget(self)
+        self.check_list.setMinimumHeight(90)
         self.summary = QLabel("", self)
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -428,48 +431,58 @@ class PartyPanel(QWidget):
         self.report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         who = QHBoxLayout()
+        who.setSpacing(8)
         who.addWidget(QLabel("Character", self))
         who.addWidget(self.character, 1)
         who.addWidget(self.refresh_button)
 
-        # Two rows for adding a bot: class/spec on row 1, level/add on row 2,
-        # so combo boxes have room to display class and spec names without clipping.
-        pick_class = QHBoxLayout()
-        pick_class.addWidget(QLabel("Class", self))
-        pick_class.addWidget(self.klass, 1)
-        pick_class.addWidget(QLabel("Spec", self))
-        pick_class.addWidget(self.spec, 1)
-
-        pick_level = QHBoxLayout()
-        pick_level.addWidget(QLabel("Level", self))
-        pick_level.addWidget(self.level, 1)
-        pick_level.addWidget(self.add_button)
+        # A form for the add-a-bot controls: each labelled field on its own
+        # row, aligned, so class/spec/level have room and the labels line up.
+        add_form = QFormLayout()
+        add_form.setSpacing(8)
+        add_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        add_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        add_form.addRow("Class", self.klass)
+        add_form.addRow("Spec", self.spec)
+        add_form.addRow("Level", self.level)
+        add_form.addRow(self.add_button)
 
         named = QHBoxLayout()
+        named.setSpacing(8)
         named.addWidget(self.candidates_button, 1)
         named.addWidget(self.add_named_button, 1)
 
         link = QHBoxLayout()
+        link.setSpacing(8)
         link.addWidget(QLabel("Link account", self))
         link.addWidget(self.link_name, 1)
         link.addWidget(self.link_button)
 
         box = QVBoxLayout(self)
+        box.setSpacing(10)
+        box.setContentsMargins(6, 6, 6, 6)
         box.addLayout(who)
-        box.addLayout(pick_class)
-        box.addLayout(pick_level)
+        box.addLayout(add_form)
         box.addWidget(self.level_absent)
         box.addLayout(named)
-        box.addWidget(self.candidate_list)
+        box.addWidget(self.candidate_list, 1)
         box.addWidget(self.candidate_note)
         box.addLayout(link)
-        box.addWidget(QLabel("In the party now", self))
+
+        # The two groups are headed by section labels (not bare body text) so
+        # the long form reads as two distinct sections instead of one wall.
+        in_party = QLabel("In the party now", self)
+        in_party.setObjectName("section-title")
+        box.addWidget(in_party)
         box.addWidget(self.summary)
-        box.addWidget(self.member_list)
+        box.addWidget(self.member_list, 2)
         box.addWidget(self.dismiss_button)
         box.addWidget(self.dismiss_all_button)
-        box.addWidget(QLabel("What My Party needs", self))
-        box.addWidget(self.check_list)
+
+        needs = QLabel("What My Party needs", self)
+        needs.setObjectName("section-title")
+        box.addWidget(needs)
+        box.addWidget(self.check_list, 2)
         box.addWidget(self.report)
         self._member_chosen(-1)
         self._candidate_chosen(-1)

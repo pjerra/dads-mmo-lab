@@ -144,8 +144,8 @@ class WarcraftHeader(QFrame):
 
     def __init__(
         self,
-        title: str = "YU'LON",
-        subtitle: str = "Dad's MMO Lab — Unified Realm Launcher",
+        title: str = "Dad's MMO Lab",
+        subtitle: str = "Yu'lon — Unified Server Launcher",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)

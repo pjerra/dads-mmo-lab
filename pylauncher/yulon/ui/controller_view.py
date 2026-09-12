@@ -108,8 +108,24 @@ from yulon.ui.widgets.job import JobRunner, LineRelay, threaded_job_runner
 from yulon.ui.widgets.log_panel import LogPanel
 from yulon.ui.widgets.manifest_prompt import ask_manifest_prompts
 from yulon.ui.widgets.party_panel import PartyPanel
+from yulon.ui.widgets.warcraft_decorations import WarcraftRealmBadge
 
 logger = get_logger(__name__)
+
+
+def _realm_badge_status(status: InstallStatus) -> str:
+    """The `WarcraftRealmBadge` state for an `InstallStatus` (Server tab).
+
+    Maps the three-container reading onto the badge's four visual states: all
+    up reads "online", some up reads "starting" (a realm still coming up), and
+    none up reads "offline". The start/stop transitions set "starting"/"stopping"
+    directly, since a poll has not yet seen the change.
+    """
+    if status.all_running:
+        return "running"
+    if status.any_running:
+        return "starting"
+    return "stopped"
 
 
 class UnsupportedGameError(RuntimeError):
@@ -2306,12 +2322,10 @@ class ControllerView(QWidget):
         self._tab_titles: dict[int, str] = {}
         self._tabs = QTabWidget(self)
         self._tabs.setIconSize(QSize(16, 16))
-        # Icon-only tabs: the full name is elided to nothing in a strip this
-        # crowded (8 sub-tabs), and clipped titles are unreadable. Each tab's
-        # text becomes its tooltip, so hovering still names it, and the header
-        # label above shows the open panel's full name.
         self._tabs.setUsesScrollButtons(True)
         self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tabs.setDocumentMode(False)
+        self._tabs.tabBar().setExpanding(True)
         self._tabs.currentChanged.connect(self._sync_panel_title)
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
@@ -2562,7 +2576,18 @@ class ControllerView(QWidget):
         # row: a Start button drawn 226px wide beside a 95px word looks like a
         # broken border, not a button. The spare width goes to a trailing gap.
         row.addStretch(1)
-        box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
+        # The header line: the install's name and path, with the realm's live
+        # status as a glowing gem badge on the right. `WarcraftRealmBadge` is
+        # the one decoration that had a natural home in the view but was only
+        # ever exercised by tests.
+        name_row = QHBoxLayout()
+        name_row.addWidget(
+            QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}")
+        )
+        name_row.addStretch(1)
+        self.realm_badge = WarcraftRealmBadge("stopped", tab)
+        name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        box.addLayout(name_row)
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addWidget(self.channel_label)
@@ -2850,6 +2875,7 @@ class ControllerView(QWidget):
             self.status_label.setText("status: " + ", ".join(parts))
         self.start_button.setEnabled(not status.all_running and not self._busy)
         self.stop_button.setEnabled(status.any_running and not self._busy)
+        self.realm_badge.set_status(_realm_badge_status(status))
         self._update_forget_visibility()
         self._ask_about_the_import(status)
         self.status_changed.emit(status)
@@ -3027,6 +3053,7 @@ class ControllerView(QWidget):
     def _status_failed(self, exc: object) -> None:
         self._status_pending = False
         self.status_label.setText(f"status: Docker not reachable ({exc})")
+        self.realm_badge.set_status("stopped")
 
     def _set_busy(self, busy: bool) -> None:
         """Lock the Server buttons while an action of ours is running.
@@ -3137,6 +3164,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: starting…")
+        self.realm_badge.set_status("starting")
         self._run(self.services.controller.start, self._server_action_done, self._start_failed)
 
     @Slot()
@@ -3145,6 +3173,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping…")
+        self.realm_badge.set_status("starting")
         self._run(self.services.controller.stop, self._stop_done, self._stop_failed)
 
     @Slot(object)
@@ -3320,6 +3349,7 @@ class ControllerView(QWidget):
         self.problem_label.setText("")
         self._set_busy(True)
         self.status_label.setText("status: stopping the other server…")
+        self.realm_badge.set_status("starting")
         self._run(
             self.services.controller.stop_conflicting_and_start,
             self._server_action_done,

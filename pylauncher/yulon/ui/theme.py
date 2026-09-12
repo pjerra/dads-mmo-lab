@@ -125,8 +125,10 @@ QTabBar {{
 }}
 
 /* Top (North) Tab Bar — used in ControllerView and general tabs.
-   Full 4-sided borders around each tab, with the right-hand border fully visible. */
-QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north {{
+   Full 4-sided bevel on every tab, with the right-hand border fully visible.
+   Square top corners keep the strip continuous when tabs expand in document
+   mode (rounded corners leave a 1px seam between expanding tabs). */
+QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north, QTabWidget:not(#sidebar-tabs) QTabBar::tab {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #25201A, stop:0.5 #1A1612, stop:1 #100D0A
@@ -137,15 +139,15 @@ QTabBar::tab, QTabBar::tab:top, QTabBar::tab:north {{
     border-left: 2px solid {COLOR_GOLD_BORDER};
     border-right: 2px solid {COLOR_BRASS_DARK};
     border-bottom: 2px solid {COLOR_BRASS_DARK};
-    border-top-left-radius: 5px;
-    border-top-right-radius: 5px;
+    border-top-left-radius: 0px;
+    border-top-right-radius: 0px;
     border-bottom-left-radius: 0px;
     border-bottom-right-radius: 0px;
     padding: 7px 16px;
-    margin-right: 3px;
+    margin-right: 0px;
 }}
 
-QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover {{
+QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover, QTabWidget:not(#sidebar-tabs) QTabBar::tab:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
@@ -158,7 +160,7 @@ QTabBar::tab:hover, QTabBar::tab:top:hover, QTabBar::tab:north:hover {{
     border-bottom: 2px solid {COLOR_GOLD_BRASS};
 }}
 
-QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected {{
+QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected, QTabWidget:not(#sidebar-tabs) QTabBar::tab:selected {{
     background: qlineargradient(
         x1:0, y1:0, x2:0, y2:1,
         stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
@@ -175,8 +177,9 @@ QTabBar::tab:selected, QTabBar::tab:top:selected, QTabBar::tab:north:selected {{
 
 /* West (Left Sidebar) Tabs — distinct navigation rail on the left side of the
    window. Missing its right-hand border so it seamlessly connects and merges
-   into the central container pane on its right. */
-QTabBar::tab:west, QTabBar::tab:left {{
+   into the central container pane on its right. Targets both the :west selector
+   and the #sidebar-tabs objectName for reliable matching. */
+QTabBar::tab:west, QTabBar::tab:left, QTabWidget#sidebar-tabs QTabBar::tab {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #25201A, stop:0.5 #1A1612, stop:1 #100D0A
@@ -200,7 +203,7 @@ QTabBar::tab:west, QTabBar::tab:left {{
     text-align: left;
 }}
 
-QTabBar::tab:west:hover, QTabBar::tab:left:hover {{
+QTabBar::tab:west:hover, QTabBar::tab:left:hover, QTabWidget#sidebar-tabs QTabBar::tab:hover {{
     background: qlineargradient(
         x1:0, y1:0, x2:1, y2:0,
         stop:0 #3A3026, stop:0.5 #282018, stop:1 #1A1410
@@ -208,6 +211,24 @@ QTabBar::tab:west:hover, QTabBar::tab:left:hover {{
     color: {COLOR_GOLD_LIGHT};
     border: 2px solid {COLOR_GOLD_BRIGHT};
     border-top: 2px solid #FFF8D0;
+    border-left: 2px solid #FFF8D0;
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
+    border-right: none;
+}}
+
+QTabWidget#sidebar-tabs QTabBar::tab:selected, QTabBar::tab:west:selected, QTabBar::tab:left:selected {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:0,
+        stop:0 #42321D, stop:0.4 #2A1F13, stop:1 #17100A
+    );
+    color: {COLOR_GOLD_BRIGHT};
+    border: 2px solid {COLOR_GOLD_BRASS};
+    border-top: 2px solid {COLOR_GOLD_BRIGHT};
+    border-left: 3px solid {COLOR_GOLD_BRIGHT};
+    border-bottom: 2px solid {COLOR_GOLD_BRASS};
+    border-right: none;
+    padding-left: 7px;
+}}
     border-left: 2px solid #FFF8D0;
     border-bottom: 2px solid {COLOR_GOLD_BRASS};
     border-right: none;
