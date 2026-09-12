@@ -348,7 +348,21 @@ def main(argv: list[str] | None = None) -> int:
             # nothing that greps them today. `lines.parse()` hands back the
             # display text, so every line a run used to write is byte for byte
             # what it writes now.
-            said = lines.parse(line).text
+            #
+            # **A progress READING is not written at all, and that is the whole
+            # rule.** It is a header field on a screen this harness does not
+            # have: one number that replaces the last one. Every relayed
+            # reading already has its own raw line written beside it
+            # (`lines.relayed()` yields both), so writing the reading too would
+            # duplicate the 8005 tile lines of a CMaNGOS install with a
+            # rephrased copy of each. The readings with no raw twin are git's
+            # clone percentages, which this file never carried before T35
+            # either — the clone was not streamed at all. So the transcript is
+            # what it always was, plus git's own sentences.
+            parsed = lines.parse(line)
+            if parsed.kind == "progress":
+                continue
+            said = parsed.text
             sys.stdout.write(said + "\n")
             sys.stdout.flush()
             # Streamed first, recorded second: stdout is what a gate is reading

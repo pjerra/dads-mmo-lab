@@ -506,18 +506,21 @@ def _run_git(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedPr
 def _streamed_git(argv: list[str], *, stage: str, cwd: Path | None = None) -> Iterator[str]:
     """One long git command, yielding its output as log-panel lines; `GitError` if it fails.
 
-    `_run_git()`'s contract for a command worth watching: the same
-    non-prompting environment is not reachable here — `stream_progress()` takes
-    no `env` — and does not need to be, because the prompt suppression it
-    carries is about a command that would BLOCK, and the caller of this one is
-    watching it live and has a Stop button.
+    `_run_git()`'s contract for a command worth watching, INCLUDING its
+    environment. `_no_prompt_env()` is not optional here and the argument that
+    it was is wrong: this function's whole purpose is the command that takes
+    minutes, and a credential helper that opens a prompt against a pipe makes
+    that command take forever. A headless harness has no Stop button and no
+    terminal to type into, so the wait has no end — which is the exact failure
+    `_run_git()` has passed this environment to prevent since the beginning
+    (review, 2026-09-12).
 
     The last fragments are kept for the refusal, because the sentence that says
     why a clone failed is the last thing git wrote.
     """
     tail: deque[str] = deque(maxlen=_KEEP_FRAGMENTS)
     try:
-        with closing(runner.stream_progress(argv, cwd=cwd)) as fragments:
+        with closing(runner.stream_progress(argv, cwd=cwd, env=_no_prompt_env())) as fragments:
             for fragment in fragments:
                 tail.append(fragment)
                 yield progress_line(fragment, stage)

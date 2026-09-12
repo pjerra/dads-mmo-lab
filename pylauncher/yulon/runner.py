@@ -515,15 +515,24 @@ thousands of Python calls spread over minutes.
 """
 
 
-def stream_progress(command: list[str], cwd: Path | None = None) -> Generator[str, None, None]:
+def stream_progress(
+    command: list[str], cwd: Path | None = None, env: Mapping[str, str] | None = None
+) -> Generator[str, None, None]:
     """Run a command, yielding BOTH pipes live, split on carriage returns as well as newlines.
 
     `stream()` for the one command whose real output is stderr with no newlines
     in it. It exists rather than a flag on `stream()` because the two differ in
     every respect that matters: this one reads both pipes on their own threads
-    and interleaves them through a queue, and it cuts a fragment at `\r` —
-    which `stream()` must never do, since a `\r` inside a line of a build log
-    is part of that line.
+    and merges them through a queue, and it cuts a fragment at `\r` — which
+    `stream()` must never do, since a `\r` inside a line of a build log is part
+    of that line.
+
+    **It does not promise the child's own ordering across the two pipes**, and
+    could not: two independent reader threads race, so a stdout fragment and a
+    stderr fragment written a microsecond apart can be queued either way round.
+    What holds is the order WITHIN each pipe. That is enough for git, whose
+    progress is all stderr and whose stdout is silent, and it is the claim this
+    docstring made too strongly until the 2026-09-12 review.
 
     Git is what needs it, and `_FRAGMENT` carries the recording that says why.
     `stream(merge_stderr=True)` was tried first and is not enough: merging puts
@@ -531,9 +540,20 @@ def stream_progress(command: list[str], cwd: Path | None = None) -> Generator[st
     newline-terminated line per phase, so the clone stage went from silence to
     "done" with nothing in between.
 
+    `env` is the complete environment for the child, through `child_env()` and
+    with `run()`'s meaning: it REPLACES this process's rather than adding to it,
+    so a caller that only wants a variable added copies `os.environ` and extends
+    it. `git.py` passes `_no_prompt_env()`, which is that copy plus the four
+    variables that stop a credential helper opening a prompt — the guard
+    `_run_git()` has always had, and the one this function went without until
+    the 2026-09-12 review.
+
     Yields:
-        Each fragment of either stream, in the order it arrived, with its own
-        separator removed. Decoded UTF-8, undecodable bytes replaced.
+        Each fragment of either stream, with its own separator removed, decoded
+        UTF-8 and undecodable bytes replaced. **Order holds WITHIN each pipe and
+        not across the two**: the two pipes are read by independent threads, so
+        a stdout fragment and a stderr fragment written a microsecond apart can
+        arrive either way round.
 
     Raises:
         subprocess.CalledProcessError: if the command exits non-zero, AFTER
@@ -547,13 +567,17 @@ def stream_progress(command: list[str], cwd: Path | None = None) -> Generator[st
     registration is why this is a plain function returning a generator.
     """
     child = _Child()
-    generator = _progress_lines(command, cwd, child=child)
+    generator = _progress_lines(command, cwd, env, child=child)
     _register(generator, child)
     return generator
 
 
 def _progress_lines(
-    command: list[str], cwd: Path | None = None, *, child: _Child
+    command: list[str],
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    *,
+    child: _Child,
 ) -> Generator[str, None, None]:
     """`stream_progress()`'s body. Private so that no caller can skip the registration."""
     logger.debug(f"stream_progress() called: command={command} cwd={cwd}")
@@ -566,7 +590,7 @@ def _progress_lines(
         cwd=_cwd_arg(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=child_env(),
+        env=child_env(env),
         creationflags=creationflags(),
     )
     child.proc = proc

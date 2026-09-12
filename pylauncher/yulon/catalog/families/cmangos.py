@@ -88,13 +88,13 @@ from yulon.catalog.native import (
     Stage,
     StageContext,
     StagedInstaller,
+    _put_all,
     import_reads_as_finished,
     rerunnable_phases,
     secret_token_name,
     stop_abandoned_worker,
 )
 from yulon.log import get_logger
-from yulon.ui import lines
 
 logger = get_logger(__name__)
 
@@ -2076,7 +2076,7 @@ class CmangosInstaller(StagedInstaller):
 
         def work() -> None:
             try:
-                for line in call(lambda pushed: queued.put(lines.relayed(pushed, stage=stage))):
+                for line in call(lambda pushed: _put_all(queued, pushed, stage)):
                     queued.put(line)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
                 failure.append(exc)

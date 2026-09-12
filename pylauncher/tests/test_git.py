@@ -1529,7 +1529,7 @@ def streamed(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         piece for piece in re.split(r"[\r\n]", GIT_PROGRESS.read_text(encoding="utf-8")) if piece
     ]
 
-    def fake(argv: list[str], cwd: Path | None = None) -> Iterator[str]:
+    def fake(argv: list[str], cwd: Path | None = None, env: object = None) -> Iterator[str]:
         # A GENERATOR, not `iter(list)`: the real `stream_progress()` returns
         # one and `_streamed_git()` closes it, which is how a clone abandoned
         # mid-stream ends its child. A list iterator has no `close()` and would
@@ -1704,3 +1704,50 @@ def test_the_containerized_clone_streams_the_same_container_the_buffered_one_run
         if parsed.kind == "progress" and parsed.text.startswith("Receiving objects")
     ]
     assert receiving[0] == 0 and receiving[-1] == 100
+
+
+def test_no_streamed_git_call_can_run_without_the_no_prompt_environment(
+    monkeypatch: pytest.MonkeyPatch, seen: list[list[str]], tmp_path: Path
+) -> None:
+    """A credential prompt against a pipe is a clone that never ends.
+
+    `_run_git()` has passed `_no_prompt_env()` since the beginning for this
+    reason; the streamed path went without it until the 2026-09-12 review, and
+    the streamed path is the one that runs for minutes. A headless harness has
+    no terminal to type into and no Stop button, so a prompt there is a wait
+    with no end at all.
+
+    Driven through all three streamed routes rather than asserted of
+    `_streamed_git()` alone — the host clone, the host update, and the
+    containerized clone — because what has to hold is that no ROUTE reaches a
+    child without the guard.
+
+    Mutation: drop `env=_no_prompt_env()` from `_streamed_git()` and all three
+    fail; pass the variables to `child_env()`'s caller wrongly (e.g. `env={}`)
+    and they fail naming the missing variable.
+    """
+    monkeypatch.setattr(git.platform, "docker_program", lambda: "docker")
+    monkeypatch.setattr(git.platform, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(git.platform, "filesystem_type", lambda _p: "ext4")
+    envs: list[dict[str, str] | None] = []
+
+    def fake(argv: list[str], cwd: Path | None = None, env: object = None) -> Iterator[str]:
+        envs.append(env)  # type: ignore[arg-type]
+        yield "Receiving objects:  50% (1/2)"
+
+    monkeypatch.setattr(runner, "stream_progress", fake)
+
+    fresh = tmp_path / "fresh"
+    existing = tmp_path / "existing"
+    (existing / ".git").mkdir(parents=True)
+    containerized = tmp_path / "containerized"
+    list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=fresh)))
+    list(git.RunnerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=existing)))
+    list(git.ContainerGit().clone_lines(git.CloneSpec(url="https://x/y.git", dest=containerized)))
+
+    assert len(envs) == 3, "a streamed route did not reach a child"
+    for env in envs:
+        assert env is not None, "a streamed git inherited this process's environment"
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_ASKPASS"] == "" and env["SSH_ASKPASS"] == ""
+        assert env["GCM_INTERACTIVE"] == "never"
