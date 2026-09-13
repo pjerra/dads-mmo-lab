@@ -23,11 +23,16 @@ Both callers force it whole, and both catch at **family** scope:
 | caller | what the catch costs |
 |---|---|
 | `ui/controller_view.py:5908` — `list(store.load_all(kind))` | the family's rows are replaced by one `!! could not load modules: …` line |
-| `controller_wow_wotlk/modules.py:261` — fills `branches` | **every** module's branch is dropped, so `apply_updates()` counts nobody behind and the tab reads "up to date" |
+| `controller_wow_wotlk/modules.py:261` — fills `branches` | every module **after** the bad one loses its branch, silently |
 
 So ONE unparseable or mis-declared file — and the user layer is where user-derived
-files live — takes down all ~20 shipped modules of that family. The second caller is the
-quieter one: it does not draw an error anywhere, it silently answers "nothing to update".
+files live — takes down all ~20 shipped modules of that family.
+
+**Measured, not assumed, about the second caller:** its `branches` dict is built *outside*
+the `try`, so entries added before the raise survive, and the bundled pass runs first. The
+loss is therefore partial — the user items after the failure — not total, and it draws no
+error anywhere. An earlier draft of this ticket said "every module's branch is dropped";
+that was wrong, and the code is the reason it is wrong.
 
 ## The store already argues the fix, one method up
 
@@ -71,8 +76,9 @@ One commit per item, TDD, each test with its named mutation.
 1. **The store skips a bad user item and names it** — `load_all()` returns the manifests and
    the skips rather than raising for the user pass. Both callers updated; the bundled pass
    and both index paths still raise.
-2. **`module_updates()` keeps the branches it could read** — a skipped manifest costs one
-   module's branch, never the dict.
+2. **`module_updates()` keeps the branches it could read** — a skipped manifest costs its
+   own entry and nothing after it. Item 1 gives this for free, so this item is a test that
+   proves it rather than a second change; it is here because "for free" is a claim.
 3. **The panel reports skips without losing the family** — the `!!` line is now per item and
    the other rows are drawn.
 4. **`Not for this game`**, as a real row from a real file on disk, with the comment at

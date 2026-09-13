@@ -148,8 +148,29 @@ class ManifestStore:
             )
         return manifest
 
-    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        """Every bundled item in index order, then every user item that shadows none."""
+    def load_all(
+        self, kind: ManifestType, *, skipped: list[str] | None = None
+    ) -> Iterator[Manifest]:
+        """Every bundled item in index order, then every user item that shadows none.
+
+        A BUNDLED item that will not load raises. It is a file this app ships
+        and tests, so it failing is an app bug, and a shipped catalog that does
+        not parse is not a condition to render politely around.
+
+        A USER item that will not load is skipped, logged, and appended to
+        `skipped` as one sentence naming it. That layer holds manifests this app
+        DERIVED from a link or a folder the user chose, and both callers force
+        this generator whole inside one `try` at FAMILY scope -- so before T46 a
+        single unparseable file there replaced every shipped module of the
+        family with one `!!` line, and in `module_updates()` dropped every
+        branch silently, which reads on the tab as "nothing to update".
+
+        The store already made this argument one method up, in
+        `user_index_items()`, and never applied it to the items the index lists.
+        The user INDEX itself still raises: it is the list of what to load, and
+        answering "absent" for a file that IS there would hide a custom module
+        the user believes in.
+        """
         bundled = self.load_index(kind).items
         for item_id in bundled:
             yield self._load_at(self.item_path(kind, item_id), kind, item_id)
@@ -161,7 +182,13 @@ class ManifestStore:
                     f"{item_id} is a {kind} this app ships, and a user file never replaces one"
                 )
                 continue
-            yield self._load_at(self.user_item_path(kind, item_id), kind, item_id)
+            path = self.user_item_path(kind, item_id)
+            try:
+                yield self._load_at(path, kind, item_id)
+            except ManifestError as exc:
+                logger.warning(f"skipping {path}: {exc}")
+                if skipped is not None:
+                    skipped.append(USER_ITEM_SKIPPED.format(item_id=item_id, exc=exc))
 
     def relative_files(self, kind: ManifestType) -> list[str]:
         """Paths (relative to `<root>`) the fetcher must mirror for a family."""
@@ -169,6 +196,14 @@ class ManifestStore:
         files = [f"{self.game}/{FAMILY_FILES[kind]}.json"]
         files.extend(f"{self.game}/{FAMILY_FILES[kind]}/{item_id}.json" for item_id in index.items)
         return files
+
+
+USER_ITEM_SKIPPED = "{item_id} was skipped: {exc}"
+"""One user manifest that would not load, said where the family is drawn.
+
+Per ITEM, not per family. The id leads because that is what the user typed or
+picked; the exception carries the path and what was wrong with it.
+"""
 
 
 def load_manifest(path: Path) -> Manifest:

@@ -1,0 +1,11 @@
+--- /tmp/mstore.orig	2026-09-13 08:38:54.665995258 +0200
++++ pylauncher/yulon/manifest_store.py	2026-09-13 08:38:54.667948596 +0200
+@@ -188,7 +188,7 @@
+             except ManifestError as exc:
+                 logger.warning(f"skipping {path}: {exc}")
+                 if skipped is not None:
+-                    skipped.append(USER_ITEM_SKIPPED.format(item_id=item_id, exc=exc))
++                    pass
+ 
+     def relative_files(self, kind: ManifestType) -> list[str]:
+         """Paths (relative to `<root>`) the fetcher must mirror for a family."""

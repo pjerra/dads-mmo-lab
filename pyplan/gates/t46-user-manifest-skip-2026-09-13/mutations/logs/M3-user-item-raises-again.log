@@ -1,0 +1,141 @@
+yt: Python 3.13.15 in /home/perzi/wt-t46/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t46/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 10 items / 8 deselected / 2 selected                                 [0m
+
+tests/test_manifest_store.py [31mF[0m[31mF[0m[31m                                          [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m________ test_one_bad_user_item_costs_its_own_row_and_never_the_family _________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-840/test_one_bad_user_item_costs_i0')
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b5cd8f8b380>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_one_bad_user_item_costs_its_own_row_and_never_the_family[39;49;00m([90m[39;49;00m
+        tmp_path: Path, caplog: pytest.LogCaptureFixture[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""A user manifest that will not load is skipped and named; the shipped rows stay (T46).[39;49;00m
+    [33m[39;49;00m
+    [33m    The store already argued this one method up, for the user INDEX:[39;49;00m
+    [33m[39;49;00m
+    [33m        raising would draw `!! could not load modules: ...` over the whole tab[39;49;00m
+    [33m        and take every shipped module down with it.[39;49;00m
+    [33m[39;49;00m
+    [33m    It was never applied to the items that index lists. `load_all()` is forced[39;49;00m
+    [33m    whole by both of its callers and both catch at FAMILY scope, so one[39;49;00m
+    [33m    unparseable file in the layer this app DERIVES from user input replaced[39;49;00m
+    [33m    every shipped module of that family with a single `!!` line.[39;49;00m
+    [33m[39;49;00m
+    [33m    The line this draws is who wrote the file, not how bad it is: a bundled[39;49;00m
+    [33m    manifest that will not load is an app bug and stays loud (asserted below),[39;49;00m
+    [33m    because a shipped catalog that does not parse is not a condition to render[39;49;00m
+    [33m    politely around.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        bundled, user = tmp_path / [33m"[39;49;00m[33mbundled[39;49;00m[33m"[39;49;00m, tmp_path / [33m"[39;49;00m[33muser[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        _write_layer(bundled, [[33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-other[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        _write_layer(user, [[33m"[39;49;00m[33mmod-custom[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-foreign[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-garbage[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        [90m# A real file on disk for each way a user item goes wrong -- NOT a `Manifest`[39;49;00m[90m[39;49;00m
+        [90m# injected into a builder, which is coverage of a row nothing can produce.[39;49;00m[90m[39;49;00m
+        user_items = user / [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        (user_items / [33m"[39;49;00m[33mmod-foreign.json[39;49;00m[33m"[39;49;00m).write_bytes([90m[39;49;00m
+            json.dumps([90m[39;49;00m
+                {[90m[39;49;00m
+                    [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-foreign[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mname[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mMOD-FOREIGN[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mtype[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mgame[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mwow-tbc[39;49;00m[33m"[39;49;00m,  [90m# a manifest for a different game[39;49;00m[90m[39;49;00m
+                    [33m"[39;49;00m[33msource[39;49;00m[33m"[39;49;00m: {[33m"[39;49;00m[33mrepo[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mazerothcore/mod-x[39;49;00m[33m"[39;49;00m},[90m[39;49;00m
+                }[90m[39;49;00m
+            ).encode()[90m[39;49;00m
+        )[90m[39;49;00m
+        (user_items / [33m"[39;49;00m[33mmod-garbage.json[39;49;00m[33m"[39;49;00m).write_text([33m"[39;49;00m[33m{[39;49;00m[33mnot json[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        store = ManifestStore(bundled, [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m, user_root=user)[90m[39;49;00m
+        skipped: [96mlist[39;49;00m[[96mstr[39;49;00m] = [][90m[39;49;00m
+        [94mwith[39;49;00m caplog.at_level([33m"[39;49;00m[33mWARNING[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+>           got = [m.id [94mfor[39;49;00m m [95min[39;49;00m store.load_all([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, skipped=skipped)][90m[39;49;00m
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+
+[1m[31mtests/test_manifest_store.py[0m:319: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+[1m[31myulon/manifest_store.py[0m:186: in load_all
+    [0m[94myield[39;49;00m [96mself[39;49;00m._load_at(path, kind, item_id)[90m[39;49;00m
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <yulon.manifest_store.ManifestStore object at 0x7b5cd8f8b620>
+path = PosixPath('/tmp/pytest-of-perzi/pytest-840/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json')
+kind = 'module', item_id = 'mod-foreign'
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92m_load_at[39;49;00m([96mself[39;49;00m, path: Path, kind: ManifestType, item_id: [96mstr[39;49;00m) -> Manifest:[90m[39;49;00m
+        manifest = load_manifest(path)[90m[39;49;00m
+        [94mif[39;49;00m manifest.id != item_id [95mor[39;49;00m manifest.type != kind [95mor[39;49;00m manifest.game != [96mself[39;49;00m.game:[90m[39;49;00m
+>           [94mraise[39;49;00m ManifestError([90m[39;49;00m
+                [33mf[39;49;00m[33m"[39;49;00m[33m{[39;49;00mpath[33m}[39;49;00m[33m declares [39;49;00m[33m{[39;49;00mmanifest.game[33m}[39;49;00m[33m/[39;49;00m[33m{[39;49;00mmanifest.type[33m}[39;49;00m[33m/[39;49;00m[33m{[39;49;00mmanifest.id[33m}[39;49;00m[33m, [39;49;00m[33m"[39;49;00m[90m[39;49;00m
+                [33mf[39;49;00m[33m"[39;49;00m[33mexpected [39;49;00m[33m{[39;49;00m[96mself[39;49;00m.game[33m}[39;49;00m[33m/[39;49;00m[33m{[39;49;00mkind[33m}[39;49;00m[33m/[39;49;00m[33m{[39;49;00mitem_id[33m}[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+            )[90m[39;49;00m
+[1m[31mE           yulon.manifest_store.ManifestError: /tmp/pytest-of-perzi/pytest-840/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign[0m
+
+[1m[31myulon/manifest_store.py[0m:145: ManifestError
+[31m[1m________ test_a_bad_user_manifest_no_longer_costs_the_branches_after_it ________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-840/test_a_bad_user_manifest_no_lo0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7b5cd8fcfce0>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_bad_user_manifest_no_longer_costs_the_branches_after_it[39;49;00m([90m[39;49;00m
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""`module_updates()` keeps reading branches past a manifest that will not load (T46).[39;49;00m
+    [33m[39;49;00m
+    [33m    This is the claim item 1 makes "for free", proved on the real seam rather[39;49;00m
+    [33m    than asserted: `modules.module_updates()` builds its branch table by forcing[39;49;00m
+    [33m    `store().load_all("module")` inside one `try`. The dict is built OUTSIDE that[39;49;00m
+    [33m    try, so entries added before a raise always survived -- the loss was the[39;49;00m
+    [33m    user items AFTER the bad one, silently, with no error drawn anywhere. The[39;49;00m
+    [33m    branch matters because it is the ref an update fetches, and a module counted[39;49;00m
+    [33m    against the wrong ref reads as up to date when it is not.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        bundled, user = tmp_path / [33m"[39;49;00m[33mbundled[39;49;00m[33m"[39;49;00m, tmp_path / [33m"[39;49;00m[33muser[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        server = tmp_path / [33m"[39;49;00m[33mserver[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        _write_layer(bundled, [[33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        _write_layer(user, [[33m"[39;49;00m[33mmod-aaa-bad[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-zzz-good[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        items = user / [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        (items / [33m"[39;49;00m[33mmod-aaa-bad.json[39;49;00m[33m"[39;49;00m).write_text([33m"[39;49;00m[33m{[39;49;00m[33mnot json[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+        (items / [33m"[39;49;00m[33mmod-zzz-good.json[39;49;00m[33m"[39;49;00m).write_bytes([90m[39;49;00m
+            json.dumps([90m[39;49;00m
+                {[90m[39;49;00m
+                    [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-zzz-good[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mname[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mZ[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mtype[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mgame[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33msource[39;49;00m[33m"[39;49;00m: {[33m"[39;49;00m[33mrepo[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mazerothcore/mod-x[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mbranch[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mwotlk[39;49;00m[33m"[39;49;00m},[90m[39;49;00m
+                }[90m[39;49;00m
+            ).encode()[90m[39;49;00m
+        )[90m[39;49;00m
+        [90m# Both are installed on disk; the enumeration is directory names, not the catalog.[39;49;00m[90m[39;49;00m
+        [94mfor[39;49;00m name [95min[39;49;00m ([33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-zzz-good[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+            (server / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m / name / [33m"[39;49;00m[33m.git[39;49;00m[33m"[39;49;00m).mkdir(parents=[94mTrue[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        monkeypatch.setattr([90m[39;49;00m
+            modules, [33m"[39;49;00m[33mstore[39;49;00m[33m"[39;49;00m, [94mlambda[39;49;00m *a, **k: ManifestStore(bundled, [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m, user_root=user)[90m[39;49;00m
+        )[90m[39;49;00m
+        git = _AskedBehind()[90m[39;49;00m
+        modules.module_updates(server, git=git)[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# The bad file sorts FIRST in the user index, so before T46 its raise ended the[39;49;00m[90m[39;49;00m
+        [90m# loop and `mod-zzz-good` was counted against `origin HEAD` instead of `wotlk`.[39;49;00m[90m[39;49;00m
+>       [94massert[39;49;00m ([33m"[39;49;00m[33mmod-zzz-good[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mwotlk[39;49;00m[33m"[39;49;00m) [95min[39;49;00m git.asked[90m[39;49;00m
+[1m[31mE       AssertionError: assert ('mod-zzz-good', 'wotlk') in [('mod-shipped', None), ('mod-zzz-good', None)][0m
+[1m[31mE        +  where [('mod-shipped', None), ('mod-zzz-good', None)] = <tests.test_manifest_store._AskedBehind object at 0x7b5cd8f8b8c0>.asked[0m
+
+[1m[31mtests/test_manifest_store.py[0m:394: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 08:40:24 WARNING [yulon.controller_wow_wotlk.modules] could not read the wow-wotlk manifests for their branches: /tmp/pytest-of-perzi/pytest-840/test_a_bad_user_manifest_no_lo0/user/wow-wotlk/modules/mod-aaa-bad.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+------------------------------ Captured log call -------------------------------
+[33mWARNING [0m yulon.controller_wow_wotlk.modules:modules.py:264 could not read the wow-wotlk manifests for their branches: /tmp/pytest-of-perzi/pytest-840/test_a_bad_user_manifest_no_lo0/user/wow-wotlk/modules/mod-aaa-bad.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_manifest_store.py::[1mtest_one_bad_user_item_costs_its_own_row_and_never_the_family[0m - yulon.manifest_store.ManifestError: /tmp/pytest-of-perzi/pytest-840/test_on...
+[31mFAILED[0m tests/test_manifest_store.py::[1mtest_a_bad_user_manifest_no_longer_costs_the_branches_after_it[0m - AssertionError: assert ('mod-zzz-good', 'wotlk') in [('mod-shipped', None),...
+[31m======================= [31m[1m2 failed[0m, [33m8 deselected[0m[31m in 0.16s[0m[31m ========================[0m

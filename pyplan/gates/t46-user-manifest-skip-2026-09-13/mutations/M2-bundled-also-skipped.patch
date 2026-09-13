@@ -1,0 +1,14 @@
+--- /tmp/mstore.orig	2026-09-13 08:38:55.176386051 +0200
++++ pylauncher/yulon/manifest_store.py	2026-09-13 08:38:55.177975533 +0200
+@@ -173,7 +173,10 @@
+         """
+         bundled = self.load_index(kind).items
+         for item_id in bundled:
+-            yield self._load_at(self.item_path(kind, item_id), kind, item_id)
++            try:
++                yield self._load_at(self.item_path(kind, item_id), kind, item_id)
++            except ManifestError:
++                pass
+         shipped = set(bundled)
+         for item_id in self.user_index_items(kind):
+             if item_id in shipped:

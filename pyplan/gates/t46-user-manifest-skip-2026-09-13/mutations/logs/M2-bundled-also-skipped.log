@@ -1,0 +1,97 @@
+yt: Python 3.13.15 in /home/perzi/wt-t46/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t46/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollected 9 items / 8 deselected / 1 selected                                  [0m
+
+tests/test_manifest_store.py [31mF[0m[31m                                           [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m________ test_one_bad_user_item_costs_its_own_row_and_never_the_family _________[0m
+
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0')
+caplog = <_pytest.logging.LogCaptureFixture object at 0x72f107c87230>
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_one_bad_user_item_costs_its_own_row_and_never_the_family[39;49;00m([90m[39;49;00m
+        tmp_path: Path, caplog: pytest.LogCaptureFixture[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""A user manifest that will not load is skipped and named; the shipped rows stay (T46).[39;49;00m
+    [33m[39;49;00m
+    [33m    The store already argued this one method up, for the user INDEX:[39;49;00m
+    [33m[39;49;00m
+    [33m        raising would draw `!! could not load modules: ...` over the whole tab[39;49;00m
+    [33m        and take every shipped module down with it.[39;49;00m
+    [33m[39;49;00m
+    [33m    It was never applied to the items that index lists. `load_all()` is forced[39;49;00m
+    [33m    whole by both of its callers and both catch at FAMILY scope, so one[39;49;00m
+    [33m    unparseable file in the layer this app DERIVES from user input replaced[39;49;00m
+    [33m    every shipped module of that family with a single `!!` line.[39;49;00m
+    [33m[39;49;00m
+    [33m    The line this draws is who wrote the file, not how bad it is: a bundled[39;49;00m
+    [33m    manifest that will not load is an app bug and stays loud (asserted below),[39;49;00m
+    [33m    because a shipped catalog that does not parse is not a condition to render[39;49;00m
+    [33m    politely around.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        bundled, user = tmp_path / [33m"[39;49;00m[33mbundled[39;49;00m[33m"[39;49;00m, tmp_path / [33m"[39;49;00m[33muser[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        _write_layer(bundled, [[33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-other[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        _write_layer(user, [[33m"[39;49;00m[33mmod-custom[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-foreign[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-garbage[39;49;00m[33m"[39;49;00m])[90m[39;49;00m
+        [90m# A real file on disk for each way a user item goes wrong -- NOT a `Manifest`[39;49;00m[90m[39;49;00m
+        [90m# injected into a builder, which is coverage of a row nothing can produce.[39;49;00m[90m[39;49;00m
+        user_items = user / [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        (user_items / [33m"[39;49;00m[33mmod-foreign.json[39;49;00m[33m"[39;49;00m).write_bytes([90m[39;49;00m
+            json.dumps([90m[39;49;00m
+                {[90m[39;49;00m
+                    [33m"[39;49;00m[33mid[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmod-foreign[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mname[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mMOD-FOREIGN[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mtype[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+                    [33m"[39;49;00m[33mgame[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mwow-tbc[39;49;00m[33m"[39;49;00m,  [90m# a manifest for a different game[39;49;00m[90m[39;49;00m
+                    [33m"[39;49;00m[33msource[39;49;00m[33m"[39;49;00m: {[33m"[39;49;00m[33mrepo[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mazerothcore/mod-x[39;49;00m[33m"[39;49;00m},[90m[39;49;00m
+                }[90m[39;49;00m
+            ).encode()[90m[39;49;00m
+        )[90m[39;49;00m
+        (user_items / [33m"[39;49;00m[33mmod-garbage.json[39;49;00m[33m"[39;49;00m).write_text([33m"[39;49;00m[33m{[39;49;00m[33mnot json[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        store = ManifestStore(bundled, [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m, user_root=user)[90m[39;49;00m
+        skipped: [96mlist[39;49;00m[[96mstr[39;49;00m] = [][90m[39;49;00m
+        [94mwith[39;49;00m caplog.at_level([33m"[39;49;00m[33mWARNING[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+            got = [m.id [94mfor[39;49;00m m [95min[39;49;00m store.load_all([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, skipped=skipped)][90m[39;49;00m
+    [90m[39;49;00m
+        [90m# The family survives: every shipped row, plus the user row that does load.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m got == [[33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-other[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-custom[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+        [90m# Both failures are named, each in its own sentence, each naming its id.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [96mlen[39;49;00m(skipped) == [94m2[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [96many[39;49;00m([33m"[39;49;00m[33mmod-foreign[39;49;00m[33m"[39;49;00m [95min[39;49;00m line [95mand[39;49;00m [33m"[39;49;00m[33mwow-tbc[39;49;00m[33m"[39;49;00m [95min[39;49;00m line [94mfor[39;49;00m line [95min[39;49;00m skipped)[90m[39;49;00m
+        [94massert[39;49;00m [96many[39;49;00m([33m"[39;49;00m[33mmod-garbage[39;49;00m[33m"[39;49;00m [95min[39;49;00m line [95mand[39;49;00m [33m"[39;49;00m[33mJSON[39;49;00m[33m"[39;49;00m [95min[39;49;00m line [94mfor[39;49;00m line [95min[39;49;00m skipped)[90m[39;49;00m
+        [90m# And logged, because a silently ignored file is a bug report nobody can answer.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [33m"[39;49;00m[33mmod-garbage[39;49;00m[33m"[39;49;00m [95min[39;49;00m caplog.text[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# A caller that does not ask for the skips still gets the surviving family[39;49;00m[90m[39;49;00m
+        [90m# rather than an exception -- the panel and `module_updates()` differ only[39;49;00m[90m[39;49;00m
+        [90m# in whether they have somewhere to print them.[39;49;00m[90m[39;49;00m
+        [94massert[39;49;00m [m.id [94mfor[39;49;00m m [95min[39;49;00m store.load_all([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m)] == [[33m"[39;49;00m[33mmod-shipped[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-other[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mmod-custom[39;49;00m[33m"[39;49;00m][90m[39;49;00m
+    [90m[39;49;00m
+        [90m# The bundled pass is NOT softened: this app's own file failing is an app bug.[39;49;00m[90m[39;49;00m
+        (bundled / [33m"[39;49;00m[33mwow-wotlk[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m / [33m"[39;49;00m[33mmod-other.json[39;49;00m[33m"[39;49;00m).write_text([33m"[39;49;00m[33m{[39;49;00m[33mnot json[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+>       [94mwith[39;49;00m pytest.raises(ManifestError, match=[33m"[39;49;00m[33mvalid JSON[39;49;00m[33m"[39;49;00m):[90m[39;49;00m
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[90m[39;49;00m
+[1m[31mE       Failed: DID NOT RAISE ManifestError[0m
+
+[1m[31mtests/test_manifest_store.py[0m:337: Failed
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+2026-09-13 08:38:55 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+------------------------------ Captured log call -------------------------------
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-foreign.json declares wow-tbc/module/mod-foreign, expected wow-wotlk/module/mod-foreign
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:192 skipping /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json: /tmp/pytest-of-perzi/pytest-838/test_one_bad_user_item_costs_i0/user/wow-wotlk/modules/mod-garbage.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_manifest_store.py::[1mtest_one_bad_user_item_costs_its_own_row_and_never_the_family[0m - Failed: DID NOT RAISE ManifestError
+[31m======================= [31m[1m1 failed[0m, [33m8 deselected[0m[31m in 0.15s[0m[31m ========================[0m
