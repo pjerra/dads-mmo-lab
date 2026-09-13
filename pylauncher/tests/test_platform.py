@@ -1133,6 +1133,8 @@ def test_a_folder_on_a_drive_that_is_not_there_is_not_confirmed_gone(tmp_path: P
     # And a folder that exists is still not gone.
     (tmp_path / "real").mkdir()
     assert not platform.folder_is_gone(tmp_path / "real")
+
+
 def test_compose_ready_is_false_when_the_plugin_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A Docker engine without the Compose v2 plugin (T56).
 
