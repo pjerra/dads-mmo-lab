@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -1142,8 +1143,13 @@ class _LayeredStore(ManifestStore):
         super().__init__(root, game)
         self.user: dict[str, Manifest] = {}
 
-    def load_all(self, kind: ManifestType) -> Iterator[Manifest]:
-        shipped = list(super().load_all(kind))
+    def load_all(
+        self, kind: ManifestType, *, skipped: list[str] | None = None
+    ) -> Iterator[Manifest]:
+        # T46's keyword is forwarded rather than swallowed: the real store names
+        # a user manifest it could not load through it, and a fake that dropped
+        # it would make the view look like it reports skips when it never sees any.
+        shipped = list(super().load_all(kind, skipped=skipped))
         yield from shipped
         ids = {m.id for m in shipped}
         for manifest in self.user.values():
@@ -8945,3 +8951,59 @@ def test_the_file_this_install_shadows_most_is_the_one_it_will_not_write(
     which is the review this change would owe.
     """
     assert "env/dist/etc/modules/playerbots.conf" in controller_view_module.TUNING_CORE_FILES
+
+
+def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The tab keeps every shipped module and names the one file it could not read (T46).
+
+    Driven through `reload_modules()` against a REAL file on disk rather than a
+    `Manifest` handed to the builder: the defect lived in the store, surfaced in
+    `_load_manifests()`, and was only ever visible at this call site -- a test
+    that injected a broken manifest into the panel would have proved nothing
+    about either.
+
+    Before T46 the `!!` line was the ONLY thing this tab drew for the family:
+    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped
+    WotLK modules disappeared behind one file the user's own custom-module route
+    had written.
+    """
+    user = tmp_path / "user-manifests"
+    items = user / modules.GAME / "modules"
+    items.mkdir(parents=True)
+    (user / modules.GAME / "modules.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "game": modules.GAME, "type": "module", "items": ["mod-broken"]}
+        ),
+        encoding="utf-8",
+    )
+    (items / "mod-broken.json").write_text("{not json", encoding="utf-8")
+
+    services = _services(ps, tmp_path, [])
+    services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    # The report box accumulates: constructing the view already reloaded once.
+    # Cleared so what is counted below is ONE reload's worth, not the session's.
+    view.module_report.clear()
+
+    view.reload_modules()
+
+    # The family is still there. Counted, not sampled: a test that looked for one
+    # known id would pass on a tab that drew only that one.
+    shipped = services.store.load_index("module").items
+    drawn = {r.data.id for r in view.modules_panel.rows()}
+    assert set(shipped) <= drawn
+    assert len(shipped) >= 20
+
+    # And the file that would not read is named, once, where every other refusal
+    # on this tab is read.
+    report = view.module_report.toPlainText()
+    # Counted by LINE, not by substring: the id appears twice in its own sentence
+    # -- once as the id and once inside the filename -- so `report.count(...)`
+    # measures the sentence's shape rather than how many times it was written.
+    named = [line for line in report.splitlines() if "mod-broken" in line]
+    assert len(named) == 1, report
+    assert "is not valid JSON" in named[0]
+    # Not as the family-wide failure, which is what it used to be.
+    assert "could not load modules" not in report

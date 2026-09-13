@@ -1,0 +1,83 @@
+yt: Python 3.13.15 in /home/perzi/wt-t46/pylauncher
+[1m============================= test session starts ==============================[0m
+platform linux -- Python 3.13.15, pytest-9.1.1, pluggy-1.6.0
+rootdir: /home/perzi/wt-t46/pylauncher
+configfile: pyproject.toml
+[1mcollecting ... [0m[1mcollecting 321 items                                                           [0m[1mcollected 321 items / 320 deselected / 1 selected                              [0m
+
+tests/test_controller_view.py [31mF[0m[31m                                          [100%][0m
+
+=================================== FAILURES ===================================
+[31m[1m__ test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws __[0m
+
+qapp = <PySide6.QtWidgets.QApplication(0x1eb2b430) at 0x7a6315a73b00>
+ps = <tests.test_controller_view._Ps object at 0x7a63189bb620>
+tmp_path = PosixPath('/tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0')
+
+    [0m[94mdef[39;49;00m[90m [39;49;00m[92mtest_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws[39;49;00m([90m[39;49;00m
+        qapp: [96mobject[39;49;00m, ps: _Ps, tmp_path: Path[90m[39;49;00m
+    ) -> [94mNone[39;49;00m:[90m[39;49;00m
+    [90m    [39;49;00m[33m"""The tab keeps every shipped module and names the one file it could not read (T46).[39;49;00m
+    [33m[39;49;00m
+    [33m    Driven through `reload_modules()` against a REAL file on disk rather than a[39;49;00m
+    [33m    `Manifest` handed to the builder: the defect lived in the store, surfaced in[39;49;00m
+    [33m    `_load_manifests()`, and was only ever visible at this call site -- a test[39;49;00m
+    [33m    that injected a broken manifest into the panel would have proved nothing[39;49;00m
+    [33m    about either.[39;49;00m
+    [33m[39;49;00m
+    [33m    Before T46 the `!!` line was the ONLY thing this tab drew for the family:[39;49;00m
+    [33m    `list(store.load_all(kind))` is forced inside one `try`, so ~21 shipped[39;49;00m
+    [33m    WotLK modules disappeared behind one file the user's own custom-module route[39;49;00m
+    [33m    had written.[39;49;00m
+    [33m    """[39;49;00m[90m[39;49;00m
+        user = tmp_path / [33m"[39;49;00m[33muser-manifests[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        items = user / modules.GAME / [33m"[39;49;00m[33mmodules[39;49;00m[33m"[39;49;00m[90m[39;49;00m
+        items.mkdir(parents=[94mTrue[39;49;00m)[90m[39;49;00m
+        (user / modules.GAME / [33m"[39;49;00m[33mmodules.json[39;49;00m[33m"[39;49;00m).write_text([90m[39;49;00m
+            json.dumps([90m[39;49;00m
+                {[33m"[39;49;00m[33mschema_version[39;49;00m[33m"[39;49;00m: [94m1[39;49;00m, [33m"[39;49;00m[33mgame[39;49;00m[33m"[39;49;00m: modules.GAME, [33m"[39;49;00m[33mtype[39;49;00m[33m"[39;49;00m: [33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m, [33m"[39;49;00m[33mitems[39;49;00m[33m"[39;49;00m: [[33m"[39;49;00m[33mmod-broken[39;49;00m[33m"[39;49;00m]}[90m[39;49;00m
+            ),[90m[39;49;00m
+            encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m,[90m[39;49;00m
+        )[90m[39;49;00m
+        (items / [33m"[39;49;00m[33mmod-broken.json[39;49;00m[33m"[39;49;00m).write_text([33m"[39;49;00m[33m{[39;49;00m[33mnot json[39;49;00m[33m"[39;49;00m, encoding=[33m"[39;49;00m[33mutf-8[39;49;00m[33m"[39;49;00m)[90m[39;49;00m
+    [90m[39;49;00m
+        services = _services(ps, tmp_path, [])[90m[39;49;00m
+        services.store = ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME, user_root=user)[90m[39;49;00m
+        view = ControllerView(WOTLK, services, status_poll_ms=[94m0[39;49;00m)[90m[39;49;00m
+        [90m# The report box accumulates: constructing the view already reloaded once.[39;49;00m[90m[39;49;00m
+        [90m# Cleared so what is counted below is ONE reload's worth, not the session's.[39;49;00m[90m[39;49;00m
+        view.module_report.clear()[90m[39;49;00m
+    [90m[39;49;00m
+        view.reload_modules()[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# The family is still there. Counted, not sampled: a test that looked for one[39;49;00m[90m[39;49;00m
+        [90m# known id would pass on a tab that drew only that one.[39;49;00m[90m[39;49;00m
+        shipped = services.store.load_index([33m"[39;49;00m[33mmodule[39;49;00m[33m"[39;49;00m).items[90m[39;49;00m
+        drawn = {r.data.id [94mfor[39;49;00m r [95min[39;49;00m view.modules_panel.rows()}[90m[39;49;00m
+        [94massert[39;49;00m [96mset[39;49;00m(shipped) <= drawn[90m[39;49;00m
+        [94massert[39;49;00m [96mlen[39;49;00m(shipped) >= [94m20[39;49;00m[90m[39;49;00m
+    [90m[39;49;00m
+        [90m# And the file that would not read is named, once, where every other refusal[39;49;00m[90m[39;49;00m
+        [90m# on this tab is read.[39;49;00m[90m[39;49;00m
+        report = view.module_report.toPlainText()[90m[39;49;00m
+        [90m# Counted by LINE, not by substring: the id appears twice in its own sentence[39;49;00m[90m[39;49;00m
+        [90m# -- once as the id and once inside the filename -- so `report.count(...)`[39;49;00m[90m[39;49;00m
+        [90m# measures the sentence's shape rather than how many times it was written.[39;49;00m[90m[39;49;00m
+        named = [line [94mfor[39;49;00m line [95min[39;49;00m report.splitlines() [94mif[39;49;00m [33m"[39;49;00m[33mmod-broken[39;49;00m[33m"[39;49;00m [95min[39;49;00m line][90m[39;49;00m
+>       [94massert[39;49;00m [96mlen[39;49;00m(named) == [94m1[39;49;00m, report[90m[39;49;00m
+[1m[31mE       AssertionError: [0m
+[1m[31mE       assert 0 == 1[0m
+[1m[31mE        +  where 0 = len([])[0m
+
+[1m[31mtests/test_controller_view.py[0m:9006: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2026-09-13 08:46:51 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+2026-09-13 08:46:51 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+2026-09-13 08:46:51 WARNING [yulon.manifest_store] skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+------------------------------ Captured log call -------------------------------
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:189 skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:189 skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[33mWARNING [0m yulon.manifest_store:manifest_store.py:189 skipping /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json: /tmp/pytest-of-perzi/pytest-846/test_a_broken_custom_manifest_0/user-manifests/wow-wotlk/modules/mod-broken.json is not valid JSON: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)
+[36m[1m=========================== short test summary info ============================[0m
+[31mFAILED[0m tests/test_controller_view.py::[1mtest_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws[0m - AssertionError: 
+[31m====================== [31m[1m1 failed[0m, [33m320 deselected[0m[31m in 1.13s[0m[31m =======================[0m

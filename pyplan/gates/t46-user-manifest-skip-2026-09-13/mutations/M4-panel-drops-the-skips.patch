@@ -1,0 +1,11 @@
+--- /tmp/cv.orig	2026-09-13 08:46:50.662663585 +0200
++++ pylauncher/yulon/ui/controller_view.py	2026-09-13 08:46:50.664818012 +0200
+@@ -5914,7 +5914,7 @@
+             except Exception as exc:  # boundary: a broken manifest tree must not kill the UI
+                 broken.append(MODULE_LOAD_FAILED.format(kind=kind, exc=exc))
+                 continue
+-            broken += skipped
++            pass  # M4: the skips are collected and dropped
+             manifests += items
+             for manifest in items:
+                 # T42 round 2's key shape, threaded through T43's extraction of
