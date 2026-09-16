@@ -165,6 +165,14 @@ def _the_app_s_applier(
     """
     monkeypatch.setattr(docker, "world_running", lambda *_a, **_k: False)
     monkeypatch.setattr(docker, "start_database", lambda *_a, **_k: False)
+    # T69 (#182) turned a manifest's `requires` into a refusal raised before
+    # anything is written, and the Season of Discovery keg requires `mod-ale`.
+    # `missing_requirements()` asks the DISK, so a folder under the clone
+    # directory is the whole of it -- the same stand-in `_have_requirements()`
+    # in `test_apply.py` puts there. These tests are about the DBC copy and the
+    # client receipts, not about that guard.
+    for needed in manifest.requires:
+        (server_dir / "modules" / needed / ".git").mkdir(parents=True, exist_ok=True)
     services = ControllerServices.for_wotlk(WOTLK, server_dir, client_dir, wsl_distro)
     applier = services.applier
     assert applier is not None

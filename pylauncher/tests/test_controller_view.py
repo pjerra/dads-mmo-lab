@@ -9470,6 +9470,8 @@ def test_cancelling_leaves_a_real_clone_of_another_repository_byte_for_byte(
     assert "https://github.com/you/mod-my-thing" in seen[0][1]
     assert _tree(clone) == before, "the checkout was not touched"
     assert "cancelled" in view.module_report.toPlainText()
+
+
 # ------------------------------- T68: a clone whose install never finished keeps Install
 
 
@@ -9481,9 +9483,15 @@ class _ClonesFromNothing:
     one. Only the network is faked.
     """
 
-    def __init__(self, files: dict[str, str]) -> None:
+    def __init__(self, files: dict[str, str], origin: str | None = None) -> None:
         self.files = files
         self.clones: list[Path] = []
+        # What a checkout at the clone path says it is a checkout OF. `None` is
+        # "git would not say", which since T47 (#174) refuses every install
+        # over a folder that is already there -- the guard's own subject, and
+        # not what these tests are about. A caller that presses Install twice
+        # passes the manifest's own URL, which is what a real clone answers.
+        self.origin = origin
 
     def clone(self, spec: object) -> None:
         dest = cast(Path, spec.dest)  # type: ignore[attr-defined]
@@ -9494,13 +9502,18 @@ class _ClonesFromNothing:
             path.write_text(text, encoding="utf-8")
 
     def is_unmodified(self, dest: Path, relative_path: str) -> bool | None:
-        return None
+        # `None` while there is no origin to compare against, and "clean" once
+        # there is: a caller that presses Install twice is pressing it over the
+        # checkout this fake itself just made, and T47's guard asks all three
+        # questions before it would reset one. A guard answered `None` refuses,
+        # under its own sentence, a press these tests need to reach the applier.
+        return None if self.origin is None else True
 
-    def has_no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
-        return None
+    def no_local_commits(self, dest: Path, branch: str | None) -> bool | None:
+        return None if self.origin is None else True
 
     def remote_url(self, dest: Path) -> str | None:
-        return None
+        return self.origin
 
 
 class _RecordingSql:
@@ -9520,6 +9533,12 @@ class _RecordingSql:
 # which is exactly what the T7 guard refuses while the world is up.
 ARAC = "mod-arac"
 ARAC_SQL = "data/sql/db-world/arac.sql"
+ARAC_URL = (
+    ManifestStore(modules.BUNDLED_MANIFESTS_DIR, modules.GAME).load("module", ARAC).source.url
+)
+"""Read off the shipped manifest, never spelled here: T47's repository question
+compares this against what the checkout's origin says, and a URL typed into a
+fixture would go stale the day the module moves."""
 
 
 def _arac_view(
@@ -9531,13 +9550,38 @@ def _arac_view(
     test holds: the row is drawn from what the install really left on disk,
     which is the whole question T68 asks.
     """
-    git = _ClonesFromNothing({ARAC_SQL: "UPDATE creature_template SET name = 'x';\n"})
+    # The SQL file the T7 guard refuses, and the two sources the module's other
+    # steps copy: `client: Patch-A.MPQ` and `server_dbc: patch-contents/
+    # DBFilesContent` both came in with T62 (#171) and raise "client source
+    # missing in clone" if the clone this fake makes does not carry them — which
+    # would leave every install here UNFINISHED and hide what T68 measures.
+    git = _ClonesFromNothing(
+        {
+            ARAC_SQL: "UPDATE creature_template SET name = 'x';\n",
+            "Patch-A.MPQ": "not really an MPQ\n",
+            "patch-contents/DBFilesContent/CharBaseInfo.dbc": "not really a DBC\n",
+        },
+        origin=ARAC_URL,
+    )
     sql = _RecordingSql()
     services = _services(ps, tmp_path, [])
+    # T62 (#171): `mod-arac` also writes into the game client, so with no client
+    # folder set the install now stops at the client notice before it reaches
+    # the world-running guard T68 is measured on. The folder is the fixture's
+    # own; nothing here asserts anything about what lands in it.
+    client_dir = tmp_path / "client"
+    (client_dir / "Data").mkdir(parents=True, exist_ok=True)
+    object.__setattr__(services, "client_dir", client_dir)
     object.__setattr__(
         services,
         "applier",
-        Applier(tmp_path, git=git, sql=sql, world_running=lambda: world_running),
+        Applier(
+            tmp_path,
+            git=git,
+            sql=sql,
+            world_running=lambda: world_running,
+            client_dir=client_dir,
+        ),
     )
     object.__setattr__(
         services, "installed_modules", lambda: apply_module.installed_clones(tmp_path)
@@ -9728,6 +9772,8 @@ def test_an_unfinished_clone_with_nothing_in_its_way_offers_a_live_install(
     assert row.data.install_incomplete is True
     assert row.data.installable is True and row.data.install_reason is None
     assert row.install_button is not None and row.install_button.isEnabled() is True
+
+
 def test_a_broken_custom_manifest_costs_its_own_row_and_the_family_still_draws(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
@@ -9907,6 +9953,8 @@ def test_a_foreign_game_manifest_is_a_reported_skip_and_never_a_row(
     # tell a mis-declared game from an unparseable file without opening either.
     assert "wow-tbc" in named[0] and modules.GAME in named[0]
     assert "could not load modules" not in report
+
+
 # ---------------------------------------------------------------------------
 # T73: who gets the height on the Modules tab.
 #

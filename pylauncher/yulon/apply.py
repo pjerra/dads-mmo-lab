@@ -379,6 +379,7 @@ def read_client_copies(clone: Path, *, item_id: str) -> tuple[ClientCopy, ...]:
             out.append(ClientCopy(step=step, path=path, sha256=digest))
     return tuple(out)
 
+
 COMPLETED_KEY = "install_completed"
 """The claim's key for "every step of `install()` ran", written by `install()` twice.
 
@@ -1905,9 +1906,7 @@ class Applier:
         self._conf(manifest, clone, vals, log)
         self._client(manifest, clone, log)
         self._dbc(manifest, clone, log)
-        self._finish_claim(
-            manifest, clone, url, claimed, log, log.client_copies or previous_copies
-        )
+        self._finish_claim(manifest, clone, url, claimed, log, log.client_copies or previous_copies)
         return self._report("install", manifest, log)
 
     def _finish_claim(

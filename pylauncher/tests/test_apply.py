@@ -2869,6 +2869,42 @@ def _stackables_git() -> _FakeGit:
     return _FakeGit({"up.sql": "UPDATE item_template SET stackable = 200;\n", "down.sql": "-- d\n"})
 
 
+def _stackables_applier(tmp_path: Path, *, world_running: bool) -> Applier:
+    """An `Applier` over `STACKABLES` whose `origin` answers as the manifest's own URL.
+
+    T47 (#174) made `install()` ask `_costly_reset()`'s three questions before
+    it resets a checkout already at the clone path, and the FIRST of them is
+    "is this a checkout of the repository this manifest names?". `_FakeGit`
+    answers no `remote_url`, so host git is asked about a directory it did not
+    make and returns `None` — which fails closed as "git would not say what it
+    is a checkout of" and refuses every SECOND install in these fixtures.
+
+    That refusal is T47's own subject and has its own tests. The tests here are
+    about what the claim says after a refused re-install, so the repository
+    That refusal is T47's own subject and has its own tests. The tests here are
+    about what the claim says after a refused re-install, so all three questions
+    are answered the way a clean checkout this app made answers them: the origin
+    the manifest names, nothing modified in the tree, no commits of the user's
+    own. `_stackables_git()`'s `None`s are left alone for every other caller,
+    because for a FIRST install the folder does not exist and the questions are
+    never asked.
+    """
+    source = parse_manifest(STACKABLES).source
+    assert source is not None
+    git = _FakeGit(
+        {"up.sql": "UPDATE item_template SET stackable = 200;\n", "down.sql": "-- d\n"},
+        unmodified=True,
+        no_local_commits=True,
+    )
+    return Applier(
+        tmp_path,
+        git=git,
+        sql=_FakeSql(),
+        world_running=lambda: world_running,
+        remote_url=lambda _dest: source.url,
+    )
+
+
 def _one_step(db: str, **over: Any) -> dict[str, Any]:
     """A manifest whose whole content is one direct SQL step against `db`."""
     return {
@@ -4860,12 +4896,21 @@ def _city_bots_applier(tmp_path: Path, db: _ScriptedDb) -> Applier:
     # modules/mod-playerbots`), City Bots requires it, and T69 refuses without
     # it. Every one of these tests is about the roster import.
     _have_requirements(tmp_path, _shipped(CITY_BOTS_ID))
+    # T47 (#174) asks "is the checkout already here a checkout of this
+    # manifest's repository?" before a second install resets it, and `_FakeGit`
+    # answers no `remote_url` -- so host git is asked about a directory it did
+    # not make, says nothing, and the SECOND press is refused for a reason none
+    # of these tests is about. All three of the guard's questions are answered
+    # the way the clean checkout this app just made answers them.
+    source = _shipped(CITY_BOTS_ID).source
+    assert source is not None
     return Applier(
         tmp_path,
-        git=_FakeGit(_city_bots_clone()),
+        git=_FakeGit(_city_bots_clone(), unmodified=True, no_local_commits=True),
         sql=db,
         world_running=db.world_running,
         start_database=db.start_database,
+        remote_url=lambda _dest: source.url,
     )
 
 
@@ -5271,10 +5316,10 @@ def test_a_reinstall_that_fails_leaves_a_finished_module_finished(tmp_path: Path
     """
     clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
     m = parse_manifest(STACKABLES)
-    Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: False).install(m)
+    _stackables_applier(tmp_path, world_running=False).install(m)
     assert apply_module.clone_install_completed(clone, item_id="all-stackables") is True
 
-    refused = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+    refused = _stackables_applier(tmp_path, world_running=True)
     with pytest.raises(ApplyError, match="the world server is running"):
         refused.install(m)
 
@@ -5291,7 +5336,7 @@ def test_a_refused_install_over_an_unfinished_clone_stays_unfinished(tmp_path: P
     """
     clone = tmp_path / "sql_scripts" / "clones" / "all-stackables"
     m = parse_manifest(STACKABLES)
-    applier = Applier(tmp_path, git=_stackables_git(), sql=_FakeSql(), world_running=lambda: True)
+    applier = _stackables_applier(tmp_path, world_running=True)
 
     for _ in range(2):
         with pytest.raises(ApplyError, match="the world server is running"):
