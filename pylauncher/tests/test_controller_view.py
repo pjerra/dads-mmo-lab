@@ -15,7 +15,7 @@ from typing import Any, NoReturn, cast
 
 import pytest
 
-from tests.conftest import HANG_BOUND, process_events, pump_until
+from tests.conftest import HANG_BOUND, HANG_BOUND_MS, process_events, pump_until
 from yulon import apply as apply_module
 from yulon import (
     botlist,
@@ -76,7 +76,7 @@ from yulon.ui.controller_view import (
     ask_update_choice,
 )
 from yulon.ui.widgets import modules_panel, tuning_panel
-from yulon.ui.widgets.job import run_inline
+from yulon.ui.widgets.job import ThreadedJobRunner, run_inline
 from yulon.ui.widgets.modules_panel import (
     BADGE_INSTALLED,
     BADGE_NOT_INSTALLED,
@@ -9244,6 +9244,73 @@ def test_the_tuning_bar_goes_dead_while_another_action_runs_and_comes_back_to_wh
     assert view.tuning_restart_button.isEnabled() is True, "a restart is still owed"
     assert view.tuning_recreate_button.isEnabled() is False, "nothing owes a recreate"
     assert view.tuning_reload_button.isEnabled() is True
+
+
+def test_a_recreate_touches_no_window_object_from_its_worker_thread(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T110. The T94 live gate on m910q printed, once per Recreate job,
+    `QObject: Cannot create children for a parent that is in a different thread.
+    (Parent is QTextDocument...)` -- Qt's own words for a text widget written from
+    a thread that is not the window's. On Windows that class of write is a heap
+    corruption (0xc0000374, T96/T97).
+
+    The real runner, the real Recreate button, and Qt's message handler as the
+    witness: whatever widget the finished job reaches, Qt names the thread
+    mismatch there, so this does not depend on knowing which widget it was.
+    The report's writes are also recorded with the thread they ran on.
+
+    Measured (RED on upstream 4924d65e): the warning's Python stack was
+    `job.py _JobWorker.run -> done.emit` -> the per-job closure `done` ->
+    `self.tuning_report.setPlainText("recreate: done.")`, i.e. the Tuning tab's
+    report box, written by the finished job's callback on the worker thread.
+
+    Mutation: hand `_run` a closure again (`lambda answer: self._tuning_job_done(answer)`)
+    and Qt prints the QTextDocument warning here.
+    """
+    from PySide6.QtCore import QThread, qInstallMessageHandler
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    runners: list[ThreadedJobRunner] = []
+
+    def real_runner(parent: object) -> ThreadedJobRunner:
+        runners.append(ThreadedJobRunner(parent))  # type: ignore[arg-type]
+        return runners[-1]
+
+    monkeypatch.setattr(controller_view_module, "threaded_job_runner", real_runner)
+    view = _tuning_view(ps, tmp_path)
+    view._note_tuning_owed("modules/mod-x/conf/mod-x.conf")
+    assert view._tuning_owed.get("recreate")
+
+    gui = QApplication.instance().thread()  # type: ignore[union-attr]
+    report_writes: list[bool] = []
+    real_set = view.tuning_report.setPlainText
+
+    def recorded(text: str) -> None:
+        report_writes.append(QThread.currentThread() is gui)
+        real_set(text)
+
+    view.tuning_report.setPlainText = recorded  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    )
+    warnings: list[str] = []
+    previous = qInstallMessageHandler(lambda _type, _context, message: warnings.append(message))
+    try:
+        view.tuning_recreate_button.click()
+        pump_until(
+            lambda: view.tuning_report.toPlainText() == "recreate: done.", "the recreate's report"
+        )
+        assert all(runner.wait(HANG_BOUND_MS) for runner in runners)
+        process_events()
+    finally:
+        qInstallMessageHandler(previous)
+
+    thread_warnings = [message for message in warnings if "thread" in message]
+    assert thread_warnings == [], f"Qt saw the window touched from a worker: {thread_warnings}"
+    assert report_writes and all(
+        report_writes
+    ), f"report written off the GUI thread: {report_writes}"
 
 
 def test_a_failed_install_forgets_the_version_the_clone_may_no_longer_be_at(
