@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -300,6 +301,16 @@ def install_id(server_dir: Path, *, platform_id: Callable[[], str] = platform.de
 
 
 def _identity_key(server_dir: Path, platform_id: Callable[[], str]) -> str:
+    # A folder inside a WSL distro is the folder the distro names (T125). Yu'lon
+    # built it there, on Linux, and recorded the id of `/home/...`; the Windows
+    # app holds the same folder as `\\wsl.localhost\<distro>\...`, and hashing
+    # THAT spelling (lowercased, as a Windows path) named another image tag for
+    # the same install -- measured on yulon-win11: `2f1c23d4` recorded,
+    # `27a96c15` recomputed. The distro's filesystem is case-sensitive, so the
+    # Linux spelling is taken as it is.
+    inside = platform.wsl_linux_path(server_dir)
+    if inside is not None:
+        return posixpath.normpath(inside)
     text = str(Path(os.path.abspath(server_dir))).replace("\\", "/")
     while len(text) > 1 and text.endswith("/"):
         text = text[:-1]

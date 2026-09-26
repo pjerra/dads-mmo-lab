@@ -53,6 +53,7 @@ which are measured on yulon-ubuntu (Linux), and which are merely written.
 from __future__ import annotations
 
 import difflib
+import functools
 import io
 import json
 import math
@@ -72,7 +73,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from secrets import token_hex
-from typing import ClassVar, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 from yulon import dbsecret, docker, git, module_answers, networking, platform, resources, runner
 from yulon.catalog import bot_count, composegen, preflight, upstream
@@ -3159,6 +3160,87 @@ class Seams:
         """The filesystem under `path`, through the seam if one was given, else the host."""
         ask = self.fs_type
         return (ask if ask is not None else platform.filesystem_type)(path)
+
+    @classmethod
+    def in_wsl(cls, distro: str) -> Seams:
+        """Seams for a server that lives inside the WSL distro `distro` (T125).
+
+        The erasure recorded above -- four of the 7.3 primitives take a
+        `wsl_distro` these types do not carry -- is closed HERE for the one kind
+        of install that needs it, rather than by widening the types: every seam
+        whose default can name a daemon is that same function with the distro
+        bound, every git question runs on the distro's Docker through
+        `git.ContainerGit(wsl_distro=)`, and `platform_id` is "linux" because the
+        install was made by Yu'lon on Linux inside the distro -- which is what
+        makes the recipe, the compose files and the image names it re-renders
+        the ones it rendered then.
+
+        What a rebuild or an update never asks is not addressed to the distro
+        but REFUSED: provisioning, the install's preflight, the extraction and
+        conf containers and the import check belong to an install, and Yu'lon
+        does not install into a distro (`pyplan/wsl-resident-servers.md` §7).
+        A refusal there is loud; the local default would be a quiet question to
+        the wrong Docker. `tests/test_wsl_update_route.py` derives the list of
+        seams that must be bound from their signatures, so a new docker seam
+        added to this class fails that test until it is bound here.
+        """
+        repo = git.ContainerGit(wsl_distro=distro)
+        on = functools.partial
+
+        def refused(what: str) -> Callable[..., Any]:
+            def refuse(*_args: object, **_kwargs: object) -> Any:
+                raise InstallerError(
+                    f"{what} belongs to an install, and this server lives inside the WSL "
+                    f"distro {distro}; Yu'lon rebuilds and updates it there but does not "
+                    "install into it. Nothing was started. That is a bug in this build."
+                )
+
+            return refuse
+
+        return cls(
+            platform_id=lambda: "linux",
+            docker_ready=on(docker.daemon_ready, wsl_distro=distro),
+            ensure_docker=refused("Setting Docker up"),
+            dir_problem=refused("Checking a new server folder"),
+            gather=refused("The install's preflight"),
+            clone=repo.clone,
+            remote_url=repo.remote_url,
+            file_unmodified=repo.is_unmodified,
+            local_edits=repo.local_edits,
+            no_local_commits=repo.no_local_commits,
+            head_sha=repo.head_sha,
+            head_version=repo.head_version,
+            commits_since=repo.commits_since,
+            restore_rev=repo.restore_rev,
+            images_built=on(docker.images_built, wsl_distro=distro),
+            build=on(docker.build_staged, wsl_distro=distro),
+            one_shot=on(docker.run_one_shot, wsl_distro=distro),
+            verify_import=refused("Checking a database import"),
+            container_exists=on(docker.container_exists, wsl_distro=distro),
+            container_project=on(docker.container_project, wsl_distro=distro),
+            container_working_dir=on(docker.container_working_dir, wsl_distro=distro),
+            start_db=on(docker.start_database, wsl_distro=distro),
+            start=on(docker.start_staged, wsl_distro=distro),
+            recreate=on(docker.recreate_staged, wsl_distro=distro),
+            tag_image=on(docker.tag_image, wsl_distro=distro),
+            remove_image=on(docker.remove_image, wsl_distro=distro),
+            wait_db_healthy=on(docker.wait_db_healthy_for, wsl_distro=distro),
+            wait_ready=on(docker.wait_ready_for, wsl_distro=distro),
+            world_output=on(_world_output, wsl_distro=distro),
+            selinux_enforcing=lambda: False,
+            # Asked beside `selinux_enforcing` by the compose render whatever the
+            # answer; left to default it ran `stat -f` on the HOST (found by the
+            # end-to-end argv test). No SELinux, so no filesystem to ask about.
+            fs_type=lambda _path: None,
+            run_container=refused("Running an install container"),
+            copy_from_image=refused("Copying templates out of an image"),
+            exec_stdin=on(docker.exec_stdin, wsl_distro=distro),
+            sql_query=on(docker.sql_query, wsl_distro=distro),
+            volume_exists=on(docker.volume_exists, wsl_distro=distro),
+            world_running=on(docker.world_running, wsl_distro=distro),
+            db_running=on(docker.world_running, wsl_distro=distro),
+            stop_db=on(docker.stop_containers, wsl_distro=distro),
+        )
 
 
 class StagedInstaller:

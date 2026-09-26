@@ -321,6 +321,21 @@ def _run(
     return proc
 
 
+def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> bool:
+    """True if `docker info` answers from the daemon this install lives on.
+
+    `platform.docker_ready()` is the LOCAL question, and it is what an install
+    asks. A server inside a WSL distro lives on that distro's Docker, which the
+    local CLI cannot see and which may be the only Docker there is (T125): a
+    rebuild asking the local question would refuse on a machine whose server is
+    running fine, or answer yes from a Docker Desktop that has never heard of it.
+    """
+    proc = _docker(
+        ["info", "--format", "{{.ServerVersion}}"], timeout=timeout, wsl_distro=wsl_distro
+    )
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
 def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
     """Bring the compose project in `server_dir` up in the background.
 

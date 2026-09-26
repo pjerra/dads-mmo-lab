@@ -6715,25 +6715,32 @@ def test_the_rebuild_panel_is_joined_at_shutdown_like_every_other_worker(
     assert view.rebuild_log.running is False
 
 
-def test_a_server_adopted_from_wsl_is_refused_a_rebuild_by_name(tmp_path: Path) -> None:
-    """The wiring's own refusal, and the one this app is least able to notice going wrong.
+def test_a_server_adopted_from_wsl_is_rebuilt_on_the_distros_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T125: the tab of a WSL-adopted server rebuilds THERE, not on Windows' own Docker.
 
-    `native.Seams` addresses the LOCAL daemon: four of its five 7.3 primitives
-    take a `wsl_distro` the field types do not carry, and its own docstring
-    records that a repair reaching a stage on an adopted install "would hand
-    these seams a container living on another daemon, and the erasure would then
-    send all of them to the wrong one silently". A rebuild is exactly that
-    repair. So it is refused in the wiring, where the distro is known, rather
-    than left to build images on the Windows-local daemon and then fail to find
-    containers that live inside the distro.
+    Until T125 this press refused by name, because `native.Seams` addressed only
+    the local daemon. The engine the press builds now carries `Seams.in_wsl()`,
+    which is what this asserts; `tests/test_wsl_update_route.py` drives the
+    press end to end and checks every argv goes through the distro.
     """
+    built: list[object] = []
+
+    class _Stop(Exception):
+        pass
+
+    def spy(entry: object, **kw: object) -> object:
+        built.append(kw.get("wsl_distro"))
+        raise _Stop
+
+    monkeypatch.setattr(controller_view_module.install_wiring, "installer_for_app", spy)
     services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu-22.04")
     assert services.rebuild is not None
-    with pytest.raises(InstallerError) as raised:
+    assert services.update_to_latest is not None
+    with pytest.raises(_Stop):
         list(services.rebuild(None))
-    message = str(raised.value)
-    assert "Ubuntu-22.04" in message
-    assert "Nothing was started" in message
+    assert built == ["Ubuntu-22.04"]
 
 
 def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> None:
