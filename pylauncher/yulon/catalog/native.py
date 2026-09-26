@@ -3123,6 +3123,16 @@ class Seams:
     so a press that could not tell leaves the database exactly as it found it.
     """
 
+    install_id: Callable[[Path], str] | None = None
+    """The id this install's images and compose project are named after; None = hash the folder.
+
+    `None` is every install this app makes on this machine: the id IS the hash
+    of the folder, and `_install_id()` computes it. A server inside a WSL distro
+    (T125) answers with the id its record carries instead (`recorded_install_id`),
+    because Yu'lon on Linux hashed the distro's spelling of the folder and the
+    Windows spelling hashes to a different one -- which stays the Windows-side
+    key (credentials, dbsecret, run records) and must not name its images.
+    """
     stop_db: Callable[[list[str]], None] = docker.stop_containers
     """Stop these containers. Used by ONE press, to put back what it started.
 
@@ -3240,7 +3250,31 @@ class Seams:
             world_running=on(docker.world_running, wsl_distro=distro),
             db_running=on(docker.world_running, wsl_distro=distro),
             stop_db=on(docker.stop_containers, wsl_distro=distro),
+            install_id=recorded_install_id,
         )
+
+
+_INSTALL_ID = re.compile(rf"^[0-9a-f]{{{composegen.INSTALL_ID_LENGTH}}}$")
+
+
+def recorded_install_id(server_dir: Path) -> str:
+    """The install id `server_dir`'s record carries, for a server inside a WSL distro (T125).
+
+    NOT recomputed: the folder's Windows spelling hashes to a different id from
+    the Linux one Yu'lon recorded when it built the server inside the distro, and
+    the images and compose project there are named after the recorded one. The
+    record is `.yulon-install.json`, the same file every rebuild already refuses
+    without; an id that is missing or not the shape this app writes is refused
+    too, because a guess would compile images no compose file names.
+    """
+    state = read_state(server_dir, valid=())
+    ident = state.install_id if state is not None else ""
+    if not _INSTALL_ID.match(ident):
+        raise InstallerError(
+            f"{server_dir} has no usable install id in its {STATE_FILE} ({ident!r}), and the "
+            "server inside the distro is named after that id. Nothing was started."
+        )
+    return ident
 
 
 class StagedInstaller:
@@ -5769,6 +5803,9 @@ class StagedInstaller:
         an id is what both the compose project and the kept database password
         are filed under.
         """
+        ask = self._seams.install_id
+        if ask is not None:
+            return ask(server_dir)
         return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
 
     def resolve_secrets(self, server_dir: Path) -> Secrets:
@@ -6140,7 +6177,10 @@ class StagedInstaller:
         wherever it is now (review, Codex, 2026-09-11).
         """
         ours = composegen.project_name(
-            self.entry.id, server_dir, platform_id=self._seams.platform_id
+            self.entry.id,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
         spec = self.entry.container_spec()
         for name in (spec.db, spec.auth, spec.world):
@@ -6535,6 +6575,7 @@ class StagedInstaller:
             db_password=secrets.db_password,
             bind_label=label,
             platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
 
     def _base_compose_facts(self, server_dir: Path) -> tuple[ComposeCheck, str | None, str | None]:
@@ -6733,7 +6774,10 @@ class StagedInstaller:
         is the two-spellings defect above, pointed at a disk.
         """
         return composegen.built_image_refs(
-            self.entry, server_dir, platform_id=self._seams.platform_id
+            self.entry,
+            server_dir,
+            platform_id=self._seams.platform_id,
+            install_id=self._install_id(server_dir),
         )
 
     def built_images(self, ctx: StageContext) -> bool | None:

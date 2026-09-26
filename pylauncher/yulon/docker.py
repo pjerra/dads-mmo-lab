@@ -250,7 +250,16 @@ def _docker(
     # separator. `--cd` rather than compose's `--project-directory`, because
     # this function runs every docker subcommand and only compose understands
     # the latter.
-    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    try:
+        inside = (
+            platform.wsl_linux_path_in(cwd, wsl_distro)
+            if (wsl_distro is not None and cwd is not None)
+            else None
+        )
+    except platform.WslDistroMismatch as exc:
+        # The existing "the command failed" shape, so every caller already has
+        # a sentence for it (wsl-resident-servers §6); nothing was started.
+        return subprocess.CompletedProcess(["docker", *argv], 1, "", str(exc))
     prefix = platform.docker_prefix(wsl_distro, inside=inside)
     if prefix is not None:
         command = [*prefix, *argv]
@@ -3827,7 +3836,14 @@ def run_attached(
     # The same two-seam rule as `_docker()`: for a WSL install the location
     # rides in the argv as `wsl --cd`, because a Windows process cannot cd into
     # a distro and `runner.stream()` would be handed a cwd that does not exist.
-    inside = platform.wsl_linux_path(cwd) if (wsl_distro is not None and cwd is not None) else None
+    try:
+        inside = (
+            platform.wsl_linux_path_in(cwd, wsl_distro)
+            if (wsl_distro is not None and cwd is not None)
+            else None
+        )
+    except platform.WslDistroMismatch as exc:
+        return AttachedRun(1, (str(exc),))
     prefix = platform.docker_prefix(wsl_distro, inside=inside)
     if prefix is None:
         logger.debug(f"no docker CLI on this host; not running: docker {' '.join(argv)}")
@@ -4709,7 +4725,10 @@ def compose_run_stdin(
     """
     inside: str | None = None
     if wsl_distro is not None:
-        inside = platform.wsl_linux_path(server_dir)
+        try:
+            inside = platform.wsl_linux_path_in(server_dir, wsl_distro)
+        except platform.WslDistroMismatch as exc:
+            raise DockerCommandError(str(exc)) from exc
         if inside is None:
             # `_docker()` would run compose in the distro's home directory here,
             # which is some OTHER project or none. A copy into a volume must not

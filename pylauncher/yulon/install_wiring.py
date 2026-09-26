@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from yulon import docker, platform, wsl
-from yulon.catalog import composegen, upstream
+from yulon.catalog import upstream
 
 # By name and not as the module. `import_gate_for()` below binds a local called
 # `native` in a walrus (`entry.install.native`), and a module of the same name
@@ -184,29 +184,36 @@ def installer_for_app(
     )
 
 
-def _refuse_unless_the_distro_names_this_install(
-    entry: CatalogEntry, server_dir: Path, wsl_distro: str
-) -> None:
-    """The id this folder's record carries must be the one the distro's engine will build under.
+def _refuse_unless_in_the_distro(server_dir: Path, wsl_distro: str) -> None:
+    """The folder must be a WSL folder IN `wsl_distro`; refused before anything is read or run.
 
-    Yu'lon on Linux recorded the id of the folder's Linux path; the WSL engine
-    recomputes it from the same spelling (`composegen._identity_key()`), and the
-    image tags and project name follow from it. If the two disagree -- a folder
-    copied from elsewhere, or one whose Windows path does not map the way the
-    distro spells it -- a rebuild would compile images no compose file names
-    and leave the old build running, so it is refused before anything runs.
+    `platform.wsl_linux_path_in()` keeps the distro the UNC path names and
+    compares it with the one the install is remembered under, so a stale name
+    cannot send a rebuild to the same Linux path in another distro (a clone of
+    it, say). The image names come from the install's own record
+    (`native.recorded_install_id()`), read only after this has passed.
     """
-    state = read_state(server_dir, valid=())
-    if state is None:
-        return  # the engine's own refusal names the missing record
-    here = composegen.install_id(server_dir, platform_id=lambda: "linux")
-    if state.install_id != here:
+    try:
+        inside = platform.wsl_linux_path_in(server_dir, wsl_distro)
+    except platform.WslDistroMismatch as exc:
+        raise InstallerError(str(exc)) from exc
+    if inside is None:
         raise InstallerError(
-            f"{server_dir} records install id {state.install_id}, but inside {wsl_distro} this "
-            f"folder is install id {here}. Yu'lon will not rebuild it under a name its own "
-            f"compose files do not use. Nothing was started. Was the folder copied or moved "
-            f"after it was installed?"
+            f"{server_dir} is not a folder inside the WSL distro {wsl_distro}, so there is no "
+            "server there to rebuild. Nothing was started."
         )
+
+
+def _in_the_distro(server_dir: Path, wsl_distro: str | None) -> bool:
+    """`_refuse_unless_in_the_distro()` as a yes/no, for a READING, which must not raise."""
+    if wsl_distro is None:
+        return True
+    try:
+        _refuse_unless_in_the_distro(server_dir, wsl_distro)
+    except InstallerError as exc:
+        logger.warning(f"not reading {server_dir}: {exc}")
+        return False
+    return True
 
 
 def _distro_down(wsl_distro: str | None) -> bool:
@@ -249,14 +256,14 @@ def rebuild_for_app(
     own Docker and left the distro's server running the build it already had.
     `installer_for_app(wsl_distro=)` now builds the engine on
     `Seams.in_wsl()`, which addresses the distro's Docker for every docker and
-    git question; the one extra check is that the folder's record names the
-    install id the distro's engine will build under
-    (`_refuse_unless_the_distro_names_this_install()`).
+    git question. Its images are named after the install id the folder's
+    record carries (`native.recorded_install_id()`), after the folder is
+    checked to be in that distro at all (`_refuse_unless_in_the_distro()`).
     """
 
     def rebuild(cancel: threading.Event | None = None) -> Iterator[str]:
         if wsl_distro is not None:
-            _refuse_unless_the_distro_names_this_install(entry, server_dir, wsl_distro)
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
         engine = installer_for_app(entry, wsl_distro=wsl_distro)
         yield from engine.rebuild(InstallOptions(server_dir=server_dir), cancel=cancel)
 
@@ -330,7 +337,7 @@ def update_to_latest_for_app(
 
     def engine() -> InstallEngine:
         if wsl_distro is not None:
-            _refuse_unless_the_distro_names_this_install(entry, server_dir, wsl_distro)
+            _refuse_unless_in_the_distro(server_dir, wsl_distro)
         return installer_for_app(entry, wsl_distro=wsl_distro)
 
     def press(cancel: threading.Event | None = None) -> Iterator[str]:
@@ -347,7 +354,7 @@ def update_to_latest_for_app(
         yield from engine().update_to_latest(options, to_pin=True, cancel=cancel)
 
     def version() -> SourceVersion:
-        if _distro_down(wsl_distro):
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             return SourceVersion(line="", past_the_pin=False)
         return source_version(read_state(server_dir, valid=()))
 
@@ -355,7 +362,7 @@ def update_to_latest_for_app(
         # T124. Built per call like the presses: it is asked off the GUI thread
         # and at most once a day reaches past its cache. No import gate: it asks
         # nothing of the databases.
-        if _distro_down(wsl_distro):
+        if not _in_the_distro(server_dir, wsl_distro) or _distro_down(wsl_distro):
             # "Could not ask", which the tab shows as nothing: no cache read (a
             # read of the folder boots the distro as well) and no git.
             return upstream.UpstreamNews(checked_unix=upstream.now_unix(), sources=())

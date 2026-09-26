@@ -1439,7 +1439,10 @@ class ContainerGit:
 
     def _in_distro(self, dest: Path) -> str:
         """`dest` as the distro spells it; `GitError` for a folder the distro cannot name."""
-        inside = platform.wsl_linux_path(dest)
+        try:
+            inside = platform.wsl_linux_path_in(dest, self.wsl_distro or "")
+        except platform.WslDistroMismatch as exc:
+            raise GitError(str(exc)) from exc
         if inside is None:
             raise GitError(
                 f"{dest} is not inside the WSL distro {self.wsl_distro}, so its git cannot run "

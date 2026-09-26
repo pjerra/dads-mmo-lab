@@ -312,12 +312,24 @@ still out of scope (§7).
   owner (`stat -c %u:%g` inside the distro; refused rather than run as root when
   unknown). Every git subcommand is the same argv, so the pin logic
   (`CloneSpec.rev`, T126's releases, "Return to the tested pin") is unchanged.
-* **Identity.** `composegen.install_id()` hashes a WSL folder's LINUX spelling,
-  not the UNC one: measured, the fixture recorded `2f1c23d4` for
-  `/home/pk/wow-vanilla` while the Windows spelling hashed (lowercased) to
-  `27a96c15` -- a different image tag. Before either press the wiring checks
-  the folder's recorded id equals the one the distro's engine will build under,
-  and refuses otherwise.
+* **Two ids, and neither replaces the other.** The Windows-side id --
+  `composegen.install_id()` of the `\\wsl.localhost\<distro>\...` spelling,
+  lowercased -- keys the command-channel credential, its GM account name,
+  dbsecret, altbot memory and the run records, and is left exactly as it was:
+  re-hashing it would orphan every WSL install adopted before (and merge two
+  distros holding the same Linux path). The distro's images and compose project
+  are named after the id Linux Yu'lon RECORDED in `.yulon-install.json`: the WSL
+  engine's `Seams.install_id` is `native.recorded_install_id()`, which reads it
+  and refuses a missing or malformed one, and every `composegen.image_tag() /
+  project_name() / built_image_refs() / render()` the engine calls takes it as
+  `install_id=`. Measured on the fixture: recorded `2f1c23d4`, Windows-side
+  `27a96c15`.
+* **The distro is part of the path.** `platform.wsl_location()` parses the
+  distro and the Linux path together, and `wsl_linux_path_in(path, distro)` --
+  the one conversion `docker._docker()`, `run_attached()`, `compose_run_stdin()`
+  and `ContainerGit` use -- refuses a folder whose UNC path names another distro
+  than the one the install is remembered in (compared case-insensitively),
+  before anything is read or run. The wiring checks it first of all.
 * **§2 for the two readings.** `LatestRoute.source_version` (every tab reload)
   and `upstream_news` (T124, once a day) answer "nothing to say" while
   `wsl.is_running()` says the distro is down: no read of the folder (a UNC read

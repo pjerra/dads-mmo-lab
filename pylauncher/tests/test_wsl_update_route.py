@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import inspect
+import json
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
@@ -35,20 +36,89 @@ OLD = "a" * 40
 NEW = "b" * 40
 
 # -- identity ------------------------------------------------------------------------
+#
+# Two ids for one folder, and both are right for what they key (T125 rework):
+# the WINDOWS-side id -- the hash of `\\wsl.localhost\...`, lowercased -- keys
+# the command-channel credential, its GM account name, dbsecret, altbot memory
+# and the run records, and must not move; the distro's images and compose
+# project are named after the id Linux Yu'lon RECORDED in `.yulon-install.json`.
+
+UNC_FIXTURE = Path("\\\\wsl.localhost\\Ubuntu\\home\\pk\\wow-vanilla")
 
 
-def test_a_folder_inside_a_distro_is_identified_by_its_linux_path() -> None:
-    """The measured pair: the id Linux Yu'lon recorded, and not the Windows-hashed one."""
-    unc = Path("\\\\wsl.localhost\\Ubuntu\\home\\pk\\wow-vanilla")
-    assert composegen.install_id(unc, platform_id=lambda: "windows") == "2f1c23d4"
-    assert composegen.install_id(unc, platform_id=lambda: "linux") == "2f1c23d4"
-    assert composegen.image_tag(unc, platform_id=lambda: "windows") == "native-2f1c23d4"
+@pytest.fixture
+def _as_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`os.path.abspath` as Windows computes it, so the UNC fixture hashes as it does there."""
+    import ntpath
+
+    monkeypatch.setattr(composegen.os.path, "abspath", ntpath.abspath)
 
 
-def test_an_ordinary_windows_folder_is_still_lowercased() -> None:
-    upper = composegen.install_id(Path("C:\\Games\\WoW"), platform_id=lambda: "windows")
-    lower = composegen.install_id(Path("c:\\games\\wow"), platform_id=lambda: "windows")
-    assert upper == lower
+def test_the_windows_side_id_of_a_wsl_folder_is_the_one_it_always_was(_as_windows: None) -> None:
+    """Pinned to the value measured on yulon-win11 before T125: every WSL install
+    adopted earlier keys its channel credential, GM account and history by it."""
+    assert composegen.install_id(UNC_FIXTURE, platform_id=lambda: "windows") == "27a96c15"
+
+
+def test_a_credential_keyed_by_the_old_id_is_still_found(_as_windows: None, tmp_path: Path) -> None:
+    from yulon import channel_setup
+
+    before = tmp_path / "credentials" / "wow-vanilla-27a96c15.json"
+    here = channel_setup.credential_path(
+        "wow-vanilla",
+        composegen.install_id(UNC_FIXTURE, platform_id=lambda: "windows"),
+        config_dir=tmp_path,
+    )
+    assert here == before
+
+
+def _recorded(tmp_path: Path, ident: str) -> Path:
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    (server_dir / native.STATE_FILE).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "game_id": ENTRY.id,
+                "family": ENTRY.install.native.family,  # type: ignore[union-attr]
+                "install_id": ident,
+                "completed": [],
+                "last_error": "",
+                "updated_unix": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return server_dir
+
+
+def test_the_distros_images_are_named_after_the_recorded_id(tmp_path: Path) -> None:
+    server_dir = _recorded(tmp_path, "2f1c23d4")
+    engine = install_wiring.installer_for_app(ENTRY, wsl_distro=DISTRO)
+    assert engine._install_id(server_dir) == "2f1c23d4"  # type: ignore[attr-defined]
+    ctx = native.StageContext(
+        server_dir=server_dir,
+        client_dir=None,
+        state=native.read_state(server_dir, valid=()),  # type: ignore[arg-type]
+        cancel=None,
+        secrets=native.Secrets("unused"),
+    )
+    refs = engine.built_image_refs(ctx)  # type: ignore[attr-defined]
+    assert refs and all(ref.endswith(":native-2f1c23d4") for ref in refs), refs
+    local = install_wiring.installer_for_app(ENTRY)
+    assert local._install_id(server_dir) != "2f1c23d4"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("ident", ["", "27A96C15", "2f1c23d4; rm", "abc"])
+def test_a_record_with_no_usable_id_is_refused(tmp_path: Path, ident: str) -> None:
+    server_dir = _recorded(tmp_path, ident)
+    with pytest.raises(InstallerError, match="install id"):
+        native.recorded_install_id(server_dir)
+
+
+def test_no_record_at_all_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(InstallerError, match="install id"):
+        native.recorded_install_id(tmp_path)
 
 
 # -- the distro's own docker -----------------------------------------------------------
@@ -157,7 +227,7 @@ def test_the_wsl_route_keeps_the_pin_logic_only_the_transport_differs(
     dest = tmp_path / "checkout"
     (dest / ".git").mkdir(parents=True)
     spec = git.CloneSpec(url="https://github.com/x/y.git", dest=dest, branch="main", rev=NEW)
-    monkeypatch.setattr(platform, "wsl_linux_path", lambda path: str(path))
+    monkeypatch.setattr(platform, "wsl_location", lambda path: (DISTRO, str(path)))
 
     def git_tails(made: git.ContainerGit) -> list[list[str]]:
         seen: list[list[str]] = []
@@ -209,6 +279,7 @@ _NOT_ADDRESSED_TO_THE_DISTRO = {
     "run_container": "install-only (extraction); takes no distro, so it is refused instead",
     "copy_from_image": "install-only (conf templates); takes no distro, so it is refused instead",
     "verify_import": "install-only (the import stage); takes no distro",
+    "install_id": "the id the install RECORDED (`recorded_install_id`), tested on its own",
 }
 
 
@@ -260,6 +331,7 @@ def test_the_wsl_seams_answer_linux_and_ask_the_distros_daemon(
     asked: list[object] = []
     monkeypatch.setattr(docker, "daemon_ready", lambda **kw: asked.append(kw) or True)
     seams = native.Seams.in_wsl(DISTRO)
+    assert seams.install_id is native.recorded_install_id
     assert seams.platform_id() == "linux"
     assert seams.ask_selinux() is False
     assert seams.docker_ready() is True
@@ -328,6 +400,7 @@ def test_a_stopped_distro_is_not_read_for_the_version_line_or_the_news(
 
 def test_a_running_distro_is_read_as_usual(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(install_wiring.wsl, "is_running", lambda distro: True)
+    monkeypatch.setattr(platform, "wsl_location", lambda path: (DISTRO, "/home/pk/x"))
     read: list[Path] = []
     monkeypatch.setattr(
         install_wiring, "read_state", lambda path, valid=(): read.append(path) or None
@@ -341,21 +414,64 @@ def test_a_running_distro_is_read_as_usual(monkeypatch: pytest.MonkeyPatch, tmp_
 # -- identity guard -------------------------------------------------------------------------
 
 
-def test_a_folder_whose_record_names_another_id_is_refused_before_anything_runs(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def _nothing_may_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: object, **kw: object) -> object:
+        raise AssertionError(f"something was read or run: {a!r}")
+
+    for name in ("run", "stream", "stream_progress"):
+        monkeypatch.setattr(runner, name, boom)
+    monkeypatch.setattr(install_wiring, "read_state", boom)
+    monkeypatch.setattr(native, "read_state", boom)
+    monkeypatch.setattr(native, "recorded_install_id", boom)
+
+
+def test_a_folder_in_another_distro_is_refused_before_anything_is_read_or_run(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A copied folder, or one whose path the app cannot map as Linux Yu'lon did."""
-    rec = Recorder()
-    server_dir = tmp_path / "server"
-    install(rec, server_dir)
-    monkeypatch.setattr(platform, "wsl_linux_path", lambda path: "/somewhere/else")
-    monkeypatch.setattr(
-        install_wiring,
-        "installer_for",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("an engine was built")),
-    )
-    with pytest.raises(InstallerError, match="install id"):
-        list(install_wiring.rebuild_for_app(ENTRY, server_dir, wsl_distro=DISTRO)(None))
+    """Codex, high: the UNC path names Ubuntu, the install is remembered in Debian.
+
+    `wsl_linux_path()` dropped the distro, so the same Linux path would have been
+    rebuilt in the wrong distro. Refused on the comparison alone.
+    """
+    unc = Path(UNC_SERVER)
+    _nothing_may_run(monkeypatch)
+    with pytest.raises(InstallerError, match="Debian"):
+        list(install_wiring.rebuild_for_app(ENTRY, unc, wsl_distro="Debian")(None))
+    route = install_wiring.update_to_latest_for_app(ENTRY, unc, wsl_distro="Debian")
+    assert route is not None
+    with pytest.raises(InstallerError, match="Debian"):
+        list(route.press(None))
+    with pytest.raises(InstallerError, match="Debian"):
+        list(route.to_pin(None))
+    assert route.source_version().line == ""
+    assert route.upstream_news().sources == ()
+
+
+def test_the_distro_is_compared_without_regard_to_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert platform.wsl_linux_path_in(Path(UNC_SERVER), "ubuntu") == "/home/pk/wow-vanilla"
+    assert platform.wsl_location(Path(UNC_SERVER)) == ("Ubuntu", "/home/pk/wow-vanilla")
+    assert platform.wsl_linux_path_in(Path("C:\\Games\\wow"), "Ubuntu") is None
+
+
+def test_docker_refuses_a_folder_in_another_distro_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wsl_on_path(monkeypatch)
+    _nothing_may_run(monkeypatch)
+    with pytest.raises(docker.DockerCommandError, match="Debian"):
+        docker._run(["compose", "ps"], cwd=Path(UNC_SERVER), wsl_distro="Debian")
+    run = docker.run_attached(["compose", "build"], cwd=Path(UNC_SERVER), wsl_distro="Debian")
+    assert run.returncode != 0 and "Debian" in " ".join(run.tail)
+
+
+def test_git_refuses_a_folder_in_another_distro_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wsl_on_path(monkeypatch)
+    _nothing_may_run(monkeypatch)
+    made = git.ContainerGit(wsl_distro="Debian", owner=lambda d, p: "1000:1000")
+    with pytest.raises(git.GitError, match="Debian"):
+        made._argv(made._launcher(), Path(UNC_SERVER), ["status"], writes=False)
 
 
 # -- §4a second half: the presses end to end, every argv through the distro -----------------
@@ -411,7 +527,9 @@ def _through_the_distro(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tupl
     install(rec, server_dir)
     # The Linux spelling of the folder IS its path here, so the id the install
     # recorded is the one the distro's engine recomputes (see the identity tests).
-    monkeypatch.setattr(platform, "wsl_linux_path", lambda path: str(path).replace("\\", "/"))
+    monkeypatch.setattr(
+        platform, "wsl_location", lambda path: (DISTRO, str(path).replace("\\", "/"))
+    )
     _wsl_on_path(monkeypatch)
     distro = _Distro(server_dir)
     monkeypatch.setattr(runner, "run", lambda cmd, *a, **kw: distro.answer(cmd))

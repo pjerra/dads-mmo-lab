@@ -6735,12 +6735,36 @@ def test_a_server_adopted_from_wsl_is_rebuilt_on_the_distros_docker(
         raise _Stop
 
     monkeypatch.setattr(controller_view_module.install_wiring, "installer_for_app", spy)
+    # The folder as the Windows app holds a WSL server's: inside that distro.
+    monkeypatch.setattr(
+        controller_view_module.install_wiring.platform,
+        "wsl_location",
+        lambda path: ("Ubuntu-22.04", "/home/pk/wow"),
+    )
     services = ControllerServices.for_entry(WOTLK, tmp_path, None, "Ubuntu-22.04")
     assert services.rebuild is not None
     assert services.update_to_latest is not None
     with pytest.raises(_Stop):
         list(services.rebuild(None))
     assert built == ["Ubuntu-22.04"]
+
+
+def test_the_tortoise_tab_hands_its_distro_to_the_bots_adoption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T125: the T123 wrap around Update reads the bots checkout through the same distro."""
+    seen: list[object] = []
+    real = controller_view_module.tortoise_botpool.wrap_route
+
+    def spy(route: object, *args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("wsl_distro"))
+        return real(route, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(controller_view_module.tortoise_botpool, "wrap_route", spy)
+    tortoise = next(e for e in _every_game() if e.id == "wow-tortoise")
+    ControllerServices.for_entry(tortoise, tmp_path, None, "Ubuntu-22.04")
+    ControllerServices.for_entry(tortoise, tmp_path / "local", None, None)
+    assert seen == ["Ubuntu-22.04", None]
 
 
 def test_a_local_install_gets_a_rebuild_seam_on_every_game(tmp_path: Path) -> None:
