@@ -669,6 +669,29 @@ class PlayerData(_Strict):
     )
 
 
+class InnoDbConversion(_Strict):
+    """Schemas whose MyISAM tables the import converts to InnoDB before it writes the marker (T107).
+
+    Per entry, because it is a fact about one upstream's dump: Tortoise's
+    `create_databases.sql` makes 59 of `tw_char`'s 93 tables MyISAM, and MyISAM has
+    no crash recovery (T98's lab lost rows to a SIGKILL and a power cut). Every
+    other entry leaves it out and imports exactly as before.
+    """
+
+    schemas: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Database names as the plan spells them elsewhere (`into`, `verify.db`); every "
+            "MyISAM base table in each is altered to InnoDB, and the import then requires "
+            "that none of their tables is anything but InnoDB."
+        ),
+    )
+    notes: tuple[str, ...] = Field(
+        default=(),
+        description="Per-tree facts: what was measured, and what the conversion leaves out.",
+    )
+
+
 class SqlPlan(_Strict):
     """The whole import: schemas to create, ordered phases, verify rules, the marker's home."""
 
@@ -685,6 +708,13 @@ class SqlPlan(_Strict):
     marker_db: str = Field(
         min_length=1, description="Where `yulon_install` (the marker table) lives."
     )
+    convert_to_innodb: InnoDbConversion | None = Field(
+        default=None,
+        description=(
+            "Run after the last phase and before `verify`: convert these schemas' MyISAM "
+            "tables to InnoDB, then check none is left (T107). Absent: nothing is converted."
+        ),
+    )
 
     def plan_hash(self) -> str:
         """16 hex of sha256 over the canonical JSON of this plan.
@@ -693,8 +723,15 @@ class SqlPlan(_Strict):
         reordered `catalog.json` is the same plan and an edited glob is a new one; and a
         DIFFERENT hash in a marker still reads `imported` — a finished import from an older
         plan is never `partial` (phase7-decisions, "Probe").
+
+        `convert_to_innodb` is left out of the dump when it is absent, so a plan that does
+        not declare it hashes exactly as it did before the field existed, and its installs
+        do not start reading "made by an older plan" over a plan nobody changed (T107).
         """
-        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        dumped = self.model_dump(
+            mode="json", exclude={"convert_to_innodb"} if self.convert_to_innodb is None else None
+        )
+        canonical = json.dumps(dumped, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 

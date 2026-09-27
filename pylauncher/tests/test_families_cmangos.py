@@ -4204,6 +4204,7 @@ def test_schemas_answers_for_every_database_name_the_shipped_plan_spells(
         plan.marker_db,
         *(rule.db for rule in plan.verify),
         *(data.db for data in plan.player_data),
+        *(plan.convert_to_innodb.schemas if plan.convert_to_innodb is not None else ()),
     }
     for phase in plan.phases:
         if phase.into is not None:
