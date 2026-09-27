@@ -426,6 +426,10 @@ def _check_plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> None:
         ("marker_db", (plan.marker_db,)),
         ("verify", tuple(rule.db for rule in plan.verify)),
         ("player_data", tuple(table.db for table in plan.player_data)),
+        (
+            "convert_to_innodb",
+            plan.convert_to_innodb.schemas if plan.convert_to_innodb is not None else (),
+        ),
     )
     for field, values in named:
         for value in values:
@@ -961,6 +965,173 @@ def _quoted(value: str) -> str:
     return f"'{value}'"
 
 
+_MYISAM_TABLES = (
+    "SELECT TABLE_NAME FROM information_schema.TABLES "
+    "WHERE TABLE_SCHEMA = {schema} AND TABLE_TYPE = 'BASE TABLE' AND ENGINE = 'MyISAM' "
+    "ORDER BY TABLE_NAME"
+)
+"""The tables `convert_to_innodb()` alters: read from the server, never listed in the catalog.
+
+Asked rather than listed, so a pin that adds, drops or renames a table is converted as it
+stands, and a second run over converted schemas finds nothing and sends nothing (T107). No
+rows is a real answer here — nothing left to convert — unlike a `COUNT`, which always has one.
+"""
+
+_NOT_INNODB = (
+    "SELECT COUNT(*), IFNULL(GROUP_CONCAT(CONCAT(TABLE_NAME, ' (', IFNULL(ENGINE, 'no engine'), "
+    "')') ORDER BY TABLE_NAME SEPARATOR ', '), '') FROM information_schema.TABLES "
+    "WHERE TABLE_SCHEMA = {schema} AND TABLE_TYPE = 'BASE TABLE' "
+    "AND (ENGINE <> 'InnoDB' OR ENGINE IS NULL)"
+)
+"""What `check_innodb()` asks after the conversion: how many are left, and which.
+
+One aggregate row, always — `COUNT` plus the names — so "none left" is an answer (`0` and an
+empty list) and not the same empty stdout a question that went wrong would give.
+"""
+
+_TO_INNODB = "ALTER TABLE `{schema}`.`{table}` ENGINE=InnoDB, ROW_FORMAT=DYNAMIC;"
+"""The ONE spelling of the conversion, and `ROW_FORMAT=DYNAMIC` is not decoration (T107).
+
+19 of Tortoise's MyISAM `tw_char` tables and 3 of its `tw_logon` ones are `ROW_FORMAT=FIXED`,
+which InnoDB does not have. An ALTER that names only the engine keeps the old create option,
+and under `innodb_strict_mode` (on by default, and on in `mariadb:10.6`) the server refuses it:
+measured on a test machine 2026-09-27, `mariadb:10.6.28`, `ERROR 1005 (HY000): Can't create
+table ... (errno: 140 "Wrong create options")`, table left MyISAM. Naming DYNAMIC — 10.6's
+default row format — converts it with no warning.
+"""
+
+
+def _schema_literal(schema: str) -> str:
+    """A database name as a single-quoted SQL literal, refused if it cannot be one."""
+    _refuse_unquotable(schema, "a database name in the InnoDB conversion")
+    return f"'{schema}'"
+
+
+def _identifier(name: str) -> str:
+    """A table name as the server gave it, safe inside backticks (a backtick is doubled)."""
+    return name.replace("`", "``")
+
+
+def convert_to_innodb(
+    plan: SqlPlan,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    schemas: Mapping[str, str],
+    exec_stdin: ExecStdin,
+    sql_query: SqlQuery,
+    cancel: threading.Event | None,
+    wsl_distro: str | None = None,
+) -> Iterator[str]:
+    """Alter every MyISAM table of the plan's `convert_to_innodb` schemas to InnoDB (T107).
+
+    Nothing at all when the plan does not declare the block — no question asked, no
+    statement sent. Otherwise, per schema: ask the server which base tables are still
+    MyISAM, and send one script altering each of them with `_TO_INNODB`'s spelling. Yields a
+    line per schema before its work, like `apply()`.
+
+    **Why after the dumps and before `verify()`.** The dumps are what create the tables, so
+    nothing earlier has anything to convert; and the marker is the install's claim that its
+    databases are finished, so it is not written over a character table that a power cut
+    could still roll back. A refusal raises from `_run_sql()` naming the statement the client
+    stopped at, and with no marker the install stays `partial`; the next press resets and
+    imports again. The client stops at the first refused statement, so the tables before it
+    are converted and the rest are not — `check_innodb()` is what says which.
+
+    Only MyISAM is converted. Any other engine is left as the server has it and is then
+    named by `check_innodb()`, because it would be something this change was not measured
+    against rather than something to convert blind.
+    """
+    block = plan.convert_to_innodb
+    if block is None:
+        return
+    _check_plan_schemas(plan, schemas)
+    for name in block.schemas:
+        _check_cancel(cancel, IMPORT_CANCEL_NOTE)
+        schema = schemas[name]
+        statement = _MYISAM_TABLES.format(schema=_schema_literal(schema))
+        try:
+            answer = sql_query(container, client, password, None, statement, wsl_distro=wsl_distro)
+        except docker.DockerCommandError as exc:
+            raise InstallerError(
+                f"The import stopped while listing {schema}'s MyISAM tables to convert to "
+                f"InnoDB: the database could not be asked ({_redact(str(exc), password)})."
+            ) from exc
+        tables = [row.strip() for row in answer.splitlines() if row.strip()]
+        if not tables:
+            yield f"{schema}: every table is already InnoDB."
+            continue
+        yield (
+            f"{schema}: converting {len(tables)} MyISAM table(s) to InnoDB, "
+            "so a crash or power cut cannot leave half a save behind."
+        )
+        script = "".join(
+            _TO_INNODB.format(schema=_identifier(schema), table=_identifier(table)) + "\n"
+            for table in tables
+        )
+        _run_sql(
+            script,
+            what=f"converting {schema}'s tables to InnoDB",
+            container=container,
+            client=client,
+            password=password,
+            schema=None,
+            exec_stdin=exec_stdin,
+            wsl_distro=wsl_distro,
+        )
+
+
+def check_innodb(
+    plan: SqlPlan,
+    *,
+    container: str,
+    client: str,
+    password: str,
+    schemas: Mapping[str, str],
+    sql_query: SqlQuery,
+    wsl_distro: str | None = None,
+) -> tuple[str, ...]:
+    """One sentence per `convert_to_innodb` schema that still holds a non-InnoDB table.
+
+    Asked of the server after the conversion rather than trusted from its exit code, and in
+    the same `try` as `verify()`, before the marker: a script that exited 0 without altering
+    anything, or a table the conversion does not cover, is a failed check and no marker (T107).
+    The answer is parsed the way `verify()` parses a count — exactly one row, a number first —
+    so an empty answer or an unexpected shape is a failure and never "none left".
+    """
+    block = plan.convert_to_innodb
+    if block is None:
+        return ()
+    failed: list[str] = []
+    for name in block.schemas:
+        schema = schemas[name]
+        statement = _NOT_INNODB.format(schema=_schema_literal(schema))
+        try:
+            answer = sql_query(container, client, password, None, statement, wsl_distro=wsl_distro)
+        except docker.DockerCommandError as exc:
+            failed.append(
+                f"{schema}: whether every table is InnoDB could not be asked "
+                f"({_redact(str(exc), password)})"
+            )
+            continue
+        rows = answer.splitlines()
+        count_text, _, names = rows[0].partition("\t") if len(rows) == 1 else ("", "", "")
+        try:
+            count = int(count_text.strip())
+        except ValueError:
+            failed.append(
+                f"{schema}: the question whether every table is InnoDB came back as "
+                f"{answer!r}, which is not one count"
+            )
+            continue
+        if count:
+            failed.append(f"{schema}: {count} table(s) are still not InnoDB: {names.strip()}")
+            continue
+        logger.info(f"verified {schema}: every base table is InnoDB")
+    return tuple(failed)
+
+
 def verify(
     plan: SqlPlan,
     *,
@@ -1324,8 +1495,8 @@ _VOLUME_NOTE = (
 def plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
     """Every schema on the server this plan touches, in `create` order then first mention.
 
-    The same five places `expand()` reads names from, refused in the same words
-    when one is not this game's: `_check_plan_schemas()` for the four the model
+    The same six places `expand()` reads names from, refused in the same words
+    when one is not this game's: `_check_plan_schemas()` for the five the model
     holds, `_targets()` for a phase's `into`/`into_each`.
 
     Computed when a `MarkerGate` is BUILT rather than when it probes, because
@@ -1346,6 +1517,9 @@ def plan_schemas(plan: SqlPlan, schemas: Mapping[str, str]) -> tuple[str, ...]:
         seen.setdefault(schemas[rule.db], None)
     for data in plan.player_data:
         seen.setdefault(schemas[data.db], None)
+    if plan.convert_to_innodb is not None:
+        for name in plan.convert_to_innodb.schemas:
+            seen.setdefault(schemas[name], None)
     for phase in plan.phases:
         for schema, _patterns in _targets(phase, schemas):
             if schema is not None:
