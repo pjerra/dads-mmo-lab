@@ -1240,7 +1240,9 @@ class CmangosInstaller(StagedInstaller):
 
         Then, in order: phase 0 (the schemas, the app user and its grants),
         every phase in the plan's own order with its statements filled through
-        the one token mapping, `sqlplan.verify()`, and only then the marker.
+        the one token mapping, the plan's `convert_to_innodb` schemas moved off
+        MyISAM (T107; nothing for a plan without the block), `sqlplan.verify()`
+        with `check_innodb()`, and only then the marker.
 
         Phase 0 is skipped by the `if plan.create:` below, HERE and not inside
         `create_schemas()`, so for Tortoise — whose `create` is empty — that
@@ -1364,6 +1366,29 @@ class CmangosInstaller(StagedInstaller):
             stage="import",
         )
         self._check_cancel(ctx.cancel)
+        # After the dumps, which are what create the tables, and before verify and the
+        # marker, which say the databases are finished: a plan that declares
+        # `convert_to_innodb` does not get a marker over a character table a power cut
+        # could still roll back (T107). Nothing at all for a plan without the block.
+        try:
+            yield from sqlplan.convert_to_innodb(
+                plan,
+                container=container,
+                client=db.client,
+                password=password,
+                schemas=schemas,
+                exec_stdin=self._seams.exec_stdin,
+                sql_query=self._query_seam(),
+                cancel=ctx.cancel,
+            )
+        except InstallerError:
+            raise
+        except (RuntimeError, OSError) as exc:
+            raise InstallerError(
+                f"The import stopped while converting its tables to InnoDB "
+                f"({type(exc).__name__}: {exc}). No completion marker was written, so the next "
+                "install press imports again."
+            ) from exc
         try:
             failing = sqlplan.verify(
                 plan,
@@ -1385,6 +1410,15 @@ class CmangosInstaller(StagedInstaller):
                 container=container,
                 client=db.client,
                 password=password,
+                sql_query=self._query_seam(),
+            )
+            # Asked again of the server, not trusted from the ALTERs' exit code (T107).
+            failing += sqlplan.check_innodb(
+                plan,
+                container=container,
+                client=db.client,
+                password=password,
+                schemas=schemas,
                 sql_query=self._query_seam(),
             )
         except InstallerError:

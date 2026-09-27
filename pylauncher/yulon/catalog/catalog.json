@@ -1225,7 +1225,18 @@
                   ]
                 }
               ],
-              "marker_db": "tw_world"
+              "marker_db": "tw_world",
+              "convert_to_innodb": {
+                "schemas": [
+                  "tw_char",
+                  "tw_logon"
+                ],
+                "notes": [
+                  "T107, owner decision 2026-09-27: new installs first. The pinned core's `sql/create_databases.sql` (1181dev @187af788, a mariadb-dump of 10.6.22) makes 59 of tw_char's 93 tables and 18 of tw_logon's 41 MyISAM, `characters` and `character_inventory` among them, while `item_instance` and `mail` are InnoDB. MyISAM has no crash recovery: T98's lab lost 26 rows to a SIGKILL and 152 to an emulated power cut, and a character save's ROLLBACK could only undo its InnoDB half. The import converts every MyISAM table in these two schemas after the dumps and before verify and the marker; tw_logs is InnoDB already.",
+                  "Read 2026-09-27 at the pins: nothing in the core's C++ or in TortoiseBots uses LOCK TABLES, INSERT DELAYED or FULLTEXT; every AUTO_INCREMENT column leads a key; no row comes near InnoDB's size limit; the one core character migration and all nine TortoiseBots character migrations create InnoDB tables. 22 of the tables are ROW_FORMAT=FIXED, which a bare `ENGINE=InnoDB` keeps and strict mode refuses (errno 140, measured on a test machine with mariadb:10.6.28), so the ALTER names ROW_FORMAT=DYNAMIC.",
+                  "NOT COVERED: tw_world stays as upstream ships it (static content a re-import restores, and ten core world migrations re-create MyISAM tables at first start anyway); an install made before this change keeps its MyISAM tables; a MyISAM character table a later core update adds at world start stays MyISAM; restoring a backup taken from a MyISAM install puts its tables back to MyISAM."
+                ]
+              }
             }
           }
         }
