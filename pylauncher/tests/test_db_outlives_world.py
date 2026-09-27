@@ -5,8 +5,9 @@ and stops the database last, but a Docker DAEMON shutdown — a PC shutdown, a D
 `systemctl stop docker` — signals every container at once. MariaDB was gone 1.8 s later while the
 world was still draining its save queue: 0 saves landed, 9 failed. On a Tortoise install made before
 T107 most character tables are MyISAM, so a save cut between its DELETE and its INSERT leaves a
-character without those rows; a fresh install converts them to InnoDB (T107), where a cut save is
-rolled back whole, but the saves still queued when the database goes are lost on either engine.
+character without those rows. T107 (2026-09-27) added an InnoDB conversion to a fresh install's
+import, where a cut save is rolled back whole; the saves still queued when the database goes are
+lost on either engine, which is why this hold matters on both.
 
 So the database service's entrypoint holds SIGTERM while a server container is still connected and
 only then shuts the database down, and its `stop_grace_period` is long enough for that wait. These

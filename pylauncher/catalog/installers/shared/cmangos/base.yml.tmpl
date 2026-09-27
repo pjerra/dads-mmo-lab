@@ -55,9 +55,9 @@ services:
     # `systemctl stop docker` -- does not read depends_on: it signals all three
     # containers at once. Measured on yulon-ubuntu (2026-09-23) with this
     # file: mariadbd was gone 1.8 s after the signal, and the world, still
-    # draining its save queue, got 0 saves in and 9 refused. A Tortoise install from
-    # before T107 keeps most character tables on MyISAM, where a save cut between
-    # its DELETE and INSERT loses rows; a newer one is InnoDB (T107).
+    # draining its save queue, got 0 saves in and 9 refused. Tortoise installs made
+    # before T107 kept most character tables on MyISAM, where a cut save loses rows;
+    # T107 (2026-09-27) added an InnoDB conversion to the import, not yet run end to end.
     #
     # So SIGTERM is held here while any server container is still connected
     # (a TCP client from off loopback), then passed on to mariadbd. Neither
