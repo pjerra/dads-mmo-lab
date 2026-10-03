@@ -1424,15 +1424,19 @@ def test_two_installs_under_different_parents_do_not_get_the_same_tab_title(
 
 
 def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_path: Any) -> None:
-    """The rail is narrow, so a long install name elides — the full server dir
-    must stay reachable on hover, or elision becomes information loss."""
+    """The rail shows the short game name (T192) — the full server dir must stay
+    reachable on hover, or the short title becomes information loss.
+
+    T192 changed the tooltip from the bare path to "WoW WotLK — <path>", so the
+    whole game name is on it too; the path is still all of it.
+    """
     server_dir = tmp_path / "DadsMmoLab"
     catalog = _catalog_view(window)
     catalog.installed.emit("wow-wotlk", server_dir, None)
 
     tabs = window.property("tabs")
     index = tabs.indexOf(_tab_for(window, server_dir))
-    assert tabs.tabToolTip(index) == str(server_dir)
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
 
 
 def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
@@ -2176,11 +2180,15 @@ def test_the_tab_menu_offers_the_same_removal_on_server_tabs_only(
     assert [title for title, _, _ in asked] == [forgetting.TITLE], "not the same dialog"
     assert tabs.indexOf(view) != -1, "answered No, yet the tab went"
 
-    catalog = window.yulon_tab_menu(bar.tabRect(0).center())
-    assert catalog.actions(), "not the Catalog's menu"
-    assert forgetting.BUTTON_LABEL not in [
-        a.text() for a in catalog.actions()
-    ], "the Catalog's menu offers a removal"
+    # T192: the Catalog is pinned above the rail, no longer a tab in it, so
+    # there is nothing of it in the bar to right-click (its menu offered one
+    # disabled caption and nothing else).
+    assert not bar.isTabVisible(0) and bar.tabRect(0).isEmpty()
+    # And should a point ever answer the Catalog's index, it has no menu.
+    from PySide6.QtCore import QPoint
+
+    monkeypatch.setattr(bar, "tabAt", lambda _pos: 0)
+    assert window.yulon_tab_menu(QPoint(1, 1)) is None, "the Catalog has a bar menu"
 
 
 def test_the_tab_menu_answered_yes_removes_the_server(
@@ -4305,15 +4313,25 @@ def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_
     from PySide6.QtGui import QKeySequence
 
     server_dir = tmp_path / "Raids & Dungeons"
+    # T192: the folder is on the tab only when another tab has the same game,
+    # so a second WotLK puts "Raids & Dungeons" on this one's second line.
+    other = tmp_path / "Other WotLK"
     _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
-    view = _tab_for(window, server_dir)
-    tabs = window.property("tabs")
-    index = tabs.indexOf(view)
+    _catalog_view(window).installed.emit("wow-wotlk", other, None)
+    try:
+        view = _tab_for(window, server_dir)
+        tabs = window.property("tabs")
+        index = tabs.indexOf(view)
 
-    title = tabs.tabText(index)
-    assert QKeySequence.mnemonic(title).isEmpty(), title
-    assert "Raids & Dungeons" in title.replace("&&", "&"), title
-    assert tabs.tabToolTip(index) == str(server_dir)
+        title = tabs.tabText(index)
+        assert "\n" in title, ("the folder is not on the tab", title)
+        assert QKeySequence.mnemonic(title).isEmpty(), title
+        assert "Raids & Dungeons" in title.replace("&&", "&"), title
+        assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+    finally:
+        for folder in (server_dir, other):
+            _tab_for(window, folder).uninstalled.emit("wow-wotlk", folder)
+        process_events(10)
 
 
 def test_remove_from_yulon_names_the_ready_to_play_client_it_leaves(
@@ -4740,3 +4758,548 @@ def test_a_notice_is_remembered_only_once_it_was_shown(
     notice = _REAL_SWEEP(config_dir=tmp_path)
     assert notice is not None and notice.folders == (str(other),)
     assert "a temporary copy of a game client" in notice.text
+
+
+# -- T193 A20: "Check for updates" is a real button, whole at every width -----------
+
+
+@pytest.fixture
+def shown_window(window: Any) -> Iterator[Any]:
+    """The shared window shown on the Catalog, put back hidden at its size afterwards."""
+    tabs = window.property("tabs")
+    size, current = window.size(), tabs.currentIndex()
+    tabs.setCurrentIndex(0)
+    window.show()
+    process_events(50)
+    yield window
+    window.hide()
+    window.resize(size)
+    window._restyle_for_width()
+    tabs.setCurrentIndex(current)
+    process_events(20)
+
+
+def _at_width(window: Any, size: tuple[int, int]) -> None:
+    """Resize the window and restyle it the way its settle timer does."""
+    window.resize(*size)
+    process_events(20)
+    window._restyle_for_width()
+    process_events(50)
+
+
+def test_the_header_check_button_has_an_opaque_brass_edge(shown_window: Any) -> None:
+    """A20: the header's selector-less sheet stripped the button's border and fill.
+
+    `background: transparent; border: none;` with no selector reaches every
+    child (T188 C1's mechanism), and the button was also flat: it read as a
+    caption on the ember glow. Four pixels down the middle of its left edge are
+    the theme's hairline, which is opaque, so the glow animating behind it
+    cannot change them.
+
+    Mutation: give the header its selector-less sheet back and the edge is the
+    glow, not `COLOR_BRASS_DARK`.
+    """
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import COLOR_BRASS_DARK
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    button.clearFocus()
+    image = button.grab().toImage()
+    middle = image.height() // 2
+    edge = [image.pixelColor(0, y).name() for y in range(middle - 2, middle + 2)]
+    assert edge == [QColor(COLOR_BRASS_DARK).name()] * 4, edge
+
+
+@pytest.mark.parametrize("size", [(960, 640), (1280, 800), (1920, 1080)])
+def test_the_header_check_button_is_never_cut_off(shown_window: Any, size: tuple[int, int]) -> None:
+    """T188's renders showed "Check for updates" cut at 1280 on the Catalog.
+
+    Measured for T193: a harness artefact, not the app. The shot was taken 0.2 s
+    after the resize, and the 120 ms restyle had grown the font but the header's
+    relayout had not landed yet; at a 1 s settle the button is whole at every
+    size. Kept as the guard on that answer: reached from 960, the way a window
+    is dragged wider, the button is as wide as it asks to be, wider than its words.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from yulon.ui.theme import TOUCH_TARGET_PX
+
+    button = shown_window.findChild(QPushButton, "check-for-updates")
+    assert button is not None
+    _at_width(shown_window, (960, 640))
+    _at_width(shown_window, size)
+
+    words = button.fontMetrics().horizontalAdvance(button.text())
+    assert button.width() >= button.sizeHint().width(), (button.width(), button.sizeHint())
+    assert button.width() > words, (button.width(), words)
+    # And inside the header, top to bottom: at the theme's 8px padding it was
+    # 50px tall in a 44px row and stood out over the header's bottom edge.
+    header = shown_window.property("header")
+    inside = header.contentsRect().marginsRemoved(header.layout().contentsMargins())
+    assert inside.contains(button.geometry()), (button.geometry(), inside)
+    assert button.height() >= TOUCH_TARGET_PX
+
+
+# -- T192: whole short names on the rail; Catalog and Logs pinned above it -----------
+
+
+@pytest.fixture
+def five_servers(shown_window: Any, tmp_path: Any) -> Iterator[list[Any]]:
+    """Five server tabs, the second WotLK on another disk with the same folder name.
+
+    Removed again afterwards through the tab's own `uninstalled`, as every test
+    on the shared window must.
+    """
+    made = [
+        ("wow-tbc", tmp_path / "WoW TBC"),
+        ("wow-vanilla", tmp_path / "WoW Vanilla"),
+        ("wow-tortoise", tmp_path / "WoW Tortoise"),
+        ("wow-centurion", tmp_path / "WoW Centurion"),
+        ("wow-wotlk", tmp_path / "disk2" / "WoW WotLK"),
+    ]
+    catalog = _catalog_view(shown_window)
+    for game, folder in made:
+        catalog.installed.emit(game, folder, None)
+    process_events(30)
+    yield [_tab_for(shown_window, folder) for _, folder in made]
+    for game, folder in made:
+        view = _tab_for(shown_window, folder)
+        view.uninstalled.emit(game, folder)
+    process_events(20)
+
+
+SIZES = [(960, 640), (1280, 800), (1920, 1080)]
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_every_server_tab_shows_its_whole_short_name(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """A3/B5/C9: with more tabs than fit, every tab shrank to "WoW…" / "Cata…".
+
+    Short names ("TBC", not "WoW TBC — WoW TBC"), never elided: the rail
+    scrolls instead, so each tab is at least as long as its text asks.
+
+    Mutation: `ElideRight` back and the 960 tabs are shorter than their hints.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    for view in five_servers:
+        index = tabs.indexOf(view)
+        assert (
+            bar.tabRect(index).height() >= bar.tabSizeHint(index).height()
+        ), f"{bar.tabText(index)!r} at {size}: {bar.tabRect(index)} < {bar.tabSizeHint(index)}"
+        assert not bar.tabText(index).startswith("WoW "), bar.tabText(index)
+    # Its first line, whatever other TBC tab an earlier test on the shared
+    # window left open (that one would add the folder as a second line).
+    assert bar.tabText(tabs.indexOf(five_servers[0])).split("\n")[0] == "TBC"
+
+
+@pytest.mark.parametrize("size", SIZES)
+def test_catalog_and_logs_are_pinned_above_the_rail_at_every_size(
+    shown_window: Any, five_servers: list[Any], size: tuple[int, int]
+) -> None:
+    """The Catalog was tab 0 of a scrolling bar, so with a few servers it scrolled away.
+
+    Both are pinned buttons above the bar, inside the tab widget, each at least
+    its own size hint, and the bar starts below them -- after the restyle at
+    each size, which is what moves the bar.
+
+    Mutation: drop the `::tab-bar` offset and the bar starts at the top, under
+    the pins.
+    """
+    _at_width(shown_window, size)
+    tabs = shown_window.property("tabs")
+    bar = tabs.tabBar()
+    pins = shown_window.yulon_sidebar_pins
+    assert pins.isVisible()
+    assert tabs.rect().contains(pins.geometry()), (pins.geometry(), tabs.rect())
+    assert pins.geometry().bottom() < bar.geometry().top(), (pins.geometry(), bar.geometry())
+    for button in pins.buttons.values():
+        assert button.isVisible()
+        assert button.width() >= button.sizeHint().width(), (button.size(), button.sizeHint())
+        assert button.height() >= button.sizeHint().height(), (button.size(), button.sizeHint())
+    assert not bar.isTabVisible(0) and not bar.isTabVisible(1)
+
+
+def test_the_catalog_pin_stays_put_and_visible_with_the_last_server_current(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    _at_width(shown_window, (960, 640))
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    catalog = pins.buttons[0]
+    tabs.setCurrentIndex(0)
+    process_events(20)
+    where = catalog.mapTo(shown_window, catalog.rect().topLeft())
+
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(20)
+
+    assert catalog.isVisible()
+    assert catalog.mapTo(shown_window, catalog.rect().topLeft()) == where
+    assert not catalog.isChecked() and not pins.buttons[1].isChecked()
+
+
+def test_pressing_the_catalog_pin_shows_the_catalog(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The pin is the Catalog's tab now: it shows tab 0, is checked, and the header
+    hides the realm badge as it does on the Catalog (T188 C6)."""
+    tabs = shown_window.property("tabs")
+    header = shown_window.property("header")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentWidget(five_servers[-1])
+    process_events(10)
+    assert header._badge.isHidden() is False
+
+    pins.buttons[0].click()
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked() and not pins.buttons[1].isChecked()
+    assert header._badge.isHidden() is True
+
+    pins.buttons[1].click()
+    process_events(10)
+    assert tabs.currentIndex() == 1
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+
+
+def test_the_next_tab_bumper_from_the_last_server_lands_on_the_catalog(
+    shown_window: Any, five_servers: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LB/RB still walk tabs 0..n (they stayed tabs), and the pin follows them.
+
+    The bumper acts on the tab widget around the FOCUSED widget. On the shared
+    window, after the module's earlier tests, offscreen Qt will not make this
+    window active again (measured: `requestActivate()` never lands), so the
+    focus is answered as the rail's bar -- what a pad user on the rail has.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from yulon.ui import gamepad
+    from yulon.ui.gamepad import Action
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    tabs.setCurrentIndex(tabs.count() - 1)
+    monkeypatch.setattr(gamepad.QApplication, "focusWidget", staticmethod(tabs.tabBar))
+    assert QApplication.focusWidget() is tabs.tabBar()
+    process_events(10)
+
+    shown_window.yulon_keyboard._navigator.perform(Action.CYCLE_NEXT)
+    process_events(10)
+
+    assert tabs.currentIndex() == 0
+    assert pins.buttons[0].isChecked()
+
+
+# -- T192: a status dot on each server tab; the server's name in the header -----------
+
+
+def _tab_dot(window: Any, view: Any) -> Any:
+    """The tab's icon as the rail draws it, at the rail's icon size."""
+    tabs = window.property("tabs")
+    size = tabs.iconSize()
+    return tabs.tabIcon(tabs.indexOf(view)).pixmap(size).toImage()
+
+
+def _dot_is(image: Any, hex_colour: str) -> bool:
+    """The dot's centre pixel is `hex_colour` (within 24 a channel), opaque."""
+    from PySide6.QtGui import QColor
+
+    from yulon.ui.sidebar import status_dot_geometry
+
+    centre, _radius, _halo = status_dot_geometry(image.width())
+    got, want = image.pixelColor(int(centre.x()), int(centre.y())), QColor(hex_colour)
+    return got.alpha() > 200 and all(
+        abs(a - b) <= 24 for a, b in zip(got.getRgb()[:3], want.getRgb()[:3], strict=True)
+    )
+
+
+def _drop(window: Any, game: str, server_dir: Path) -> None:
+    for view in list(window.yulon_controllers):
+        if view.services.controller.server_dir == server_dir:
+            view.uninstalled.emit(game, server_dir)
+    process_events(10)
+
+
+def test_a_server_tab_carries_a_dot_that_follows_its_realm_badge(
+    window: Any, tmp_path: Any
+) -> None:
+    """C28: every server tab had the same icon, so the rail said nothing about which were up.
+
+    Mutation: leave `status_changed` unconnected and the dot stays at the
+    status the tab was built with.
+    """
+    from yulon.ui.icons import get_tab_icon
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        view.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, view), COLOR_RARE)
+        view.realm_badge.set_status("partial")
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+
+        # T188: Docker did not answer. No dot -- a ring would claim it is offline.
+        view.realm_badge.set_status("unknown")
+        plain = get_tab_icon("server").pixmap(window.property("tabs").iconSize()).toImage()
+        dot = _tab_dot(window, view)
+        assert dot.convertToFormat(plain.format()) == plain, "an unknown realm shows a dot"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_new_server_tab_starts_with_the_dot_of_its_badge(window: Any, tmp_path: Any) -> None:
+    """Read at `add_controller`, not only on the first change: the badge starts stopped."""
+    from yulon.ui.theme import COLOR_TEXT_MUTED, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-first-dot"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        assert view.realm_badge.status == "stopped"
+        image = _tab_dot(window, view)
+        assert not _dot_is(image, COLOR_UNCOMMON)
+        from PySide6.QtGui import QColor
+
+        from yulon.ui.sidebar import status_dot_geometry
+
+        centre, radius, _halo = status_dot_geometry(image.width())
+        muted = QColor(COLOR_TEXT_MUTED).getRgb()[:3]
+        ring = [
+            image.pixelColor(x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if abs(((x + 0.5 - centre.x()) ** 2 + (y + 0.5 - centre.y()) ** 2) ** 0.5 - radius)
+            < 1.5
+        ]
+        assert any(
+            c.alpha() > 200
+            and all(abs(a - b) <= 24 for a, b in zip(c.getRgb()[:3], muted, strict=True))
+            for c in ring
+        ), "a new tab shows no stopped ring"
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_dot_shows_the_badge_held_while_our_stop_runs(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T188 holds the badge at "stopping" while our own Stop runs; the dot holds with it."""
+    from yulon.ui.theme import COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-held"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    try:
+        view.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, view), COLOR_UNCOMMON)
+        monkeypatch.setattr(view, "_run", lambda *_args, **_kwargs: None)
+
+        view.stop_server()
+
+        assert view.realm_badge.status == "stopping"
+        assert _dot_is(_tab_dot(window, view), COLOR_GOLD_BRIGHT)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_a_rebuilt_tab_gets_its_new_badge_s_dot_and_the_old_badge_lets_go(
+    window: Any, tmp_path: Any
+) -> None:
+    """A new client folder rebuilds the tab (`on_client_dir_changed`): a new view, a new badge.
+
+    The old badge must not keep a line to the tab: nothing is left listening
+    to it, and what it says no longer reaches the rail.
+
+    Mutation: leave the old badge connected and it still has a receiver.
+    """
+    from PySide6.QtCore import SIGNAL
+
+    from yulon.ui.theme import COLOR_RARE, COLOR_UNCOMMON
+
+    server_dir = tmp_path / "t192-rebuilt"
+    client = tmp_path / "t192-client"
+    (client / "Data").mkdir(parents=True)
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    old = _tab_for(window, server_dir)
+    try:
+        old.client_dir_changed.emit("wow-wotlk", server_dir, client)
+        made = _tab_for(window, server_dir)
+        assert made is not old
+
+        made.realm_badge.set_status("running")
+        assert _dot_is(_tab_dot(window, made), COLOR_UNCOMMON)
+        assert old.realm_badge.receivers(SIGNAL("status_changed(QString)")) == 0
+        old.realm_badge.set_status("restarting")  # still alive until its deferred delete
+        assert not _dot_is(_tab_dot(window, made), COLOR_RARE)
+        process_events()  # the old view's deferred delete
+        made.realm_badge.set_status("restarting")
+        assert _dot_is(_tab_dot(window, made), COLOR_RARE)
+    finally:
+        _drop(window, "wow-wotlk", server_dir)
+
+
+def test_the_header_names_the_server_on_screen_and_nothing_on_the_catalog(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The game strip: "WoW WotLK — <folder>" beside the badge, clear of both header controls.
+
+    Mutation: stop passing `title=` and the header names nothing.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "Hdr Realm"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        _at_width(shown_window, (960, 640))
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        assert title.isVisible()
+        assert title.text().startswith("WoW WotLK"), title.text()
+        assert title.toolTip() == f"WoW WotLK — {server_dir}"
+        assert not title.geometry().intersects(check.geometry()), (
+            title.geometry(),
+            check.geometry(),
+        )
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        tabs.setCurrentIndex(0)
+        process_events(10)
+        assert title.isHidden(), "the Catalog names a server"
+        tabs.setCurrentIndex(1)
+        process_events(10)
+        assert title.isHidden(), "Logs names a server"
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
+
+
+def test_the_header_title_shortens_when_the_tab_that_needed_the_longer_one_goes(
+    window: Any, tmp_path: Any
+) -> None:
+    """Two "Hdr Twin" folders need a parent folder each to tell apart; one alone does not.
+
+    Removing a tab that is not on screen moves no selection, so it is the
+    retitle after the removal that has to refresh the header.
+    """
+    header = window.property("header")
+    tabs = window.property("tabs")
+    first, second = tmp_path / "d1" / "Hdr Twin", tmp_path / "d2" / "Hdr Twin"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", first, None)
+    catalog.installed.emit("wow-wotlk", second, None)
+    try:
+        tabs.setCurrentWidget(_tab_for(window, first))
+        assert header._realm_title.text() == f"WoW WotLK — {Path('d1') / 'Hdr Twin'}"
+
+        _drop(window, "wow-wotlk", second)
+
+        assert header._realm_title.text() == "WoW WotLK — Hdr Twin"
+    finally:
+        _drop(window, "wow-wotlk", first)
+        _drop(window, "wow-wotlk", second)
+
+
+def test_ctrl_tab_reaches_the_catalog_and_logs_from_the_rail_and_from_them(
+    shown_window: Any, five_servers: list[Any]
+) -> None:
+    """The changelog's claim, in the real window (T192 final review).
+
+    From the rail, the Catalog or Logs, Ctrl+Tab and Ctrl+Shift+Tab walk the
+    same ring as the bumpers, pinned tabs included, and the pins follow. Inside
+    a server page its own sub-tabs take the keys first and the rail does not
+    move: cycling a server's sub-tabs is that page's natural Ctrl+Tab.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTabWidget
+
+    tabs = shown_window.property("tabs")
+    pins = shown_window.yulon_sidebar_pins
+    last = tabs.count() - 1
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    back = ctrl | Qt.KeyboardModifier.ShiftModifier
+
+    def press(widget: Any, key: Qt.Key, modifiers: Qt.KeyboardModifier) -> int:
+        assert widget.isVisible(), widget
+        QTest.keyClick(widget, key, modifiers)
+        process_events(10)
+        return tabs.currentIndex()
+
+    tabs.setCurrentIndex(last)
+    process_events(10)
+    assert press(tabs.tabBar(), Qt.Key.Key_Tab, ctrl) == 0, "the rail skipped the Catalog"
+    assert pins.buttons[0].isChecked()
+    catalog = _catalog_view(shown_window)
+    assert press(catalog, Qt.Key.Key_Tab, ctrl) == 1, "the Catalog skipped Logs"
+    assert pins.buttons[1].isChecked() and not pins.buttons[0].isChecked()
+    assert press(shown_window.yulon_logs_view, Qt.Key.Key_Backtab, back) == 0
+    assert pins.buttons[0].isChecked()
+    assert press(catalog, Qt.Key.Key_Backtab, back) == last, "Ctrl+Shift+Tab did not wrap"
+    assert not any(button.isChecked() for button in pins.buttons.values())
+
+    server = five_servers[-1]
+    tabs.setCurrentWidget(server)
+    process_events(10)
+    inner = server.findChild(QTabWidget)
+    assert inner is not None
+    before = inner.currentIndex()
+    assert press(inner.currentWidget(), Qt.Key.Key_Tab, ctrl) == tabs.indexOf(server)
+    assert (
+        inner.currentIndex() == (before + 1) % inner.count()
+    ), "the server's sub-tabs did not move"
+
+
+def test_a_long_server_name_is_shortened_in_a_narrow_header_and_whole_again_wider(
+    shown_window: Any, tmp_path: Any
+) -> None:
+    """The header's name gives way before the update check and the badge, and comes back.
+
+    Task 2's lesson: a label whose size hint is what it shows never asks for
+    its room back, so a name cut at 960 stayed cut at 1920.
+
+    Mutation: answer `_RealmTitle.sizeHint` from the text on screen and the
+    name is still shortened at 1920.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    header = shown_window.property("header")
+    tabs = shown_window.property("tabs")
+    server_dir = tmp_path / "A very long server folder name that cannot fit beside the badge"
+    _catalog_view(shown_window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(shown_window, server_dir)
+    try:
+        tabs.setCurrentWidget(view)
+        title = header._realm_title
+        check = shown_window.findChild(QPushButton, "check-for-updates")
+        _at_width(shown_window, (960, 640))
+        whole = title.full_text
+        assert whole == f"WoW WotLK — {server_dir.name}"
+        assert title.text() != whole and title.text().endswith("…"), title.text()
+        assert title.text().startswith("WoW"), title.text()
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+        assert check.width() >= check.sizeHint().width(), "the name squeezed the update check"
+
+        _at_width(shown_window, (1920, 1080))
+        assert title.text() == whole, f"still cut at 1920: {title.text()!r}"
+        assert not title.geometry().intersects(check.geometry())
+        assert not title.geometry().intersects(header._badge.geometry())
+    finally:
+        _drop(shown_window, "wow-wotlk", server_dir)
