@@ -447,10 +447,34 @@ class DatabaseAlone:
     step nearer to useless.
     """
 
-    bring_up: Callable[[], bool]
-    """Start the database alone and wait for it to be healthy. True if it had to."""
+    bring_up: Callable[[str], bool]
+    """Start the database alone and wait for it to be healthy. True if it had to.
+
+    The argument is `because`: what was NOT done if the start fails, completing
+    `docker.start_database()`'s timeout sentence. A parameter since T205, when
+    Restore became the second caller: bound once in the factory, a restore
+    whose database never came up told the player *"…so no backup was taken"*.
+
+    One that raises has answered nothing, so `take_down` is not called after
+    it; it has put back whatever it started itself (`_database_alone()`).
+    """
     take_down: Callable[[], None]
     """Stop the database again. Called only where `bring_up` answered True."""
+
+
+class PlanRestore(Protocol):
+    """`maintenance.plan_restore()` bound to one install: the Maintenance tab's planner.
+
+    A Protocol and not `Callable[[Path], RestorePlan]` for T205's keyword. Only
+    a tab that holds a `DatabaseAlone` passes `can_start_database=True`, which
+    turns "the database is not running" from a refusal into a plan that starts
+    it; every other caller, and every call that omits it, gets the planner as it
+    was. The restore's own re-plan, made once the database is up, never needs it.
+    """
+
+    def __call__(
+        self, path: Path, *, can_start_database: bool = False
+    ) -> wotlk_maintenance.RestorePlan: ...
 
 
 _ROW_SETTLE_MS = 750
@@ -1152,7 +1176,7 @@ class ControllerServices:
     create_account: Callable[[str, str, int], wotlk_accounts.AccountResult]
     backup: Callable[[], wotlk_maintenance.BackupReport]
     backups_dir: Callable[[], Path]
-    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan]
+    plan_restore: PlanRestore
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
@@ -1854,27 +1878,54 @@ def _mysql_for(
 def _database_alone(
     spec: docker.ContainerSpec, server_dir: Path, *, wsl_distro: str | None
 ) -> DatabaseAlone:
-    """The two halves of "bring the database up for a backup, then put it back" (T76).
+    """The two halves of "bring the database up for a backup or a restore, then put it back".
 
-    One factory and four call sites, because the four games must not disagree
-    about this: the reason the backup needed it is identical in all four (a
-    `mysqldump` through `docker exec` needs the container to exist and be
-    running), and so is the reason it is stopped again.
+    T76 for the backup, T205 for the restore. One factory and four call sites,
+    because the four games must not disagree about this: the reason both need
+    it is identical in all four (a `mysqldump` or `mysql` through `docker exec`
+    needs the container to exist and be running), and so is the reason it is
+    stopped again.
 
-    `because` completes `docker.start_database()`'s timeout sentence, and it
-    says what was not done rather than what was attempted -- a user reading
-    *"…did not report healthy within 180s, so no backup was taken"* knows the
-    state their server is in, which is the whole job of that sentence.
+    `because` is the caller's, since T205: it completes `docker.start_database()`'s
+    timeout sentence and says what was not done rather than what was attempted
+    -- a user reading *"…did not report healthy within 180s, so no backup was
+    taken"* knows the state their server is in, which is the whole job of that
+    sentence. Bound here it was the backup's alone, and a restore whose
+    database never came up would have said a backup was not taken.
 
     `stop_containers([spec.db])` and not `stop_staged()`: only the container
     this started may be stopped. `stop_staged()` takes the compose project down,
     and a backup that stopped a server somebody was playing on would be a far
     worse press than one that failed.
+
+    **A start that fails puts back what it started** (T205). `start_database()`
+    raises when the container does not report healthy in time, and by then
+    `compose up -d` has already started it: the press failed, and left a
+    database up that nobody asked to run -- after a restore that said "nothing
+    was restored". So the census is taken HERE first: a database that was down
+    before this call and is up after a failed start was started by it, and is
+    stopped again. One that was already up returns False at once, exactly as
+    `start_database()` would, so nothing this did not start is ever stopped. A
+    census that fails raises before anything is started, and stops nothing.
     """
+
+    def bring_up(because: str) -> bool:
+        if spec.db in set(docker.status(wsl_distro=wsl_distro)):
+            return False
+        try:
+            return docker.start_database(spec, server_dir, because=because, wsl_distro=wsl_distro)
+        except docker.DockerCommandError as exc:
+            try:
+                docker.stop_containers([spec.db], wsl_distro=wsl_distro)
+            except docker.DockerCommandError as stop_exc:
+                raise docker.DockerCommandError(
+                    f"{exc} It was started for this and could not be stopped again "
+                    f"({stop_exc}); `docker stop {spec.db}` stops it."
+                ) from exc
+            raise
+
     return DatabaseAlone(
-        bring_up=lambda: docker.start_database(
-            spec, server_dir, because="no backup was taken", wsl_distro=wsl_distro
-        ),
+        bring_up=bring_up,
         take_down=lambda: docker.stop_containers([spec.db], wsl_distro=wsl_distro),
     )
 
@@ -1926,7 +1977,7 @@ def _assemble(
     store: ManifestStore | None,
     applier: Applier | None,
     backup: Callable[[], wotlk_maintenance.BackupReport],
-    plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan],
+    plan_restore: PlanRestore,
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
     dashboard: Callable[[], dashboard_module.Verdict] | None = None,
     log_snapshot: logsnap.Recorder | None = None,
@@ -2511,8 +2562,12 @@ def _for_wotlk(
             core_databases=entry.core_databases(),
             wsl_distro=wsl_distro,
         ),
-        plan_restore=lambda path: wotlk_maintenance.plan_restore(
-            path, server_dir, spec=spec, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: wotlk_maintenance.plan_restore(
+            path,
+            server_dir,
+            spec=spec,
+            wsl_distro=wsl_distro,
+            can_start_database=can_start_database,
         ),
         # `confirm=plan.token` is not a rubber stamp: the token can only come
         # from a plan, a plan can only come from a real file, and the human
@@ -2664,8 +2719,8 @@ def _for_tbc(
             else None
         ),
         backup=lambda: tbc_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: tbc_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: tbc_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: tbc_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -2826,8 +2881,8 @@ def _for_vanilla(
             else None
         ),
         backup=lambda: vanilla_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: vanilla_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: vanilla_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: vanilla_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -3110,8 +3165,8 @@ def _for_tortoise(
             else None
         ),
         backup=lambda: tortoise_maintenance.backup(server_dir, mysql, wsl_distro=wsl_distro),
-        plan_restore=lambda path: tortoise_maintenance.plan_restore(
-            path, server_dir, wsl_distro=wsl_distro
+        plan_restore=lambda path, can_start_database=False: tortoise_maintenance.plan_restore(
+            path, server_dir, wsl_distro=wsl_distro, can_start_database=can_start_database
         ),
         restore=lambda plan: tortoise_maintenance.restore(
             plan, mysql, confirm=plan.token, wsl_distro=wsl_distro
@@ -11113,7 +11168,7 @@ class ControllerView(QWidget):
         alone = self.services.database_alone
         if alone is None:
             return self.services.backup()
-        started = alone.bring_up()
+        started = alone.bring_up("no backup was taken")
         try:
             return self.services.backup()
         finally:
@@ -11170,12 +11225,73 @@ class ControllerView(QWidget):
         )
 
     def _plan_with_the_bot_request(self, path: Path) -> object:
-        """The plan, plus T144's `always` warning where this game has the bot request (worker)."""
-        plan = self.services.plan_restore(path)
+        """The plan, plus T144's `always` warning where this game has the bot request (worker).
+
+        T205: a tab that can start its database alone asks for a plan that
+        allows a stopped one, and the press (`_restore_with_the_database()`)
+        does the starting. Planning itself starts nothing -- a plan is read,
+        often several times, and a press of "Show restore plan" that brought a
+        container up would change the server before anyone agreed to anything.
+        """
+        if self.services.database_alone is None:
+            plan = self.services.plan_restore(path)
+        else:
+            plan = self.services.plan_restore(path, can_start_database=True)
         seam = self.services.bot_pool_rebuild
         if seam is None:
             return plan
         return _PlanWithWarning(plan, seam.restore_warning())
+
+    def _restore_with_the_database(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """Restore, starting the database alone first if it is down (T205; worker thread).
+
+        `_backup_with_the_database()`'s handling, given to the restore it was
+        never given to. Reported from a Steam Deck on WotLK (2026-10-03): the
+        plan refused while the world and login servers ran -- "Stop the server
+        and try again" -- and refused again once Stop had run, because the one
+        Stop takes the database down too and the plan then said there was
+        "nothing to restore into". No press reached a restorable state; the
+        player stopped two containers by hand in a terminal. Per-container
+        buttons were asked for and are not the answer: the maintainer's reply in
+        the same thread was that there is one Stop because everything has to
+        stop at once.
+
+        Only the database is started, never the world: a worldserver holds
+        characters in memory and saves them back over the restored rows, which
+        is the whole reason the plan refuses while one runs.
+
+        **The plan is asked again with the database up**, by `maintenance.
+        restore()` itself on the plain path and by `_restore_with_the_bot_
+        request()` before it touches the conf on Tortoise's -- and without
+        `can_start_database`, because at that point a database that is not up is
+        a refusal again. A server started between the plan and the press is
+        caught there: the database is already up, so nothing is started or
+        stopped, and the running world refuses as it always did. The token is
+        the file's identity, length and schemas and not the census, so the plan
+        made with the database down still confirms the one made with it up, and
+        a file replaced in between is still refused.
+
+        **The database is left as it was found**, by `bring_up()`'s own answer:
+        only True runs `take_down()`, in `finally`, so a refusal at the press, a
+        failed load and a success all put it back. A start that fails raises
+        before the restore is reached, and `bring_up()` has already stopped
+        anything it started (`_database_alone()`); the sentence leads with what
+        the player needs to know, that nothing was restored.
+        """
+        alone = self.services.database_alone
+        if alone is None:
+            return self._restore_with_the_bot_request(plan)
+        try:
+            started = alone.bring_up("the restore was not started")
+        except Exception as exc:
+            raise wotlk_maintenance.MaintenanceError(
+                f"Nothing was restored: the database could not be started on its own for it. {exc}"
+            ) from exc
+        try:
+            return self._restore_with_the_bot_request(plan)
+        finally:
+            if started:
+                alone.take_down()
 
     def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
         """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).
@@ -11272,6 +11388,13 @@ class ControllerView(QWidget):
             # user to discount it (review, 2026-08-24).
             named = ", ".join(result.databases) if result.databases else "nothing"
             lines.append(f"This overwrites: {named}.")
+            if result.starts_database:
+                # T205: said before the press, because it is something the press
+                # does to the server that the player did not do themselves.
+                lines.append(
+                    "The database will be started on its own for this restore and stopped again "
+                    "afterwards; the game servers stay stopped."
+                )
             lines.append(
                 "Tables the backup does not contain are LEFT AS THEY ARE — a restore merges "
                 "into the databases it names rather than returning them to the state the backup "
@@ -11305,7 +11428,7 @@ class ControllerView(QWidget):
         self.maintenance_report.setPlainText(f"Restoring {plan.backup.name}…")
         self._restore_running = True  # T95: `forget_refusal()` reads it
         self._run(
-            lambda: self._restore_with_the_bot_request(plan),
+            lambda: self._restore_with_the_database(plan),
             self._restore_done,
             self._restore_failed,
         )
