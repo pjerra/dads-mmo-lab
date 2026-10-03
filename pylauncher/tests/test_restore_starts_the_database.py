@@ -854,3 +854,28 @@ def test_a_hold_is_refused_while_a_lifecycle_command_runs(
     assert refused == [docker.SERVER_IN_MOTION]
     with docker.hold_the_server(tmp_path, "after"):
         pass  # and the start's mark is gone once it returned
+
+
+def test_a_restore_cannot_begin_between_a_recreate_s_stop_and_its_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recreate is ONE lifecycle command: its servers are down between its two halves.
+
+    A hold taken there would refuse the recreate's own start and leave the
+    server down; so the recreate is in flight from its stop to its start.
+    """
+    refused: list[str] = []
+
+    def start_half(*args: object, **kwargs: object) -> bool:
+        try:
+            with docker.hold_the_server(tmp_path, "a restore"):
+                pass
+        except docker.ServerHeldError as exc:
+            refused.append(str(exc))
+        return True
+
+    monkeypatch.setattr(docker, "stop_servers_staged", lambda *a, **k: None)
+    monkeypatch.setattr(docker, "start_staged", start_half)
+    docker.recreate_staged(SPEC, tmp_path)
+
+    assert refused == [docker.SERVER_IN_MOTION]
