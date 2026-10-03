@@ -879,3 +879,58 @@ def test_a_restore_cannot_begin_between_a_recreate_s_stop_and_its_start(
     docker.recreate_staged(SPEC, tmp_path)
 
     assert refused == [docker.SERVER_IN_MOTION]
+
+
+# -- review round 2: a hold and a mark that end when their job fails ------------------------
+
+
+def test_a_lifecycle_command_that_fails_does_not_keep_the_server_marked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start whose `compose up` raised is over: a restore may be taken afterwards."""
+
+    def compose_fails(
+        cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    ) -> object:
+        return subprocess.CompletedProcess(cmd, 1, "", "port is already allocated")
+
+    monkeypatch.setattr(runner, "run", compose_fails)
+    with pytest.raises(docker.DockerCommandError, match="port is already allocated"):
+        docker.start(tmp_path)
+
+    with docker.hold_the_server(tmp_path, "a restore"):
+        pass
+
+
+def test_the_server_buttons_work_again_once_a_failed_restore_has_ended(
+    qapp: object, tmp_path: Path, ps: _Ps
+) -> None:
+    """The hold is released by a restore that fails too: the next Start reaches compose."""
+    stack = _Stack()
+    mysql = _Mysql(stack, fails_load="ERROR 2013 (HY000): Lost connection")
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    failures = _failures(view)
+    view.show_restore_plan()
+    view.run_restore()
+    assert failures and "failed part-way" in failures[-1], failures
+
+    view.start_server()
+    assert any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
+
+
+def test_a_backup_pressed_while_the_server_is_starting_says_no_backup_was_taken(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Backup's refusal leads with what was not done, as Restore's does."""
+    stack = _Stack()
+    view = _view(_real_maintenance(tmp_path, stack, _Mysql(stack)))
+    backups: list[int] = []
+    view.services.backup = lambda: backups.append(1)  # type: ignore[assignment,func-returns-value]
+    failures = _failures(view)
+
+    with docker._in_flight(tmp_path):
+        view.back_up()
+
+    assert backups == [] and stack.starts == 0
+    assert failures and failures[-1] == f"No backup was taken: {docker.SERVER_IN_MOTION}", failures

@@ -11200,11 +11200,15 @@ class ControllerView(QWidget):
         # database stopped under it. A database that was already up is not
         # stopped afterwards, so a hot copy releases the hold at once.
         with contextlib.ExitStack() as held:
-            held.enter_context(
-                docker.hold_the_server(
-                    self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+            try:
+                held.enter_context(
+                    docker.hold_the_server(
+                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+                    )
                 )
-            )
+            except docker.ServerHeldError as exc:
+                # Led with what was not done, as the restore's refusal is (review round 2).
+                raise wotlk_maintenance.MaintenanceError(f"No backup was taken: {exc}") from exc
             started = alone.bring_up("no backup was taken")
             if not started:
                 held.close()
