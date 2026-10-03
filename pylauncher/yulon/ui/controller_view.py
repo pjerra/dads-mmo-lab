@@ -11306,7 +11306,7 @@ class ControllerView(QWidget):
         own words, so a restore that would refuse does not touch the conf.
 
         **A restore that raises anyway** (round 5): `maintenance.restore()`
-        (controller_wow_wotlk/maintenance.py:949) runs "re-census, safety dump,
+        (controller_wow_wotlk/maintenance.py:973) runs "re-census, safety dump,
         marker, load, marker removed". Everything before `_write_marker()` -- the
         confirmation, the re-census, `_safety_backup()`, the marker write itself
         ("nothing was restored") -- raises with nothing loaded; from the marker
