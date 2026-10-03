@@ -310,10 +310,14 @@ def restart_world(controller: Controller) -> None:
     """Stop, then start: the Server tab's own restart (`_do_restart`), for the module to reload.
 
     The controller already knows which daemon it means, so nothing here names one.
+    Asked first whether a start may run at all (`Controller.refuse_start()`, T197), as
+    `_do_restart` does, so a refused start leaves the running world running.
 
     Raises:
+        StartRefused: no start may run here; nothing was stopped.
         StopFailed: the stop raised; nothing was started.
     """
+    controller.refuse_start()
     try:
         controller.stop()
     except Exception as exc:  # noqa: BLE001 - re-raised, typed: see `StopFailed`
