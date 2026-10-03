@@ -20,6 +20,7 @@ reached servers that have none of them.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import math
 import os
@@ -1904,9 +1905,14 @@ def _database_alone(
     database up that nobody asked to run -- after a restore that said "nothing
     was restored". So the census is taken HERE first: a database that was down
     before this call and is up after a failed start was started by it, and is
-    stopped again. One that was already up returns False at once, exactly as
-    `start_database()` would, so nothing this did not start is ever stopped. A
-    census that fails raises before anything is started, and stops nothing.
+    stopped again -- "is up" asked again after the failure, because a `compose
+    up` that failed outright may have created nothing, and a `docker stop` of
+    nothing fails and would have reported a start that never happened (review
+    round 1). If even that stop fails, the sentence says the database may still
+    be running and names the command. One that was already up returns False
+    at once, exactly as `start_database()` would, so nothing this did not start
+    is ever stopped. A census that fails raises before anything is started, and
+    stops nothing.
     """
 
     def bring_up(because: str) -> bool:
@@ -1915,12 +1921,22 @@ def _database_alone(
         try:
             return docker.start_database(spec, server_dir, because=because, wsl_distro=wsl_distro)
         except docker.DockerCommandError as exc:
+            # Asked again rather than assumed (review round 1): when `compose up`
+            # itself failed there may be no container at all, and a `docker stop`
+            # of it fails too. A census that will not answer cannot rule the
+            # container out, so the stop is tried.
+            try:
+                up = spec.db in set(docker.status(wsl_distro=wsl_distro))
+            except docker.DockerCommandError:
+                up = True
+            if not up:
+                raise
             try:
                 docker.stop_containers([spec.db], wsl_distro=wsl_distro)
             except docker.DockerCommandError as stop_exc:
                 raise docker.DockerCommandError(
-                    f"{exc} It was started for this and could not be stopped again "
-                    f"({stop_exc}); `docker stop {spec.db}` stops it."
+                    f"{exc} {spec.db} may still be running: it could not be stopped again "
+                    f"({stop_exc}). `docker stop {spec.db}` stops it."
                 ) from exc
             raise
 
@@ -8834,10 +8850,18 @@ class ControllerView(QWidget):
         self.repair_button.setText(REPAIR_IDLE)
 
     def _disarm_actions(self) -> None:
-        """Any other server action means the user moved on from all of them."""
+        """Any other server action means the user moved on from all of them.
+
+        The restore plan included (T205 review round 1): a plan is a census of
+        what ran when it was shown, and a Start, Stop or Remove changes exactly
+        that. The press re-plans anyway; a plan on screen that the server has
+        since moved away from is still one the player would be agreeing to.
+        """
         self._disarm_remove()
         self._disarm_repair()
         self._hide_stop_other()
+        self._restore_plan = None
+        self.restore_button.setEnabled(False)
 
     @Slot(object)
     def _remove_done(self, result: object) -> None:
@@ -11165,15 +11189,30 @@ class ControllerView(QWidget):
         through must not leave the container up either, and `MaintenanceError`
         is the ordinary way out of here.
         """
+        from yulon import forgetting
+
         alone = self.services.database_alone
         if alone is None:
             return self.services.backup()
-        started = alone.bring_up("no backup was taken")
-        try:
-            return self.services.backup()
-        finally:
-            if started:
-                alone.take_down()
+        # T205 review round 1: held while the database this press started is
+        # up, because the `finally` below stops it -- and a Start pressed in
+        # between (still enabled: only the database runs) would have had its
+        # database stopped under it. A database that was already up is not
+        # stopped afterwards, so a hot copy releases the hold at once.
+        with contextlib.ExitStack() as held:
+            held.enter_context(
+                docker.hold_the_server(
+                    self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_SERVER
+                )
+            )
+            started = alone.bring_up("no backup was taken")
+            if not started:
+                held.close()
+            try:
+                return self.services.backup()
+            finally:
+                if started:
+                    alone.take_down()
 
     @Slot()
     def back_up(self) -> None:
@@ -11271,6 +11310,17 @@ class ControllerView(QWidget):
         made with the database down still confirms the one made with it up, and
         a file replaced in between is still refused.
 
+        **Nothing starts, stops or recreates the server while it runs**
+        (`docker.hold_the_server()`, review round 1, 2026-10-03). With the
+        server stopped, only the database is up during the restore, so Start
+        stays enabled and the view is not busy: a Start pressed during the load
+        brought the world up on the databases being written, and the `finally`
+        below then stopped the database under it. The hold is taken whether or
+        not this press starts the database -- a world started under a restore
+        is the hazard either way -- and it cannot be taken while a Start, Stop
+        or recreate of this server is running, whose world may exist without
+        running yet and so pass the census.
+
         **The database is left as it was found**, by `bring_up()`'s own answer:
         only True runs `take_down()`, in `finally`, so a refusal at the press, a
         failed load and a success all put it back. A start that fails raises
@@ -11278,20 +11328,32 @@ class ControllerView(QWidget):
         anything it started (`_database_alone()`); the sentence leads with what
         the player needs to know, that nothing was restored.
         """
+        from yulon import forgetting
+
         alone = self.services.database_alone
-        if alone is None:
-            return self._restore_with_the_bot_request(plan)
-        try:
-            started = alone.bring_up("the restore was not started")
-        except Exception as exc:
-            raise wotlk_maintenance.MaintenanceError(
-                f"Nothing was restored: the database could not be started on its own for it. {exc}"
-            ) from exc
-        try:
-            return self._restore_with_the_bot_request(plan)
-        finally:
-            if started:
-                alone.take_down()
+        with contextlib.ExitStack() as held:
+            try:
+                held.enter_context(
+                    docker.hold_the_server(
+                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_SERVER
+                    )
+                )
+            except docker.ServerHeldError as exc:
+                raise wotlk_maintenance.MaintenanceError(f"Nothing was restored: {exc}") from exc
+            started = False
+            if alone is not None:
+                try:
+                    started = alone.bring_up("the restore was not started")
+                except Exception as exc:
+                    raise wotlk_maintenance.MaintenanceError(
+                        "Nothing was restored: the database could not be started on its own "
+                        f"for it. {exc}"
+                    ) from exc
+            try:
+                return self._restore_with_the_bot_request(plan)
+            finally:
+                if started:
+                    alone.take_down()  # type: ignore[union-attr]
 
     def _restore_with_the_bot_request(self, plan: wotlk_maintenance.RestorePlan) -> object:
         """T144: take a pending `once:` bot rebuild back, THEN restore (worker thread).

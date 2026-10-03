@@ -16,6 +16,8 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import functools
+import inspect
 import io
 import json
 import os
@@ -25,10 +27,10 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import IO, Any, BinaryIO, Literal
+from typing import IO, Any, BinaryIO, Literal, ParamSpec, TypeVar
 
 from yulon import platform, runner, wsl
 from yulon.log import get_logger
@@ -355,6 +357,121 @@ def daemon_ready(*, wsl_distro: str | None = None, timeout: float = 30.0) -> boo
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
+class ServerHeldError(DockerCommandError):
+    """A start, stop or recreate refused because a maintenance job holds this server (T205).
+
+    The message is the holder's own sentence (`hold_the_server()`'s `reason`),
+    so the press that was refused says which job to wait for. Nothing was run.
+    """
+
+
+SERVER_IN_MOTION = (
+    "This server is being started, stopped or recreated right now. Wait for that to "
+    "finish, then try again."
+)
+"""Why a hold could not be taken: a lifecycle command for the same server is running."""
+
+_HOLD_LOCK = threading.Lock()
+_HELD: dict[str, list[str]] = {}
+_IN_FLIGHT: dict[str, int] = {}
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _server_key(server_dir: Path | str) -> str:
+    """One spelling per server folder. String arithmetic only: no filesystem is touched.
+
+    Not `Path.resolve()`, which reads the disk -- and on Windows a read under
+    `\\\\wsl.localhost\\<distro>` starts a stopped distro (T133).
+    """
+    return os.path.normcase(os.path.abspath(os.fspath(server_dir)))
+
+
+@contextmanager
+def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
+    """Keep every start, stop and recreate of this server away while the block runs (T205).
+
+    For the Maintenance tab's restore, and for a backup that started the
+    database alone. Both write or read the databases with the game servers
+    stopped and, when they started the database, stop it again at the end. A
+    Start pressed in between brought the world up on databases being written
+    -- the hazard the restore plan refuses for -- and the cleanup then stopped
+    the database under that running world; a Stop or a Restart took the
+    database from under the load. Start stays enabled throughout (only the
+    database runs, and the view is not busy), so the press itself cannot be
+    trusted to be absent.
+
+    One guard at this layer, not one per button: every press that starts,
+    stops or recreates this install -- Start, Stop, Restart and the recreate on
+    the Tuning tab, "Start and play", "Stop the other server and start this
+    one", a rebuild's or an update's recreate, the Tortoise bot rebuild's
+    restart, a removal's teardown -- reaches `docker.compose` through one of
+    the functions marked `@_a_lifecycle_command`, and each refuses here with
+    `reason` before it runs anything. The database-only start and stop the
+    jobs use themselves (`start_database()`, `stop_containers()`) are not
+    lifecycle commands and are not held.
+
+    Taken only when no lifecycle command for this server is running: a Start
+    waiting for the database to report healthy has a world container that
+    exists and is not running yet, which passes the restore's name census.
+
+    Raises:
+        ServerHeldError: a start, stop or recreate of this server is running
+            (`SERVER_IN_MOTION`).
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        if _IN_FLIGHT.get(key):
+            raise ServerHeldError(SERVER_IN_MOTION)
+        _HELD.setdefault(key, []).append(reason)
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            reasons = _HELD[key]
+            reasons.remove(reason)
+            if not reasons:
+                del _HELD[key]
+
+
+@contextmanager
+def _in_flight(server_dir: Path | str) -> Iterator[None]:
+    """Mark a lifecycle command for this server as running, unless the server is held."""
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        held = _HELD.get(key)
+        if held:
+            logger.warning(f"refused a start/stop/recreate of {server_dir}: {held[-1]}")
+            raise ServerHeldError(held[-1])
+        _IN_FLIGHT[key] = _IN_FLIGHT.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            _IN_FLIGHT[key] -= 1
+            if not _IN_FLIGHT[key]:
+                del _IN_FLIGHT[key]
+
+
+def _a_lifecycle_command(command: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run `command` only while its server is not held, and mark it running meanwhile (T205).
+
+    The server is read off the call's own `server_dir` argument, so every
+    caller -- and every alias a game's `docker_ctl` binds -- goes through it.
+    """
+    signature = inspect.signature(command)
+
+    @functools.wraps(command)
+    def run(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        server_dir = signature.bind_partial(*args, **kwargs).arguments["server_dir"]
+        with _in_flight(server_dir):
+            return command(*args, **kwargs)
+
+    return run
+
+
+@_a_lifecycle_command
 def start(server_dir: Path, *, wsl_distro: str | None = None) -> None:
     """Bring the compose project in `server_dir` up in the background.
 
@@ -917,6 +1034,7 @@ def recreate_stop_argv(spec: ContainerSpec) -> list[str]:
     return ["compose", "stop", "-t", str(STOP_GRACE_SECONDS), *reversed(servers)]
 
 
+@_a_lifecycle_command
 def stop_servers_staged(
     spec: ContainerSpec,
     server_dir: Path,
@@ -944,6 +1062,7 @@ def stop_servers_staged(
     _run(recreate_stop_argv(spec), cwd=server_dir, wsl_distro=wsl_distro)
 
 
+@_a_lifecycle_command
 def recreate_staged(
     spec: ContainerSpec,
     server_dir: Path,
@@ -975,6 +1094,7 @@ def recreate_staged(
     return start_staged(spec, server_dir, wsl_distro=wsl_distro, force_recreate=True)
 
 
+@_a_lifecycle_command
 def start_staged(
     spec: ContainerSpec,
     server_dir: Path,
@@ -1368,6 +1488,7 @@ def server_version(*, wsl_distro: str | None = None, timeout: float = 20.0) -> s
     return proc.stdout.strip() or None
 
 
+@_a_lifecycle_command
 def remove_staged(
     spec: ContainerSpec,
     server_dir: Path,
@@ -2964,6 +3085,7 @@ def kill_container(container: str, *, wsl_distro: str | None = None) -> None:
     _run(["kill", container], wsl_distro=wsl_distro)
 
 
+@_a_lifecycle_command
 def stop_staged(
     spec: ContainerSpec,
     server_dir: Path,

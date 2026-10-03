@@ -26,7 +26,7 @@ that did not:
 from __future__ import annotations
 
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import IO
@@ -35,7 +35,7 @@ import pytest
 
 from tests.test_controller_view import _Ps, _services
 from tests.test_maintenance import good_dump
-from yulon import docker, runner
+from yulon import docker, forgetting, runner
 from yulon.catalog.catalog import load_catalog
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError, RestorePlan
@@ -117,8 +117,26 @@ class _Mysql:
 
 
 @pytest.fixture(autouse=True)
-def _no_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runner, "run", _Ps())
+def ps(monkeypatch: pytest.MonkeyPatch) -> _Ps:
+    """Every `docker` command any press runs, recorded; nothing reaches a daemon."""
+    fake = _Ps()
+    monkeypatch.setattr(runner, "run", fake)
+    return fake
+
+
+def _lifecycle_calls(ps: _Ps) -> list[list[str]]:
+    """The commands that start, stop or recreate this server's containers."""
+    return [
+        c
+        for c in ps.calls
+        if c[:3]
+        in (
+            ["docker", "compose", "up"],
+            ["docker", "compose", "stop"],
+            ["docker", "compose", "down"],
+        )
+        or c[:2] == ["docker", "stop"]
+    ]
 
 
 def _real_maintenance(
@@ -358,14 +376,26 @@ def test_a_tab_without_the_database_seam_refuses_a_stopped_server_as_before(
 # -- T144's path, on the one game that has the bot request -----------------------------------
 
 
+class _Taken:
+    """What T144's `before_restore()` hands back when it set a pending request off."""
+
+    note = "The random-bot rebuild request was set back to off."
+
+
 class _BotRequest:
-    """T144's seam with no pending request: records that the press reached it."""
+    """T144's seam: records what the press asked of it; `pending` is a request it takes back."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, pending: bool = False) -> None:
         self.calls: list[str] = []
+        self.pending = pending
 
-    def before_restore(self) -> None:
+    def before_restore(self) -> _Taken | None:
         self.calls.append("before-restore")
+        return _Taken() if self.pending else None
+
+    def after_a_failed_restore(self, taken: _Taken, *, loaded: bool | None) -> str:
+        self.calls.append(f"after-a-failed-restore:loaded={loaded}")
+        return "The request was put back as it was."
 
     def restore_warning(self) -> None:
         return None
@@ -379,8 +409,10 @@ class _NoBots:
         return None
 
 
-def _tortoise(tmp_path: Path, stack: _Stack, mysql: _Mysql) -> tuple[ControllerView, _BotRequest]:
-    request = _BotRequest()
+def _tortoise(
+    tmp_path: Path, stack: _Stack, mysql: _Mysql, *, pending: bool = False
+) -> tuple[ControllerView, _BotRequest]:
+    request = _BotRequest(pending=pending)
     services = replace(
         _real_maintenance(tmp_path, stack, mysql), bots=_NoBots(), bot_pool_rebuild=request
     )
@@ -540,3 +572,285 @@ def test_a_database_already_up_is_not_started_by_the_factory(
         )
         assert alone.bring_up("nothing was run") is False, game
         assert fake.started == [] and fake.stopped == [], game
+
+
+def test_a_failed_restore_on_the_bot_request_path_puts_the_request_back_and_the_database_down(
+    qapp: object, tmp_path: Path
+) -> None:
+    """T144's failure branch, reached with a database this press started (review round 1).
+
+    The load fails after the marker is written, so T144 keeps the request off
+    and says so -- and the database the press started is still taken down.
+    """
+    stack = _Stack()
+    mysql = _Mysql(stack, fails_load="ERROR 2013 (HY000): Lost connection")
+    view, request = _tortoise(tmp_path, stack, mysql, pending=True)
+    _select_backup(view, tmp_path)
+    failures = _failures(view)
+
+    view.show_restore_plan()
+    view.run_restore()
+
+    assert request.calls == ["before-restore", "after-a-failed-restore:loaded=True"]
+    assert failures and "failed part-way" in failures[-1], failures
+    assert "The request was put back as it was." in failures[-1]
+    assert stack.starts == 1 and stack.stops == 1 and stack.running == set()
+
+
+def test_a_start_that_failed_before_the_container_existed_stops_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`compose up` itself failed: nothing is running, so nothing is stopped (review round 1).
+
+    A `docker stop` of a container that was never created fails too, and the
+    message would then have claimed the press started something it had not.
+    """
+
+    class NeverCreated(_Docker):
+        def start_database(self, spec: docker.ContainerSpec, server_dir: Path, **_: object) -> bool:
+            self.started.append("compose up")
+            raise docker.DockerCommandError(
+                "docker compose up -d --no-deps exited 1: no such image"
+            )
+
+    fake = NeverCreated([])
+    for alone in _factory(monkeypatch, fake):
+        with pytest.raises(docker.DockerCommandError) as raised:
+            alone.bring_up("nothing was run")
+        assert str(raised.value) == "docker compose up -d --no-deps exited 1: no such image"
+    assert fake.stopped == [], "a container that was never created was stopped"
+
+
+def test_a_database_that_could_not_be_stopped_again_says_it_may_still_be_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stop after a failed start failed too: say so, honestly, and name the command."""
+
+    class StopFails(_Docker):
+        def stop_containers(self, names: list[str], *, wsl_distro: str | None = None) -> None:
+            self.stopped.append(list(names))
+            raise docker.DockerCommandError("docker stop exited 1: daemon busy")
+
+    fake = StopFails([], start_fails=True)
+    for alone in _factory(monkeypatch, fake):
+        fake.running = []
+        with pytest.raises(docker.DockerCommandError) as raised:
+            alone.bring_up("nothing was run")
+        said = str(raised.value)
+        db = fake.stopped[-1][0]
+        assert said.startswith(f"{db} did not report healthy within 180s, so nothing was run.")
+        assert f"{db} may still be running" in said and "daemon busy" in said, said
+        assert f"`docker stop {db}`" in said, said
+
+
+# -- review round 1: nothing starts, stops or recreates the server under a restore ----------
+
+
+def _press_during_the_load(
+    view: ControllerView, mysql: _Mysql, press: Callable[[], object]
+) -> list[object]:
+    """Make `press` happen while the restore is loading, the way a player's click would."""
+    pressed: list[object] = []
+    load = mysql.load_from
+
+    def load_and_press(source: IO[bytes]) -> None:
+        pressed.append(press())
+        load(source)
+
+    mysql.load_from = load_and_press  # type: ignore[method-assign]
+    return pressed
+
+
+@pytest.mark.parametrize("press", ["start", "stop", "restart", "recreate", "stop_other_and_start"])
+def test_no_server_press_starts_or_stops_anything_while_a_restore_runs(
+    qapp: object,
+    tmp_path: Path,
+    ps: _Ps,
+    monkeypatch: pytest.MonkeyPatch,
+    press: str,
+) -> None:
+    """Every Server and Tuning press that starts, stops or recreates is refused under a restore.
+
+    The press found in review: with the server stopped, Restore starts the
+    database alone, so Start is still enabled (not everything runs) and the
+    view is not busy. A Start during the load brought the world up on the
+    databases being written -- the very hazard the plan refuses for -- and the
+    restore's cleanup then stopped the database under the running world.
+    Stop, Restart and the recreate are the same hazard from the other side: a
+    stop takes the database from under the load. One hold at the docker layer
+    refuses all of them; nothing here reaches `docker compose`.
+    """
+    monkeypatch.setattr(ControllerView, "_confirm", lambda self, title, question: True)
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    path = _select_backup(view, tmp_path)
+    failures = _failures(view)
+    presses = {
+        "start": view.start_server,
+        "stop": view.stop_server,
+        "restart": view.restart_server,
+        "recreate": view.recreate_containers,
+        "stop_other_and_start": view.stop_other_and_start,
+    }
+    _press_during_the_load(view, mysql, presses[press])
+
+    view.show_restore_plan()
+    before = len(ps.calls)
+    view.run_restore()
+
+    assert mysql.loaded == [path.read_bytes()], "the restore itself did not finish"
+    assert _lifecycle_calls(ps) == [], ps.calls[before:]
+    said = " ".join(failures) + view.problem_label.text() + view.tuning_report.toPlainText()
+    assert forgetting.RESTORE_HOLDS_THE_SERVER in said, said
+    assert stack.starts == 1 and stack.stops == 1 and stack.running == set()
+
+
+def test_the_server_buttons_work_again_once_the_restore_has_finished(
+    qapp: object, tmp_path: Path, ps: _Ps
+) -> None:
+    """The hold is the restore's and ends with it: the next Start reaches compose."""
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    view.show_restore_plan()
+    view.run_restore()
+    assert len(mysql.loaded) == 1
+
+    view.start_server()
+    assert any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
+
+
+def test_a_backup_that_started_the_database_holds_the_server_too(
+    qapp: object, tmp_path: Path, ps: _Ps
+) -> None:
+    """Backup's cleanup stops the database it started; a Start in between must not happen."""
+    stack = _Stack()
+    services = _real_maintenance(tmp_path, stack, _Mysql(stack))
+    view = _view(services)
+    pressed: list[object] = []
+    failures = _failures(view)
+
+    def back_up() -> maintenance.BackupReport:
+        pressed.append(view.start_server())
+        return maintenance.BackupReport(directory=tmp_path, dumps=())
+
+    view.services.backup = back_up
+    view.back_up()
+
+    assert pressed, "the backup never ran"
+    assert _lifecycle_calls(ps) == [], ps.calls
+    assert forgetting.BACKUP_HOLDS_THE_SERVER in " ".join(failures) + view.problem_label.text()
+    assert stack.running == set()
+
+
+def test_a_backup_of_a_database_that_was_already_up_holds_nothing(
+    qapp: object, tmp_path: Path, ps: _Ps
+) -> None:
+    """A hot backup of a running server leaves Start alone: nothing will be stopped after it."""
+    stack = _Stack(SPEC.db)
+    view = _view(_real_maintenance(tmp_path, stack, _Mysql(stack)))
+
+    def back_up() -> maintenance.BackupReport:
+        view.start_server()
+        return maintenance.BackupReport(directory=tmp_path, dumps=())
+
+    view.services.backup = back_up
+    view.back_up()
+
+    assert any(c[:3] == ["docker", "compose", "up"] for c in ps.calls), ps.calls
+
+
+def test_a_restore_pressed_while_the_server_is_starting_is_refused(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The other order: a Start's database-healthy wait is no time to restore.
+
+    While compose waits for the database to report healthy the world container
+    exists but is not running, so the name census passes. The hold cannot be
+    taken while a start is in flight, and the restore says nothing was restored.
+    """
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    failures = _failures(view)
+    view.show_restore_plan()
+
+    with docker._in_flight(tmp_path):
+        view.run_restore()
+
+    assert mysql.loaded == [] and stack.starts == 0
+    assert failures and failures[-1].startswith("Nothing was restored"), failures
+    assert docker.SERVER_IN_MOTION in failures[-1]
+
+
+def test_a_start_disarms_the_restore_plan(qapp: object, tmp_path: Path) -> None:
+    """A plan is a census; a Start changes what it counted, so it is not carried over."""
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    view.show_restore_plan()
+    assert view.restore_button.isEnabled()
+
+    view.start_server()
+
+    assert not view.restore_button.isEnabled()
+    view.run_restore()
+    assert mysql.loaded == []
+    assert view.maintenance_report.toPlainText() == "Show the restore plan first."
+
+
+# -- the hold itself, at the docker layer --------------------------------------------------
+
+_LIFECYCLE = {
+    "start_staged": lambda d: docker.start_staged(SPEC, d),
+    "start": lambda d: docker.start(d),
+    "recreate_staged": lambda d: docker.recreate_staged(SPEC, d),
+    "stop_servers_staged": lambda d: docker.stop_servers_staged(SPEC, d),
+    "stop_staged": lambda d: docker.stop_staged(SPEC, d),
+    "remove_staged": lambda d: docker.remove_staged(SPEC, d),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_LIFECYCLE))
+def test_a_held_server_refuses_every_lifecycle_command_and_runs_none(
+    tmp_path: Path, ps: _Ps, name: str
+) -> None:
+    """Each door, asked directly: refused in the holder's own words, before docker is run."""
+    with docker.hold_the_server(tmp_path, "held for a test"):
+        with pytest.raises(docker.ServerHeldError, match="held for a test"):
+            _LIFECYCLE[name](tmp_path)
+    assert ps.calls == [], ps.calls
+
+
+def test_a_hold_on_one_server_leaves_another_alone(tmp_path: Path, ps: _Ps) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    with docker.hold_the_server(tmp_path / "held", "held for a test"):
+        docker.start(other)
+    assert ps.calls and ps.calls[-1][:3] == ["docker", "compose", "up"]
+
+
+def test_a_hold_is_refused_while_a_lifecycle_command_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start's own `compose up` is where a restore must not begin."""
+    refused: list[str] = []
+
+    def compose(cmd: list[str], cwd: Path | None = None, timeout: float | None = None) -> object:
+        try:
+            with docker.hold_the_server(tmp_path, "a restore"):
+                pass
+        except docker.ServerHeldError as exc:
+            refused.append(str(exc))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(runner, "run", compose)
+    docker.start(tmp_path)
+
+    assert refused == [docker.SERVER_IN_MOTION]
+    with docker.hold_the_server(tmp_path, "after"):
+        pass  # and the start's mark is gone once it returned
