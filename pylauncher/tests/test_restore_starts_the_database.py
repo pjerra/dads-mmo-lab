@@ -934,3 +934,183 @@ def test_a_backup_pressed_while_the_server_is_starting_says_no_backup_was_taken(
 
     assert backups == [] and stack.starts == 0
     assert failures and failures[-1] == f"No backup was taken: {docker.SERVER_IN_MOTION}", failures
+
+
+# -- review round 3: one Backup or Restore of a server at a time ---------------------------
+
+
+def _backup_that_presses(
+    view: ControllerView, stack: _Stack, press: Callable[[], object]
+) -> list[bool]:
+    """A backup that presses `press` half way through, and records whether the db was up."""
+    ran: list[bool] = []
+
+    def back_up() -> maintenance.BackupReport:
+        press()
+        ran.append(SPEC.db in stack.running)
+        return maintenance.BackupReport(
+            directory=maintenance.backups_dir(view.services.controller.server_dir), dumps=()
+        )
+
+    view.services.backup = back_up
+    return ran
+
+
+def test_a_restore_pressed_during_a_backup_that_started_the_database_is_refused(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The worse order (review round 3): the backup's cleanup would stop the db under the load.
+
+    The plan was shown with the server stopped, so it is armed. The backup
+    starts the database; a Restore pressed now found it up, started nothing,
+    and loaded -- and the backup's `finally` then stopped the database under
+    the half-loaded restore.
+    """
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    failures = _failures(view)
+    view.show_restore_plan()
+    assert view.restore_button.isEnabled()
+    ran = _backup_that_presses(view, stack, view.run_restore)
+
+    view.back_up()
+
+    assert mysql.loaded == [], "a restore loaded while a backup held the server"
+    assert failures, "the refused restore said nothing"
+    assert failures[-1] == f"{forgetting.BACKUP_HOLDS_THE_DATABASES} Nothing was restored."
+    assert ran == [True], "the backup did not run to the end"
+    assert stack.starts == 1 and stack.stops == 1 and stack.running == set()
+    assert "Backed up to" in view.maintenance_report.toPlainText()
+
+
+def test_a_restore_pressed_during_a_hot_backup_is_refused(qapp: object, tmp_path: Path) -> None:
+    """A database already up holds no lifecycle hold -- and still leases the databases."""
+    stack = _Stack(SPEC.db)
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    _select_backup(view, tmp_path)
+    failures = _failures(view)
+    view.show_restore_plan()
+    assert view.restore_button.isEnabled()
+    ran = _backup_that_presses(view, stack, view.run_restore)
+
+    view.back_up()
+
+    assert mysql.loaded == []
+    assert failures and failures[-1] == (
+        f"{forgetting.BACKUP_HOLDS_THE_DATABASES} Nothing was restored."
+    ), failures
+    assert ran == [True] and stack.running == {SPEC.db}
+
+
+def test_a_backup_pressed_during_a_restore_is_refused_and_dumps_nothing(
+    qapp: object, tmp_path: Path
+) -> None:
+    """Scenario 1: a mysqldump beside the load is a backup of half-old, half-new data."""
+    stack = _Stack()
+    mysql = _Mysql(stack)
+    view = _view(_real_maintenance(tmp_path, stack, mysql))
+    path = _select_backup(view, tmp_path)
+    failures = _failures(view)
+    backups: list[int] = []
+    view.services.backup = lambda: backups.append(1)  # type: ignore[assignment,func-returns-value]
+    _press_during_the_load(view, mysql, view.back_up)
+
+    view.show_restore_plan()
+    view.run_restore()
+
+    assert backups == [], "a backup ran beside the restore's load"
+    refused = [f for f in failures if f.endswith("No backup was taken.")]
+    assert refused == [f"{forgetting.RESTORE_HOLDS_THE_DATABASES} No backup was taken."], failures
+    assert mysql.loaded == [path.read_bytes()], "the restore itself did not finish"
+    assert stack.running == set()
+
+
+def test_the_lease_is_exclusive_and_named_by_its_holder(tmp_path: Path) -> None:
+    with docker.maintenance_lease(tmp_path, "the first job"):
+        with pytest.raises(docker.MaintenanceLeaseTaken, match="the first job"):
+            with docker.maintenance_lease(tmp_path, "the second job"):
+                pass
+        with docker.maintenance_lease(tmp_path / "another", "another server's job"):
+            pass
+    with docker.maintenance_lease(tmp_path, "after"):
+        pass
+
+
+def test_the_lease_is_released_by_a_job_that_raises(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        with docker.maintenance_lease(tmp_path, "a job"):
+            raise RuntimeError("boom")
+    with docker.maintenance_lease(tmp_path, "after"):
+        pass
+
+
+# -- review round 3: a composite is one lifecycle command from its first step to its last --
+
+
+def _hold_attempt(server_dir: Path, refused: list[str]) -> Callable[[], None]:
+    def start() -> None:
+        try:
+            with docker.hold_the_server(server_dir, "a restore"):
+                pass
+        except docker.ServerHeldError as exc:
+            refused.append(str(exc))
+        refused.append("started")
+
+    return start
+
+
+@pytest.mark.parametrize("composite", ["_do_restart", "_do_recreate"])
+def test_a_restore_cannot_begin_between_a_restart_s_two_halves(
+    qapp: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, composite: str
+) -> None:
+    """Restart is stop then start, recreate is remove then start: one command each."""
+    stack = _Stack()
+    view = _view(_real_maintenance(tmp_path, stack, _Mysql(stack)))
+    controller = view.services.controller
+    refused: list[str] = []
+    monkeypatch.setattr(controller, "stop", lambda: True)
+    monkeypatch.setattr(controller, "remove", lambda: True)
+    monkeypatch.setattr(controller, "start", _hold_attempt(controller.server_dir, refused))
+
+    assert getattr(view, composite)() is True
+
+    assert refused == [docker.SERVER_IN_MOTION, "started"]
+
+
+def test_a_restore_cannot_begin_between_the_bot_rebuild_s_stop_and_start(tmp_path: Path) -> None:
+    from yulon.controller_wow_tortoise import botpool
+
+    refused: list[str] = []
+
+    class Lifecycle:
+        server_dir = tmp_path
+
+        def stop(self) -> bool:
+            return True
+
+        start = staticmethod(_hold_attempt(tmp_path, refused))
+
+    botpool.restart_world(Lifecycle())  # type: ignore[arg-type]
+
+    assert refused == [docker.SERVER_IN_MOTION, "started"]
+
+
+def test_a_held_server_refuses_a_bot_restart_as_a_failed_stop(tmp_path: Path) -> None:
+    """Refused before its stop: `StopFailed`, which its caller reads as "nothing was started"."""
+    from yulon.controller_wow_tortoise import botpool
+
+    class Lifecycle:
+        server_dir = tmp_path
+
+        def stop(self) -> bool:
+            raise AssertionError("stopped a held server")
+
+        def start(self) -> None:
+            raise AssertionError("started a held server")
+
+    with docker.hold_the_server(tmp_path, "a restore"):
+        with pytest.raises(botpool.StopFailed, match="a restore"):
+            botpool.restart_world(Lifecycle())  # type: ignore[arg-type]

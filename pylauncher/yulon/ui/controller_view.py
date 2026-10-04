@@ -11191,6 +11191,23 @@ class ControllerView(QWidget):
         """
         from yulon import forgetting
 
+        # T205 review round 3: the databases are leased for the WHOLE backup,
+        # a hot copy included -- one Backup or Restore of a server at a time.
+        with contextlib.ExitStack() as leased:
+            try:
+                leased.enter_context(
+                    docker.maintenance_lease(
+                        self.services.controller.server_dir, forgetting.BACKUP_HOLDS_THE_DATABASES
+                    )
+                )
+            except docker.MaintenanceLeaseTaken as exc:
+                raise wotlk_maintenance.MaintenanceError(f"{exc} No backup was taken.") from exc
+            return self._back_up_under_the_lease()
+
+    def _back_up_under_the_lease(self) -> object:
+        """`_backup_with_the_database()`'s work, once it holds the databases (worker thread)."""
+        from yulon import forgetting
+
         alone = self.services.database_alone
         if alone is None:
             return self.services.backup()
@@ -11325,6 +11342,13 @@ class ControllerView(QWidget):
         or recreate of this server is running, whose world may exist without
         running yet and so pass the census.
 
+        **One Backup or Restore of a server at a time** (`docker.maintenance_
+        lease()`, review round 3). Separate from the hold, which is about the
+        containers: a Back up pressed during the load ran its mysqldump beside
+        it, and a Restore pressed while a stopped server's Backup had the
+        database up loaded into it -- then the backup's cleanup stopped the
+        database under the half-loaded restore. Taken first, before the hold.
+
         **The database is left as it was found**, by `bring_up()`'s own answer:
         only True runs `take_down()`, in `finally`, so a refusal at the press, a
         failed load and a success all put it back. A start that fails raises
@@ -11332,6 +11356,21 @@ class ControllerView(QWidget):
         anything it started (`_database_alone()`); the sentence leads with what
         the player needs to know, that nothing was restored.
         """
+        from yulon import forgetting
+
+        with contextlib.ExitStack() as leased:
+            try:
+                leased.enter_context(
+                    docker.maintenance_lease(
+                        self.services.controller.server_dir, forgetting.RESTORE_HOLDS_THE_DATABASES
+                    )
+                )
+            except docker.MaintenanceLeaseTaken as exc:
+                raise wotlk_maintenance.MaintenanceError(f"{exc} Nothing was restored.") from exc
+            return self._restore_under_the_lease(plan)
+
+    def _restore_under_the_lease(self, plan: wotlk_maintenance.RestorePlan) -> object:
+        """`_restore_with_the_database()`'s work, once it holds the databases (worker thread)."""
         from yulon import forgetting
 
         alone = self.services.database_alone
@@ -14479,10 +14518,14 @@ class ControllerView(QWidget):
 
     def _do_restart(self) -> bool:
         """Stop, then start. ONE worker job: a stop the user then has to follow with a
-        start by hand is a server left down by a control that promised a restart."""
+        start by hand is a server left down by a control that promised a restart.
+
+        And one lifecycle command (`docker.lifecycle()`, T205 review round 3), so a
+        restore cannot take its hold between the two and leave the server stopped."""
         controller = self.services.controller
-        stopped = controller.stop()
-        controller.start()
+        with docker.lifecycle(controller.server_dir):
+            stopped = controller.stop()
+            controller.start()
         return stopped
 
     def _do_recreate(self) -> bool:
@@ -14490,8 +14533,10 @@ class ControllerView(QWidget):
         characters are not touched and the next start creates the containers again --
         the Server tab's own sentence for the same pair of calls."""
         controller = self.services.controller
-        removed = controller.remove()
-        controller.start()
+        # One lifecycle command, as `_do_restart()` is: a gap here leaves the server removed.
+        with docker.lifecycle(controller.server_dir):
+            removed = controller.remove()
+            controller.start()
         return removed
 
     @Slot(object)

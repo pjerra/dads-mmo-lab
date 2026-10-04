@@ -80,6 +80,16 @@ BACKUP_HOLDS_THE_SERVER = (
     "own for it, and the database is stopped again when the backup ends. Wait for the "
     "backup to finish, then try again. Nothing was started or stopped."
 )
+# What a Backup or Restore refused by `docker.maintenance_lease()` is told: the running job's
+# own sentence, to which the refused one adds what it did not do (T205 review round 3).
+BACKUP_HOLDS_THE_DATABASES = (
+    "A backup of this server is running on its Maintenance tab. Wait for it to finish, "
+    "then try again."
+)
+RESTORE_HOLDS_THE_DATABASES = (
+    "A restore is writing into this server's databases on its Maintenance tab. Wait for "
+    "it to finish, then try again."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."

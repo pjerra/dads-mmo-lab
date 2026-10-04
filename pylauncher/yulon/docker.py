@@ -16,6 +16,7 @@ logic, generalized and given explicit, overridable timeouts.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import io
@@ -452,6 +453,65 @@ def _in_flight(server_dir: Path | str) -> Iterator[None]:
             _IN_FLIGHT[key] -= 1
             if not _IN_FLIGHT[key]:
                 del _IN_FLIGHT[key]
+
+
+def lifecycle(server_dir: Path | str) -> contextlib.AbstractContextManager[None]:
+    """One lifecycle command made of several: a restart, a recreate, a bot restart (T205).
+
+    `@_a_lifecycle_command` marks each primitive while it runs, so between a
+    restart's stop and its start nothing is marked, and a restore could take
+    its hold there -- refusing the start and leaving the server stopped, or
+    after a recreate removed (review round 3). Wrapped around every step of
+    the composite, the mark lasts from its first step to its last; the marks
+    nest, so the primitives inside run as before.
+
+    Raises:
+        ServerHeldError: the server is held, so not even the first step runs.
+    """
+    return _in_flight(server_dir)
+
+
+class MaintenanceLeaseTaken(RuntimeError):
+    """A Backup or Restore refused because another one of this server is running (T205).
+
+    The message is the holder's own sentence (`maintenance_lease()`'s
+    `reason`); the refused job adds what it did not do.
+    """
+
+
+_LEASED: dict[str, str] = {}
+
+
+@contextmanager
+def maintenance_lease(server_dir: Path | str, reason: str) -> Iterator[None]:
+    """One Backup or Restore of this server at a time, for the whole of it (T205 round 3).
+
+    Separate from `hold_the_server()`, which is about the containers: a hot
+    backup of a running server takes no hold, so Start stays free during it,
+    and still takes this. What it stops is two jobs on one set of databases:
+    a mysqldump running beside a restore's load reported success for a copy
+    of half-old, half-new data, and a Restore pressed while a stopped server's
+    Backup had started the database loaded into it -- and the backup's own
+    cleanup then stopped the database under the half-loaded restore.
+
+    In this module and not on the view because one server can have more than
+    one view (T187 gives each server its own launcher window), and a flag on
+    one of them would not be seen by the other.
+
+    Raises:
+        MaintenanceLeaseTaken: a Backup or Restore of this server holds it.
+    """
+    key = _server_key(server_dir)
+    with _HOLD_LOCK:
+        holder = _LEASED.get(key)
+        if holder is not None:
+            raise MaintenanceLeaseTaken(holder)
+        _LEASED[key] = reason
+    try:
+        yield
+    finally:
+        with _HOLD_LOCK:
+            del _LEASED[key]
 
 
 def _a_lifecycle_command(command: Callable[_P, _R]) -> Callable[_P, _R]:
