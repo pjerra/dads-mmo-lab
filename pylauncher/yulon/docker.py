@@ -413,6 +413,15 @@ def hold_the_server(server_dir: Path | str, reason: str) -> Iterator[None]:
     jobs use themselves (`start_database()`, `stop_containers()`) are not
     lifecycle commands and are not held.
 
+    "Stop the other server and start this one" pressed on ANOTHER install is
+    not held here either, and does not need to be: its `stop_conflicting()`
+    stops only an install whose containers publish that install's auth or world
+    port (`ContainerSpec.ports`, never the database's), and a held install has
+    neither running -- the restore plan refuses while they are up, and this
+    hold refuses their start. Both Codex reviews of 2026-10-04 read the
+    sentence above as covering that cross-server press; it covers the press
+    made on the held install itself.
+
     Taken only when no lifecycle command for this server is running: a Start
     waiting for the database to report healthy has a world container that
     exists and is not running yet, which passes the restore's name census.
