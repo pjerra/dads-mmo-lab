@@ -32,6 +32,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A finished build that could not be started is kept, and the next rebuild uses it instead of compiling again.
 
 ### Fixed
+- **Stop** during a quiet build step ends the build at once, not at its next line.
+- **Stop** during a clone with your own git also ends the helpers git started.
 - **Stop** during **Re-extract map data** ends the map extractor at once and puts the old map data back.
 - The pathfinding line quotes the generator up to a whole word, and **Refresh** keeps what **Stop** said there.
 - **Stop** during a clone or map tool removes its container, even as it starts; one Docker would not start goes too.
@@ -144,6 +146,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A WotLK rebuild with nothing changed no longer re-sends gigabytes to Docker, and still uses a Docker builder you chose.
 
 ### Changed
+- A stopped install or rebuild says what the Stop left, after **Stopped:**.
 - On Linux, **Stop** during a build is said to end it at once, as it does; the line after a Stop says so on Windows too.
 - A WotLK install keeps one copy of the shared server source in Docker's build cache instead of two, saving about 1.5 GB.
 - New TBC, Vanilla and Centurion servers build from their projects' newest code of October 2026.
