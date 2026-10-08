@@ -1080,13 +1080,13 @@
             "repo": "tortoise-wow/tortoise-wow",
             "branch": "1181dev",
             "dest": "src/tortoise-wow",
-            "rev": "187af788177aa2f9f0e61eb8c5b9653d8f4f7199"
+            "rev": "6131a26f91d60e64f6d58c7f0a9b6333f2d9f25a"
           },
           {
             "repo": "Sagiroth/TortoiseBots",
             "branch": "main",
             "dest": "src/tortoise-wow/modules/TortoiseBots",
-            "rev": "83d88fdc034b224d88a2ecade975e26f8d1d513c",
+            "rev": "a504a62567d89e6e0608759b1e8a3d85e87fbc04",
             "follow": "releases"
           }
         ]
