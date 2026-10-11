@@ -24381,7 +24381,9 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
     play = _built(original, tmp_path)
     with_one, _ = _play_view(ps, tmp_path, original=original, play=play)
     assert with_one.play_button is not None
-    assert with_one.play_button.text() == controller_view_module.PLAY_STARTS_IT_LABEL
+    assert (
+        with_one.play_button.text() == controller_view_module.PLAY_LABEL
+    )  # nothing read yet (T699)
     assert with_one.play_menu_button is not None and not with_one.play_menu_button.isHidden()
     entries = [action.text() for action in with_one.play_menu.actions()]
     assert entries == [
@@ -24412,7 +24414,7 @@ def test_a_forgotten_original_still_leaves_play(qapp: object, ps: _Ps, tmp_path:
     play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
     view, _ = _play_view(ps, tmp_path, original=None, play=play)
     assert view.play_button is not None and not view.play_button.isHidden()
-    assert view.play_button.text() == controller_view_module.PLAY_STARTS_IT_LABEL
+    assert view.play_button.text() == controller_view_module.PLAY_LABEL  # nothing read yet (T699)
 
 
 def test_busy_greys_play_and_its_menu(qapp: object, ps: _Ps, tmp_path: Path) -> None:

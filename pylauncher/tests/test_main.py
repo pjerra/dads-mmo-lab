@@ -5009,6 +5009,22 @@ def test_the_sidebar_play_plays_through_the_server_tabs_play(
     assert launchers == {}, "the ▶ opened the launcher window"
 
 
+def test_the_sidebar_play_of_another_server_brings_its_page_up_first(
+    window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T699 review: PLAY's "Checking…" and realm wait are said on that server's own tab."""
+    first = _server(window, tmp_path, "t699-rail-first", play=True)
+    second = _server(window, tmp_path, "t699-rail-second", play=True)
+    tabs = window.property("tabs")
+    assert tabs.currentWidget() is second
+    played: list[object] = []
+    monkeypatch.setattr(first, "play", lambda: played.append(tabs.currentWidget()))
+
+    _play_of(window, first).click()
+
+    assert played == [first], "played with another server's page on screen"
+
+
 def test_the_sidebar_play_without_a_ready_to_play_client_opens_the_launcher_once(
     window: Any, tmp_path: Path, launchers: Any
 ) -> None:

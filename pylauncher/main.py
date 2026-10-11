@@ -845,7 +845,7 @@ def build_window() -> object:
         if cv.stop_button.isEnabled() and cv.stop_button.isVisible():
             stop_act = menu.addAction("Stop Server")
             stop_act.triggered.connect(cv.stop_server)
-        # T95: the ×'s dialog, for anyone who reads the menu first.
+        # T95: the Server tab's "Remove from Yu'lon…" dialog, for anyone who reads the menu first.
         # The same entry point and the same refusals.
         menu.addSeparator()
         remove_act = menu.addAction(forgetting.BUTTON_LABEL)
@@ -1134,8 +1134,8 @@ def build_window() -> object:
     def request_removal(game: str, server_dir: object) -> None:
         """Take one server off Yu'lon's list, deleting nothing (T95). THE entry point.
 
-        Three routes land here and nowhere else: the × on the server's sidebar
-        tab, "Remove from Yu'lon…" in that tab's right-click menu, and the
+        Two routes land here and nowhere else (T693 took the sidebar × away):
+        "Remove from Yu'lon…" in the sidebar tab's right-click menu, and the
         Server tab's button of the same name (`ControllerView.remove_requested`,
         T34's "Forget this install…" renamed). One path is one refusal rule,
         one dialog and one forget, so the routes cannot drift apart.
@@ -1252,17 +1252,17 @@ def build_window() -> object:
         )
         on_uninstalled(game, folder)
 
-    # Where the × sits: the style's own close-button side (Fusion's
+    # Where the ▶ strip sits (T95's × sat there until T693): the style's close-button side (Fusion's
     # `SH_TabBar_CloseButtonPosition`), which on this West rail is the TOP of the
     # tab (measured offscreen 2026-09-23: the button's y equals the tab's).
     FORGET_SIDE = QTabBar.ButtonPosition.RightSide
 
     class _ForgetButtons(QObject):
-        """Shows a server tab's × on the tab under the mouse and on the current one (T95).
+        """Shows a server tab's ▶ on the tab under the mouse and on the current one (T95, T187).
 
         An event filter on the sidebar's `QTabBar`, which has `WA_Hover` on by
-        default. Moving onto the × still sends the bar `HoverMove`, and leaving
-        the bar sends `Leave`/`HoverLeave` (both measured), so the × never
+        default. Moving onto the ▶ still sends the bar `HoverMove`, and leaving
+        the bar sends `Leave`/`HoverLeave` (both measured), so the ▶ never
         blinks out under the pointer. A hidden tab button still reserves its
         length, so showing it moves nothing.
         """
@@ -1386,6 +1386,8 @@ def build_window() -> object:
         if view.services.play_client_dir is None:
             open_launcher(game, server_dir)
             return
+        # Its own page first, so PLAY's "Checking…" and the wait for the realm are seen.
+        tabs.setCurrentWidget(view)
         view.dialog_host = None
         view.play()
 
@@ -1607,8 +1609,8 @@ def build_window() -> object:
         )
         status_dots[key] = show_status_dot
         show_status_dot(view.realm_badge.status)
-        # T95: the ×, on a server page only. Catalog (and T93's Logs) never get
-        # one, because only this function attaches it and only to a ControllerView.
+        # T187/T693: the ▶ strip, on a server page only (the sidebar × is gone). Catalog
+        # and T93's Logs never get one: only this function attaches it, to a ControllerView.
         forget_buttons.attach(tabs.indexOf(view), _tab_buttons(key, entry.name))
         # A new page entered the tree; the navigator's focus chain is stale.
         navigator.invalidate()

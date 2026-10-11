@@ -8730,6 +8730,12 @@ class ControllerView(QWidget):
         self._realm_read_pending = False
         self._realm_read_when_up = True
         self._mode_now = ""
+        # T698: the mode last applied, read once at build and after Apply (None: never applied).
+        self._intent_mode: str | None = None
+        self._intent_read = False
+        # T667/T699: the ready-to-play client logs in at another computer's realm, so the
+        # local server is neither waited for nor offered to start. Read off the GUI thread.
+        self._plays_elsewhere = False
         # T696: "Create account…" asks through this, and its outcome is said in a box too.
         self._account_asker: AccountAsker = ask_new_account
         self._account_from_a_dialog = False
@@ -8746,6 +8752,9 @@ class ControllerView(QWidget):
         self._build_tuning_tab()
         self._build_networking_tab()
         self._order_the_tabs()
+        # T667/T699: where PLAY logs in, once now and after each launcher save.
+        self.read_where_play_goes()
+        self.launcher_saved.connect(self._launcher_saved_where)
 
         # T106: asked once now, whether or not this tab polls -- it reads files
         # and asks no daemon.
@@ -9579,7 +9588,14 @@ class ControllerView(QWidget):
 
     @Slot(str)
     def _show_the_status(self, status: str) -> None:
-        """The pill, the one line beside it, the rows, the steps and PLAY's word: one reading."""
+        """The pill, the one line beside it, the rows, the steps and PLAY's word: one reading.
+
+        Before any poll has answered (and no Start or Stop of ours holds the badge) nothing
+        is known, so the pill says so rather than the badge's resting "stopped" -- which a
+        stopped WSL distro, whose polls wait for it, would otherwise show for good.
+        """
+        if self._last_polled is None and self._badge_held is None:
+            status = "unknown"
         self.status_pill.set_status(status)
         self._show_the_glance()
         self._show_the_services()
@@ -9647,14 +9663,12 @@ class ControllerView(QWidget):
             return
         announced = self._announced
         self.realm_address_value.setText(announced or "—")
-        # The record is a file in the server's folder: a WSL server's waits for its distro (T133).
-        if self._waits_for_the_distro("realm card", self._show_the_realm):
+        # The mode as last read (`_read_the_mode_in_force`), never read here: this runs on
+        # every poll, and the record is a file in the server's folder (9p for a WSL server).
+        if not self._intent_read:
             self._mode_now = "—"
         else:
-            intent = networking.read_network_intent(self.services.controller.server_dir)
-            self._mode_now = server_status.mode_now(
-                intent.mode if intent is not None else None, announced
-            )
+            self._mode_now = server_status.mode_now(self._intent_mode, announced)
         self.network_mode_value.setText(self._mode_now)
         verdict = self.last_verdict
         players = verdict.players if verdict is not None else None
@@ -9671,7 +9685,9 @@ class ControllerView(QWidget):
         if play is None or self.services.play_client_dir is None:
             return
         look = self.status_pill.look
-        if self._play_waits_for_the_start or look in (
+        if self._plays_elsewhere:
+            word = PLAY_LABEL  # T667: another computer's realm; the local server is not asked
+        elif self._play_waits_for_the_start or look in (
             server_status.STARTING,
             server_status.RESTARTING,
         ):
@@ -9684,6 +9700,31 @@ class ControllerView(QWidget):
             word = PLAY_LABEL
         if play.text() != word:
             play.setText(word)
+
+    @Slot(str)
+    def _launcher_saved_where(self, said: str) -> None:
+        """A launcher save that worked may have changed the realm address: read it again."""
+        if not said:
+            self.read_where_play_goes()
+
+    def read_where_play_goes(self) -> None:
+        """Whether the ready-to-play client logs in at another computer's realm (T667, T699).
+
+        Read from the client's own small record and `networking.is_this_computer()`, which
+        is made for the GUI thread (the launcher's banner asks it too). Then PLAY neither
+        waits for this computer's Start nor says it starts it: that realm is not this one.
+        """
+        play = self.services.play_client_dir
+        elsewhere = False
+        if play is not None:
+            try:
+                address = _realm_address(client_packs.read_record(play))
+            except OSError as exc:
+                logger.info(f"{self.entry.id}: could not read where PLAY logs in: {exc}")
+            else:
+                elsewhere = not networking.is_this_computer(address)
+        self._plays_elsewhere = elsewhere
+        self._show_play_word()
 
     @Slot()
     def open_server_folder(self) -> None:
@@ -9774,8 +9815,9 @@ class ControllerView(QWidget):
 
     @Slot(object)
     def _realm_read_failed(self, exc: object) -> None:
+        # Not asked again on the next poll: only once the server has been seen down and up
+        # again (`_read_the_realm_once_up`), or after an account or a network change.
         self._realm_read_pending = False
-        self._realm_read_when_up = True
         logger.info(f"{self.entry.id}: could not read the accounts and the realm row: {exc}")
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:
@@ -10846,6 +10888,9 @@ class ControllerView(QWidget):
         style = self.forget_install_button.style()
         style.unpolish(self.forget_install_button)
         style.polish(self.forget_install_button)
+        if highlight and hasattr(self, "danger_toggle"):
+            # T699: the way out is in the folded Danger zone; it must be on screen.
+            self.open_the_danger_zone()
 
     def folder_is_gone(self) -> bool:
         """Confirmed absent on this host, for the window's dialog (T95). `_forget_is_eligible()`."""
@@ -11296,7 +11341,12 @@ class ControllerView(QWidget):
             # reached for (review, 2026-08-23).
             for press in self._server_presses():
                 set_enabled_why(press, wait_for(job))
-            if job == "Start" and self.play_button is not None and self.services.play_client_dir:
+            if (
+                job == "Start"
+                and self.play_button is not None
+                and self.services.play_client_dir
+                and not self._plays_elsewhere
+            ):
                 # T699: "PLAY when ready" -- PLAY waits for this Start and then the realm.
                 set_enabled_why(self.play_button, None)
             self.rebuild_action.setEnabled(False)
@@ -13643,7 +13693,8 @@ class ControllerView(QWidget):
         ends the Play with its words (`_start_failed`). Only for a Start: any other job of
         ours is not bringing the realm up.
         """
-        if not (self._busy and self._busy_job == "Start"):
+        if not (self._busy and self._busy_job == "Start") or self._plays_elsewhere:
+            # T667: a realm at another computer is not waiting on this one's Start.
             return False
         if self._module_job_running() or self._play_client_running:
             return False
@@ -23364,19 +23415,32 @@ class ControllerView(QWidget):
         self._plan: NetworkPlan | None = None
         self._show_the_realm()
 
-    def _tick_the_mode_in_force(self) -> None:
-        """Tick the radio of the mode last applied (T698); LAN, the install's own, when none was."""
+    def _read_the_mode_in_force(self) -> None:
+        """Read the mode last applied (T698) into `_intent_mode`: at build, and after Apply.
+
+        Once, not per poll: the record is a file in the server's folder, and a WSL
+        server's waits for its distro (T133) like every other reading of this tab.
+        """
         if self._waits_for_the_distro("network mode", self._tick_the_mode_in_force):
-            self.lan_radio.setChecked(True)
             return
         intent = networking.read_network_intent(self.services.controller.server_dir)
-        mode = intent.mode if intent is not None else "lan"
+        self._intent_mode = intent.mode if intent is not None else None
+        self._intent_read = True
+
+    def _tick_the_mode_in_force(self) -> None:
+        """Tick the radio of the mode last applied (T698); LAN, the install's own, when none was."""
+        self._read_the_mode_in_force()
+        if not self._intent_read:
+            self.lan_radio.setChecked(True)
+            return
+        mode = self._intent_mode or "lan"
         radio = {
             "lan": self.lan_radio,
             "internet": self.internet_radio,
             "loopback": self.loopback_radio,
         }[mode]
         radio.setChecked(True)
+        self._show_the_realm()
 
     def network_mode(self) -> Mode:
         """Which mode the radios are asking for. `lan` is the answer to "none of them".
@@ -23427,7 +23491,8 @@ class ControllerView(QWidget):
     @Slot(object)
     def _apply_done(self, result: object) -> None:
         self._network_applying = False
-        self._show_the_realm()  # T698: what Apply recorded is the mode in force now
+        self._read_the_mode_in_force()  # T698: what Apply recorded is the mode in force now
+        self._show_the_realm()
         self._realm_read_when_up = True  # and the realm row it rewrote is read again
         if self._last_polled is not None and self._last_polled.all_running:
             self.read_the_realm()

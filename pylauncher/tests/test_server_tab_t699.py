@@ -24,6 +24,7 @@ from tests.test_controller_view import (  # noqa: F401 - fixtures
     _play_view,
     _Ps,
     _RealmWait,
+    _save_launcher,
     _this_host_owns,
     launched,
     ps,
@@ -479,3 +480,133 @@ def test_play_while_another_job_of_the_tab_runs_is_refused_not_queued(
     assert not view._play_after_start
     assert view.play_label.text() != cvm.PLAY_WAITS_FOR_THE_START
     assert told and "busy" in told[0], told
+
+
+# -- Round 4 (cold review) ---------------------------------------------------------------
+
+
+def test_the_mode_in_force_is_read_once_not_on_every_poll(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is a file in the server's folder -- a 9p read for a WSL server -- so it is
+    read at build and after Apply, and every poll only formats what was read."""
+    reads: list[Path] = []
+    real = networking.read_network_intent
+
+    def counted(server_dir: Path) -> object:
+        reads.append(server_dir)
+        return real(server_dir)
+
+    monkeypatch.setattr(cvm.networking, "read_network_intent", counted)
+    view = _view(ps, tmp_path)
+    built = len(reads)
+    assert built >= 1
+    for names in (WORLD_UP, "", WORLD_UP):
+        _poll(view, ps, names)
+    view._verdict_ready(Verdict(state="up", players=1, bots=2))
+    view._clear_the_verdict()
+    assert len(reads) == built, f"read {len(reads) - built} more times on polls"
+    networking.record_network_intent(tmp_path, "internet")
+    view._apply_done(None)
+    assert len(reads) == built + 1
+    assert view.network_mode_value.text() == "Internet"
+
+
+def test_before_the_first_reading_the_pill_says_unknown_and_play_claims_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    view = _view(ps, tmp_path)
+    assert view._last_polled is None
+    assert view.status_pill.look is server_status.UNKNOWN
+    assert view.play_button.text() == cvm.PLAY_LABEL  # type: ignore[union-attr]
+    assert view.glance_label.isHidden(), "says nothing is running before anything was read"
+    _poll(view, ps, "")
+    assert view.status_pill.look is server_status.OFFLINE
+    assert view.play_button.text() == cvm.PLAY_STARTS_IT_LABEL  # type: ignore[union-attr]
+
+
+def _remote_view(
+    ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, jobs: Any = None
+) -> ControllerView:
+    _this_host_owns(monkeypatch)  # 192.168.0.60 is another computer's
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    _save_launcher(play, {"realm_address": "192.168.0.60"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, job_runner=jobs)
+    if jobs is not None:
+        while jobs.queue:
+            jobs.run()
+    return view
+
+
+def test_with_a_remote_realm_play_says_play_whatever_the_local_server_does(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T667: another computer's realm does not need this one; PLAY never says it starts it."""
+    view = _remote_view(ps, tmp_path, monkeypatch)
+    _poll(view, ps, "")
+    assert view.play_button.text() == cvm.PLAY_LABEL  # type: ignore[union-attr]
+    _poll(view, ps, DB_AND_WORLD)
+    assert view.play_button.text() == cvm.PLAY_LABEL  # type: ignore[union-attr]
+
+
+def test_with_a_remote_realm_play_does_not_wait_for_a_local_start(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cvm, "show_information", lambda *_a: None)
+    jobs = _Deferred()
+    view = _remote_view(ps, tmp_path, monkeypatch, jobs)
+    view.start_server()
+    assert view._busy_job == "Start"
+    assert view.play_button.text() != cvm.PLAY_WHEN_READY_LABEL  # type: ignore[union-attr]
+    view.play()
+    assert not view._play_after_start, "PLAY at another computer waits for the local Start"
+    assert view.play_label.text() != cvm.PLAY_WAITS_FOR_THE_START
+
+
+def test_the_danger_zone_opens_when_remove_from_yulon_is_the_way_out(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T54/T95: a server whose folder is gone has "Remove from Yu'lon…" lit as the answer; a
+    folded zone would hide the one press that is the way out."""
+    view = _view(ps, tmp_path)
+    assert view.danger_body.isHidden()
+    monkeypatch.setattr(cvm.platform, "folder_is_gone", lambda _path: True)
+    view._update_forget_visibility()
+    assert view.forget_install_button is not None
+    assert view.forget_install_button.property("primary") is True
+    assert not view.danger_body.isHidden(), "the way out is lit inside a folded zone"
+
+
+def test_a_failed_account_read_is_not_asked_again_on_every_poll(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Retried only once the server has been seen down and up again, not every five seconds."""
+    view = _view(ps, tmp_path)
+    asked: list[int] = []
+
+    def broken() -> object:
+        asked.append(1)
+        raise RuntimeError("the database said no")
+
+    view.realm_reads = broken
+    for _ in range(3):
+        _poll(view, ps, WORLD_UP)
+    assert asked == [1], f"asked {len(asked)} times while the server stayed up"
+    _poll(view, ps, "")
+    _poll(view, ps, WORLD_UP)
+    assert asked == [1, 1], "a server that came back up is not asked again"
+
+
+def test_a_launcher_save_to_another_computers_address_is_read_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _this_host_owns(monkeypatch)
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    _poll(view, ps, "")
+    assert view.play_button.text() == cvm.PLAY_STARTS_IT_LABEL  # type: ignore[union-attr]
+    _save_launcher(play, {"realm_address": "192.168.0.60"})
+    view.launcher_saved.emit("")
+    assert view.play_button.text() == cvm.PLAY_LABEL  # type: ignore[union-attr]
