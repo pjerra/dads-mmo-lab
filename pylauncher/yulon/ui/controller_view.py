@@ -10890,8 +10890,16 @@ class ControllerView(QWidget):
         ]
         # T657: the one line a Start says when it renamed the bot settings for the module, as
         # a note and not a problem; the next Start that renames nothing takes it away.
-        renamed = getattr(self.services.controller, "bot_settings_renamed", None)
-        renamed = renamed if isinstance(renamed, str) and renamed else ""
+        # T668: and the one it says about CMaNGOS's built-in accounts, locked or not lockable.
+        notes = [
+            note
+            for note in (
+                getattr(self.services.controller, "bot_settings_renamed", None),
+                getattr(self.services.controller, "seeded_accounts_locked", None),
+            )
+            if isinstance(note, str) and note
+        ]
+        renamed = " ".join(notes)
         self.notice_label.setText(renamed)
         self.notice_label.setVisible(bool(renamed))
         if said:

@@ -90,6 +90,7 @@ from yulon import (
     realm_flag,
     resources,
     runner,
+    seeded_accounts,
     server_build_gone,
     server_build_presses,
     serverlock,
@@ -6416,6 +6417,12 @@ class Seams:
     """
     clear_realm_offline: Callable[..., object] = realm_flag.clear_offline_if_world_up
     """Take the bit off again when a replace gave up with the old world still running (T577)."""
+    lock_seeded_accounts: Callable[..., str | None] = seeded_accounts.settle
+    """Give CMaNGOS's four built-in accounts random passwords before a start (T668).
+
+    Called with `(entry, spec, server_dir)`; returns the line to say or None, and asks a core
+    that does not seed them nothing. Best effort: it never raises.
+    """
     stop_servers: Callable[..., None] = docker.stop_servers_staged
     """The rollback's stop of the FAILED build's servers, before any tag moves back (T158).
 
@@ -6772,6 +6779,7 @@ class Seams:
             recreate=on(docker.recreate_staged, wsl_distro=distro),
             mark_realm_offline=on(realm_flag.mark_offline, wsl_distro=distro),
             clear_realm_offline=on(realm_flag.clear_offline_if_world_up, wsl_distro=distro),
+            lock_seeded_accounts=on(seeded_accounts.settle, wsl_distro=distro),
             stop_servers=on(docker.stop_servers_staged, wsl_distro=distro),
             tag_image=on(docker.tag_image, wsl_distro=distro),
             remove_image=on(docker.remove_image, wsl_distro=distro),
@@ -8734,6 +8742,9 @@ class StagedInstaller:
         renamed = self._rename_bot_settings(ctx.server_dir, rollback=rollback)
         if renamed is not None:
             yield renamed
+        locked = self._lock_seeded_accounts(ctx.server_dir)
+        if locked is not None:
+            yield locked
         # T577: marked offline before the replace starts the new world, so the realm list says
         # Offline for the whole load. On the update route the old world is already down here,
         # and the bit is set within seconds of that. Best effort, never raising; a replace
@@ -12901,6 +12912,15 @@ class StagedInstaller:
 
         return playerbots_rename.settle(self.entry, server_dir, rollback=rollback)
 
+    def _lock_seeded_accounts(self, server_dir: Path) -> str | None:
+        """T668: CMaNGOS's built-in accounts locked before this engine's own starts; its line.
+
+        The install's `up` (so a new install's auth server never serves the seeded rows) and a
+        rebuild's recreate start containers without `Controller.start()`, which asks the same
+        function. Nothing for a core that does not seed them. Never raises.
+        """
+        return self._seams.lock_seeded_accounts(self.entry, self.entry.container_spec(), server_dir)
+
     def _remember_built_prefix(self, server_dir: Path) -> None:
         """T660: the prefix the image just compiled reads, for the rename before a Start.
 
@@ -14011,6 +14031,9 @@ class StagedInstaller:
         renamed = self._rename_bot_settings(ctx.server_dir)
         if renamed is not None:
             yield renamed
+        locked = self._lock_seeded_accounts(ctx.server_dir)
+        if locked is not None:
+            yield locked
         # T577: a core whose world never marks its realm offline while it loads is marked
         # here, before the world exists to be logged in to. Best effort, never raising.
         self._seams.mark_realm_offline(
