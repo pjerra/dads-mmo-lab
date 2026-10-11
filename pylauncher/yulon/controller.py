@@ -28,6 +28,7 @@ from yulon import (
     forgetting,
     platform,
     playerbots_rename,
+    seeded_accounts,
     server_build_gone,
     wsl,
 )
@@ -255,6 +256,9 @@ class Controller:
         # The line the last `start()` said when it renamed the server's bot settings to
         # the prefix its mod-playerbots reads (T657): `None` when there was nothing to do.
         self.bot_settings_renamed: str | None = None
+        # The line the last `start()` said about CMaNGOS's built-in accounts (T668): they were
+        # locked, or could not be and still log in with their own name. `None` when nothing.
+        self.seeded_accounts_locked: str | None = None
         # The catalog entry this install is, where the subclass knows it (T179).
         # `None` reads it off the shipped catalog by container names
         # (`_entry_for`), which every game but one in the making can answer.
@@ -397,6 +401,7 @@ class Controller:
                 logger.warning(f"start() refused: ports {self.spec.ports} bound by {conflicts}")
                 raise PortConflictError(conflicts, self.spec.ports, self._owners_of(conflicts))
             self.bot_settings_renamed = None
+            self.seeded_accounts_locked = None
             self.refuse_a_missing_image()
             self.refuse_a_missing_database()
             self.refuse_an_ended_import()
@@ -407,6 +412,8 @@ class Controller:
             # cannot be written refuses here, with the database `refuse_a_missing_database`
             # started left up, as a refused `before_servers` answer leaves it.
             self.bot_settings_renamed = self._rename_bot_settings()
+            # T668: the database is up (`refuse_a_missing_database`); never refuses a start.
+            self.seeded_accounts_locked = self._lock_seeded_accounts()
             self._before_the_servers_start()
             self.zone_problem = self._put_back_the_zone_file()
             # The map-data fingerprint was written by `refuse_start()` above (T219).
@@ -435,6 +442,17 @@ class Controller:
         except playerbots_rename.RenameRefused as exc:
             logger.warning(f"start() refused: {exc}")
             raise StartRefused(str(exc)) from exc
+
+    def _lock_seeded_accounts(self) -> str | None:
+        """T668: CMaNGOS's four built-in accounts given random passwords; the line to say or None.
+
+        TBC and Vanilla only (`seeded_accounts.settle()` asks no other core anything), and
+        only rows still holding the seeded password. Never raises.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return None
+        return seeded_accounts.settle(entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def refuse_an_old_compose(self) -> None:
         """Raise `StartRefused` when this machine's Compose is one that stops every Start (T658).

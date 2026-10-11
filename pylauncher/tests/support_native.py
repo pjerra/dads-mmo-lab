@@ -152,6 +152,8 @@ class Recorder:
     """The entries whose realm row the engine marked offline (T577), apart from `calls`."""
     realm_clears: list[str] = field(default_factory=list)
     """The entries whose offline bit it took off again after a replace gave up (T577)."""
+    account_locks: list[str] = field(default_factory=list)
+    """The entries whose built-in accounts the engine asked to lock (T668)."""
     probe_answers: list[docker.ImportState] = field(default_factory=lambda: [ABSENT, IMPORTED])
     reset_answer: tuple[str, ...] = ("acore_world",)
     reset_error: Exception | None = None
@@ -1025,6 +1027,10 @@ class Recorder:
                 entry.id
             ),
             clear_realm_offline=lambda entry, spec, server_dir: self.realm_clears.append(entry.id),
+            # T668: bound like the realm marks -- the default writes to the auth database.
+            lock_seeded_accounts=lambda entry, spec, server_dir, **_k: self.account_locks.append(
+                entry.id
+            ),
             # T158: the rollback's stop of the failed build. Bound like T64's six:
             # its default asks `docker exec`, and a world that loads on a script is
             # `test_stop_waits_for_the_world.py`'s.

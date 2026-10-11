@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- TBC and Vanilla servers no longer keep built-in admin accounts that anyone on your network could log in to.
 
 ### Changed
 
