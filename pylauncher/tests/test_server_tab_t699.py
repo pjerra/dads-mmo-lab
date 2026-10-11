@@ -456,3 +456,26 @@ def test_create_account_with_a_name_the_rules_refuse_says_why_in_a_box(
     assert view.services.create_account.__self__.created == []  # type: ignore[attr-defined]
     assert len(warned) == 1 and "account name" in warned[0], warned
     assert not view._account_from_a_dialog, "the next run's end would be said as this one's"
+
+
+def test_play_while_another_job_of_the_tab_runs_is_refused_not_queued(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the tab's own Start brings the realm up, so only it is waited for ("PLAY when
+    ready"). A PLAY pressed while a Stop runs is refused as a busy tab, as before T699: it must
+    not sit queued to start the game when that Stop ends.
+    """
+    told: list[str] = []
+    monkeypatch.setattr(cvm, "show_information", lambda _p, _t, text: told.append(text))
+    jobs = _Deferred()
+    view = _view(ps, tmp_path, job_runner=jobs)
+    ps.names = WORLD_UP
+    view.stop_server()
+    assert view._busy and view._busy_job == "Stop"
+
+    view.play()
+
+    assert not view._play_pending, "PLAY queued behind a Stop as if it were the Start"
+    assert not view._play_after_start
+    assert view.play_label.text() != cvm.PLAY_WAITS_FOR_THE_START
+    assert told and "busy" in told[0], told
