@@ -507,8 +507,8 @@ def apply_module_sql(
 
     **What the updater is given, and what it is not (T78).** The importer is no
     longer handed every folder under `modules/`. A module whose manifest says
-    this app applies a `.sql` of its own under one of the three directories the
-    updater walks (`apply.IMPORTER_DB_DIRS`) is withheld, because the core
+    this app applies a `.sql` of its own in a folder the
+    updater walks (`apply.updater_walks()`) is withheld, because the core
     updater has no ledger row for a file this app ran with its own client and
     exits 1 over it — which is what the round-3 gate's press 9c read as
     "may be part-applied" on a world database this app had written itself. A
@@ -574,6 +574,20 @@ def apply_module_sql(
     ):
         say(line)
     return run
+
+
+def importer_modules(server_dir: Path, *, user_game: str = GAME) -> str:
+    """Which modules a Rebuild's importer may update (T706): this press's own split (T78).
+
+    `apply_module_sql()` hands the importer `module_sql_plan().allowed`, and a Rebuild
+    runs the same importer before its new build first starts, so it is handed the same
+    list: a module whose own SQL this app applied with its own client stays withheld
+    there too, rather than failing the import (and the rebuild) over a file the
+    updater has no ledger row for.
+    """
+    return module_sql_plan(
+        server_dir, _module_manifests(user_game), docker.module_dir_names(server_dir)
+    ).allowed
 
 
 def _module_manifests(user_game: str = GAME) -> tuple[Manifest, ...]:

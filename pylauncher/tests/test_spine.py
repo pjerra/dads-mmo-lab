@@ -1226,7 +1226,10 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
 
     def prompter(question: str) -> str:
         asked.append(question)
-        return SUDO_CANARY if question == platform.SUDO_PASSWORD_QUESTION else "n"
+        if question == platform.SUDO_PASSWORD_QUESTION:
+            return SUDO_CANARY
+        # T700: the install is asked first and agreed to; the group is the one declined.
+        return "y" if question.startswith("Docker Engine is not installed") else "n"
 
     fed: list[tuple[list[str], str]] = []
 
@@ -1245,7 +1248,8 @@ def test_the_prompter_the_spine_forwards_is_the_one_the_sudo_dialog_asks_with(
         installer.preflight(InstallOptions(server_dir=tmp_path / "wow"), ask=prompter)
 
     assert built == [prompter], "the session was built with something other than the forwarded ask"
-    assert asked[0] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
+    assert asked[0].startswith("Docker Engine is not installed")
+    assert asked[1] == platform.DOCKER_GROUP_QUESTION.format(user="pk")
     assert platform.SUDO_PASSWORD_QUESTION in asked
     assert asked.count(platform.SUDO_PASSWORD_QUESTION) == 1  # one dialog per run, still
     # The answer went to sudo, on stdin, and never as an argv element.
@@ -1303,7 +1307,10 @@ def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
 
     def message(run: _LinuxBox, run_input: platform.RunWithInput, password: str | None) -> str:
         def prompter(question: str) -> str | None:
-            return password if question == platform.SUDO_PASSWORD_QUESTION else "n"
+            if question == platform.SUDO_PASSWORD_QUESTION:
+                return password
+            # T700: yes to the install itself, no to the docker group.
+            return "y" if question.startswith("Docker Engine is not installed") else "n"
 
         rec = Recorder(images=False)
         installer = _build(
@@ -2660,6 +2667,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "delete has already failed once, and an rmdir it cannot do is left for the retry "
         "to name against the tree"
     ),
+    ("rmtree.py", "remove_tree_last"): (
+        "lists the top of a folder the caller asked to delete (an Uninstall's server folder) "
+        "only to ORDER the deletion: every sub-folder first, then the other files, then the "
+        "names the caller wants last (the install record a second Uninstall proves ownership "
+        "from, T682). It decides no write on its own; a link at the top is unlinked, never "
+        "entered, and a root that is a link is `remove_tree()`'s to refuse"
+    ),
     ("rmtree.py", "_empty_stoppably"): (
         "walks the tree a press is deleting (the old map data, the pathfinding tiles) so it "
         "can ask the claim's `stop()` before each unlink and rmdir. It IS a write, and it is "
@@ -2692,9 +2706,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "precondition's own sentence; reporting a scripts-are-there when the folder could not "
         "be read is the one thing that would be worse, and this cannot"
     ),
-    ("apply.py", "_undeploy"): (
-        "re-derives what a `deploy` step put on disk from the clone's own `src` listing, so it "
-        "removes exactly those names; reads a folder this app filled, decides no write into it"
+    ("apply.py", "_deploy_files"): (
+        "lists the clone's own `src` folder (links never walked) to name the files a `deploy` "
+        "step will write, for the deploy record (T684); reads a folder this app just cloned, "
+        "and what is written or removed is decided by that record, not by this listing"
+    ),
+    ("platform.py", "_proc_listener"): (
+        "lists `/proc` to name the program holding a taken port in Start's sentence (T671); "
+        "best effort and read-only, an unreadable entry is skipped, and it never decides a "
+        "write or a refusal: the refusal comes from the bind probe, not from this name"
     ),
     ("apply.py", "_patches"): (
         "resolves a manifest's `patch.file` glob to real paths; a pattern that matches nothing "
@@ -2742,13 +2762,15 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "mount from an empty mount point; its own `except OSError` logs and answers None, "
         "which is the honest 'cannot tell' this probe is allowed to give"
     ),
-    ("networking.py", "_realmlist_candidates"): (
-        "lists a client's `Data/` (found whatever its case, T261) for its locale folders, "
-        "and finds `realmlist.wtf` in each the same way, to find the file(s) to write: the "
-        "first for `write_client_realmlist()`, every one for T181's "
+    ("networking.py", "_data_subfolders"): (
+        "lists a client's `Data/` (found whatever its case, T261) for its locale folders; "
+        "`_realmlist_candidates()` finds `realmlist.wtf` in each the same way, to find the "
+        "file(s) to write: the first for `write_client_realmlist()`, every one for T181's "
         "`write_ready_to_play_realmlists()`, which is only ever handed a ready-to-play "
-        "client. Finding none falls back to `Data/enUS/` under the names already on disk, "
-        "and each write is to a named file. A `Data/` that cannot be listed offers none"
+        "client, and which also gives a retail locale folder without one a new file "
+        "(T665, never inside a link). Finding none falls back to `Data/enUS/` under the "
+        "names already on disk, and each write is to a named file. A `Data/` that cannot "
+        "be listed offers none"
     ),
     ("logsnap.py", "_prune"): (
         "lists this install's own snapshots in the app's logs directory to keep the newest "

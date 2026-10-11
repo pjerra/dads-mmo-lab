@@ -545,6 +545,22 @@ def _docker_cli_is_the_plain_name(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_docker_is_installed_on_this_linux_box(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provisioning tests see a machine with no Docker on it, whatever this one has (T700).
+
+    `platform.linux_docker_on_board()` reads the systemd unit directories and
+    Docker Desktop's install paths, so without this the install-path tests pass or
+    fail on the developer's own docker-ce. `test_docker_consent.py` sets what a
+    test needs.
+    """
+    monkeypatch.setattr(platform, "_SYSTEMD_UNIT_DIRS", ())
+    monkeypatch.setattr(platform, "_docker_desktop_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_snap_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_rootless_paths", lambda: ())
+    monkeypatch.setattr(platform, "_docker_cli_context", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _compose_is_new_enough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every Start asks `docker compose version` first (T658); a unit test's Compose is new enough.
 
@@ -1375,6 +1391,23 @@ def _no_unit_test_holds_a_real_distro_open(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(wsl, "_spawn", refuse)
     monkeypatch.setattr(wsl, "_run_release", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_unit_test_binds_a_real_host_port_at_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Start binds this server's host ports first (T671); a unit test's are free.
+
+    Without this, a test driving `Controller.start()` would bind 3724, 8085 and 3306 on
+    the machine running the suite, and fail wherever one is taken. The tests about the
+    probe itself (`tests/test_start_ports.py`) put the real `platform.bind_tcp` back.
+    """
+    from yulon import controller
+
+    monkeypatch.setattr(
+        controller,
+        "bind_host_port",
+        lambda host, port: platform.PortBind(host, port, "free", "not bound in a unit test"),
+    )
 
 
 @pytest.fixture(autouse=True)

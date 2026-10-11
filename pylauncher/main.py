@@ -338,7 +338,7 @@ def close_refusal(window: object, *, strict: bool = False) -> str | None:
     the ones opened afterwards.
     """
     reasons = _busy_reasons(window, strict=strict)
-    return str(reasons[0]) if reasons else None
+    return reasons[0] if reasons else None
 
 
 def announce_previous_update(
@@ -573,6 +573,7 @@ def build_window() -> object:
     )
 
     from yulon import __version__, forgetting, play_client, ui_settings
+    from yulon.catalog import native
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -681,6 +682,7 @@ def build_window() -> object:
         # T690: why the player chose "Quit anyway" (empty until then). `main()` leaves through
         # the forced exit, without joining the jobs it cuts off, when this is set.
         yulon_forced_quit: str
+        yulon_removal_pending: Callable[[], bool]
         yulon_open_settings: Callable[[], None]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
@@ -781,6 +783,8 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
         # T601 level 2: "Bring from another computer…" on each tile.
         move_in=move_in_for_app(catalog),
+        # T702: the drive is judged as soon as the server folder is chosen.
+        ready_check=native.early_refusal,
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
@@ -1557,7 +1561,16 @@ def build_window() -> object:
             # `save_state()`'s `OSError` is caught by `purge.run()` and reported
             # as a warning on a finished uninstall.
             services.uninstall.forget = _forget_live_record(game, server_dir)
-        view = ControllerView(entry, services)
+        # T676 round 3: the smoke run proves the window BUILDS, not that the
+        # servers answer. A polling tab asks docker at once (ps, inspect, the
+        # account read: 24 calls for six servers, measured), and on Docker
+        # Desktop each can take seconds inside the 60 s the update allows.
+        # `status_poll_ms=0` is the tab's own "not polled at all" switch.
+        view = (
+            ControllerView(entry, services, status_poll_ms=0)
+            if in_smoke_test()
+            else ControllerView(entry, services)
+        )
         view.uninstalled.connect(on_uninstalled)
         view.client_dir_changed.connect(on_client_dir_changed)
         view.play_client_dir_changed.connect(on_play_client_dir_changed)
@@ -1669,7 +1682,7 @@ def build_window() -> object:
                 client_dir=cd,
                 wsl_distro=known.wsl_distro if known else None,
                 play_client_dir=play,
-            )
+            ).keeping_unknown_fields_of(known)
         )
         _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, known.wsl_distro if known else None, play)
@@ -1708,7 +1721,7 @@ def build_window() -> object:
         state.remember(
             KnownInstall(
                 game=game, server_dir=sd, client_dir=cd, wsl_distro=distro, play_client_dir=play
-            )
+            ).keeping_unknown_fields_of(known)
         )
         _warn_unless_remembered(state, window)
         add_controller(game, sd, cd, distro, play)
@@ -2380,6 +2393,8 @@ def build_window() -> object:
     window.yulon_logs_view = logs_view
     window.yulon_catalog_view = catalog_view
     window.yulon_close_refusal = lambda strict=False: close_refusal(window, strict=strict)
+    # T690: a removal waiting for its Stop; quitting drops it, and the tray's box says so.
+    window.yulon_removal_pending = lambda: bool(removal_pending)
     assert isinstance(window, QWidget)
     return window
 
@@ -2416,9 +2431,9 @@ def provision_headless() -> int:
       2  not ready, and what remains needs a human
 
     On Linux, 2 is the *expected* outcome rather than a fault: there is nobody
-    here to ask about joining the docker group, and the app never makes a
-    root-equivalent change with nobody asked, so the engine is installed and
-    the one step only the user may take is printed for them to run.
+    here to ask, and the app never runs anything as root with nobody asked (T700),
+    so nothing is installed or started and the commands are printed for the user
+    to run.
     """
     # The same defect's other half: the human-readable lines below put that same
     # step text through `logging`, and a cp1252 stream cannot encode it either.
@@ -2632,9 +2647,21 @@ def main() -> int:
     # reads state.json and starts the update check, and a second copy doing
     # either beside the first is the race this exists to stop. After the theme,
     # so the one box a second launch can show looks like the app.
-    instance = InstanceGuard(platform.config_dir())
+    #
+    # T676: NOT under the smoke run. `selfupdate.stage.smoke_test()` starts the
+    # staged build while the Yu'lon doing the update is open and holds this lock,
+    # with the same config dir, so the claim answered "raised" and the run left
+    # before `build_window()`: the check passed a build whose window was never
+    # made. The smoke run writes nothing (`in_smoke_test()`) and runs no event
+    # loop, so it is not the second copy this guard exists to stop; it neither
+    # takes the lock nor asks the open copy anything.
+    instance = None if in_smoke_test() else InstanceGuard(platform.config_dir())
     # T540: a `--tray` (sign-in) start only asks whether Yu'lon is there.
-    claim = instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
+    claim = (
+        None
+        if instance is None
+        else instance.claim(verb="present" if "--tray" in sys.argv[1:] else "raise")
+    )
     if claim == "raised":
         return 0
     # T540: the sign-in entry (`autostart`) starts Yu'lon with `--tray`: hidden
@@ -2658,14 +2685,17 @@ def main() -> int:
     platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
-    # Looked up at each call, not bound here, so a test can wrap it.
-    instance.raise_requested.connect(lambda token: _bring_to_front(window, token))
+    if instance is not None:
+        # Looked up at each call, not bound here, so a test can wrap it.
+        instance.raise_requested.connect(lambda token: _bring_to_front(window, token))
     # What `main()` returns, kept outside the `try` for the forced exit below,
     # which has to leave with the same answer the return would have given.
     code = 0
     try:
-        if os.environ.get("YULON_SMOKE_TEST"):
-            # CI / packaging check: prove the frozen app can build its window, then leave.
+        if instance is None:
+            # CI / packaging check, and the self-update's proof run (T676: with no
+            # instance claim, so it gets here even while the old copy is open):
+            # prove the frozen app can build its window, then leave.
             logger.info("YULON_SMOKE_TEST set: window built, exiting 0")
             return 0
 
@@ -2688,36 +2718,63 @@ def main() -> int:
         code = int(app.exec())
         return code
     finally:
-        # The window is closed and nothing will pump the socket again; the lock
-        # is kept until the jobs are joined, so a relaunch waits for them (T152).
+        _leave_after_the_loop(window, instance, code)
+
+
+def _leave_after_the_loop(window: object, instance: Any, code: int) -> None:
+    """`main()`'s exit, once the event loop has ended: join the jobs, or leave without them.
+
+    A function of its own so a test drives the choice below with a real window and a real
+    tab. "Quit anyway" (T690) cuts the work off on the player's word and skips
+    `ControllerView.shutdown()`'s wait of up to `STOP_GRACE_SECONDS + 30` seconds per tab.
+    Every other exit joins, a quit over a Stop included: the window is already gone and the
+    process stays for the minute or two the Stop takes, so that the Stop completes.
+    """
+    # The window is closed and nothing will pump the socket again; the lock
+    # is kept until the jobs are joined, so a relaunch waits for them (T152).
+    if instance is not None:  # the smoke run holds no single-instance guard (T676)
         instance.stop_answering()
-        forced = str(getattr(window, "yulon_forced_quit", "") or "")
-        stuck = _stop_for_forced_quit(window) if forced else _stop_background_threads(window)
-        # Before the forced exit as well: `os._exit` would leave the file to the
-        # dead-pid check, which works, but a clean release costs nothing.
+    quick = _quick_exit_reason(window)
+    stuck = _stop_without_joining(window, quick) if quick else _stop_background_threads(window)
+    # Before the forced exit as well: `os._exit` would leave the file to the
+    # dead-pid check, which works, but a clean release costs nothing.
+    if instance is not None:
         instance.release()
-        if stuck:
-            # A job is still running and nothing can stop it (T113). Returning
-            # from here hands its QThread to interpreter teardown, and Qt aborts
-            # there: exit 134, a crash report on Windows and macOS. The window is
-            # already closed and nothing is saved at close (state.json is written
-            # at each action), so leaving now loses nothing a return would keep.
-            failure = sys.exc_info()[1]
-            if failure is not None:
-                logger.error("the launcher ended on an exception", exc_info=failure)
-                code = 1
-            _leave_with_jobs_still_running(code, stuck)
+    if stuck:
+        # A job is still running and nothing can stop it (T113). Returning
+        # from here hands its QThread to interpreter teardown, and Qt aborts
+        # there: exit 134, a crash report on Windows and macOS. The window is
+        # already closed and nothing is saved at close (state.json is written
+        # at each action), so leaving now loses nothing a return would keep.
+        failure = sys.exc_info()[1]
+        if failure is not None:
+            logger.error("the launcher ended on an exception", exc_info=failure)
+            code = 1
+        _leave_with_jobs_still_running(code, stuck)
 
 
-def _stop_for_forced_quit(window: object) -> list[str]:
-    """The exit after "Quit anyway" (T690): stop what stops at once, wait for nothing.
+def _quick_exit_reason(window: object) -> str:
+    """Why this exit must not join the jobs, or "" for an ordinary one (T690).
+
+    Only "Quit anyway". A Stop in flight is JOINED: it is Python-driven (wait for the world
+    to load, save, `compose stop`, stop by name) and its `compose stop` writes to captured
+    pipes, so leaving before it ends cuts the sequence short.
+    """
+    forced = str(getattr(window, "yulon_forced_quit", "") or "")
+    if forced:
+        return f"work Quit anyway cut off: {forced}"
+    return ""
+
+
+def _stop_without_joining(window: object, label: str) -> list[str]:
+    """The exit that waits for nothing: stop what stops at once, and name what is left (T690).
 
     `_stop_background_threads()` joins each tab for up to `STOP_GRACE_SECONDS + 30` seconds
-    (`ControllerView.shutdown()`), and that join is what held a quit past the closed window
-    for minutes (measured). The player chose to cut that work off, so nothing is joined: the
-    launchers and panels are told to stop, the input sources stop, and the answer names what
-    was cut off, which sends `main()` through `_leave_with_jobs_still_running()` (the forced
-    exit that skips Qt's teardown, which would abort on a running thread).
+    (`ControllerView.shutdown()`). Here the launchers and panels are told to stop, the input
+    sources stop, and the answer is `label`, which sends `_leave_after_the_loop()` through
+    `_leave_with_jobs_still_running()` (the forced exit that skips Qt's teardown, which would
+    abort on a running thread). The jobs' own children, a restore's `docker exec` or a Stop's
+    `docker compose stop`, are not signalled: they carry on.
     """
     close_launchers(window)
     for panel in getattr(window, "yulon_log_panels", []):
@@ -2726,8 +2783,7 @@ def _stop_for_forced_quit(window: object) -> list[str]:
         source = getattr(window, name, None)
         if source is not None:
             source.stop()
-    reason = str(getattr(window, "yulon_forced_quit", "") or "running work")
-    return [f"work Quit anyway cut off: {reason}"]
+    return [label]
 
 
 def _bring_to_front(window: Any, token: str = "") -> None:

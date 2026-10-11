@@ -49,6 +49,7 @@ from yulon import (
     forgetting,
     links,
     module_answers,
+    module_deploys,
     module_moves,
     platform,
     play_client,
@@ -699,10 +700,15 @@ class ApplyRefusal(ApplyError, SaidByYulon):
 
 
 DEFERRED_EXISTS_NOTE = (
-    "not checked against the database yet: on a move to this computer the characters are put "
-    "in after the modules, and this answer is the one the old server already used"
+    "not checked against the database, and nothing checks it later: on a move to this "
+    "computer the modules go in before the old server's characters. It is the answer the old "
+    "server used; after the move, make sure the character it names is on the Characters tab, "
+    "or the module will do nothing"
 )
-"""What a move-in's module install says in place of the does-it-exist check (T679)."""
+"""What a move-in's module install says in place of the does-it-exist check (T679).
+
+No step re-asks the question once the data is in, so the note promises no later check:
+it says what was skipped and what the player looks at after the move."""
 
 _STARTED_DB_LINE = "started the database alone; the world server was left stopped"
 
@@ -995,6 +1001,10 @@ class ClientCopy:
             out["addon"] = self.addon
         return out
 
+
+EARLIER_CONF_SUFFIX = ".yulon-earlier"
+"""Appended to a module `.conf` a FIRST install found already there (T689): AzerothCore loads
+module confs by their exact names, so the world never reads it, and its settings stay readable."""
 
 ASIDE_SUFFIX = ".yulon-module-old"
 """Appended to the name of a player's file a module's client file takes the place of.
@@ -2697,6 +2707,9 @@ class _Log:
     # from then on a failed first install keeps its folder (and its record),
     # because the database may hold part of what it sent.
     sql_attempted: bool = False
+    # T684 review round 2. Set by `_deploy()` once the deploy record names this press's
+    # files: a first install refused before its SQL takes them back by that record.
+    deployed: bool = False
 
 
 TakenBack = Literal["taken", "gone", "kept"]
@@ -3324,6 +3337,8 @@ def check_answer(prompt: Prompt, value: str) -> str:
     text = value.strip()
     if not text:
         return "this cannot be left empty"
+    if "\n" in value or "\r" in value:
+        return "this must be typed on one line"
     if prompt.kind == "character":
         # T637: a GUID (or an account id) is a uint32, and a list is those joined by commas,
         # typed as the server reads them. Every piece is held to the `int` rule.
@@ -4018,15 +4033,17 @@ class Applier:
         try:
             self._refuse_checkout_links(manifest, clone, "install", vals)
             self._refuse_a_clash(manifest, clone)
+            self._refuse_a_deploy_clash(manifest, clone)
             if complete is not None:
                 self._refuse_a_players_addon(manifest, replace_addons, log)
             self._refuse_links(manifest, clone)
             self._check_hold()
-            self._deploy(manifest, clone, log)
+            self._deploy(manifest, clone, log, first=first)
             self._check_hold()
             self._folders(manifest, log)
             self._check_hold()
             self._patches(manifest, clone, vals, "install", log)
+            self._rehash_deployed(manifest)
             # Both SQL passes are refused as one, BEFORE either runs: the guard's
             # own sentence says no rows were written, and after the install-time
             # pass that would be false of the configure-time one.
@@ -4038,6 +4055,11 @@ class Applier:
                 # D5: nothing is undone in the database, and the report says so.
                 log.skipped.append(PUT_BACK_KEPT_SQL)
         except BaseException as exc:
+            # Review round 2 of T684: a FIRST install refused after its deploy and before
+            # any SQL (the running-world guard, mostly) takes its deployed files back and
+            # puts the player's set-aside files back, with the record entry.
+            if first and not log.sql_attempted and log.deployed:
+                self._take_back_a_refused_deploy(manifest, exc)
             # T596 (Codex review): a FIRST install from a link or a folder that is
             # refused before any SQL was sent -- a link in the checkout, a clash,
             # the running-world guard, an unreadable ledger, a failed backup --
@@ -4051,7 +4073,7 @@ class Applier:
                 # D5: a put-back runs no SQL, and its report says these were kept.
                 module_moves.mark_sql(self.server_dir, module_moves.key(manifest.type, manifest.id))
         self._check_hold()
-        self._conf(manifest, clone, vals, log)
+        self._conf(manifest, clone, vals, log, first=first)
         # Then the configure-time steps, as this item's first configure
         # (`_whens`): a value the person answered is written now, not left for
         # a `configure()` nothing calls. After `_conf()`, because a configure
@@ -4059,6 +4081,7 @@ class Applier:
         # which is the state a later `configure()` always finds.
         self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
+        self._rehash_deployed(manifest)
         if first_configure_sql and restore is None:
             self._sql(manifest, clone, vals, "configure", log)
         try:
@@ -4589,11 +4612,26 @@ class Applier:
         for item_id in named:
             manifest = load(item_id)
             last = self.last_update(manifest) if manifest is not None else None
-            if manifest is None or last is None:
+            if manifest is None:
+                # No manifest: a folder put into modules/ by hand, with no Modules-tab
+                # row to press Remove on (review round 2).
                 other.append(
-                    f"The build stopped on an error in {item_id}. {item_id} was not updated since "
-                    f"your last build that worked, so Yu'lon did not change it. Your server is "
-                    f"still running the build it had."
+                    f"The build stopped on an error in {item_id}. Yu'lon did not install "
+                    f"{item_id}, so it did not change it. Your server is still running the "
+                    f"build it had. To build without it, move the folder modules/{item_id} out "
+                    f"of your server folder, then press {_REBUILD}."
+                )
+                continue
+            if last is None:
+                # Not "was not updated since your last build that worked": a module
+                # installed since that build was never built at all (T689, City Bots).
+                # What is true either way: there is no update of it to put back, and
+                # Remove is the press that builds without it.
+                other.append(
+                    f"The build stopped on an error in {item_id}. Yu'lon has no update of "
+                    f"{item_id} to put back, so it did not change it. Your server is still "
+                    f"running the build it had. To build without {item_id}, press Remove on its "
+                    f"row, then press {_REBUILD}."
                 )
                 continue
             if last.source != "ledger":
@@ -4975,6 +5013,7 @@ class Applier:
         self._refuse_checkout_links(manifest, clone, "configure", vals)
         self._check_hold()
         self._patches(manifest, clone, vals, "configure", log)
+        self._rehash_deployed(manifest)
         self._sql(manifest, clone, vals, "configure", log)
         self._check_hold()
         self._conf(manifest, clone, vals, log)
@@ -5039,9 +5078,11 @@ class Applier:
                     f"that {manifest.name} is installed could not be cleared ({problem}), so its "
                     "row will keep reading Installed"
                 )
-        for step in manifest.deploy:
-            self._check_hold()
-            self._undeploy(step, clone, log)
+        self._check_hold()
+        if not self._undeploy_recorded(manifest, log):
+            for step in manifest.deploy:
+                self._check_hold()
+                self._undeploy(step, clone, log)
         self._check_hold()
         self._unfolders(manifest, log)
         # T67, and BEFORE the `rmtree` below: the receipts that say which client
@@ -5171,6 +5212,24 @@ class Applier:
                     f"{', '.join(carried)}, and Yu'lon's add-on route installs add-ons alone."
                 )
         return finished
+
+    def _take_back_a_refused_deploy(self, manifest: Manifest, exc: BaseException) -> None:
+        """Undo a refused first install's deploy by its record, and say so (review round 2).
+
+        Never raises: the refusal being raised is what the player must read. A hold lost
+        meanwhile stops the take-back at its first step, and then nothing is claimed.
+        """
+        try:
+            took = self._undeploy_recorded(manifest, _Log())
+        except Exception as failed:  # noqa: BLE001 - the refusal is what is reported
+            logger.warning(f"could not take back {manifest.id}'s deployed files: {failed}")
+            return
+        if took and isinstance(exc, ApplyError):
+            exc.args = (
+                f"{exc} The files {manifest.name} had copied into your server folder were "
+                "taken back, and any of yours it had set aside are in place again.",
+                *exc.args[1:],
+            )
 
     def _take_back_a_first_install(
         self, clone: Path, first: bool, exc: BaseException, *, completing: bool
@@ -5855,7 +5914,7 @@ class Applier:
 
     # -- steps -------------------------------------------------------------
 
-    def _deploy(self, manifest: Manifest, clone: Path, log: _Log) -> None:
+    def _deploy(self, manifest: Manifest, clone: Path, log: _Log, *, first: bool = False) -> None:
         """Copy each `deploy` step's source in the checkout into the server folder.
 
         Never through a link in the checkout (T530): `_refuse_checkout_links()`
@@ -5863,24 +5922,334 @@ class Applier:
         of every folder it lists (`_stop_at_links`) and of the way to the source,
         because `copytree` follows a symlink and, on Python 3.11 under Windows,
         walks into a junction as a folder.
+
+        T684: every file the steps write is recorded (`module_deploys`) BEFORE
+        anything is moved or copied, and that record is what Remove and the next
+        Update take back. A file of the player's at one of those paths is moved
+        aside first (`ASIDE_SUFFIX`), never overwritten; Remove puts it back. A
+        file the previous deploy wrote and this one does not (upstream renamed or
+        dropped it) is taken back after the copy. Without a record nobody can tell
+        the module's files from the player's -- an install made before the record
+        existed, or a record that cannot be read -- so nothing is set aside or
+        taken back on a guess, and the copy runs as it always did.
         """
+        if not manifest.deploy:
+            return  # nothing to copy, and so nothing to record
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        before = ledger.get(item) if ledger is not None else None
+        if before is None and ledger is not None and first:
+            before = module_deploys.Deployed()
+        if ledger is None:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: the record of which files modules put in your "
+                f"server folder could not be read, so {manifest.name}'s files were copied without "
+                "setting aside any of yours they replace"
+            )
+        fold = self._fold()
+        planned: list[tuple[Deploy, Path, Path]] = []
+        sources: dict[str, Path] = {}
+        roots: list[str] = []
         for step in manifest.deploy:
             src = clone / step.src
             target = self._deploy_target(step.src, step.dest)
             _look_again(clone, step.src)
+            if not (src.is_dir() or src.is_file()):
+                raise ApplyError(f"deploy source missing in clone: {src}")
+            sources.update(self._deploy_files(step, src, target))
+            roots.append(_posix_rel(self.server_dir, target if src.is_dir() else target.parent))
+            planned.append((step, src, target))
+        files = sorted(sources)
+        asides = dict(before.asides) if before is not None else {}
+        moves: list[tuple[str, Path, Path]] = []
+        if before is not None:
+            mine = {fold(rel) for rel in before.files}
+            held = {fold(rel) for rel, aside in asides.items() if self._still_aside(aside)}
+            for rel in files:
+                path = self.server_dir / rel
+                # A set-aside the record planned and a killed process never made: the
+                # file at the name is still the player's, whatever the record lists.
+                unmoved = rel in asides and not self._still_aside(asides[rel])
+                if unmoved and not (path.is_file() or path.is_symlink()):
+                    asides.pop(rel)
+                if (not unmoved and fold(rel) in mine | held) or not (
+                    path.is_file() or path.is_symlink()
+                ):
+                    continue
+                aside = _free_aside(path)
+                asides[rel] = _posix_rel(self.server_dir, aside)
+                moves.append((rel, path, aside))
+            # The record names every file this press may write, with the bytes it is
+            # about to write, and every move it is about to make, BEFORE any happens.
+            planned_files = dict(before.files)
+            planned_files.update({rel: sha256_of(src) for rel, src in sources.items()})
+            problem = module_deploys.write(
+                self.server_dir,
+                item,
+                module_deploys.Deployed(
+                    files=planned_files,
+                    roots=tuple(sorted(set(before.roots) | set(roots))),
+                    asides=asides,
+                ),
+            )
+            if problem:
+                # Nothing is moved that the record cannot name: the copy overwrites,
+                # as every install before the record did, and the report says so.
+                log.skipped.append(
+                    f"{module_deploys.DEPLOYS_FILE}: {problem}, so {manifest.name}'s files were "
+                    "copied without setting aside any of yours they replace"
+                )
+                before, moves, asides = None, [], {}
+            else:
+                log.deployed = True
+        for number, (rel, path, aside) in enumerate(moves):
+            try:
+                os.replace(path, aside)
+            except OSError as exc:
+                # Review round 2: the record must say only what happened. The moves not
+                # made leave it, and nothing is copied over the file that did not move.
+                for undone, _path, _aside in moves[number:]:
+                    asides.pop(undone, None)
+                assert before is not None  # moves are only planned with a record
+                module_deploys.write(
+                    self.server_dir,
+                    item,
+                    module_deploys.Deployed(
+                        files=before.files,
+                        roots=tuple(sorted(set(before.roots) | set(roots))),
+                        asides=asides,
+                    ),
+                )
+                raise ApplyRefusal(
+                    f"Your {rel} could not be set aside ({exc}), so none of {manifest.name}'s "
+                    f"files were copied and your file is as it was. Close whatever has it "
+                    f"open, then install {manifest.name} again."
+                ) from exc
+            log.done.append(
+                f"set aside your {rel} as {aside.name}: {manifest.name} has a file of that name"
+            )
+        for step, src, target in planned:
             if src.is_dir():
                 shutil.copytree(
                     src, target, dirs_exist_ok=True, ignore=_stop_at_links(manifest, clone)
                 )
-            elif src.is_file():
+            else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, target)
-            else:
-                raise ApplyError(f"deploy source missing in clone: {src}")
             log.done.append(f"deploy {step.src} → {_rel(self.server_dir, target)}")
             for old, new in step.rename:
                 (target / old).replace(target / new)
                 log.done.append(f"rename {old} → {new}")
+        if ledger is None:
+            return
+        all_roots = set(roots) | (set(before.roots) if before is not None else set())
+        if before is not None:
+            # What the previous deploy wrote and this one did not: upstream renamed or
+            # dropped it, and left in place it would keep loading (catalog audit C4).
+            # Compared case-blind where the filesystem is: `Foo.lua` -> `foo.lua` there
+            # is one file, and taking back the old name would delete the new one.
+            known = module_deploys.Deployed(
+                files=before.files, roots=tuple(all_roots), asides=asides
+            )
+            now = {fold(rel) for rel in files}
+            for rel in sorted(before.files):
+                if fold(rel) not in now:
+                    self._take_back_deployed(rel, known, log)
+                    asides.pop(rel, None)
+        record = module_deploys.Deployed(
+            files={rel: _sha_or_blank(self.server_dir / rel) for rel in files},
+            roots=tuple(sorted(all_roots)),
+            asides=asides,
+        )
+        problem = module_deploys.write(self.server_dir, item, record)
+        if problem:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: {problem}, so removing {manifest.name} will "
+                "take back its files by the list in its checkout"
+            )
+        else:
+            log.deployed = True
+
+    def _fold(self) -> Callable[[str], str]:
+        """How record paths compare here: case-blind where the filesystem is (review round 2)."""
+        if module_deploys.folds_case(self.server_dir):
+            return str.casefold
+        return str
+
+    def _still_aside(self, aside: str) -> bool:
+        """Is the player's file really at its recorded aside? A move the record planned and a
+        killed process never made is no aside (review round 2)."""
+        return os.path.lexists(self.server_dir / aside)
+
+    def _rehash_deployed(self, manifest: Manifest) -> None:
+        """Record the bytes this app's own patches left in the deployed files (review round 2).
+
+        Run after each pass of patches, so a file is "changed by the player" only when its
+        bytes differ from what this app last wrote.
+        """
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        record = ledger.get(item) if ledger is not None else None
+        if record is None:
+            return
+        files = {rel: _sha_or_blank(self.server_dir / rel) for rel in record.files}
+        if files != dict(record.files):
+            module_deploys.write(
+                self.server_dir,
+                item,
+                module_deploys.Deployed(files=files, roots=record.roots, asides=record.asides),
+            )
+
+    def _refuse_a_deploy_clash(self, manifest: Manifest, clone: Path) -> None:
+        """Refuse a deploy onto a file ANOTHER module's deploy put there (review round 2).
+
+        T262's rule for the client, for the server folder: setting the other module's
+        file aside as if it were the player's would put the wrong file back at either
+        Remove. Both modules are named and nothing of this one is deployed.
+        """
+        ledger = module_deploys.read(self.server_dir)
+        if not ledger:
+            return
+        fold = self._fold()
+        mine: set[str] = set()
+        for step in manifest.deploy:
+            src = clone / step.src
+            if src.is_dir() or src.is_file():
+                target = self._deploy_target(step.src, step.dest)
+                mine.update(fold(rel) for rel in self._deploy_files(step, src, target))
+        item = module_deploys.key(manifest.type, manifest.id)
+        clashes: dict[str, list[str]] = {}
+        for other, record in ledger.items():
+            if other == item:
+                continue
+            for rel in record.files:
+                if fold(rel) in mine and os.path.lexists(self.server_dir / rel):
+                    clashes.setdefault(other.partition("/")[2], []).append(rel)
+        if not clashes:
+            return
+        said = "; ".join(
+            f"{', '.join(sorted(rels))}, which {other} put there"
+            for other, rels in sorted(clashes.items())
+        )
+        raise ApplyRefusal(
+            f"{manifest.id} would put a file into your server folder where another module's "
+            f"file already is: {said}. Remove {' and '.join(sorted(clashes))} first, then "
+            f"install {manifest.id}. Nothing of {manifest.id} was deployed."
+        )
+
+    def _deploy_files(self, step: Deploy, src: Path, target: Path) -> dict[str, Path]:
+        """The server-relative paths `step` writes, each with its source: every file under
+        `src`, renamed as the step says."""
+        if src.is_file():
+            return {_posix_rel(self.server_dir, target): src}
+        out: dict[str, Path] = {}
+        for folder, dirs, names in os.walk(src):
+            # Links are refused by the copy itself (`_stop_at_links`); never walked here.
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(folder, d))]
+            for name in names:
+                rel = PurePosixPath(Path(folder, name).relative_to(src).as_posix())
+                for old, new in step.rename:
+                    old_p = PurePosixPath(old)
+                    if rel == old_p:
+                        rel = PurePosixPath(new)
+                    elif rel.is_relative_to(old_p):
+                        rel = PurePosixPath(new) / rel.relative_to(old_p)
+                out[_posix_rel(self.server_dir, target / rel)] = Path(folder, name)
+        return out
+
+    def _take_back_deployed(self, rel: str, record: module_deploys.Deployed, log: _Log) -> None:
+        """Delete one recorded deploy file, put back the player's file it replaced, tidy up.
+
+        Never through a link: a folder on the way that is a link now (the player
+        swapped `lua_scripts/lib` for one) is not this app's to walk into. A folder
+        the file leaves empty goes too, up to the folder the step deployed into,
+        which stays (it may be `lua_scripts`, which every script shares).
+        """
+        path = self.server_dir / rel
+        link = next(
+            (
+                p
+                for p in reversed(path.parents)
+                if p.is_relative_to(self.server_dir) and p != self.server_dir and p.is_symlink()
+            ),
+            None,
+        )
+        if link is not None:
+            log.skipped.append(
+                f"{rel}: {_rel(self.server_dir, link)} is a link now, so nothing was deleted "
+                "through it"
+            )
+            return
+        recorded = record.files.get(rel, "")
+        if path.is_file() and not path.is_symlink() and recorded and sha256_of(path) != recorded:
+            # Review round 2: not the bytes this app left there, so not this app's to
+            # delete. The player's own file it replaced, if any, stays aside beside it.
+            log.skipped.append(
+                f"{rel}: kept because you changed it after the module put it there"
+                + (
+                    f"; your earlier file is still set aside as {record.asides[rel]}"
+                    if rel in record.asides
+                    else ""
+                )
+            )
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            log.done.append(f"rm {rel}")
+        elif path.is_dir():
+            log.skipped.append(f"{rel}: a folder is there now, not the module's file; left")
+            return
+        aside = record.asides.get(rel)
+        if aside:
+            held = self.server_dir / aside
+            if (held.is_file() or held.is_symlink()) and not os.path.lexists(path):
+                os.replace(held, path)
+                log.done.append(f"put back your {rel}")
+            elif os.path.lexists(held):
+                log.skipped.append(f"{rel}: your own file is still set aside as {aside}")
+            else:
+                log.skipped.append(f"{rel}: your own file was set aside as {aside}, which is gone")
+        root = record.root_of(rel)
+        if root is None:
+            return
+        stop = self.server_dir / root
+        folder = path.parent
+        while folder != stop and folder.is_relative_to(stop):
+            try:
+                folder.rmdir()
+            except OSError:
+                break
+            folder = folder.parent
+
+    def _undeploy_recorded(self, manifest: Manifest, log: _Log) -> bool:
+        """Take back what the record says `manifest` deployed; False with no record (T684)."""
+        item = module_deploys.key(manifest.type, manifest.id)
+        ledger = module_deploys.read(self.server_dir)
+        record = ledger.get(item) if ledger is not None else None
+        if record is None:
+            return False
+        for rel in sorted(record.files):
+            self._check_hold()
+            self._take_back_deployed(rel, record, log)
+        # A player's file set aside at a path the record no longer lists.
+        for rel in sorted(set(record.asides) - set(record.files)):
+            self._take_back_deployed(rel, record, log)
+        # The OLD name of a renamed file too (T104): an install made before a rename
+        # was added to the manifest holds the file under that name, live.
+        for step in manifest.deploy:
+            target = self._deploy_target(step.src, step.dest)
+            for old, _new in step.rename:
+                path = target / old
+                rel = _posix_rel(self.server_dir, path)
+                if rel not in record.files and (path.is_file() or path.is_symlink()):
+                    self._take_back_deployed(rel, record, log)
+        problem = module_deploys.write(self.server_dir, item, None)
+        if problem:
+            log.skipped.append(
+                f"{module_deploys.DEPLOYS_FILE}: Yu'lon could not forget {manifest.id}'s "
+                f"files ({problem})"
+            )
+        return True
 
     def _folders(self, manifest: Manifest, log: _Log) -> None:
         """Make each `folders` entry, empty, where it is not already a folder (T587).
@@ -5955,15 +6324,30 @@ class Applier:
             # manifest after installs exist -- accountwide's Ashen Order script,
             # `.lua` -> `.lua.unused` -- leaves every earlier install holding the
             # OLD name, and deleting only the new one left that live script
-            # behind in silence. `_rm()` names what it found and skips what is
-            # not there, so the report says which of the two this install had.
-            deployed = {entry.name for entry in src.iterdir()}
-            for old, new in step.rename:
-                old_parts, new_parts = Path(old).parts, Path(new).parts
-                if len(old_parts) == 1 and old_parts[0] in deployed:
-                    deployed.add(new_parts[0])
-            for name in sorted(deployed):
-                self._rm(target / name, log)
+            # behind in silence.
+            #
+            # T684: FILES, never a whole folder. This is the install made before
+            # the deploy record, and it used to delete each top-level NAME, so
+            # Battle Pass's `lib/` took the player's own libraries with it.
+            listed = {PurePosixPath(rel) for rel in self._deploy_files(step, src, target)}
+            listed |= {
+                PurePosixPath(_posix_rel(self.server_dir, target / old))
+                for old, _new in step.rename
+            }
+            folders: set[Path] = set()
+            for rel in sorted(listed):
+                path = self.server_dir / rel
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                    log.done.append(f"rm {rel}")
+                    folders.update(
+                        p for p in path.parents if p.is_relative_to(target) and p != target
+                    )
+            for folder in sorted(folders, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass  # it holds something of the player's
             return
         if target.is_file():
             self._rm(target, log)
@@ -6006,14 +6390,22 @@ class Applier:
             files = sorted(base.glob(patch.file)) if _is_glob(patch.file) else [base / patch.file]
             spelled = _lua_spelling(manifest, vals) if patch.file.endswith(".lua") else vals
             replacement = _render(patch.replace, spelled, f"patch {patch.file}")
+            matched = False
             for path in files:
                 if patch.in_clone:
                     _look_again(clone, path.relative_to(clone).as_posix())
                 if not path.is_file():
                     raise ApplyError(f"patch target missing: {path}")
-                changed = _apply_patch(path, patch, replacement)
-                log.done.append(
-                    f"patch {_rel(base, path)} ({'changed' if changed else 'already applied'})"
+                outcome = _apply_patch(path, patch, replacement)
+                if outcome != "did not match":
+                    matched = True
+                    log.done.append(f"patch {_rel(base, path)} ({outcome})")
+            if not matched:
+                # T689: said, not logged as "already applied". A glob is one patch, so
+                # it is reported once, when no file it names held what it looks for.
+                log.skipped.append(
+                    f"patch {patch.file}: did not match, so this change of {manifest.name}'s "
+                    "was not made (the file may have changed upstream)"
                 )
 
     def _sql(
@@ -6809,11 +7201,28 @@ class Applier:
                 f"replaces its own rows, so a repeat repairs rather than duplicates."
             )
 
-    def _conf(self, manifest: Manifest, clone: Path, vals: Mapping[str, str], log: _Log) -> None:
+    def _conf(
+        self,
+        manifest: Manifest,
+        clone: Path,
+        vals: Mapping[str, str],
+        log: _Log,
+        *,
+        first: bool = False,
+    ) -> None:
         for conf in manifest.conf:
             if _is_glob(conf.file) or not conf.file.endswith(_CONF_KEY_WRITE_SUFFIXES):
                 continue  # Lua/DB-table "conf" is patched or prompted, not key-written
             target = self.server_dir / conf.file
+            if first and conf.template is not None and target.is_file():
+                _look_again(clone, conf.template)
+                template = clone / conf.template
+                # A conf written for this module -- every key its own template sets is
+                # there, as after a Remove and Install of the same module -- keeps the
+                # player's settings in effect (review round 2). Another module's (AH Bot's
+                # under AH Bot Plus) goes aside.
+                if not (template.is_file() and _conf_written_from(target, template)):
+                    self._set_an_earlier_conf_aside(manifest, conf.file, target, log)
             if conf.template is not None and not target.exists():
                 _look_again(clone, conf.template)
                 template = clone / conf.template
@@ -6860,6 +7269,38 @@ class Applier:
                 f"{conf.file} at its next start"
             )
             log.conf_restart = True
+
+    def _set_an_earlier_conf_aside(
+        self, manifest: Manifest, rel: str, target: Path, log: _Log
+    ) -> None:
+        """Move a conf a FIRST install finds in its place aside, so its own template is used (T689).
+
+        `_conf()` copies a template only where no file is, and Remove leaves the
+        activated conf (a world built with the module still reads it until the
+        Rebuild, T596). So the file a first install meets was an earlier install's:
+        AH Bot, Remove, AH Bot Plus ran Plus on AH Bot's 69-key `mod_ahbot.conf`,
+        without 443 of its 447 keys. Moved aside, never deleted: what the player
+        tuned stays readable beside it under a name the world does not load. Only a
+        first install (no checkout before this press): an Update or a reinstall over
+        the checkout keeps the conf it has, as it always did.
+        """
+        aside = target.with_name(target.name + EARLIER_CONF_SUFFIX)
+        number = 1
+        while os.path.lexists(aside):
+            aside = target.with_name(f"{target.name}{EARLIER_CONF_SUFFIX}.{number}")
+            number += 1
+        try:
+            os.replace(target, aside)
+        except OSError as exc:
+            log.skipped.append(
+                f"conf {rel}: an earlier install's file is there and could not be set aside "
+                f"({exc}), so {manifest.name} runs on it instead of its own"
+            )
+            return
+        log.done.append(
+            f"set aside {rel} as {aside.name}: an earlier install left it, so "
+            f"{manifest.name} starts from its own; your settings in it are kept there"
+        )
 
     def _client(self, manifest: Manifest, clone: Path, log: _Log) -> None:
         """Copy this manifest's `client` steps into the game client's own folders.
@@ -8589,16 +9030,22 @@ def _step_name(step: SqlStep) -> str:
     return f"sql {step.path or 'inline'} → {step.db}"
 
 
-def _apply_patch(path: Path, patch: Patch, replacement: str) -> bool:
+def _apply_patch(path: Path, patch: Patch, replacement: str) -> str:
+    """Apply one patch: "changed", "already applied" (it matched, nothing differs), or
+    "did not match" -- never the second for the third, which hid a patch that had stopped
+    matching upstream (T689: ActiveChat's `pcall(require, "data.context")`)."""
     text = path.read_text(encoding="utf-8")
     if patch.regex:
-        new = re.sub(patch.find, replacement, text, flags=re.MULTILINE)
+        new, count = re.subn(patch.find, replacement, text, flags=re.MULTILINE)
     else:
+        count = text.count(patch.find)
         new = text.replace(patch.find, replacement)
+    if not count:
+        return "did not match"
     if new == text:
-        return False
+        return "already applied"
     path.write_text(new, encoding="utf-8", newline="\n")
-    return True
+    return "changed"
 
 
 _KeyMode = Literal["replace", "append", "unchanged"]
@@ -8632,6 +9079,22 @@ def _comment_unreadable_lines(path: Path) -> None:
     )
 
 
+_CONF_KEY = re.compile(r"^[ \t]*([A-Za-z0-9_.\-]+)[ \t]*=", re.MULTILINE)
+
+
+def _conf_written_from(conf: Path, template: Path) -> bool:
+    """Does `conf` set every key `template` sets? Then an install of this module wrote it.
+
+    Unreadable either way reads as "no": the conf then goes aside, never deleted.
+    """
+    try:
+        have = set(_CONF_KEY.findall(conf.read_text(encoding="utf-8")))
+        want = set(_CONF_KEY.findall(template.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return want <= have
+
+
 def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     """Set `key = value` in a worldserver-style conf: replace the line, append it, or —
 
@@ -8642,9 +9105,17 @@ def _set_conf_key(path: Path, key: str, value: str) -> _KeyMode:
     text` is that no-op, caught before the write rather than after: nothing on disk
     changes, and the caller sees `"unchanged"` rather than `"replace"`.
     """
+    if "\n" in value or "\r" in value:
+        # One key, one line: a line break would write a second key (review round 2).
+        raise ApplyRefusal(
+            f"The value for {key} has a line break in it, and a setting is one line. "
+            "Type it on one line, then try again. Nothing was written."
+        )
     text = path.read_text(encoding="utf-8")
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}[ \t]*=.*$", re.MULTILINE)
-    new, count = pattern.subn(f"{key} = {value}", text, count=1)
+    # A function, not a template: the typed answer is text, and `re` reads a template's
+    # backslashes (`Welcome \o/` raised, a typed `\n` became a second line; T689).
+    new, count = pattern.subn(lambda _match: f"{key} = {value}", text, count=1)
     if count:
         if new == text:
             return "unchanged"
@@ -8660,6 +9131,28 @@ def _rel(base: Path, path: Path) -> str:
         return str(path.relative_to(base))
     except ValueError:
         return str(path)
+
+
+def _posix_rel(base: Path, path: Path) -> str:
+    """`path` under `base`, spelled with `/` on every OS: how the deploy record names a file."""
+    return path.relative_to(base).as_posix()
+
+
+def _sha_or_blank(path: Path) -> str:
+    """The SHA-256 of a regular file there, `""` for anything else (gone, a link, a folder)."""
+    if path.is_symlink() or not path.is_file():
+        return ""
+    return sha256_of(path)
+
+
+def _free_aside(path: Path) -> Path:
+    """Where a player's file at `path` goes aside: `<name>.yulon-module-old`, then `.1`, `.2`..."""
+    aside = path.with_name(path.name + ASIDE_SUFFIX)
+    number = 1
+    while os.path.lexists(aside):
+        aside = path.with_name(f"{path.name}{ASIDE_SUFFIX}.{number}")
+        number += 1
+    return aside
 
 
 @dataclass(frozen=True)
@@ -9565,17 +10058,21 @@ IMPORTER_SQL_ROOT = "data/sql/"
 `UpdateFetcher.cpp:159-186` joins every allowed module name onto
 `<source>/modules/<name>/data/sql/` and skips the ones that are not directories
 -- the reading recorded on `docker.ALL_MODULES`, measured live 2026-09-07. It is
-the ROOT and not the answer: what the updater opens under it is `IMPORTER_DB_DIRS`
-and nothing else.
+the ROOT and not the answer: what the updater opens under it is the folders
+`updater_walks()` names, and nothing else.
 """
 
-IMPORTER_DB_DIRS = ("db-auth", "db-characters", "db-world")
-"""The directories under `IMPORTER_SQL_ROOT` the core updater actually walks.
+IMPORTER_DB_NAMES = ("auth", "characters", "world")
+"""What the core updater looks for in the name of each folder under `IMPORTER_SQL_ROOT`.
 
-**One per database it loads, and that is the whole set.** `DBUpdater` runs once
-for each of the three `DatabaseLoader` pools and walks
-`<module>/data/sql/<that pool's directory>/` recursively -- `base/` and
-`updates/` alike, which is why this is a directory prefix and not a file list.
+**A folder whose name CONTAINS one is walked, recursively; no other is.** `DBUpdater`
+runs once for each of the three `DatabaseLoader` pools, and `UpdateFetcher.cpp:159-186`
+(read at 2a2211cd) keeps a folder under `<module>/data/sql/` when
+`dirName.find(_dbModuleName)` finds that pool's name: `db-world`, but also `world`
+(mod-individual-progression) and `db_world` (mod-mount-scaling). Until T689 this was
+the three exact names `db-auth`/`db-characters`/`db-world`, narrower than the rule, so
+a direct file under `data/sql/world/` would not have withheld its module. See
+`updater_walks()`.
 Evidence in this tree, none of it inferred:
 
 * `catalog/installers/wow-wotlk/native/base.yml.tmpl:163-164` mounts `./modules`
@@ -9602,8 +10099,16 @@ doesn't exist`, and the app's own remedy ("Press Apply module SQL") could not be
 followed by pressing the button it named.
 """
 
-IMPORTER_SQL_DIRS = tuple(f"{IMPORTER_SQL_ROOT}{name}/" for name in IMPORTER_DB_DIRS)
-"""`IMPORTER_DB_DIRS` as clone-relative prefixes, in manifest spelling (POSIX)."""
+
+def updater_walks(path: str) -> bool:
+    """Is clone-relative `path` in a folder the core updater walks (`IMPORTER_DB_NAMES`)?"""
+    parts = PurePosixPath(path).parts
+    return (
+        len(parts) >= 4
+        and "/".join(parts[:2]) + "/" == IMPORTER_SQL_ROOT
+        and any(name in parts[2] for name in IMPORTER_DB_NAMES)
+    )
+
 
 _APPLIED_UPDATE = re.compile(r"Applying update\s+[\"']?(\S+\.sql)")
 """The importer's own evidence that it applied a file.
@@ -9705,7 +10210,7 @@ def module_sql_plan(
     'acore_world.city_bot_poi' doesn't exist`, the app printed its own correct
     remedy ("Press Apply module SQL on the Modules tab, then Start"), and that
     button withheld `mod-city-bots`; the world restarted 18 times. A direct file
-    outside `IMPORTER_DB_DIRS` is now no reason to withhold anything, and a
+    outside `IMPORTER_DB_NAMES`' folders is now no reason to withhold anything, and a
     direct file inside one still withholds its module -- that is the only lever
     `AC_UPDATES_ALLOWED_MODULES` offers for a file the updater can see, and the
     module's db-import work is the price. `module_sql_report()` then says which
@@ -9786,13 +10291,13 @@ def _the_updater_would_find_it(path: str) -> bool:
     "direct"`): a db-import file under the same prefix is the updater's job and
     is no reason to withhold anything.
 
-    `IMPORTER_SQL_DIRS`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
+    `updater_walks()`, not `IMPORTER_SQL_ROOT`, and the difference is T78 round
     3. `data/sql/` is where the updater is POINTED; the three directories under
     it are what it walks. A direct file anywhere else under `data/sql/` --
     City Bots' `data/sql/playerbots/updates/2026_07_15_00_citizen_roster.sql` is
     the shipped one -- is as invisible to it as Battle Pass's `sql/`, so
     withholding a module over it takes that module's REAL db-import work down
-    with it and leaves the world unable to start. See `IMPORTER_DB_DIRS`.
+    with it and leaves the world unable to start. See `IMPORTER_DB_NAMES`.
 
     `.sql`, because the updater applies nothing else: `npc-teleporter` keeps two
     `data/sql/db-world/*.dist` files, which sit inside a walked directory and
@@ -9803,7 +10308,7 @@ def _the_updater_would_find_it(path: str) -> bool:
     updater on an install that still wants the module is a worse outcome than a
     skipped update.
     """
-    return path.endswith(".sql") and path.startswith(IMPORTER_SQL_DIRS)
+    return path.endswith(".sql") and updater_walks(path)
 
 
 def _blocking_files(plan: ModuleSqlPlan, module: str) -> tuple[str, ...]:

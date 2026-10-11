@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - A **Get playing** checklist on the Server tab, and **Create account…** there and in the launcher's Log in as.
 
 ### Fixed
+- On Windows, deleting a folder no longer clears read-only flags or removes folders behind a junction inside it.
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.
 - Uninstall now moves your database backups to a folder beside the server folder and says where, instead of deleting them.
 - Bringing in a server with Auction House Bot from another computer no longer stops on a missing character.
@@ -25,10 +26,47 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
 - **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
+- Install now asks before it starts or installs Docker Engine as root, and never installs a second engine over yours.
+- A full drive is now said right after you pick the server folder, and a wrong move file before any folder is asked.
+- The Accounts tab only creates names and passwords that Delete, Set password and GM level can use afterwards.
+- Start finds a port taken by another server's database or by a program before anything starts, and names it.
+- **Rebuild** now applies the database updates of a module you just installed, such as City Bots, so the world starts.
+- After an update or rebuild that stopped part-way, **Start** is refused or allowed for a reason that is still true.
+- **Update the server to latest** no longer runs the SQL of a module Yu'lon applies itself, such as ARAC, a second time.
+- A **Rebuild** whose database updates fail puts your databases back as they were and names the update that failed.
+- A server list that an older copy of Yu'lon emptied comes back the next time you open this version.
+- **Update now** checks that the new version's window really opens before it installs it, as it was meant to.
+- A module that breaks a rebuild before it ever built now tells you to press **Remove**, not that it was kept as it was.
+- A message of the day or XP-rate text with a backslash in it no longer stops the install, and is written as typed.
+- A typed answer with a line break in it is refused instead of writing a second setting into the server's file.
+- **Azeroth Chatter** loads its holiday, season and month words again.
+- **AH Bot Plus** installed after **AH Bot** starts from its own settings; reinstalling one module keeps yours.
+- **Apply module SQL** no longer says "nothing to apply" for ten modules whose SQL the server does apply.
+- A module change that no longer fits the module's file is reported, instead of being listed as already applied.
+- Removing **Battle Pass** no longer deletes your own Lua libraries from the lua_scripts folder.
+- A Lua script module that would replace one of your own files sets yours aside, and **Remove** puts it back.
+- Updating a Lua script module takes away the files its new version dropped, so they no longer load.
+- The **Battle Pass** vendor can now be spawned in the world, and removing Battle Pass takes it away.
+- Removing or updating a Lua script module keeps any of its files you changed, and says which.
+- A Lua script module that would replace another module's file is refused, naming that module.
+- A ready-to-play WotLK or Unbound client whose realmlist sat beside Wow.exe now logs in to your server, not an old one.
+- **PLAY** in a client unpacked with lower-case folder names keeps your game settings instead of starting a new file.
+- While a restore runs, Modules installs and other database changes wait for it instead of writing into it.
+- Start, Update and Rebuild refuse a server whose restore did not finish, and say how to finish or undo it.
+- Restore refuses a backup that would overwrite MySQL's own accounts and passwords.
+- A backup or restore that worked is no longer reported as failed when the database cannot be stopped afterwards.
+- Uninstall can be pressed again after a folder that could not be fully deleted, and then finishes the job.
+- A server brought in from another computer can be used with Use existing and is not installed again.
+- Reinstalling after an uninstall that removed the characters sets up the command channel fresh, without Repair.
+- The Console tab no longer shows a typed account password, whether the command is shortened, capitalised or dotted.
+- A support file now also takes out the password of a shortened or quoted account command.
+- On Linux and macOS your database backups can now be read by you alone.
+- The Bots tab name filter no longer fails on a name typed with a backslash.
 
 ### Changed
 - The sidebar's ▶ starts the game, its × is gone, and Networking shows the network mode now in force.
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
+- **Battle Pass** no longer asks for its vendor's creature entry: the vendor it creates is always the one it uses.
 
 ## v0.9.16-Public — 2026-10-10
 

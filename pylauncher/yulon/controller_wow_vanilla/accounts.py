@@ -27,7 +27,7 @@ The scheme is READ from `entry().accounts.scheme` rather than spelled here.
 The catalog field's own description says why that matters: getting it wrong
 does not fail loudly, it inserts a row that looks correct and can never log in.
 
-Two things this package has NOT verified for this core
+Two things this package had NOT verified for this core (the second since read)
 ------------------------------------------------------
 Neither is invented here — both are AzerothCore facts the shared writer
 applies to every scheme — and both are named so the next person does not read
@@ -42,17 +42,17 @@ them as measured:
    account exists and its GM level was never applied. That is a hole that
    announces itself rather than a silently wrong row, which is why it is
    documented instead of guarded by a guess.
-2. **The length ceilings.** `MAX_USERNAME` (17) and `MAX_PASSWORD` (16) are
-   AzerothCore's `MAX_ACCOUNT_STR`/`MAX_PASS_STR`, applied here to a core
-   whose own limits nobody in this repo has read. They are ceilings, so the
-   direction of a wrong value is: this app refuses a name or password the
-   server would have accepted. Never the reverse.
+2. **The length ceilings** -- read since (T673, 2026-10-11): mangos-classic
+   8ec338a1 takes names of up to 16 characters, one fewer than AzerothCore's
+   17, and passwords of up to 16. The shared writer applies this core's own
+   through `account_rules`, and `MAX_USERNAME` below is this core's 16.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from yulon import account_rules
 from yulon.apply import DockerSql
 from yulon.controller_wow_vanilla import docker_ctl, entry
 
@@ -64,9 +64,6 @@ from yulon.controller_wow_wotlk.accounts import (
 )
 from yulon.controller_wow_wotlk.accounts import (
     MAX_PASSWORD as MAX_PASSWORD,
-)
-from yulon.controller_wow_wotlk.accounts import (
-    MAX_USERNAME as MAX_USERNAME,
 )
 from yulon.controller_wow_wotlk.accounts import (
     NO_GM as NO_GM,
@@ -86,6 +83,9 @@ from yulon.controller_wow_wotlk.accounts import (
 from yulon.controller_wow_wotlk.accounts import (
     mangos_srp6_credentials as mangos_srp6_credentials,
 )
+
+MAX_USERNAME = account_rules.NAME_MAX["mangos_srp6"]
+"""This core's own `MAX_ACCOUNT_STR` (16), not AzerothCore's 17 (T673, `account_rules`)."""
 
 
 def scheme() -> writer.Scheme:

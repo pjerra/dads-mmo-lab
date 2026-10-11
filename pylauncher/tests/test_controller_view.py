@@ -473,6 +473,34 @@ def test_console_tab_sends_commands(qapp: object, ps: _Ps, tmp_path: Path) -> No
 @pytest.mark.parametrize(
     "typed",
     [
+        "account create dad Zq7s3cretWv",
+        ".account create dad Zq7s3cretWv",
+        "Account create dad Zq7s3cretWv",
+        "acc create dad Zq7s3cretWv",
+        "account set password dad Zq7s3cretWv Zq7s3cretWv",
+        "account set pass dad Zq7s3cretWv Zq7s3cretWv",
+        "account password old Zq7s3cretWv Zq7s3cretWv",
+    ],
+)
+def test_the_console_echo_hides_a_password_in_any_spelling_of_an_account_command(
+    qapp: object, ps: _Ps, tmp_path: Path, typed: str
+) -> None:
+    """The panel echoes each command as `> ...`, and a screenshot of it goes to
+    support. The cores take any prefix of each word, any case and a leading dot,
+    so only the exact `account create` prefix being hidden left the rest in clear
+    (T683 S4). The command itself still goes to the server unchanged."""
+    sent: list[str] = []
+    view = ControllerView(WOTLK, _services(ps, tmp_path, sent), status_poll_ms=0)
+    view.command_edit.setText(typed)
+    view.send_console_command()
+    assert sent == [typed]
+    assert "Zq7s3cretWv" not in view.console_log.text()
+    assert "> " in view.console_log.text()
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
         "server shutdown 1",
         ".server shutdown 60",
         "server exit",
@@ -16942,7 +16970,7 @@ def test_the_time_zone_leaves_nothing_on_the_tuning_tab_cut(
 
 
 ARAC_FILE = "modules/mod-arac/data/sql/db-world/arac.sql"
-AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/aoe_loot_module_string.sql"
+AOE_FILE = "modules/mod-aoe-loot/data/sql/db-world/base/aoe_loot_module_string.sql"
 APPLYING_AOE = ">> Applying update aoe_loot_module_string.sql"
 
 
@@ -16950,8 +16978,8 @@ def _two_modules_on_disk(server_dir: Path) -> None:
     """One shipped module of each route, with its SQL where its manifest says.
 
     `mod-arac` declares `data/sql/db-world/arac.sql` as `applied_by="direct"`
-    and `mod-aoe-loot` declares `data/sql/db-world/*.sql` as `db-import`, in the
-    bundled manifests these tests read through the real store.
+    and `mod-aoe-loot` declares `data/sql/db-world/base/*.sql` as `db-import` (where
+    upstream keeps it, T689), in the bundled manifests these tests read through the real store.
     """
     for rel in (ARAC_FILE, AOE_FILE):
         path = server_dir / rel
@@ -17020,7 +17048,7 @@ def test_the_module_sql_press_never_hands_the_updater_a_file_this_app_applied(
         "sql data/sql/db-world/arac.sql -> world: not handed to the updater: this app "
         "applies it itself at install" in text
     )
-    assert "sql data/sql/db-world/aoe_loot_module_string.sql -> world: applied" in text
+    assert "sql data/sql/db-world/base/aoe_loot_module_string.sql -> world: applied" in text
     assert "FAILED" not in text, text
 
 
@@ -26242,6 +26270,37 @@ def test_play_points_every_locales_realmlist_at_this_machine(
     assert gb.read_text(encoding="utf-8") == "set realmlist logon.example.com\n"
 
 
+def _root_realmlist_only(client: Path) -> Path:
+    """A repack-style 3.3.5a client (T665): its realmlist at the top level, none in `Data/enUS/`,
+    and a Config.wtf that still names the player's old server."""
+    (client / "Data" / "enUS" / "realmlist.wtf").unlink()
+    (client / "Data" / "enUS" / "locale-enUS.MPQ").write_bytes(b"MPQ the locale")
+    (client / "realmlist.wtf").write_text("set realmlist logon.warmane.com\n", encoding="utf-8")
+    (client / "WTF").mkdir()
+    (client / "WTF" / "Config.wtf").write_text(
+        'SET locale "enUS"\nSET realmList "logon.warmane.com"\n', encoding="utf-8"
+    )
+    return client
+
+
+def test_play_gives_a_client_with_only_a_top_level_realmlist_one_in_its_locale_folder(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    """T665: 3.3.5a reads `Data/<locale>/realmlist.wtf`; without one it logs in wherever the
+    copied Config.wtf points, the player's old server."""
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = _built(original, tmp_path)
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert len(launched) == 1
+    assert _realmlist(play) == "set realmlist 127.0.0.1\n"
+    assert (play / "realmlist.wtf").read_text(encoding="utf-8") == "set realmlist 127.0.0.1\n"
+    assert not (original / "Data" / "enUS" / "realmlist.wtf").exists()
+
+
 def _dialog_for(tmp_path: Path, plan: play_client.BuildPlan, target: Path) -> Any:
     offer = replace(_offer(tmp_path, lambda _t: plan), plan=plan, target=target)
     return controller_view_module.PlayClientDialog(offer)
@@ -27360,6 +27419,63 @@ def test_the_realmlist_keeps_unbounds_own_login_port(
 
     assert _realmlist(play).startswith("set realmlist 127.0.0.1:3725\n")
     assert ":3724" not in _realmlist(play)
+
+
+def test_an_unbound_client_whose_realmlist_was_top_level_only_logs_in_at_3725(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665: 3.3.5a reads `Data/<locale>/realmlist.wtf`, else Config.wtf's realmList, which the
+    copy kept from the player's old server; neither may leave the game going to 3724."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = play_client.default_target(original, UNBOUND.name, tmp_path)
+    play_client.create(
+        original,
+        play,
+        game=UNBOUND.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=UNBOUND)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    assert _realmlist(play) == "set realmlist 127.0.0.1:3725\n"
+    text = _config(play)
+    assert 'SET realmList "127.0.0.1:3725"' in text and "warmane" not in text, text
+    assert 'SET locale "enUS"' in text, "a line of the player's own was touched"
+    assert not (original / "Data" / "enUS" / "realmlist.wtf").exists()
+    assert "warmane" in (original / "WTF" / "Config.wtf").read_text(encoding="utf-8")
+
+
+def test_on_3724_the_realmlist_files_alone_carry_the_address(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665's Config.wtf line is for a server off 3724 only; on 3724 the copy's Config.wtf is
+    left as the player had it, and the locale realmlist (which the game reads first) says it."""
+    _lay_folder_module(tmp_path, module=UNBOUND_MODULE)
+    entry = UNBOUND.model_copy(update={"ports": UNBOUND.ports.model_copy(update={"auth": 3724})})
+    original = _root_realmlist_only(_game_client(tmp_path / "clients" / "WoW"))
+    play = play_client.default_target(original, entry.name, tmp_path)
+    play_client.create(
+        original,
+        play,
+        game=entry.id,
+        server_dir=tmp_path,
+        allow_full_copy=False,
+        reflink=lambda _s, _d: False,
+    )
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert steps[-1] == "launch"
+    assert _realmlist(play) == "set realmlist 127.0.0.1\n"
+    assert 'SET realmList "logon.warmane.com"' in _config(play)
 
 
 def test_a_client_that_pressed_play_before_the_addons_still_gets_the_out_of_date_switch(
@@ -28692,6 +28808,21 @@ def test_without_a_typed_address_the_catalogs_realmlist_stays(
 
     text = _config(play)
     assert 'SET realmList "127.0.0.1"' in text and "patchList" not in text
+
+
+def test_off_3724_the_catalogs_own_realmlist_still_wins(
+    qapp: object, ps: _Ps, tmp_path: Path, site: _Site, steps: list[str], asks: _Asks
+) -> None:
+    """T665 sets Config.wtf's realmList only where the catalog does not: the catalog's is the
+    server's own word."""
+    entry, original, play = _made_client(tmp_path)
+    entry = entry.model_copy(update={"ports": entry.ports.model_copy(update={"auth": 3725})})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert 'SET realmList "127.0.0.1"' in _config(play)
 
 
 @pytest.mark.parametrize("config", [True, False])

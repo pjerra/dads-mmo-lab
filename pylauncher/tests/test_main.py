@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -406,6 +407,95 @@ def test_the_launcher_declares_which_thread_is_its_gui_thread(tmp_path: Path) ->
     )
 
     assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+
+
+_SMOKE_BUILDS_A_WINDOW = """\
+import sys
+
+sys.argv = ["yulon"]
+import main
+
+real = main.build_window
+built = []
+
+
+def build_window():
+    window = real()
+    built.append(window)
+    return window
+
+
+main.build_window = build_window
+code = main.main()
+if not built:
+    raise SystemExit("the smoke run returned without building the window")
+from yulon.ui.controller_view import ControllerView
+
+print(f"TABS {len(built[0].findChildren(ControllerView))}", flush=True)
+raise SystemExit(code)
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in docker is a shell script")
+def test_the_smoke_run_builds_every_servers_tab_and_asks_docker_nothing(tmp_path: Path) -> None:
+    """T676 round 3: the smoke run proves the window builds, not that the servers answer.
+
+    Since the instance claim no longer stops it, it builds every remembered server's
+    tab, and each tab's first status poll and account read went to docker: 24-30
+    calls for six servers, measured. On Docker Desktop each can take seconds, inside
+    the 60 s `SMOKE_TIMEOUT_SECONDS`, so a good update could be refused. The real
+    entry point runs in a child, with a `docker` first on PATH that records any call.
+    """
+    home, scratch, bin_ = tmp_path / "home", tmp_path / "temp", tmp_path / "bin"
+    for folder in (home, scratch, bin_):
+        folder.mkdir()
+    calls = tmp_path / "docker-calls"
+    for name in ("docker", "docker-compose", "podman"):
+        fake = bin_ / name
+        fake.write_text(f'#!/bin/sh\necho "{name} $*" >> "{calls}"\nexit 1\n', encoding="utf-8")
+        fake.chmod(0o755)
+    games = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-unbound", "wow-centurion"]
+    installs = []
+    for game in games:
+        server_dir = tmp_path / "servers" / game
+        server_dir.mkdir(parents=True)
+        installs.append({"game": game, "server_dir": str(server_dir)})
+    config = home / "yulon"
+    config.mkdir()
+    (config / "state.json").write_text(
+        json.dumps({"schema_version": 1, "installs": installs}), encoding="utf-8"
+    )
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("YULON_")}
+    path = [p for p in env.get("PATH", "").split(os.pathsep) if not p.startswith("/mnt/")]
+    env.update(
+        {
+            "PATH": os.pathsep.join([str(bin_), *path]),
+            "HOME": str(home),
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "YULON_SMOKE_TEST": "1",
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch),
+            "TEMP": str(scratch),
+            "TMP": str(scratch),
+            "PYTHONPATH": str(Path(main.__file__).parent),
+        }
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", _SMOKE_BUILDS_A_WINDOW],
+        cwd=Path(main.__file__).parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+    assert f"TABS {len(games)}" in done.stdout, "a tab was not built, so it asked nothing"
+    said = calls.read_text(encoding="utf-8") if calls.exists() else ""
+    assert said == "", f"the smoke run asked docker {said.count(chr(10))} time(s):\n{said}"
 
 
 def test_a_log_that_had_to_move_is_told_to_the_user_and_not_only_to_the_log(
@@ -1360,6 +1450,33 @@ def test_use_existing_on_a_wsl_server_does_not_demote_its_tab_to_the_local_daemo
     ), "the distro was erased from what would be saved"
 
 
+@pytest.mark.parametrize("signal", ["installed", "adopted"])
+def test_pointing_at_a_known_server_again_keeps_the_fields_a_newer_yulon_wrote(
+    window: Any, tmp_path: Any, signal: str
+) -> None:
+    """T670 review round 2: `remember()` REPLACES the record, so a record rebuilt from the
+    signal's arguments alone drops what a newer Yu'lon wrote into it, and the next save
+    writes it without. The record is rebuilt keeping those fields."""
+    server_dir = tmp_path / f"keep-newer-{signal}"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    live = window.saved_states[-1]
+    live.remember(
+        state.KnownInstall.model_validate(
+            {"game": "wow-wotlk", "server_dir": server_dir, "from_a_newer_yulon": {"x": 1}}
+        )
+    )
+
+    if signal == "installed":
+        catalog.installed.emit("wow-wotlk", server_dir, None)
+    else:
+        catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+
+    remembered = window.saved_states[-1].find("wow-wotlk", server_dir)
+    assert remembered is not None
+    assert (remembered.model_extra or {}).get("from_a_newer_yulon") == {"x": 1}, remembered
+
+
 def test_a_tab_that_is_mid_import_is_not_torn_down_to_change_its_distro(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1673,28 +1790,112 @@ def test_quit_anyway_lets_the_close_through_and_marks_it_as_forced(
         view._restore_running = False
 
 
-def test_a_forced_quit_does_not_join_the_jobs_it_is_cutting_off(window: Any) -> None:
-    """`ControllerView.shutdown()` waits 330 s per tab: the window was gone, the process not."""
+class _Left(Exception):
+    """Stands in for `os._exit`: raised by the recorded `_leave_with_jobs_still_running`."""
 
-    class _Tab:
-        def shutdown(self) -> None:
-            raise AssertionError("a forced quit waited on a tab's jobs")
 
-    class _Panel:
-        stopped = 0
+class _Instance:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
-        def stop(self) -> None:
-            self.stopped += 1
+    def stop_answering(self) -> None:
+        self.calls.append("stop_answering")
 
-    panel = _Panel()
-    fake = SimpleNamespace(
-        yulon_controllers=[_Tab()],
-        yulon_log_panels=[panel],
+    def release(self) -> None:
+        self.calls.append("release")
+
+
+def _exit_recorder(monkeypatch: pytest.MonkeyPatch) -> tuple[list[list[str]], list[int]]:
+    """Record the forced exit and the joins, replacing both with something that cannot hang."""
+    left: list[list[str]] = []
+    joined: list[int] = []
+
+    def leave(code: int, stuck: list[str]) -> None:
+        left.append(stuck)
+        raise _Left
+
+    def join(window: Any) -> list[str]:
+        joined.append(1)
+        return []
+
+    monkeypatch.setattr(main, "_leave_with_jobs_still_running", leave)
+    monkeypatch.setattr(main, "_stop_background_threads", join)
+    return left, joined
+
+
+def test_the_exit_after_quit_anyway_joins_nothing_and_leaves_by_the_forced_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`main()`'s `finally` chooses between the joins and the forced exit; this drives it.
+
+    Mutation: make `_leave_after_the_loop()` take `_stop_background_threads` whatever
+    `yulon_forced_quit` says.
+    """
+    left, joined = _exit_recorder(monkeypatch)
+    window = SimpleNamespace(
+        yulon_controllers=[],
+        yulon_log_panels=[],
         yulon_launchers={},
         yulon_forced_quit="A restore is writing",
     )
-    stuck = main._stop_for_forced_quit(fake)
-    assert stuck == ["work Quit anyway cut off: A restore is writing"] and panel.stopped == 1
+    instance = _Instance()
+
+    with pytest.raises(_Left):
+        main._leave_after_the_loop(window, instance, 0)
+
+    assert joined == [], "Quit anyway waited on the jobs it was cutting off"
+    assert left == [["work Quit anyway cut off: A restore is writing"]]
+    assert instance.calls == ["stop_answering", "release"]
+
+
+def test_an_ordinary_exit_still_joins_and_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+    left, joined = _exit_recorder(monkeypatch)
+    window = SimpleNamespace(
+        yulon_controllers=[], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
+    )
+    instance = _Instance()
+
+    main._leave_after_the_loop(window, instance, 0)
+
+    assert joined == [1] and left == []
+    assert instance.calls == ["stop_answering", "release"]
+
+
+def test_quitting_over_a_stop_still_joins_it_so_the_stop_finishes(
+    window: Any, tmp_path: Any
+) -> None:
+    """A Stop is Python-driven (wait for the load, save, `compose stop`, stop by name).
+
+    Leaving before it ends kills the sequence part-way, and the pipes of its captured
+    `compose stop` then break. So the exit joins it, as before this ticket: the window stays
+    hidden for the minute or two it takes, and the stop COMPLETES. A real tab, a real Stop on
+    the real job runner, released by a timer after the exit has begun waiting.
+    Mutation: re-add the Stop branch to `_quick_exit_reason()`.
+    """
+    server_dir = tmp_path / "t690-stop-exit"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    gate = threading.Event()
+    finished: list[float] = []
+
+    def slow_stop() -> bool:
+        gate.wait(60)
+        finished.append(time.monotonic())
+        return True
+
+    view.services.controller.stop = slow_stop
+    view.stop_server()
+    quitting = SimpleNamespace(
+        yulon_controllers=[view], yulon_log_panels=[], yulon_launchers={}, yulon_forced_quit=""
+    )
+    assert main._quick_exit_reason(quitting) == "", "a Stop must be joined, not left behind"
+    threading.Timer(1.5, gate.set).start()
+    started = time.monotonic()
+
+    main._leave_after_the_loop(quitting, _Instance(), 0)  # the REAL joins; returns, no forced exit
+
+    assert finished, "the exit left before the Stop had finished"
+    assert time.monotonic() - started >= 1.0, "the exit did not wait for the Stop"
 
 
 def test_a_real_tray_quit_now_while_stopping_goes_through(
@@ -6497,3 +6698,12 @@ def test_a_tab_from_state_json_asks_for_its_update_refresh(
     finally:
         main._stop_background_threads(window)
         QApplication.processEvents()
+
+
+def test_the_window_hands_the_catalog_its_early_checks(window: Any) -> None:
+    """T702 in production: `build_window()` wires the drive check and the package check in."""
+    from yulon.catalog import native
+
+    view = _catalog_view(window)
+    assert view._ready_check is native.early_refusal
+    assert view._move_in is not None and view._move_in.check is not None
