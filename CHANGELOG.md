@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Closing, quitting, updating or changing the client folder is refused while a restore, backup or install is running.
 
 ### Changed
 

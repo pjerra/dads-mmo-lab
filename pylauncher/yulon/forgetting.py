@@ -113,6 +113,10 @@ DELETE_HOLDS_THE_DATABASES = (
     "Old backups are being deleted on this server's Maintenance tab. Wait for that to "
     "finish, then try again."
 )
+TUNING_RUNNING = (
+    "A Tuning change is being saved or put back on this server's Tuning tab. Wait for it "
+    "to finish, then try again. Nothing was removed."
+)
 NETWORK_RUNNING = (
     "A network change is being applied on this server's Networking tab. Wait for it to "
     "finish, then try again. Nothing was removed."

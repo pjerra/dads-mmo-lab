@@ -59,6 +59,30 @@ def test_quit_with_nothing_running_just_quits(
     assert quits == [1]
 
 
+def test_quit_says_what_cannot_be_cut_off_before_it_asks_anything(
+    tray: YulonTray, window: FakeWindow, quits: list[int]
+) -> None:
+    """T690: the box said "1 server is running" over a Restart in flight (measured on m910q).
+
+    Mutation: drop the `yulon_close_refusal` check from `ask_to_quit()`, and the
+    quit question is asked (and, for "leave", the window's own filter refuses
+    only afterwards).
+    """
+    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    window.yulon_close_refusal = lambda: "Restart is running on this server's Server tab."  # type: ignore[attr-defined]
+    told: list[tuple[str, str]] = []
+    asked: list[int] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+    tray.choose_quit = lambda count: asked.append(count) or "leave"  # type: ignore[method-assign]
+
+    tray.ask_to_quit()
+
+    assert asked == [], "the quit question was put over work that cannot be cut off"
+    assert quits == []
+    assert told == [("Yu'lon is still working", "Restart is running on this server's Server tab.")]
+    assert window.isVisible(), "the window must come forward with the reason"
+
+
 def test_quit_leaving_the_servers_running(
     tray: YulonTray, window: FakeWindow, quits: list[int]
 ) -> None:

@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, platform, wsl
+from yulon import docker, platform, teardown, wsl
 from yulon.catalog.catalog import Catalog, CatalogEntry
 from yulon.catalog.installer import (
     FORMER_DEFAULT_DIRS,
@@ -1044,6 +1044,20 @@ class CatalogView(QWidget):
         return True
 
     # -- install --------------------------------------------------------
+
+    def busy_reason(self) -> str | None:
+        """Why the window must not close now, or None (T690). Read by `main._busy_reasons()`.
+
+        An install runs on the Catalog's own log and belongs to no server tab, so no
+        tab's guard saw it: Quit, Update now and the window's close cancelled it
+        without a word. The install can be stopped from its log, so the reason says
+        to do that first, or wait.
+
+        `_current`, not `self._log.running`: that is set for exactly an install's run
+        (`_run_install()` to `_on_run_finished()`), while the log panel is also
+        "running" when it is merely following a stream.
+        """
+        return teardown.CATALOG_INSTALL if self._current is not None else None
 
     def start_install(self, entry: CatalogEntry) -> bool:
         """Ask for folders, then run the installer into the log panel. False if not started."""
