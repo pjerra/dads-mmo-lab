@@ -986,6 +986,32 @@ def _address_written_elsewhere(cfg: ConfigWtf | None) -> bool:
 
 PLAY_START_FAILED = "The server did not start, so World of Warcraft was not started."
 
+PLAY_REALM_WAIT_SECONDS = 600.0
+"""How long Play waits for the realm after starting the server (T672), ten minutes.
+
+The shared ready check (`services.ready_after_start`, the Tuning tab's) can run for
+hours on a first boot; a Play after a Start on an installed server needs one to three
+minutes. Past this the game is not started and the player is told, not left waiting."""
+PLAY_WAITING_FOR_THE_REALM = (
+    "The server is starting. Waiting for the realm to come up before starting the game…"
+)
+PLAY_REALM_TIMED_OUT = (
+    "The realm was not up after {minutes} minutes, so World of Warcraft was not started. "
+    "The Server tab shows when it is up; press Play again then."
+)
+PLAY_REALM_WAIT_STOPPED = (
+    "Stopped waiting for the realm, so World of Warcraft was not started. "
+    "The Server tab shows when it is up; press Play again then."
+)
+PLAY_REALM_WAIT_BROKE = (
+    "The server was started, but Yu'lon could not wait for the realm, so World of Warcraft was "
+    "not started. The Server tab shows whether it is up; press Play again then."
+)
+PLAY_AT_ANOTHER_COMPUTER = (
+    "Starting World of Warcraft at {address}. The server on this computer is not started or "
+    "checked for it."
+)
+
 PLAY_PENDING = (
     "Play is still starting World of Warcraft from this server's ready-to-play client. "
     "Wait for it to finish, then press this again. Nothing was changed."
@@ -1700,6 +1726,18 @@ class _Compared:
     stale: tuple[Path, ...]
     left_out: tuple[Path, ...]
     flags_lost: str = ""  # T198: `play_client.flags_lost_warning()` of the Refresh
+
+
+@dataclass(frozen=True)
+class _PlayTarget:
+    """Where a Play logs in, read off the GUI thread (T667).
+
+    `remote` is the launcher's realm address when it names another computer, and
+    then `status` is None: that computer's server is not this one's to check.
+    """
+
+    remote: str | None
+    status: object | None
 
 
 @dataclass(frozen=True)
@@ -8177,6 +8215,13 @@ class ControllerView(QWidget):
         # Play's two waits: a Start it asked for, and a Refresh it asked for.
         self._play_after_start = False
         self._play_after_refresh = False
+        # T672: the wait for the realm between that Start and the game, which no button waits on.
+        self._play_realm_wait: threading.Event | None = None
+        self._play_realm_number = 0
+        self._play_realm_timed_out = False
+        self._play_realm_deadline = QTimer(self)
+        self._play_realm_deadline.setSingleShot(True)
+        self._play_realm_deadline.timeout.connect(self._play_realm_gave_up)
         # Whether the uninstall plan on screen offered to delete the
         # ready-to-play client (its marker was this server's when it was read).
         self._play_delete_offered = False
@@ -9236,6 +9281,7 @@ class ControllerView(QWidget):
         # T382: the Tuning restart's wait for the world ends at its next look,
         # so the join below is not held for a world's whole load.
         self._end_the_world_wait()
+        self._end_the_play_realm_wait()  # T672: Play's wait for the realm, the same way
         self._timer.stop()
         if self._docker_repair_cancel is not None:
             # T160: a repair waiting on a question stops rather than holding
@@ -10485,6 +10531,7 @@ class ControllerView(QWidget):
         if busy:
             self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
+            self._end_the_play_realm_wait()  # T672: and Play's wait for it ends too
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -10870,7 +10917,95 @@ class ControllerView(QWidget):
         if self._play_after_start:
             # T181: Play asked for this Start ("Start and play"); it is done.
             self._play_after_start = False
+            self._play_wait_for_the_realm()
+
+    # -- the wait for the realm after Play's own Start (T672) ---------------
+
+    def _play_wait_for_the_realm(self) -> None:
+        """Hold the game until the Tuning tab's ready check says the realm is up.
+
+        `start_staged()` returns once the containers run, and only the database has a
+        healthcheck: the world takes a minute or three more, and the game started in
+        that gap meets a realm that is offline. The SAME check as the Tuning tab's
+        restart (`services.ready_after_start`), on the worker, bounded by
+        `PLAY_REALM_WAIT_SECONDS`. None (a test's fake services) goes on at once.
+        """
+        wait = self.services.ready_after_start
+        if wait is None:
             self._play_check_stale()
+            return
+        self._end_the_play_realm_wait()
+        self._play_realm_number += 1
+        number, cancel = self._play_realm_number, threading.Event()
+        self._play_realm_wait = cancel
+        self._play_cancel.clear()
+        self._show_cancel(True)
+        self._say_play(PLAY_WAITING_FOR_THE_REALM)
+        # The deadline is a GUI-thread timer that sets the wait's own `cancel`, so the check
+        # ends at its next look: no thread of its own to outlive the view.
+        self._play_realm_timed_out = False
+        self._play_realm_deadline.start(round(PLAY_REALM_WAIT_SECONDS * 1000))
+        self._run(
+            partial(_waited_for_the_world, number, "Play", wait, cancel),
+            self._play_realm_answered,
+            self._play_realm_failed,
+        )
+
+    @Slot()
+    def _play_realm_gave_up(self) -> None:
+        """`PLAY_REALM_WAIT_SECONDS` passed with the realm not up: end the wait, as a timeout."""
+        if self._play_realm_wait is not None:
+            self._play_realm_timed_out = True
+            self._play_realm_wait.set()
+
+    def _end_the_play_realm_wait(self) -> None:
+        """End a realm wait still out; its answer then says it was stopped and starts nothing."""
+        self._play_realm_deadline.stop()
+        if self._play_realm_wait is not None:
+            self._play_realm_wait.set()
+
+    @Slot(object)
+    def _play_realm_answered(self, answer: object) -> None:
+        number, _job, world = cast(tuple[int, str, "native.StartAnswer | Exception"], answer)
+        if number != self._play_realm_number:
+            return  # a newer Play's wait owns the label
+        timed_out = self._play_realm_timed_out
+        self._play_realm_deadline.stop()
+        self._play_realm_wait = None
+        self._show_cancel(False)
+        if getattr(self, "_closed", False):
+            self._play_end()
+            return
+        if isinstance(world, Exception):
+            logger.warning(f"{self.entry.id}: Play: the wait for the realm broke: {world}")
+            self._play_end()
+            self._play_refused(PLAY_REALM_WAIT_BROKE)
+            return
+        if world.ready:
+            self._play_check_stale()
+            return
+        if world.verdict == "cancelled":
+            said = (
+                PLAY_REALM_TIMED_OUT.format(minutes=round(PLAY_REALM_WAIT_SECONDS / 60))
+                if timed_out
+                else PLAY_REALM_WAIT_STOPPED
+            )
+        else:
+            said, details = _what_the_start_did("Play", world, self.services.controller)
+            said = said.replace(_SEE_DETAILS, "") + " World of Warcraft was not started."
+            logger.warning(f"{self.entry.id}: Play: the realm did not come up: {details}")
+        self._play_end()
+        self._play_refused(said)
+
+    @Slot(object)
+    def _play_realm_failed(self, exc: object) -> None:
+        """Only a BaseException `_waited_for_the_realm()` let through reaches here."""
+        logger.warning(f"{self.entry.id}: Play: the wait for the realm broke: {exc!r}")
+        self._play_realm_deadline.stop()
+        self._play_realm_wait = None
+        self._show_cancel(False)
+        self._play_end()
+        self._play_refused(PLAY_REALM_WAIT_BROKE)
 
     def _say_zone_problem(self) -> str | None:
         """T171: what the last Start could not put right about the zone file, on the Server tab.
@@ -12645,7 +12780,20 @@ class ControllerView(QWidget):
             return
         self._play_pending = True
         self._say_play("Checking that the server is running…")
-        self._run(self.services.controller.status, self._play_status_read, self._play_failed)
+        self._run(self._play_read_target, self._play_status_read, self._play_failed)
+
+    def _play_read_target(self) -> _PlayTarget:
+        """Off the GUI thread: the address Play logs in at, and the local server only if it is ours.
+
+        T667: a realm address that is another computer's is that computer's business. The
+        local server is neither read, started nor waited for, so a stopped one here does
+        not stand between the player and a game that logs in elsewhere.
+        """
+        play = self.services.play_client_dir
+        address = _realm_address(client_packs.read_record(play)) if play is not None else None
+        if address is not None and not networking.is_this_computer(address):
+            return _PlayTarget(address, None)
+        return _PlayTarget(None, self.services.controller.status())
 
     def _play_end(self, said: str | None = None) -> None:
         """The Play under way is over, started or not."""
@@ -12682,8 +12830,13 @@ class ControllerView(QWidget):
         return True
 
     @Slot(object)
-    def _play_status_read(self, status: object) -> None:
+    def _play_status_read(self, target: object) -> None:
         if self._play_stopped_by_another_action():
+            return
+        status = target.status if isinstance(target, _PlayTarget) else target
+        if isinstance(target, _PlayTarget) and target.remote is not None:
+            self._say_play(PLAY_AT_ANOTHER_COMPUTER.format(address=target.remote))
+            self._play_check_stale()
             return
         if isinstance(status, InstallStatus) and status.all_running:
             self._play_check_stale()
@@ -12790,6 +12943,7 @@ class ControllerView(QWidget):
     def _cancel_play_download(self) -> None:
         """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
         self._play_cancel.set()
+        self._end_the_play_realm_wait()  # T672: Cancel also ends the wait for the realm
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
         self.play_state_changed.emit()
