@@ -61,7 +61,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from yulon import apply, docker, forgetting, links, platform, tuning
+from yulon import apply, docker, forgetting, kept_backups, links, platform, tuning
 from yulon.controller_wow_wotlk import maintenance
 from yulon.controller_wow_wotlk.maintenance import MaintenanceError, backups_dir
 from yulon.log import get_logger
@@ -134,6 +134,14 @@ class ShelfRow:
 
 
 @dataclass(frozen=True)
+class KeptSet:
+    """The backups an earlier uninstall of this server kept in a folder beside its own (T677)."""
+
+    folder: Path
+    rows: tuple[ShelfRow, ...]
+
+
+@dataclass(frozen=True)
 class Shelf:
     folder: Path
     rows: tuple[ShelfRow, ...]
@@ -141,6 +149,8 @@ class Shelf:
     """Set when the folder leads out of the install: listed, never deleted from."""
     folder_id: tuple[int, int] | None = None
     game_id: str | None = None
+    kept: tuple[KeptSet, ...] = ()
+    """Folders earlier uninstalls kept beside the server folder: listed for Restore only."""
 
 
 @dataclass(frozen=True)
@@ -203,10 +213,11 @@ def read_shelf(
     """
     folder = backups_dir(server_dir)
     refused = _outside(folder, server_dir)
+    earlier = _kept_sets(server_dir, game_id)
     try:
         folder_st = os.stat(folder)
     except OSError:
-        return Shelf(folder, (), refused, None, game_id)
+        return Shelf(folder, (), refused, None, game_id, earlier)
     folder_id = (folder_st.st_dev, folder_st.st_ino)
     rows = _rows_in(folder, game_id)
     kept, firm = _protections(
@@ -226,7 +237,32 @@ def read_shelf(
             )
         )
     final.sort(key=lambda r: (r.made_at, r.name), reverse=True)
-    return Shelf(folder, tuple(final), refused, folder_id, game_id)
+    return Shelf(folder, tuple(final), refused, folder_id, game_id, earlier)
+
+
+KEPT_CANNOT_DELETE = (
+    "Kept from an earlier uninstall of this server. Yu'lon never deletes from that folder: "
+    "delete the folder yourself when you no longer need these."
+)
+
+
+def _kept_sets(server_dir: Path, game_id: str | None) -> tuple[KeptSet, ...]:
+    """The folders earlier uninstalls kept beside this server's folder, with their backups (T677).
+
+    Listed so a reinstall into the same folder can Restore from them. Every row is read-only
+    here: it is never selected by a Clean up and a Delete of it is refused, because the folder
+    is the player's to delete.
+    """
+    sets: list[KeptSet] = []
+    for folder in kept_backups.earlier_sets(server_dir):
+        rows = [
+            replace(r, kept_because=None, cannot_delete=KEPT_CANNOT_DELETE)
+            for r in _rows_in(folder, game_id)
+        ]
+        rows.sort(key=lambda r: (r.made_at, r.name), reverse=True)
+        if rows:
+            sets.append(KeptSet(folder, tuple(rows)))
+    return tuple(sets)
 
 
 def _outside(folder: Path, server_dir: Path) -> str | None:

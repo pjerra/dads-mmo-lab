@@ -2620,6 +2620,23 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "be listed answers None - 'could not be established' - which the caller renders "
         "*unchecked*, never a guessed drive"
     ),
+    ("purge.py", "find_backups"): (
+        "T677. Asks whether the install's `sql_scripts/backups` has anything in it (the first "
+        "entry only) so an uninstall moves a folder that holds backups and skips an empty one. "
+        "It writes nothing: it picks whether a rename or a copy is attempted beside the server "
+        "folder, and an OSError makes the uninstall refuse before anything is removed"
+    ),
+    ("purge.py", "_items_under"): (
+        "T677. Lists a backups folder and the copy made of it, to compare names and sizes "
+        "before the uninstall relies on the copy. It decides no write: a difference only "
+        "refuses the press and discards the half-made `.partial` copy, which that call "
+        "itself created. Links are listed and never entered"
+    ),
+    ("kept_backups.py", "earlier_sets"): (
+        "T677. Lists the PARENT of the server folder for the folders earlier uninstalls kept "
+        "beside it, so the Backups list can show them. It decides no write and no delete: the "
+        "rows are marked undeletable, and an OSError answers an empty list"
+    ),
     ("purge.py", "folder_bytes"): (
         "measures the server folder for the uninstall dialog; every OSError per entry is "
         "skipped and the total is short rather than absent, because a folder whose size "

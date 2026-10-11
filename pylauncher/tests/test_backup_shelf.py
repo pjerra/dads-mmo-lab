@@ -1247,3 +1247,61 @@ def test_a_read_error_while_naming_the_database_keeps_the_label(
     assert r.item == "mod-x"
     assert r.unchecked is True
     assert r.kept_because
+
+
+# ------------------------------------------------- backups an uninstall kept (T677)
+
+
+def kept_beside(server: Path, suffix: str = "") -> Path:
+    """The folder an earlier uninstall of this server left beside it."""
+    folder = server.parent / f"{server.name} - kept backups{suffix}"
+    folder.mkdir()
+    (folder / "20261001_100000_acore_characters.sql").write_bytes(dump_of("acore_characters"))
+    return folder
+
+
+def test_backups_an_earlier_uninstall_kept_are_listed_so_a_reinstall_can_restore_them(
+    server: Path,
+) -> None:
+    """A "Keep my characters" reinstall into the same folder starts with NO backups of its own."""
+    kept = kept_beside(server)
+    folder_of(server).rmdir()
+    found = shelf(server)
+    assert found.rows == ()
+    (earlier,) = found.kept
+    assert earlier.folder == kept
+    (kept_row,) = earlier.rows
+    assert kept_row.name == "20261001_100000_acore_characters.sql"
+    assert kept_row.usable
+    assert "earlier uninstall" in (kept_row.cannot_delete or "")
+
+
+def test_every_numbered_kept_set_is_listed_and_another_servers_is_not(server: Path) -> None:
+    one = kept_beside(server)
+    two = kept_beside(server, " (2)")
+    stranger = server.parent / "other-server - kept backups"
+    stranger.mkdir()
+    (stranger / "20261001_100000_acore_world.sql").write_bytes(dump_of("acore_world"))
+    assert [k.folder for k in shelf(server).kept] == [one, two]
+
+
+def test_a_kept_name_that_is_a_file_a_link_or_a_half_made_copy_is_not_a_set(
+    server: Path,
+) -> None:
+    (server.parent / f"{server.name} - kept backups").write_text("not a folder")
+    elsewhere = server.parent / "elsewhere"
+    elsewhere.mkdir()
+    (server.parent / f"{server.name} - kept backups (2)").symlink_to(elsewhere)
+    (server.parent / f"{server.name} - kept backups (3).partial").mkdir()
+    assert shelf(server).kept == ()
+
+
+def test_a_kept_file_can_be_neither_deleted_nor_cleaned_up(server: Path) -> None:
+    kept_beside(server)
+    put(server, "20261001_100000", "acore_world")
+    found = shelf(server)
+    name = found.kept[0].rows[0].name
+    with pytest.raises(ShelfRefusal):
+        backup_shelf.plan_delete(found, name)
+    plan = backup_shelf.plan_clean_up(found, Rule(older_than_days=0), now=NOW)
+    assert name not in plan.names

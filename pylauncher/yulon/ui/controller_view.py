@@ -16563,11 +16563,27 @@ class ControllerView(QWidget):
             if r.kept_because or r.cannot_delete:
                 item.setForeground(QColor(COLOR_TEXT_MUTED))
             self.backup_list.addItem(item)
+        # T677: what earlier uninstalls kept beside the server folder, for Restore only.
+        for index, earlier in enumerate(shelf.kept):
+            for r in earlier.rows:
+                text = backup_shelf.describe(r, shelf.game_id)
+                item = QListWidgetItem(f"{text} \u00b7 kept from an earlier uninstall")
+                item.setData(Qt.ItemDataRole.UserRole, str(earlier.folder / r.name))
+                item.setData(Qt.ItemDataRole.UserRole + 2, [index, r.name])
+                item.setToolTip(f"{earlier.folder / r.name}\n{r.cannot_delete or ''}".strip())
+                item.setForeground(QColor(COLOR_TEXT_MUTED))
+                self.backup_list.addItem(item)
 
     def _selected_row(self) -> backup_shelf.ShelfRow | None:
         item = self.backup_list.currentItem()
         shelf = self._shelf
         if item is None or shelf is None:
+            return None
+        kept_at = item.data(Qt.ItemDataRole.UserRole + 2)
+        if kept_at:
+            index, kept_name = kept_at
+            if 0 <= index < len(shelf.kept):
+                return next((r for r in shelf.kept[index].rows if r.name == kept_name), None)
             return None
         name = item.data(Qt.ItemDataRole.UserRole + 1)
         return next((r for r in shelf.rows if r.name == name), None)
@@ -16595,7 +16611,9 @@ class ControllerView(QWidget):
         clean = waits
         delete = waits
         if clean is None and (shelf is None or not shelf.rows):
-            clean = delete = "There are no backups to delete."
+            clean = "There are no backups to delete."
+            if shelf is None or not shelf.kept:
+                delete = clean
         elif clean is None and shelf is not None and shelf.delete_refused:
             clean = delete = shelf.delete_refused
         if delete is None:
