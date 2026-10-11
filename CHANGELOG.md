@@ -14,6 +14,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ## Unreleased
 
 ### New
+- The Server tab shows ONLINE, STARTING, PARTLY UP or OFFLINE at a glance, with each service's own state on its own line.
+- A **Get playing** checklist on the Server tab, and **Create account…** there and in the launcher's Log in as.
 
 ### Fixed
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.
@@ -25,6 +27,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 
 ### Changed
+- The sidebar's ▶ starts the game, its × is gone, and Networking shows the network mode now in force.
 - The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
 
 ## v0.9.16-Public — 2026-10-10
