@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Uninstall now moves your database backups to a folder beside the server folder and says where, instead of deleting them.
 
 ### Changed
 

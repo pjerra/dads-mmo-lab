@@ -65,6 +65,11 @@ def _unlink_link(path: str) -> None:
         os.rmdir(path)
 
 
+def remove_link(path: str) -> None:
+    """Remove a link or junction itself, never what it points at (T677)."""
+    _unlink_link(path)
+
+
 def _empty_stoppably(path: str, root: Path, stop: Callable[[], bool]) -> None:
     """Remove everything under `path`, asking `stop()` before each unlink and each rmdir."""
     with os.scandir(path) as listing:

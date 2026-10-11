@@ -80,7 +80,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from yulon import dbsecret, docker, forgetting, logsnap, platform, rmtree
+from yulon import dbsecret, docker, forgetting, links, logsnap, platform, rmtree
 from yulon.catalog import composegen
 from yulon.catalog.native import (
     PARKED_TAG_SUFFIX,
@@ -88,6 +88,7 @@ from yulon.catalog.native import (
     forget_parked_build,
     forget_stopped_build,
 )
+from yulon.catalog.snapshot import BACKUPS_FOLDER
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
@@ -153,7 +154,8 @@ behind is the surprise nobody wants. Until then the ticked press removed it
 
 
 LEFT_BEHIND = (
-    "your backups — an uninstall that deleted them would make "
+    "your backups — they are moved out of the server folder, to a new folder beside it, "
+    "before the server folder is deleted, because an uninstall that deleted them would make "
     '"Keep my characters" pointless in the one case it matters',
     "your WoW client folder. A file a module put into it is removed when it is still the "
     "file Yu'lon copied, and a file of yours a module set aside is put back",
@@ -225,6 +227,10 @@ class PurgePlan:
     folder_bytes: int = 0
     left_behind: tuple[str, ...] = LEFT_BEHIND
     problems: tuple[str, ...] = ()
+    backups_to: Path | None = None
+    """Where this install's backups will be moved to, or None when it has none (T677)."""
+    backups_linked_to: Path | None = None
+    """Where a backups folder that leads out of the install really is; it is not touched (T677)."""
 
 
 @dataclass(frozen=True)
@@ -246,6 +252,107 @@ class PurgeReport:
     folder_removed: bool = False
     record_forgotten: bool = False
     warnings: tuple[str, ...] = ()
+    backups_kept: Path | None = None
+    """The folder the install's backups were moved to before the server folder went (T677)."""
+    backups_linked_to: Path | None = None
+    """Where a backups folder that was a link out of the install really is; left as it was."""
+
+
+KEPT_BACKUPS_SUFFIX = " - kept backups"
+"""The folder an uninstall moves the backups to is `<server folder name> - kept backups`."""
+
+
+@dataclass(frozen=True)
+class BackupsFound:
+    """What this install's backups folder is, read off the disk (T677)."""
+
+    source: Path | None = None
+    """The real folder, inside the install, that holds backups to move; None when none."""
+    destination: Path | None = None
+    """Where `keep_backups()` will put it: beside the server folder, a name nobody has."""
+    linked_to: Path | None = None
+    """Where the backups folder really is when it leads OUT of the install; never touched."""
+
+
+def kept_backups_path(server_dir: Path) -> Path:
+    """Where this install's backups go: beside the server folder, never onto an earlier set.
+
+    The first free of `<name> - kept backups`, `<name> - kept backups (2)`, and so on. It is a
+    sibling of the server folder on purpose: removing the server folder already needs write
+    access to that parent, so a move there cannot fail for a reason the removal would not
+    share, and a move inside one disk is a rename that copies nothing. The name is a function
+    of the disk and not of the clock, so the dialog can say the exact folder before the press.
+    """
+    base = f"{server_dir.name}{KEPT_BACKUPS_SUFFIX}"
+    candidate = server_dir.parent / base
+    number = 2
+    while os.path.lexists(candidate):
+        candidate = server_dir.parent / f"{base} ({number})"
+        number += 1
+    return candidate
+
+
+def _strictly_inside(path: Path, root: Path) -> bool:
+    inside = os.path.normcase(str(root)).rstrip("\\/") + os.sep
+    return os.path.normcase(str(path)).startswith(inside)
+
+
+def find_backups(server_dir: Path) -> BackupsFound:
+    """Read, never write: where this install's backups are and what an uninstall will do with them.
+
+    The folder is `sql_scripts/backups` for every game (`snapshot.BACKUPS_FOLDER`). It can be
+    a link or a junction to another disk (`backup_shelf` lists that case and never deletes
+    from it), so it is judged by where it REALLY is: inside the install it is moved; outside
+    it is the player's own folder, and is reported and left alone. A folder with nothing in it
+    has nothing to keep.
+
+    Raises:
+        OSError: the folder could not be looked at; the uninstall then refuses.
+    """
+    folder = server_dir / BACKUPS_FOLDER
+    if not os.path.lexists(folder):
+        return BackupsFound()
+    real = Path(os.path.realpath(folder))
+    if not os.path.exists(real):
+        return BackupsFound()  # a link to nothing: no backups to lose
+    if not _strictly_inside(real, Path(os.path.realpath(server_dir))):
+        return BackupsFound(linked_to=real)
+    if real.is_dir():
+        with os.scandir(real) as listing:
+            if next(listing, None) is None:
+                return BackupsFound()
+    return BackupsFound(source=real, destination=kept_backups_path(server_dir))
+
+
+def keep_backups(found: BackupsFound) -> Path | None:
+    """Move the backups out of the server folder, or refuse before anything is removed.
+
+    A failed move is a refusal and never a skipped step: the folder removed next would take
+    the backups with it.
+    """
+    if found.source is None or found.destination is None:
+        return None
+    try:
+        os.rename(found.source, found.destination)
+    except OSError as exc:
+        raise PurgeRefusal(
+            f"Yu'lon could not move your backups from {found.source} to {found.destination} "
+            f"({exc}), and the uninstall deletes the folder they are in. Nothing was removed. "
+            f"Move that folder somewhere safe yourself, then uninstall again."
+        ) from exc
+    return found.destination
+
+
+def release_backups_link(server_dir: Path) -> None:
+    """Remove the link a backups path goes through, as a link, so the removal never follows it.
+
+    A link out of the install, or a link whose target `keep_backups()` has just moved, is
+    taken off by name here; what it pointed at is not read or touched. Only the two steps of
+    `sql_scripts/backups` are looked at.
+    """
+    for step in (server_dir / BACKUPS_FOLDER.parent, server_dir / BACKUPS_FOLDER):
+        if os.path.lexists(step) and links.is_link(step):
+            rmtree.remove_link(os.fspath(step))
 
 
 def refusal_for(
@@ -551,6 +658,12 @@ class Uninstaller:
         targets, refusal = self._resolve()
         if targets is None:
             return PurgePlan(game=self.game, server_dir=self.server_dir, refusal=refusal)
+        problems = list(targets.problems)
+        found = BackupsFound()
+        try:
+            found = find_backups(self.server_dir)
+        except OSError as exc:
+            problems.append(f"Yu'lon could not look at this install's backups folder ({exc})")
         return PurgePlan(
             game=self.game,
             server_dir=self.server_dir,
@@ -561,7 +674,9 @@ class Uninstaller:
             client_volume=targets.client_volume,
             images=self.image_refs,
             folder_bytes=self._folder_size(self.server_dir),
-            problems=targets.problems,
+            problems=tuple(problems),
+            backups_to=found.destination,
+            backups_linked_to=found.linked_to,
         )
 
     def _resolve(self) -> tuple[_Targets | None, str]:
@@ -676,6 +791,16 @@ class Uninstaller:
                 f"the characters. Nothing was removed."
             )
         secret_kept = self._keep_the_password(targets, keep_characters=keep_characters)
+        # T677: the backups live INSIDE the folder removed below. Moved out first, and a move
+        # that fails is a refusal here, before the first thing is removed.
+        try:
+            found = find_backups(self.server_dir)
+        except OSError as exc:
+            raise PurgeRefusal(
+                f"Yu'lon could not look at this install's backups folder ({exc}), so it cannot "
+                f"keep your backups out of the folder this deletes. Nothing was removed."
+            ) from exc
+        backups_kept = keep_backups(found)
 
         # --- everything below this line changes the machine ---------------
         snapshot = self._snapshot()
@@ -800,6 +925,14 @@ class Uninstaller:
             # Its own words, which never ask the person to delete the copy by hand.
             warnings.append(leftover)
 
+        # T677: a backups link is taken off as a link, so the removal cannot walk through it.
+        try:
+            release_backups_link(self.server_dir)
+        except OSError as exc:
+            raise PurgeRefusal(
+                f"Yu'lon could not take off the link that is your backups folder ({exc}), so "
+                f"it did not delete {self.server_dir}. The rest of the uninstall has been done."
+            ) from exc
         try:
             self._remove_folder(self.server_dir)
         except PurgeError as exc:
@@ -829,6 +962,8 @@ class Uninstaller:
             folder_removed=True,
             record_forgotten=forgotten,
             warnings=tuple(warnings),
+            backups_kept=backups_kept,
+            backups_linked_to=found.linked_to,
         )
 
     def _keep_the_password(self, targets: _Targets, *, keep_characters: bool) -> Path | None:
