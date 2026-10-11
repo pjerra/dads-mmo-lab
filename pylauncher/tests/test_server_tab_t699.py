@@ -185,20 +185,20 @@ def test_create_account_asks_and_runs_the_accounts_tabs_own_create(
     told: list[str] = []
     monkeypatch.setattr(cvm, "show_information", lambda _p, _t, text: told.append(text))
     view = _view(ps, tmp_path)
-    accounts: list[tuple[str, ...]] = [(), ("pk",)]
+    accounts: list[tuple[str, ...]] = [(), ("pkpk",)]
     view.realm_reads = lambda: SimpleNamespace(accounts=accounts.pop(0), announced=None)
     _poll(view, ps, WORLD_UP)
     assert not view.step_account_button.isHidden()
     changed: list[int] = []
     view.accounts_changed.connect(lambda: changed.append(1))
-    view._account_asker = lambda _parent: ("pk", "secret")
+    view._account_asker = lambda _parent: ("pkpk", "secret")
 
     view.step_account_button.click()
 
     made = view.services.create_account.__self__.created  # type: ignore[attr-defined]
-    assert made == [("pk", "secret", 0)]
+    assert made == [("pkpk", "secret", 0)]
     assert view.account_password.text() == "", "the password stayed in a field"
-    assert told and told[0].startswith("pk: created")
+    assert told and told[0].startswith("pkpk: created")
     assert changed == [1]
     assert view.step_account_button.isHidden(), "the step did not tick after the account"
     assert view.steps_label.text() == "Ready to play"
@@ -440,3 +440,19 @@ def test_play_on_a_stopped_server_still_says_stopped(
     _poll(view, ps, "")
     view.play()
     assert asked == ["The server is stopped. Start it first?"]
+
+
+def test_create_account_with_a_name_the_rules_refuse_says_why_in_a_box(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T673's rule refuses before anything is written; from the dialog that must be said, not
+    left on the Accounts tab's line where the player who pressed Create account… cannot see it.
+    """
+    warned: list[str] = []
+    monkeypatch.setattr(cvm, "show_warning", lambda _p, _t, text: warned.append(text))
+    view = _view(ps, tmp_path)
+    view._account_asker = lambda _parent: ("pk", "secret")  # two letters: too short a name
+    view.create_account_from_a_dialog()
+    assert view.services.create_account.__self__.created == []  # type: ignore[attr-defined]
+    assert len(warned) == 1 and "account name" in warned[0], warned
+    assert not view._account_from_a_dialog, "the next run's end would be said as this one's"

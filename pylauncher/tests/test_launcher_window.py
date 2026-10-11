@@ -2054,14 +2054,14 @@ def test_create_an_account_runs_the_server_tabs_create_and_reads_log_in_as_again
     def asker(parent: object) -> tuple[str, str]:
         hosts.append(parent)
         reads.answer = SERVER
-        return ("ALICE", "pw")
+        return ("ALICE", "pass")
 
     view._account_asker = asker
 
     window.create_account_button.click()
 
     assert view.services.create_account.__self__.created == [  # type: ignore[attr-defined]
-        ("ALICE", "pw", 0)
+        ("ALICE", "pass", 0)
     ]
     assert hosts and hosts[0] in (window, view), "asked over neither window"
     assert reads.asked > before, "Log in as was not read again after the account was made"

@@ -9714,9 +9714,14 @@ class ControllerView(QWidget):
         self.account_gm.setValue(0)
         self._account_from_a_dialog = True
         self.create_account()
-        if self._account_from_a_dialog and self.account_report.text() == ACCOUNT_FIELDS_NEEDED:
-            # Refused before it ran (an empty field): said in the box, as a run's end is.
+        started = self.account_report.text() == f"Creating {name.strip()}…"
+        if self._account_from_a_dialog and not started:
+            # Refused before it ran -- an empty field, or T673's rule (`account_rules`): said
+            # in a box, as a run's end is, not only on the Accounts tab's line, which the
+            # player who pressed Create account… is not looking at. The password typed into
+            # the dialog is taken back out of the form it was put in.
             self._account_from_a_dialog = False
+            self.account_password.clear()
             show_warning(
                 self._play_parent(), CREATE_ACCOUNT_LABEL.rstrip("…"), self.account_report.text()
             )
