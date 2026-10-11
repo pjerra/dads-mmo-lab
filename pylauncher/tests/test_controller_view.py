@@ -7286,6 +7286,35 @@ def test_the_plan_names_the_folder_the_backups_are_moved_to(
     assert f"your backups are moved to {kept}" in text
 
 
+def test_the_plan_speaks_once_about_the_backups_in_each_of_the_three_cases(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T677: one statement, from the plan, and never a second one inside "It does not touch"."""
+    kept = tmp_path / "wowserver - kept backups"
+    elsewhere = tmp_path / "elsewhere"
+
+    present = _uninstall_view(ps, tmp_path, _HasBackups(tmp_path, kept))
+    present.show_uninstall_plan()
+    text = present.uninstall_label.text()
+    assert f"your backups are moved to {kept}" in text
+    assert text.lower().count("backup") == 2  # "backups are moved" and "kept backups" in the path
+
+    class _Linked(_FakeUninstall):
+        def plan(self) -> purge.PurgePlan:
+            return replace(super().plan(), backups_linked_to=elsewhere)
+
+    linked = _uninstall_view(ps, tmp_path, _Linked(tmp_path))
+    linked.show_uninstall_plan()
+    text = linked.uninstall_label.text()
+    assert f"your backups folder is a link to {elsewhere}" in text
+    assert "are moved" not in text
+    assert text.lower().count("backup") == 1
+
+    none = _uninstall_view(ps, tmp_path, _FakeUninstall(tmp_path))
+    none.show_uninstall_plan()
+    assert "backup" not in none.uninstall_label.text().lower()
+
+
 def test_a_finished_uninstall_says_where_the_backups_now_are(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

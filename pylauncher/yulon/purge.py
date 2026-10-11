@@ -154,9 +154,6 @@ behind is the surprise nobody wants. Until then the ticked press removed it
 
 
 LEFT_BEHIND = (
-    "your backups — they are moved out of the server folder, to a new folder beside it, "
-    "before the server folder is deleted, because an uninstall that deleted them would make "
-    '"Keep my characters" pointless in the one case it matters',
     "your WoW client folder. A file a module put into it is removed when it is still the "
     "file Yu'lon copied, and a file of yours a module set aside is put back",
     "firewall rules, port forwards and anything else on the host",
@@ -338,9 +335,29 @@ def keep_backups(found: BackupsFound) -> Path | None:
         raise PurgeRefusal(
             f"Yu'lon could not move your backups from {found.source} to {found.destination} "
             f"({exc}), and the uninstall deletes the folder they are in. Nothing was removed. "
-            f"Move that folder somewhere safe yourself, then uninstall again."
+            f"Move that folder somewhere safe yourself, then uninstall again. (A backups folder "
+            f"that is its own disk or mount cannot be moved from here.)"
         ) from exc
     return found.destination
+
+
+def _telling_where_the_backups_went(exc: Exception, kept: Path) -> PurgeError:
+    """The failure, with the folder the backups moved to named in the sentence the player reads.
+
+    Yu'lon's own sentence (a refusal, a Docker refusal) is kept as written with the note after
+    it, and its Details stay. Anything else -- another program's words, a bug's -- goes under
+    Details and the line says the uninstall did not finish, because the line is the one place
+    the player is certain to read where their backups are. Always a `PurgeRefusal`, which is a
+    `PurgeError`, so every `except PurgeError` still catches it.
+    """
+    note = f"Your backups were moved to {kept}."
+    if isinstance(exc, SaidByYulon):
+        wrapped = PurgeRefusal(f"{exc} {note}")
+        wrapped.detail = exc.detail
+    else:
+        wrapped = PurgeRefusal(f"The uninstall did not finish. {note}")
+        wrapped.detail = str(exc)
+    return wrapped
 
 
 def release_backups_link(server_dir: Path) -> None:
@@ -802,6 +819,31 @@ class Uninstaller:
             ) from exc
         backups_kept = keep_backups(found)
 
+        # Everything from here changes the machine. Once the backups have moved, a failure
+        # below must say where they are: the Maintenance tab no longer lists them.
+        try:
+            return self._remove_the_rest(
+                targets,
+                keep_characters=keep_characters,
+                secret_kept=secret_kept,
+                backups_kept=backups_kept,
+                backups_linked_to=found.linked_to,
+            )
+        except Exception as exc:
+            if backups_kept is None:
+                raise
+            raise _telling_where_the_backups_went(exc, backups_kept) from exc
+
+    def _remove_the_rest(
+        self,
+        targets: _Targets,
+        *,
+        keep_characters: bool,
+        secret_kept: Path | None,
+        backups_kept: Path | None,
+        backups_linked_to: Path | None,
+    ) -> PurgeReport:
+        """Everything `_run` does after the refusals and the backups' move; see `_run`."""
         # --- everything below this line changes the machine ---------------
         snapshot = self._snapshot()
         if snapshot.problem:
@@ -963,7 +1005,7 @@ class Uninstaller:
             record_forgotten=forgotten,
             warnings=tuple(warnings),
             backups_kept=backups_kept,
-            backups_linked_to=found.linked_to,
+            backups_linked_to=backups_linked_to,
         )
 
     def _keep_the_password(self, targets: _Targets, *, keep_characters: bool) -> Path | None:
