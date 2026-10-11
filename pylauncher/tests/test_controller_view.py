@@ -361,7 +361,7 @@ def test_the_sub_tabs_carry_icon_and_title_in_the_tab_itself(
         assert view._tabs.tabToolTip(i) == view._tabs.tabText(i)
 
     assert view._tabs.tabText(0) == "Server"
-    assert view._tabs.tabText(2) == "Accounts"
+    assert view._tabs.tabText(1) == "Accounts"  # T699: Console moved to the end
 
 
 def test_server_tab_status_start_and_port_conflict_message(
@@ -19116,8 +19116,35 @@ def _server_with_the_plan_up(
     return view, window, view._tabs.currentWidget()
 
 
-SERVER_SECTIONS = ["Realm", "Play", "Client", "Command channel", "Help", "Danger zone"]
-"""T189's Server tab, top to bottom, for a game with every part wired; Help is T520's."""
+SERVER_SECTIONS = [
+    "Play",
+    "Services",
+    "Get playing",
+    "Realm",
+    "Your game client",
+    "Command channel",
+    "Help",
+    "Danger zone",
+]
+"""T699's Server tab, top to bottom and left to right, for a game with every part wired.
+
+"Play" is the top card (the name, the status pill, PLAY), which has no title of its own.
+T189's Realm/Play/Client boxes became Services, the top card and Your game client; Realm
+is now the realm's own facts (T698). Help is T520's."""
+
+
+class _Card:
+    """A Server tab card as the section tests read one: its title, and the widget for the rest."""
+
+    def __init__(self, widget: Any, title: str) -> None:
+        self._widget = widget
+        self._title = title
+
+    def title(self) -> str:
+        return self._title
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._widget, name)
 
 
 def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> ControllerView:
@@ -19136,15 +19163,30 @@ def _server_view(entry: CatalogEntry, tmp_path: Path, **wired: Any) -> Controlle
 
 
 def _sections(view: ControllerView) -> list[Any]:
-    """The group boxes the Server tab's own column holds, shown, top to bottom."""
-    from PySide6.QtWidgets import QGroupBox
+    """The Server tab's cards, shown, top to bottom and left to right (T699: rows of two).
 
-    box = view._server_body.layout()
-    found = []
-    for index in range(box.count()):
-        widget = box.itemAt(index).widget()
-        if isinstance(widget, QGroupBox) and not widget.isHidden():
-            found.append(widget)
+    The top card is a frame with no title and reads as "Play"; the rest are group boxes.
+    """
+    from PySide6.QtWidgets import QGroupBox, QLayout
+
+    found: list[Any] = []
+
+    def walk(layout: QLayout) -> None:
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget()
+            if widget is None:
+                if item.layout() is not None:
+                    walk(item.layout())
+                continue
+            if widget.isHidden():
+                continue
+            if widget is view.server_hero:
+                found.append(_Card(widget, "Play"))
+            elif isinstance(widget, QGroupBox):
+                found.append(_Card(widget, widget.title()))
+
+    walk(view._server_body.layout())
     return found
 
 
@@ -19161,14 +19203,14 @@ def _named(widget: Any) -> str:
 def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """T189: Realm, Play, Client, Command channel, Danger zone -- and what is in each."""
+    """T189, T699: the cards in the mockup's order -- and what is in each."""
     view = _server_view(WOTLK, tmp_path, uninstall=_PlanOnlyUninstall(tmp_path))
     assert view.play_button is not None and view.steam_button is not None
     assert view.services.channel_setup is not None, "the fixture has no channel to section"
 
     assert [s.title() for s in _sections(view)] == SERVER_SECTIONS
     expected = {
-        "Realm": [
+        "Services": [
             view.start_button,
             view.stop_button,
             view.refresh_button,
@@ -19186,7 +19228,7 @@ def test_the_server_tab_is_five_sections_with_every_control_in_its_own(
             view.play_label,
             view.steam_label,
         ],
-        "Client": [
+        "Your game client": [
             view.client_dir_label,
             view.set_client_dir_button,
             view.forget_client_dir_button,
@@ -19228,7 +19270,7 @@ def test_a_game_without_a_command_channel_has_no_command_channel_section(
         pytest.skip(f"{entry.name}'s channel is its console, which the section explains")
     titles = [s.title() for s in _sections(view)]
     assert "Command channel" not in titles, titles
-    assert titles[0] == "Realm" and titles[-1] == "Danger zone"
+    assert titles[0] == "Play" and titles[-1] == "Danger zone"
 
 
 def test_play_is_the_one_gold_button_and_start_is_gold_only_without_it(
@@ -19257,7 +19299,7 @@ def test_play_without_a_client_folder_says_where_to_set_one(
     assert view.play_button is not None and view.play_button.isHidden()
     assert not view.play_label.isHidden()
     assert view.play_label.text() == controller_view_module.PLAY_NEEDS_A_CLIENT_FOLDER
-    assert "Client" in view.play_label.text()
+    assert "Your game client" in view.play_label.text()
 
 
 def _gold_on_screen(view: ControllerView) -> list[str]:
@@ -19331,14 +19373,14 @@ def test_the_danger_zone_is_bordered_red_and_its_buttons_keep_the_windows_style(
     window, _tab = _controller_in_the_real_window(view, "Server")
     _at(window, T191_SIZES[1])
     zone = next(s for s in _sections(view) if s.title() == "Danger zone")
-    realm = next(s for s in _sections(view) if s.title() == "Realm")
+    realm = next(s for s in _sections(view) if s.title() == "Services")
     middle = zone.height() // 2
     assert _close(
         _pixel_near(zone, 0, middle), QColor(COLOR_DANGER)
     ), f"the Danger zone's left edge is {_pixel_near(zone, 0, middle).name()}"
     assert not _close(
         _pixel_near(realm, 0, realm.height() // 2), QColor(COLOR_DANGER)
-    ), "the Realm section is red too: the sheet is not scoped to the Danger zone"
+    ), "the Services card is red too: the sheet is not scoped to the Danger zone"
     view.stop_button.setEnabled(True)
     view.remove_button.setEnabled(True)
     process_events()
@@ -19700,7 +19742,11 @@ def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_ord
         missed = [_pad_describe(w, window) for w in _iter_focusable(tab) if w not in reached]
         assert missed == [], f"the pad cannot reach {missed} at {size}"
 
+        # T699: cards sit two by two, so "in order" is by row: Down from a card may go to
+        # the one under it and pass the one beside it, but never to a row above.
+        rows = {"Play": 0, "Services": 1, "Get playing": 1, "Realm": 2, "Your game client": 2}
         order = [s.title() for s in _sections(view)]
+        row_of = {t: rows.get(t, 3 + order.index(t)) for t in order}
         bar.setFocus()
         process_events()
         seen: list[str] = []
@@ -19713,7 +19759,7 @@ def test_the_pad_reaches_every_server_control_and_walks_down_the_sections_in_ord
             if title == "Danger zone":
                 break
         assert seen and seen[-1] == "Danger zone", f"Down went through {seen} at {size}"
-        indexes = [order.index(t) for t in seen]
+        indexes = [row_of[t] for t in seen]
         assert indexes == sorted(indexes), f"Down went back up: {seen} at {size}"
     finally:
         keyboard.stop()
@@ -19835,18 +19881,13 @@ def test_the_pad_walks_the_plan_page_from_the_sub_tab_bar_to_its_last_button(
         nav.navigate(Direction.DOWN)
         process_events()
         landed = QApplication.focusWidget()
-        # The page's top row, which since T189 is the Realm section's presses
-        # (the pathfinding and world-upkeep rows above it are hidden on a
-        # server that owes neither): nothing on the page the pad can stop on
-        # starts above it. The sub-tab bar is one stop as wide as the page, and
-        # Down takes the best centred press of the row under it
-        # (`_pick`): of Start, Stop and Refresh, Refresh.
-        top = min(_edges_in(w, window)[1] for w in _in_page(page.widget()))
-        assert landed is view.refresh_button, (
+        # The page's top card, which since T699 is the one with PLAY in it: nothing on
+        # the page the pad can stop on is in a card above it. The sub-tab bar is one stop
+        # as wide as the page, and Down takes the best centred press under it (`_pick`).
+        assert _section_of(view, landed) == "Play", (
             f"Down from the sub-tab bar went to {_pad_describe(landed, window)}, "
-            "not Refresh, the best centred press of Realm's top row"
+            "not into the top card"
         )
-        assert _section_of(view, landed) == "Realm" and _edges_in(landed, window)[1] == top
         stops = [landed]
         # The plan's last row is the uninstall press and its Cancel (PR 291's
         # Windows live test). Down lands on whichever is best centred under the
@@ -24312,7 +24353,7 @@ def test_the_button_offers_to_make_one_and_then_reads_play(
     play = _built(original, tmp_path)
     with_one, _ = _play_view(ps, tmp_path, original=original, play=play)
     assert with_one.play_button is not None
-    assert with_one.play_button.text() == "Play"
+    assert with_one.play_button.text() == controller_view_module.PLAY_STARTS_IT_LABEL
     assert with_one.play_menu_button is not None and not with_one.play_menu_button.isHidden()
     entries = [action.text() for action in with_one.play_menu.actions()]
     assert entries == [
@@ -24343,7 +24384,7 @@ def test_a_forgotten_original_still_leaves_play(qapp: object, ps: _Ps, tmp_path:
     play = _built(_game_client(tmp_path / "clients" / "WoW"), tmp_path)
     view, _ = _play_view(ps, tmp_path, original=None, play=play)
     assert view.play_button is not None and not view.play_button.isHidden()
-    assert view.play_button.text() == "Play"
+    assert view.play_button.text() == controller_view_module.PLAY_STARTS_IT_LABEL
 
 
 def test_busy_greys_play_and_its_menu(qapp: object, ps: _Ps, tmp_path: Path) -> None:
@@ -25031,6 +25072,7 @@ def test_the_tabs_play_button_starts_the_game_and_does_not_open_the_launcher(
     view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
     opened = _launcher_spy(view)
     ps.names = WORLD_UP
+    view.refresh_status()  # T699: PLAY's word follows the poll ("PLAY" once it is seen up)
 
     assert (
         view.play_button is not None

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -183,7 +184,7 @@ from yulon.manifest import ConfKey, Manifest, ManifestType, Prompt, When
 from yulon.manifest_store import FAMILY_FILES, ManifestStore
 from yulon.networking import Mode, NetworkPlan, NetworkReport
 from yulon.said import SaidByYulon, split_details
-from yulon.ui import lines, single_instance
+from yulon.ui import lines, server_status, single_instance
 from yulon.ui.answers import said_yes
 from yulon.ui.catalog_view import DirPicker, _qt_dir_picker, offer_a_docker_group_restart
 from yulon.ui.folder_picker import pick_folder
@@ -195,9 +196,13 @@ from yulon.ui.theme import (
     COLOR_GOLD_LIGHT,
     COLOR_TEXT_GOLD,
     COLOR_TEXT_MUTED,
+    COLOR_TEXT_PRIMARY,
     COLOR_TEXT_WARNING,
+    FONT_FAMILY_TITLE,
     PLAY_MENU_BUTTON,
     SERVER_BUILD_BUTTON,
+    SERVER_HERO,
+    SERVER_PLAY_BUTTON,
 )
 from yulon.ui.widgets.clean_up_dialog import CleanUpDialog
 from yulon.ui.widgets.client_addons_box import AddonRow, ClientAddonsBox
@@ -227,6 +232,7 @@ from yulon.ui.widgets.page import (
 from yulon.ui.widgets.party_panel import PartyPanel
 from yulon.ui.widgets.prompt import InputPrompter
 from yulon.ui.widgets.reasons import ReasonLine, drop_reason, reason_of, set_enabled_why
+from yulon.ui.widgets.server_cards import ServiceRow, StatusPill, StepRow
 from yulon.ui.widgets.tuning_panel import TuningPanel, build_tuning_cards
 
 logger = get_logger(__name__)
@@ -933,8 +939,48 @@ def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
 # ------------------------------------------------- the ready-to-play client (T181)
 
 MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
-PLAY_LABEL = "Play"
+SUB_TAB_ORDER = (
+    "Server",
+    "Accounts",
+    "Characters",
+    "Bots",
+    "Modules",
+    "Tuning",
+    "Networking",
+    "Maintenance",
+    "Backups & updates",
+    "Console",
+)
+"""The server's sub-tabs, left to right (T699). "Backups & updates" is Maintenance's new name
+(T692)."""
+PLAY_LABEL = "PLAY"
+PLAY_WHEN_READY_LABEL = "PLAY when ready"
+"""PLAY while the server is starting (T699): pressed, it waits for the realm, then plays."""
+PLAY_STARTS_IT_LABEL = "PLAY (starts it)"
+"""PLAY while the server is down or partly up: pressed, it asks to start it, then plays."""
 LAUNCHER_LABEL = "Launcher…"
+PLAY_OPTIONS_LABEL = "Play options ▾"
+OPEN_LAUNCHER_LABEL = "Open Launcher…"
+"""The Your game client card's way to the launcher window, the hero's "Launcher…" (T699)."""
+OPEN_FOLDER_LABEL = "Open folder"
+STEP_MAKE_LABEL = "Make…"
+"""Get playing's step 2 (T696): make the ready-to-play client."""
+CREATE_ACCOUNT_LABEL = "Create account…"
+ACCOUNT_FIELDS_NEEDED = "Username and password are required."
+"""Get playing's step 3 (T696), and the launcher's Log in as press: a name and a password."""
+NETWORKING_LINK_LABEL = "Change on the Networking tab"
+DANGER_SHOW = "Show ▸"
+DANGER_HIDE = "Hide ▾"
+DANGER_INTRO = "Every way to remove or repair this server. You choose what is kept."
+NETWORK_NOW = (
+    "Now: {mode}. This is who can reach this server. The address your own game connects to "
+    "is a different setting: Realm address, in the Launcher."
+)
+"""The Networking tab's line for the mode in force (T698), the Realm card's "Network mode now"."""
+PLAY_WAITS_FOR_THE_START = (
+    "The server is starting. World of Warcraft starts as soon as the realm is up."
+)
+"""PLAY pressed while this tab's own Start runs (T699): it waits for that Start and the realm."""
 REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
 DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
 CLIENT_OPTIONS_LABEL = "Client options…"
@@ -1262,6 +1308,51 @@ def ask_client_options(parent: QWidget, offer: ClientOptionsOffer) -> dict[str, 
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return dialog.options.choices()
+
+
+class NewAccountDialog(QDialog):
+    """ "Create account…" (T696): a name and a password for a game account, OK and Cancel.
+
+    The account is made by the Accounts tab's own Create (`create_account()`), so its
+    rules and its report are that press's; this only asks for the two fields.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(CREATE_ACCOUNT_LABEL.rstrip("…"))
+        form = QFormLayout(self)
+        intro = QLabel(
+            "A game account to log in with. You type the password in the game; Yu'lon does not "
+            "keep it.",
+            self,
+        )
+        intro.setWordWrap(True)
+        form.addRow(intro)
+        self.name = QLineEdit(self)
+        self.password = QLineEdit(self)
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Username", self.name)
+        form.addRow("Password", self.password)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+
+AccountAsker = Callable[[QWidget], "tuple[str, str] | None"]
+"""Asks for a new game account's name and password; None for Cancel (a seam for tests)."""
+
+
+def ask_new_account(parent: QWidget) -> tuple[str, str] | None:
+    """The real `AccountAsker`: the dialog, modal."""
+    dialog = NewAccountDialog(parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    answer = (dialog.name.text().strip(), dialog.password.text())
+    dialog.password.clear()
+    return answer
 
 
 def _gb_text(size: int) -> str:
@@ -8010,7 +8101,9 @@ UNINSTALL_ABSENT = (
 )
 """The Danger zone's sentence for a game with no uninstall seam (T189 A27)."""
 
-PLAY_NEEDS_A_CLIENT_FOLDER = "Play needs your own client folder first — set it under Client below."
+PLAY_NEEDS_A_CLIENT_FOLDER = (
+    "Play needs your own client folder first — set it under Your game client below."
+)
 """The Play section's line while there is nothing to make a ready-to-play client from (T189)."""
 
 
@@ -8040,6 +8133,41 @@ class _ShownWhileAnyIs(QObject):
         shown = any(not press.isHidden() for press in self._presses)
         if self._row.isHidden() == shown:
             self._row.setVisible(shown)
+
+
+class _StatusLine(QLabel):
+    """The Server tab's status line, hidden while it only repeats the poll's three words (T699).
+
+    The Services card's rows say "Database running" and the rest, one per line; the
+    line is for everything else -- "Starting…", "Stopping…", "See the box above".
+    """
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt's name
+        super().setText(text)
+        self.setVisible(not _POLL_WORDS.match(text))
+
+
+_POLL_WORDS = re.compile(r"Database (running|stopped) · Login server (running|stopped) · ")
+
+
+class _OpensWhenShown(QObject):
+    """Calls `open_it` each time one of `watched` is shown (T699: the folded Danger zone).
+
+    `ShowToParent` reaches a widget whether or not its folded parent is shown, so a
+    Repair offer, an armed press's warning or the uninstall plan unfolds the zone it
+    is in rather than appearing where nobody can see it.
+    """
+
+    def __init__(self, open_it: Callable[[], None], watched: Sequence[QWidget]) -> None:
+        super().__init__(watched[0])
+        self._open_it = open_it
+        for widget in watched:
+            widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ShowToParent:
+            self._open_it()
+        return False
 
 
 def _bar(parent: QWidget, *buttons: QWidget) -> QWidget:
@@ -8177,6 +8305,9 @@ class ControllerView(QWidget):
     """
 
     launcher_saved = Signal(str)
+
+    accounts_changed = Signal()
+    """An account was created on this server (T696): the launcher reads its Log in as again."""
     """A `save_launcher_picks()` write ended: `""` when saved, else what went wrong (T187)."""
 
     def __init__(
@@ -8540,6 +8671,21 @@ class ControllerView(QWidget):
         self._ask_again_adopt = _AskAgain()
         # T171: built before any tab, like T99's box, so `_set_busy()` can
         # always reach it; the Tuning tab is what shows it.
+        # T699/T696: what the Realm and Get playing cards read from the database once the
+        # server is up -- the person accounts (how many) and the address the realm row sends
+        # players to -- and whether that read is out. None while unread.
+        self._account_count: int | None = None
+        # The read itself: the launcher's (`ViewReads.server`) unless a test hands another.
+        self.realm_reads: Callable[[], object] | None = None
+        self._announced: str | None = None
+        self._realm_read_pending = False
+        self._realm_read_when_up = True
+        self._mode_now = ""
+        # T696: "Create account…" asks through this, and its outcome is said in a box too.
+        self._account_asker: AccountAsker = ask_new_account
+        self._account_from_a_dialog = False
+        # T699: a PLAY pressed while this tab's own Start runs waits for it ("PLAY when ready").
+        self._play_waits_for_the_start = False
         self._build_time_zone_group()
         self._build_server_tab()
         self._build_console_tab()
@@ -8550,6 +8696,7 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_tuning_tab()
         self._build_networking_tab()
+        self._order_the_tabs()
 
         # T106: asked once now, whether or not this tab polls -- it reads files
         # and asks no daemon.
@@ -8604,6 +8751,26 @@ class ControllerView(QWidget):
                 QTimer.singleShot(_POST_INSTALL_RESETTLE_MS, self, self._resettle_if_pending)
 
     # ------------------------------------------------------------- sub-tabs
+
+    def _order_the_tabs(self) -> None:
+        """The sub-tabs in the order a player reaches for them (T699, the owner's mockup).
+
+        Built in the order their parts depend on each other; shown in this one. Moved by
+        the bar, which moves each page with its tab, so nothing that finds a page by its
+        widget or its title notices.
+        """
+        bar = self._tabs.tabBar()
+        target = 0
+        for title in SUB_TAB_ORDER:
+            index = next(
+                (i for i in range(self._tabs.count()) if self._tabs.tabText(i) == title), -1
+            )
+            if index == -1:
+                continue
+            if index != target:
+                bar.moveTab(index, target)
+            target += 1
+        self._tabs.setCurrentIndex(0)
 
     def _add_panel_tab(self, tab: QWidget, icon_name: str, title: str) -> None:
         """Add a sub-tab carrying both its icon and readable title label.
@@ -8678,7 +8845,7 @@ class ControllerView(QWidget):
         self.repair_channel_button = QPushButton("Repair the command channel", tab)
         self.repair_channel_button.setVisible(False)
         self.repair_channel_button.clicked.connect(self.repair_channel)
-        self.status_label = QLabel("Status unknown", tab)
+        self.status_label = _StatusLine("Status unknown", tab)
         # T185: a Deck's sentence ran off the right edge of a 960 window.
         self.status_label.setWordWrap(True)
         # T133: said while this server's WSL distro is stopped and every tab's
@@ -8980,99 +9147,59 @@ class ControllerView(QWidget):
         self.start_button.setProperty(
             "primary", self.play_button is None or self.play_button.isHidden()
         )
-        # T189: what this tab does, as five boxes in the order a player needs
-        # them. The name row and the two banners stay above them.
         self._server_body = tab
-        name_row = QHBoxLayout()
-        name_row.addWidget(
-            QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}")
-        )
-        name_row.addStretch(1)
-        # The realm's live status as a glowing gem badge on the right.
+        # The realm's live status: the reading the tray, the header and the launcher follow.
+        # Not drawn on this tab any more (T699): the status pill below is that reading, bigger.
         self.realm_badge = DadcraftRealmBadge("stopped", tab)
-        name_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        box.addLayout(name_row)
+        self.realm_badge.setVisible(False)
         self._build_server_banners(tab)
+        self._lay_out_server_tab(tab, box)
+        box.addStretch(1)
+        for press in self._server_presses():
+            self.server_reasons.watch(press)
+        self._add_panel_tab(tab, "server", "Server")
+
+    def _lay_out_server_tab(self, tab: QWidget, box: QVBoxLayout) -> None:
+        """The Server tab as the owner's mockup draws it (T699), every control it had kept.
+
+        Top to bottom: the hero card (name, the status pill, the one line of how it is,
+        PLAY, Launcher… and the ▾ menu), the banners, then two rows of two cards --
+        Services beside Get playing, Realm beside Your game client -- side by side where
+        the tab is wide enough and stacked where it is not, then Command channel and Help,
+        and last the Danger zone, folded until it is opened (or until it has something
+        the player must see).
+        """
+        box.addWidget(self._build_server_hero(tab))
         box.addWidget(self.compose_banner)
         box.addWidget(self.corrections_banner)
         box.addWidget(self.kept_build_banner)
 
-        realm, realm_column = section("Realm", tab)
-        for label in (
-            self.verdict_label,
-            self.docker_banner,
-            self.status_label,
-            self.distro_label,
-            self.upstream_label,
-            self.pathfinding_label,
-        ):
-            realm_column.addWidget(label)
-        realm_column.addWidget(
-            _bar(realm, self.pathfinding_start_button, self.pathfinding_stop_button)
-        )
-        realm_column.addWidget(self.world_upkeep_label)
-        realm_column.addWidget(_bar(realm, self.reextract_button, self.finish_world_button))
-        realm_column.addWidget(
-            _bar(
-                realm, self.start_button, self.stop_button, self.restart_button, self.refresh_button
-            )
-        )
-        realm_column.addWidget(self.server_reasons)
-        # The refusal, then the offers it makes: read in that order.
-        realm_column.addWidget(self.problem_label)
-        realm_column.addWidget(self.notice_label)
-        realm_column.addWidget(self.problem_details)
-        realm_column.addWidget(
-            _bar(
-                realm,
-                self.stop_anyway_button,
-                self.stop_other_button,
-                self.clear_reservation_button,
-            )
-        )
-        realm_column.addWidget(
-            _bar(
-                realm,
-                self.update_compose_button,
-                self.repair_database_button,
-                self.restore_backup_button,
-            )
-        )
-        box.addWidget(realm)
+        services = self._build_services_card(tab)
+        playing = self._build_get_playing_card(tab)
+        first_row = QHBoxLayout()
+        first_row.setSpacing(12)
+        first_row.addWidget(services, 1)
+        if self.play_button is not None:
+            first_row.addWidget(playing, 1)
+        else:
+            playing.setVisible(False)
+        box.addLayout(first_row)
+        stack_when_narrow(first_row, tab)
 
-        play, play_column = section("Play", tab)
-        play_presses = [
-            b
-            for b in (
-                self.play_button,
-                self.launcher_button,
-                self.play_menu_button,
-                self.play_cancel_button,
-                self.steam_button,
-            )
-            if b is not None
-        ]
-        play_column.addWidget(_bar(play, *play_presses))
-        play_column.addWidget(self.play_label)
-        play_column.addWidget(self.steam_label)
-        play_column.addWidget(self.steam_details)
-        self._add_section(box, play, self.play_button is not None or self.steam_button is not None)
+        realm = self._build_realm_card(tab)
+        client = self._build_client_card(tab)
+        second_row = QHBoxLayout()
+        second_row.setSpacing(12)
+        second_row.addWidget(realm, 1)
+        if self.set_client_dir_button is not None:
+            second_row.addWidget(client, 1)
+        else:
+            client.setVisible(False)
+        box.addLayout(second_row)
+        stack_when_narrow(second_row, tab)
 
-        client, client_column = section("Client", tab)
-        client_column.addWidget(self.client_dir_label)
-        self.addon_pointer = QLabel(ADDON_POINTER, tab)
-        self.addon_pointer.setWordWrap(True)
-        self.addon_pointer.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
-        self.addon_pointer.setVisible(self.services.client_addons is not None)
-        client_column.addWidget(self.addon_pointer)
-        client_presses = [
-            b for b in (self.set_client_dir_button, self.forget_client_dir_button) if b is not None
-        ]
-        client_column.addWidget(_bar(client, *client_presses))
-        self._add_section(box, client, self.set_client_dir_button is not None)
-
-        # Decided at build, like `channel_label`'s own visibility above: a
-        # channel to set up, a console channel to explain, or a console to test.
+        # Decided at build, like `channel_label`'s own visibility: a channel to set up,
+        # a console channel to explain, or a console to test.
         channel, channel_column = section("Command channel", tab)
         channel_column.addWidget(self.channel_label)
         channel_column.addWidget(_bar(channel, self.test_console_button))
@@ -9093,11 +9220,259 @@ class ControllerView(QWidget):
         help_column.addWidget(_bar(help_box, self.help_button))
         self._add_section(box, help_box, bool(self.entry.help_places))
 
-        # Every press that removes something, in one red-bordered box (T189
-        # A22/C27): none of them sits beside Refresh any more. Under the
-        # presses, T188's order: what the plan removes, then the two choices
-        # that change it, then the press that acts on them.
+        box.addWidget(self._build_danger_zone(tab))
+
+    def _build_server_hero(self, tab: QWidget) -> QFrame:
+        """The top card: the server's name and folder, the status pill, and the presses to play."""
+        hero = QFrame(tab)
+        hero.setObjectName(SERVER_HERO)
+        self.server_hero = hero
+        outer = QVBoxLayout(hero)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(8)
+        top = QHBoxLayout()
+        top.setSpacing(16)
+        # In a widget of its own that takes the card's spare width: a bare layout beside the
+        # presses was squeezed to its word-wrapped labels' narrowest and centred.
+        facts_box = QWidget(hero)
+        facts_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        facts = QVBoxLayout(facts_box)
+        facts.setContentsMargins(0, 0, 0, 0)
+        facts.setSpacing(4)
+        self.server_title = QLabel(self.entry.name, hero)
+        self.server_title.setStyleSheet(
+            f"font-family: {FONT_FAMILY_TITLE}; font-size: 22px; font-weight: bold; "
+            f"color: {COLOR_TEXT_PRIMARY}; background: transparent; border: none;"
+        )
+        self.server_folder_label = QLabel(str(self.services.controller.server_dir), hero)
+        self.server_folder_label.setWordWrap(True)
+        self.server_folder_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.server_folder_label.setStyleSheet(
+            f"color: {COLOR_TEXT_MUTED}; background: transparent; border: none;"
+        )
+        self.status_pill = StatusPill(hero)
+        self.realm_badge.status_changed.connect(self._show_the_status)
+        self.glance_label = QLabel("", hero)
+        self.glance_label.setWordWrap(True)
+        self.glance_label.setStyleSheet(
+            f"color: {COLOR_TEXT_MUTED}; background: transparent; border: none;"
+        )
+        pill_row = QHBoxLayout()
+        pill_row.setSpacing(10)
+        pill_row.addWidget(self.status_pill, 0, Qt.AlignmentFlag.AlignVCenter)
+        pill_row.addWidget(self.glance_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        pill_row.addWidget(self.realm_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        pill_row.addStretch(1)  # the pill stays left when the line beside it is hidden
+        facts.addWidget(self.server_title)
+        facts.addWidget(self.server_folder_label)
+        facts.addLayout(pill_row)
+        # The world's own sentence: uptime, players, bots, or what is wrong with it.
+        facts.addWidget(self.verdict_label)
+        top.addWidget(facts_box, 1)
+        presses = QHBoxLayout()
+        presses.setSpacing(10)
+        if self.play_button is not None:
+            self.play_button.setObjectName(SERVER_PLAY_BUTTON)
+            presses.addWidget(self.play_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        side = [
+            b
+            for b in (self.launcher_button, self.play_menu_button, self.play_cancel_button)
+            if b is not None
+        ]
+        side_column = QVBoxLayout()
+        side_column.setSpacing(6)
+        for press in side:
+            side_column.addWidget(press)
+        # At their own width: the name and the pill keep the card's spare room.
+        for press in (self.play_button, *side):
+            if press is not None:
+                press.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        presses.addLayout(side_column)
+        top.addLayout(presses)
+        outer.addLayout(top)
+        if self.steam_button is not None:
+            outer.addWidget(_bar(hero, self.steam_button))
+        outer.addWidget(self.play_label)
+        outer.addWidget(self.steam_label)
+        outer.addWidget(self.steam_details)
+        self._show_the_status(self.realm_badge.status)
+        return hero
+
+    def _build_services_card(self, tab: QWidget) -> QGroupBox:
+        """One row per service with its state, then the lifecycle presses and what they say."""
+        card, column = section("Services", tab)
+        self.services_summary_label = QLabel(server_status.services_summary(None), card)
+        self.services_summary_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        column.addWidget(self.services_summary_label)
+        self.service_rows = tuple(ServiceRow(name, card) for name in server_status.SERVICE_NAMES)
+        for row in self.service_rows:
+            column.addWidget(row)
+        for label in (
+            self.docker_banner,
+            self.status_label,
+            self.distro_label,
+            self.upstream_label,
+            self.pathfinding_label,
+        ):
+            column.addWidget(label)
+        column.addWidget(_bar(card, self.pathfinding_start_button, self.pathfinding_stop_button))
+        column.addWidget(self.world_upkeep_label)
+        column.addWidget(_bar(card, self.reextract_button, self.finish_world_button))
+        # T699: "Open folder", the rail menu's "Open Server Folder in File Manager" on the tab.
+        # Not for a server inside a WSL distro: its folder is not a path on this computer.
+        self.open_folder_button = QPushButton(OPEN_FOLDER_LABEL, card)
+        self.open_folder_button.setToolTip("Open this server's folder in your file manager.")
+        self.open_folder_button.clicked.connect(self.open_server_folder)
+        self.open_folder_button.setVisible(self.services.controller.wsl_distro is None)
+        column.addWidget(
+            _bar(
+                card,
+                self.start_button,
+                self.stop_button,
+                self.restart_button,
+                self.refresh_button,
+                self.open_folder_button,
+            )
+        )
+        column.addWidget(self.server_reasons)
+        # The refusal, then the offers it makes: read in that order.
+        column.addWidget(self.problem_label)
+        column.addWidget(self.notice_label)
+        column.addWidget(self.problem_details)
+        column.addWidget(
+            _bar(
+                card, self.stop_anyway_button, self.stop_other_button, self.clear_reservation_button
+            )
+        )
+        column.addWidget(
+            _bar(
+                card,
+                self.update_compose_button,
+                self.repair_database_button,
+                self.restore_backup_button,
+            )
+        )
+        self._show_the_services()
+        return card
+
+    def _build_get_playing_card(self, tab: QWidget) -> QGroupBox:
+        """T696: the four steps to a game, each open one with the press that does it."""
+        card, column = section("Get playing", tab)
+        self.steps_label = QLabel("", card)
+        self.steps_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        column.addWidget(self.steps_label)
+        self.step_rows = tuple(StepRow(number, card) for number in range(1, 5))
+        self.step_start_button = QPushButton("Start", card)
+        self.step_start_button.setToolTip("Start this server.")
+        self.step_start_button.clicked.connect(self.start_server)
+        self.step_make_button = QPushButton(STEP_MAKE_LABEL, card)
+        self.step_make_button.clicked.connect(self._make_from_the_steps)
+        self.step_account_button = QPushButton(CREATE_ACCOUNT_LABEL, card)
+        self.step_account_button.setToolTip(
+            "Make a game account to log in with: a name and a password."
+        )
+        self.step_account_button.clicked.connect(self._from_tab(self.create_account_from_a_dialog))
+        self.step_rows[0].add_press(self.step_start_button)
+        self.step_rows[1].add_press(self.step_make_button)
+        self.step_rows[2].add_press(self.step_account_button)
+        for row in self.step_rows:
+            column.addWidget(row)
+        column.addStretch(1)
+        self._show_the_steps()
+        return card
+
+    def _build_realm_card(self, tab: QWidget) -> QGroupBox:
+        """Where players are sent, the network mode in force (T698), and who is on."""
+        card, column = section("Realm", tab)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+
+        def fact(row: int, col: int, caption: str) -> QLabel:
+            cell = QVBoxLayout()
+            cell.setSpacing(1)
+            head = QLabel(caption, card)
+            head.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+            value = QLabel("—", card)
+            value.setStyleSheet("font-weight: bold;")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            cell.addWidget(head)
+            cell.addWidget(value)
+            grid.addLayout(cell, row, col)
+            return value
+
+        self.realm_address_value = fact(0, 0, "Players are sent to")
+        self.network_mode_value = fact(0, 1, "Network mode now")
+        self.players_value = fact(1, 0, "Players online")
+        self.bots_value = fact(1, 1, "Bots online")
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        column.addLayout(grid)
+        self.networking_link = QPushButton(NETWORKING_LINK_LABEL, card)
+        self.networking_link.setFlat(True)
+        self.networking_link.setToolTip(
+            "The Networking tab sets who can reach this server. The address your own game "
+            "connects to is a different setting: Realm address, in the Launcher."
+        )
+        self.networking_link.clicked.connect(self.go_to_networking)
+        column.addWidget(_bar(card, self.networking_link))
+        self._show_the_realm()
+        return card
+
+    def _build_client_card(self, tab: QWidget) -> QGroupBox:
+        """The player's own client folder and the ready-to-play client made from it."""
+        card, column = section("Your game client", tab)
+        column.addWidget(self.client_dir_label)
+        self.addon_pointer = QLabel(ADDON_POINTER, card)
+        self.addon_pointer.setWordWrap(True)
+        self.addon_pointer.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        self.addon_pointer.setVisible(self.services.client_addons is not None)
+        column.addWidget(self.addon_pointer)
+        # T699: the Launcher once more, where the client's own settings are talked about.
+        self.client_launcher_button: QPushButton | None = None
+        if self.launcher_button is not None:
+            self.client_launcher_button = QPushButton(OPEN_LAUNCHER_LABEL, card)
+            self.client_launcher_button.setToolTip(self.launcher_button.toolTip())
+            self.client_launcher_button.clicked.connect(self._open_the_launcher)
+            self.client_launcher_button.setVisible(not self.launcher_button.isHidden())
+        presses = [
+            b
+            for b in (
+                self.client_launcher_button,
+                self.set_client_dir_button,
+                self.forget_client_dir_button,
+            )
+            if b is not None
+        ]
+        column.addWidget(_bar(card, *presses))
+        return card
+
+    def _build_danger_zone(self, tab: QWidget) -> QGroupBox:
+        """Every press that removes something, in one red-bordered box, folded (T189, T699).
+
+        Folded until it is opened, and opened by itself when something in it is the
+        thing to do or to read: an import to repair, "Remove from Yu'lon…" lit as the
+        way out, an armed press's warning, the uninstall plan.
+        """
         danger, danger_column = section("Danger zone", tab, danger=True)
+        self.danger_toggle = QPushButton(DANGER_SHOW, danger)
+        self.danger_toggle.setCheckable(True)
+        self.danger_toggle.setToolTip(
+            "Removing, uninstalling and repairing this server. You choose what is kept."
+        )
+        intro = QLabel(DANGER_INTRO, danger)
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
+        head = QHBoxLayout()
+        head.addWidget(self.danger_toggle)
+        head.addWidget(intro, 1)
+        danger_column.addLayout(head)
+        self.danger_body = QWidget(danger)
+        body = QVBoxLayout(self.danger_body)
+        body.setContentsMargins(0, 0, 0, 0)
         danger_presses = [
             b
             for b in (
@@ -9109,34 +9484,245 @@ class ControllerView(QWidget):
             )
             if b is not None
         ]
-        danger_column.addWidget(_bar(danger, *danger_presses))
-        danger_column.addWidget(self.danger_label)
-        danger_column.addWidget(self.danger_details)
-        danger_column.addWidget(self.repair_label)
+        body.addWidget(_bar(self.danger_body, *danger_presses))
+        body.addWidget(self.danger_label)
+        body.addWidget(self.danger_details)
+        body.addWidget(self.repair_label)
         # A27: a game with no Uninstall says what it has instead of saying nothing.
         self.uninstall_absent_label = QLabel(
             UNINSTALL_ABSENT.format(
                 name=self.entry.name, server_dir=self.services.controller.server_dir
             ),
-            danger,
+            self.danger_body,
         )
         self.uninstall_absent_label.setWordWrap(True)
         self.uninstall_absent_label.setStyleSheet(f"color: {COLOR_TEXT_MUTED};")
         self.uninstall_absent_label.setVisible(self.services.uninstall is None)
-        danger_column.addWidget(self.uninstall_absent_label)
+        body.addWidget(self.uninstall_absent_label)
         if self.uninstall_button is not None:
-            danger_column.addWidget(self.uninstall_label)
-            danger_column.addWidget(self.uninstall_details)
-            danger_column.addWidget(self.keep_characters_check)
-            danger_column.addWidget(self.delete_play_client_check)
-            danger_column.addWidget(
-                _bar(danger, self.uninstall_confirm_button, self.uninstall_cancel_button)
+            body.addWidget(self.uninstall_label)
+            body.addWidget(self.uninstall_details)
+            body.addWidget(self.keep_characters_check)
+            body.addWidget(self.delete_play_client_check)
+            body.addWidget(
+                _bar(self.danger_body, self.uninstall_confirm_button, self.uninstall_cancel_button)
             )
-        box.addWidget(danger)
-        box.addStretch(1)
-        for press in self._server_presses():
-            self.server_reasons.watch(press)
-        self._add_panel_tab(tab, "server", "Server")
+        danger_column.addWidget(self.danger_body)
+        self.danger_body.setVisible(False)
+        self.danger_toggle.toggled.connect(self._fold_the_danger_zone)
+        self._danger_opener = _OpensWhenShown(
+            self.open_the_danger_zone,
+            (self.repair_button, self.danger_label, self.keep_characters_check),
+        )
+        return danger
+
+    @Slot(bool)
+    def _fold_the_danger_zone(self, opened: bool) -> None:
+        self.danger_body.setVisible(opened)
+        self.danger_toggle.setText(DANGER_HIDE if opened else DANGER_SHOW)
+
+    def open_the_danger_zone(self) -> None:
+        """Unfold the Danger zone (its toggle, pressed): something in it is the thing to see."""
+        if not self.danger_toggle.isChecked():
+            self.danger_toggle.setChecked(True)
+
+    # -- the at-a-glance cards (T699) ----------------------------------------
+
+    @Slot(str)
+    def _show_the_status(self, status: str) -> None:
+        """The pill, the one line beside it, the rows, the steps and PLAY's word: one reading."""
+        self.status_pill.set_status(status)
+        self._show_the_glance()
+        self._show_the_services()
+        self._show_the_steps()
+        self._show_play_word()
+
+    def _show_the_glance(self) -> None:
+        """The pill's one line: which service is down, or a word while no verdict line says more.
+
+        The world's own sentence (`verdict_label`, `dashboard.line()`) sits under the pill
+        whenever a verdict is shown -- uptime, players, bots, a loop -- so this never repeats it.
+        """
+        look = self.status_pill.look
+        said = ""
+        if look is server_status.PARTLY_UP:
+            said = server_status.partly_up_sentence(self._last_polled)
+        elif not self.verdict_label.text():
+            if look is server_status.STARTING:
+                said = "the world is loading"
+            elif look is server_status.OFFLINE:
+                said = "nothing is running"
+        self.glance_label.setText(said)
+        self.glance_label.setVisible(bool(said))
+
+    def _show_the_services(self) -> None:
+        rows = getattr(self, "service_rows", ())
+        if not rows:
+            return
+        status = None if self.realm_badge.status == "unknown" else self._last_polled
+        ports = (self.entry.ports.db, self.entry.ports.auth, self.entry.ports.world)
+        lines = server_status.service_lines(status, self.realm_badge.status, ports)
+        for row, line in zip(rows, lines, strict=True):
+            row.show_line(line)
+        self.services_summary_label.setText(server_status.services_summary(status))
+
+    def _get_playing_steps(self) -> tuple[server_status.Step, ...]:
+        return server_status.get_playing(
+            server_up=self.status_pill.look is server_status.ONLINE,
+            has_client=self.services.play_client_dir is not None,
+            accounts=self._account_count,
+        )
+
+    def _show_the_steps(self) -> None:
+        rows = getattr(self, "step_rows", ())
+        if not rows:
+            return
+        steps = self._get_playing_steps()
+        current = next((s.key for s in steps if not s.done), None)
+        for row, step in zip(rows, steps, strict=True):
+            row.show_step(step, step.key == current)
+        self.steps_label.setText(server_status.steps_done(steps))
+        by_key = {s.key: s for s in steps}
+        self.step_start_button.setVisible(
+            not by_key["server"].done and self.status_pill.look is not server_status.STARTING
+        )
+        client_dir = self.services.client_dir
+        self.step_make_button.setVisible(not by_key["client"].done)
+        self.step_make_button.setText(
+            STEP_MAKE_LABEL if client_dir is not None else SET_CLIENT_DIR_LABEL
+        )
+        self.step_account_button.setVisible(by_key["account"].done is False)
+
+    def _show_the_realm(self) -> None:
+        if not hasattr(self, "realm_address_value"):
+            return
+        announced = self._announced
+        self.realm_address_value.setText(announced or "—")
+        # The record is a file in the server's folder: a WSL server's waits for its distro (T133).
+        if self._waits_for_the_distro("realm card", self._show_the_realm):
+            self._mode_now = "—"
+        else:
+            intent = networking.read_network_intent(self.services.controller.server_dir)
+            self._mode_now = server_status.mode_now(
+                intent.mode if intent is not None else None, announced
+            )
+        self.network_mode_value.setText(self._mode_now)
+        verdict = self.last_verdict
+        players = verdict.players if verdict is not None else None
+        bots = verdict.bots if verdict is not None else None
+        self.players_value.setText("—" if players is None else str(players))
+        self.bots_value.setText("—" if bots is None else str(bots))
+        mode_line = getattr(self, "network_now_label", None)
+        if mode_line is not None:
+            mode_line.setText(NETWORK_NOW.format(mode=self._mode_now))
+
+    def _show_play_word(self) -> None:
+        """PLAY says what it will do from here: play, wait for the realm, or start it first."""
+        play = self.play_button
+        if play is None or self.services.play_client_dir is None:
+            return
+        look = self.status_pill.look
+        if self._play_waits_for_the_start or look in (
+            server_status.STARTING,
+            server_status.RESTARTING,
+        ):
+            word = PLAY_WHEN_READY_LABEL
+        elif look is server_status.ONLINE:
+            word = PLAY_LABEL
+        elif look in (server_status.OFFLINE, server_status.PARTLY_UP):
+            word = PLAY_STARTS_IT_LABEL
+        else:
+            word = PLAY_LABEL
+        if play.text() != word:
+            play.setText(word)
+
+    @Slot()
+    def open_server_folder(self) -> None:
+        """The server's folder in the file manager (the rail menu's entry, on the tab)."""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.services.controller.server_dir)))
+
+    @Slot()
+    def go_to_networking(self) -> None:
+        """Open the Networking tab (the Realm card's link)."""
+        self._show_page_of(self.lan_radio)
+
+    @Slot()
+    def create_account_from_a_dialog(self) -> None:
+        """ "Create account…" (T696): ask for a name and a password, then the Accounts tab's Create.
+
+        A game whose accounts Yu'lon cannot write has no Create to run: the Accounts tab,
+        which says how to make one at the console, is opened instead.
+        """
+        if self.entry.accounts.scheme is None or not self.create_account_button.isEnabled():
+            self._show_page_of(self.account_name)
+            return
+        answer = self._account_asker(self._play_parent())
+        if answer is None:
+            return
+        name, password = answer
+        self.account_name.setText(name)
+        self.account_password.setText(password)
+        self.account_gm.setValue(0)
+        self._account_from_a_dialog = True
+        self.create_account()
+        if self._account_from_a_dialog and self.account_report.text() == ACCOUNT_FIELDS_NEEDED:
+            # Refused before it ran (an empty field): said in the box, as a run's end is.
+            self._account_from_a_dialog = False
+            show_warning(
+                self._play_parent(), CREATE_ACCOUNT_LABEL.rstrip("…"), self.account_report.text()
+            )
+
+    @Slot()
+    def _make_from_the_steps(self) -> None:
+        """Get playing's step 2: make the ready-to-play client, or first set the client folder."""
+        self.dialog_host = None
+        if self.services.client_dir is None:
+            self.change_client_dir()
+        else:
+            self.make_play_client()
+
+    def _read_the_realm_once_up(self, status: InstallStatus) -> None:
+        """Read the accounts and the realm row the first poll the server is all up (T696, T699).
+
+        Once per time it comes up, never on every poll: it is a database query. A server
+        seen down is read again the next time it is up.
+        """
+        if not status.any_running:
+            self._realm_read_when_up = True
+            return
+        if status.all_running and self._realm_read_when_up:
+            self.read_the_realm()
+
+    def read_the_realm(self) -> None:
+        """Ask the database, off the GUI thread, for the person accounts and the realm row."""
+        if self._realm_read_pending:
+            return
+        read = self.realm_reads
+        if read is None:
+            if self.services.accounts is None:
+                return
+            from yulon.ui.launcher_window import ViewReads  # it imports this module
+
+            read = ViewReads(self).server
+        self._realm_read_pending = True
+        self._realm_read_when_up = False
+        self._run(read, self._realm_read, self._realm_read_failed)
+
+    @Slot(object)
+    def _realm_read(self, reading: object) -> None:
+        self._realm_read_pending = False
+        accounts = getattr(reading, "accounts", None)
+        self._account_count = None if accounts is None else len(accounts)
+        announced = getattr(reading, "announced", None)
+        self._announced = announced if isinstance(announced, str) else None
+        self._show_the_steps()
+        self._show_the_realm()
+
+    @Slot(object)
+    def _realm_read_failed(self, exc: object) -> None:
+        self._realm_read_pending = False
+        self._realm_read_when_up = True
+        logger.info(f"{self.entry.id}: could not read the accounts and the realm row: {exc}")
 
     def _server_presses(self) -> tuple[QAbstractButton, ...]:
         """The Server tab's presses a job of ours greys, in the order the tab draws them."""
@@ -9150,6 +9736,8 @@ class ControllerView(QWidget):
                 self.reinstall_docker_button,
                 self.play_button,
                 self.play_menu_button,
+                self.step_start_button,
+                self.step_make_button,
                 self.set_client_dir_button,
                 self.forget_client_dir_button,
                 self.remove_button,
@@ -9514,6 +10102,8 @@ class ControllerView(QWidget):
             # T391: a loop seen after the poll takes REALM ONLINE down now, and
             # the first verdict past it gives the badge back, not a poll later.
             self.realm_badge.set_status(self._badge_word(self._last_polled))
+        self._show_the_status(self.realm_badge.status)
+        self._show_the_realm()
 
     def _start_reason(self) -> str:
         """Why Start is greyed over containers that are all up (T629).
@@ -9591,6 +10181,9 @@ class ControllerView(QWidget):
         self._world_ready = False
         if refresh_start:
             self._refresh_start_reason()
+        if hasattr(self, "status_pill"):
+            self._show_the_status(self.realm_badge.status)
+            self._show_the_realm()
 
     # ------------------------------------------- the movement-map job (T179)
 
@@ -10129,6 +10722,10 @@ class ControllerView(QWidget):
         if status.distro is not None:
             self._distro_answered(status.distro)
         self._ask_about_the_import(status)
+        # T699: the cards, from this same reading, and the accounts and realm row once it is up.
+        self._show_the_status(self.realm_badge.status)
+        if not stale:
+            self._read_the_realm_once_up(status)
         # T668: once each time the database is found running; asked again after it was down.
         if not status.db:
             self._seeded_asked = False
@@ -10645,6 +11242,9 @@ class ControllerView(QWidget):
             # reached for (review, 2026-08-23).
             for press in self._server_presses():
                 set_enabled_why(press, wait_for(job))
+            if job == "Start" and self.play_button is not None and self.services.play_client_dir:
+                # T699: "PLAY when ready" -- PLAY waits for this Start and then the realm.
+                set_enabled_why(self.play_button, None)
             self.rebuild_action.setEnabled(False)
             # And both T64 presses, for the rebuild's reason exactly: each of
             # them IS that rebuild with a fetch in front of it. Disabled and not
@@ -10770,6 +11370,8 @@ class ControllerView(QWidget):
                 self.play_button.setEnabled(True)
             if self.play_menu_button is not None:
                 self.play_menu_button.setEnabled(True)
+            self.step_start_button.setEnabled(True)
+            self.step_make_button.setEnabled(True)
             self.delete_play_client_check.setEnabled(True)
             self.rebuild_action.setEnabled(self.services.rebuild is not None)
             # Back to what this install can do, never unconditionally, and then
@@ -11001,8 +11603,9 @@ class ControllerView(QWidget):
             # A later Start (or "Stop the other server and start this one") worked.
             self._say_play("")
         if self._play_after_start:
-            # T181: Play asked for this Start ("Start and play"); it is done.
+            # T181: Play asked for this Start ("Start and play"), or waited for it (T699).
             self._play_after_start = False
+            self._play_waits_for_the_start = False
             self._play_wait_for_the_realm()
 
     # -- the wait for the realm after Play's own Start (T672) ---------------
@@ -12427,7 +13030,7 @@ class ControllerView(QWidget):
         )
         self.launcher_button.clicked.connect(self._open_the_launcher)
         self.launcher_button.setVisible(has_play)
-        self.play_menu_button = QPushButton("▾", tab)
+        self.play_menu_button = QPushButton(PLAY_OPTIONS_LABEL, tab)
         # Its label is the arrow: the style's own indicator would be a second (T187).
         self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
         self.play_menu_button.setToolTip("More for the ready-to-play client")
@@ -12947,6 +13550,8 @@ class ControllerView(QWidget):
         if self.services.play_client_dir is None:
             self.make_play_client()
             return
+        if self._play_waits_for_this_start():
+            return
         if self._play_client_blocked():
             return
         marker = self._usable_play_client()
@@ -12975,8 +13580,31 @@ class ControllerView(QWidget):
             return _PlayTarget(address, None)
         return _PlayTarget(None, self.services.controller.status())
 
+    def _play_waits_for_this_start(self) -> bool:
+        """PLAY pressed while this tab's own Start runs: wait for it, then the realm (T699).
+
+        "PLAY when ready": the Start already asked for is the one Play would have asked
+        for, so it is waited for rather than refused as a busy tab. Its end goes on
+        through Play's own wait for the realm (`_server_action_done`); a Start that fails
+        ends the Play with its words (`_start_failed`). Only for a Start: any other job of
+        ours is not bringing the realm up.
+        """
+        if not (self._busy and self._busy_job == "Start"):
+            return False
+        if self._module_job_running() or self._play_client_running:
+            return False
+        if self._usable_play_client() is None:
+            return True
+        self._play_pending = True
+        self._play_after_start = True
+        self._play_waits_for_the_start = True
+        self._say_play(PLAY_WAITS_FOR_THE_START)
+        self._show_play_word()
+        return True
+
     def _play_end(self, said: str | None = None) -> None:
         """The Play under way is over, started or not."""
+        self._play_waits_for_the_start = False
         self._play_pending = False
         self._play_left_out = ()
         self._play_notes = ()
@@ -13019,6 +13647,10 @@ class ControllerView(QWidget):
             self._play_check_stale()
             return
         if isinstance(status, InstallStatus) and status.all_running:
+            if self._badge_word(status) == "starting":
+                # T699: up in `docker ps`, the world still loading -- PLAY waits for the realm.
+                self._play_wait_for_the_realm()
+                return
             self._play_check_stale()
             return
         answer = _ask_with(
@@ -15384,7 +16016,7 @@ class ControllerView(QWidget):
         if not name or not password:
             # The signal alone left the button doing nothing at all
             # (review, 2026-08-22), so the tab says it as well.
-            self.account_report.setText("Username and password are required.")
+            self.account_report.setText(ACCOUNT_FIELDS_NEEDED)
             self.action_failed.emit("username and password are required")
             return
         gm_level = self.account_gm.value()
@@ -15422,6 +16054,14 @@ class ControllerView(QWidget):
         if isinstance(answer, _CreatedAccount) and answer.note:
             said = f"{said} {answer.note}"
         self.account_report.setText(said)
+        # T696: the Get playing card and the launcher's Log in as count accounts again.
+        self._realm_read_when_up = True
+        if self._last_polled is not None and self._last_polled.all_running:
+            self.read_the_realm()
+        self.accounts_changed.emit()
+        if self._account_from_a_dialog:
+            self._account_from_a_dialog = False
+            show_information(self._play_parent(), CREATE_ACCOUNT_LABEL.rstrip("…"), said)
 
     @Slot(object)
     def _account_failed(self, exc: object) -> None:
@@ -15433,6 +16073,11 @@ class ControllerView(QWidget):
             else f"Could not create the account: {exc}"
         )
         self.action_failed.emit(str(exc))
+        if self._account_from_a_dialog:
+            self._account_from_a_dialog = False
+            show_warning(
+                self._play_parent(), CREATE_ACCOUNT_LABEL.rstrip("…"), self.account_report.text()
+            )
 
     # --------------------------------------------------------------- bots tab
 
@@ -22537,7 +23182,11 @@ class ControllerView(QWidget):
         self.lan_radio = QRadioButton(LAN_CHOICE, tab)
         self.internet_radio = QRadioButton(INTERNET_CHOICE, tab)
         self.loopback_radio = QRadioButton(LOOPBACK_CHOICE, tab)
-        self.lan_radio.setChecked(True)
+        # T698: the mode in force, said and pre-ticked. It used to be LAN on every build of
+        # the tab, whatever had been applied, so the tab never showed what was in force.
+        self.network_now_label = QLabel("", tab)
+        self.network_now_label.setWordWrap(True)
+        self._tick_the_mode_in_force()
         group = QButtonGroup(tab)
         group.addButton(self.lan_radio)
         group.addButton(self.internet_radio)
@@ -22569,12 +23218,28 @@ class ControllerView(QWidget):
         row.flow().add_gap()
         row.flow().addWidget(self.plan_button)
         row.flow().addWidget(self.apply_button)
+        box.addWidget(self.network_now_label)
         box.addWidget(row)
         box.addWidget(self.network_reasons)
         box.addWidget(self.network_text, 1)
         box.addWidget(self.network_details)
         self._add_panel_tab(tab, "networking", "Networking")
         self._plan: NetworkPlan | None = None
+        self._show_the_realm()
+
+    def _tick_the_mode_in_force(self) -> None:
+        """Tick the radio of the mode last applied (T698); LAN, the install's own, when none was."""
+        if self._waits_for_the_distro("network mode", self._tick_the_mode_in_force):
+            self.lan_radio.setChecked(True)
+            return
+        intent = networking.read_network_intent(self.services.controller.server_dir)
+        mode = intent.mode if intent is not None else "lan"
+        radio = {
+            "lan": self.lan_radio,
+            "internet": self.internet_radio,
+            "loopback": self.loopback_radio,
+        }[mode]
+        radio.setChecked(True)
 
     def network_mode(self) -> Mode:
         """Which mode the radios are asking for. `lan` is the answer to "none of them".
@@ -22625,6 +23290,10 @@ class ControllerView(QWidget):
     @Slot(object)
     def _apply_done(self, result: object) -> None:
         self._network_applying = False
+        self._show_the_realm()  # T698: what Apply recorded is the mode in force now
+        self._realm_read_when_up = True  # and the realm row it rewrote is read again
+        if self._last_polled is not None and self._last_polled.all_running:
+            self.read_the_realm()
         if isinstance(result, NetworkReport):
             self.network_text.appendPlainText("\n" + _format_network_report(result))
             # The plan's commands, then what became of each one (fix round 1, M3).
