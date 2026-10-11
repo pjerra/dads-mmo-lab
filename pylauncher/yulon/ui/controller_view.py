@@ -1005,6 +1005,10 @@ PLAY_REALM_WAIT_STOPPED = (
     "Stopped waiting for the realm, so World of Warcraft was not started. "
     "The Server tab shows when it is up; press Play again then."
 )
+PLAY_REALM_WAIT_STOPPED_BY_ACTION = (
+    "Stopped waiting for the realm because you started another action on this server, so World "
+    "of Warcraft was not started. Press Play again when it is up."
+)
 PLAY_REALM_WAIT_BROKE = (
     "The server was started, but Yu'lon could not wait for the realm, so World of Warcraft was "
     "not started. The Server tab shows whether it is up; press Play again then."
@@ -8221,6 +8225,7 @@ class ControllerView(QWidget):
         self._play_realm_wait: threading.Event | None = None
         self._play_realm_number = 0
         self._play_realm_timed_out = False
+        self._play_realm_ended_by = ""
         self._play_realm_deadline = QTimer(self)
         self._play_realm_deadline.setSingleShot(True)
         self._play_realm_deadline.timeout.connect(self._play_realm_gave_up)
@@ -10604,7 +10609,7 @@ class ControllerView(QWidget):
         if busy:
             self._stop_update_refresh()  # T621
             self._end_the_world_wait()  # T382: the press that starts now owns the server
-            self._end_the_play_realm_wait()  # T672: and Play's wait for it ends too
+            self._end_the_play_realm_wait("busy")  # T672: and Play's wait for it ends too
         self._busy = busy
         self._busy_job = job if busy else ""
         # T179: the movement-map job's Start is held while any press runs.
@@ -11025,6 +11030,7 @@ class ControllerView(QWidget):
         # The deadline is a GUI-thread timer that sets the wait's own `cancel`, so the check
         # ends at its next look: no thread of its own to outlive the view.
         self._play_realm_timed_out = False
+        self._play_realm_ended_by = ""
         self._play_realm_deadline.start(round(PLAY_REALM_WAIT_SECONDS * 1000))
         self._run(
             partial(_waited_for_the_world, number, "Play", wait, cancel),
@@ -11039,10 +11045,17 @@ class ControllerView(QWidget):
             self._play_realm_timed_out = True
             self._play_realm_wait.set()
 
-    def _end_the_play_realm_wait(self) -> None:
-        """End a realm wait still out; its answer then says it was stopped and starts nothing."""
+    def _end_the_play_realm_wait(self, by: str = "") -> None:
+        """End a realm wait still out; its answer then says it was stopped and starts nothing.
+
+        `by` is "busy" for a Server action of the player's (Stop, Restart...), "cancel" for
+        Play's Cancel button, "" for a new wait or the tab closing. The Event stays set until
+        the answer is handled: an answer that already says "ready" is read AFTER this, and a
+        set Event outranks it (`_play_realm_answered`).
+        """
         self._play_realm_deadline.stop()
         if self._play_realm_wait is not None:
+            self._play_realm_ended_by = by
             self._play_realm_wait.set()
 
     @Slot(object)
@@ -11051,6 +11064,8 @@ class ControllerView(QWidget):
         if number != self._play_realm_number:
             return  # a newer Play's wait owns the label
         timed_out = self._play_realm_timed_out
+        ended_by = self._play_realm_ended_by
+        ended = self._play_realm_wait is not None and self._play_realm_wait.is_set()
         self._play_realm_deadline.stop()
         self._play_realm_wait = None
         self._show_cancel(False)
@@ -11062,10 +11077,15 @@ class ControllerView(QWidget):
             self._play_end()
             self._play_refused(PLAY_REALM_WAIT_BROKE)
             return
-        if world.ready:
+        if ended and not timed_out and ended_by == "busy":
+            # The player's own Stop/Restart took the server: the reason on the label, no box
+            # over their press. Whatever the wait had found, nothing is started over it.
+            self._play_end(PLAY_REALM_WAIT_STOPPED_BY_ACTION)
+            return
+        if world.ready and not ended:
             self._play_check_stale()
             return
-        if world.verdict == "cancelled":
+        if ended or world.verdict == "cancelled":
             said = (
                 PLAY_REALM_TIMED_OUT.format(minutes=round(PLAY_REALM_WAIT_SECONDS / 60))
                 if timed_out
@@ -13103,7 +13123,7 @@ class ControllerView(QWidget):
     def _cancel_play_download(self) -> None:
         """Stop the whole preparation; it is checked between steps, so a stalled read waits."""
         self._play_cancel.set()
-        self._end_the_play_realm_wait()  # T672: Cancel also ends the wait for the realm
+        self._end_the_play_realm_wait("cancel")  # T672: Cancel also ends the wait for the realm
         self.play_cancel_button.setEnabled(False)
         self.play_cancel_button.setText("Cancelling…")
         self.play_state_changed.emit()

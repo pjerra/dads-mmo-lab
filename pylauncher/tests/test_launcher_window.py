@@ -915,6 +915,8 @@ def test_a_remote_address_does_not_promise_that_play_starts_the_local_server(
     banner = window.online_label.text()
     reason = window.play_reason_label.text()
     assert "192.168.0.60" in banner and "192.168.0.60" in reason
+    # Someone hosting for friends types their own public address: say where the server starts.
+    assert "start it on the Server tab first" in reason
     assert banner != launcher_window.STOPPED_BANNER
     assert reason != launcher_window.STOPPED_REASON
     for text in (banner, reason):
