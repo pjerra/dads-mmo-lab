@@ -94,12 +94,13 @@ def test_the_flyout_sits_by_the_icon_and_inside_the_screen() -> None:
 # ----------------------------------------------------------------- the cards
 
 
-def test_play_opens_that_servers_client_launcher(tray: YulonTray, window: FakeWindow) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "running"))
+def test_play_plays_that_server(tray: YulonTray, window: FakeWindow) -> None:
+    view = _add(window, FakeView("WotLK", "/srv/a", "running"))
     flyout = _open(tray)
     _card(flyout, "WotLK").action.click()
-    assert window.opened == [("game-wotlk", Path("/srv/a"))]
-    assert not flyout.isVisible(), "the flyout stayed over the launcher it opened"
+    assert view.played == 1
+    assert window.opened == [], "T694: Play opened the launcher instead of playing"
+    assert not flyout.isVisible(), "the flyout stayed over the game it started"
 
 
 def test_the_footer_opens_yulon_and_quits(tray: YulonTray, window: FakeWindow) -> None:

@@ -117,12 +117,12 @@ def test_the_icon_button_is_play_start_open_or_none(tray: YulonTray, window: Fak
 
 
 def test_the_buttons_do_what_they_say(tray: YulonTray, window: FakeWindow) -> None:
-    _add(window, FakeView("WotLK", "/srv/a", "running"))
+    online = _add(window, FakeView("WotLK", "/srv/a", "running"))
     stopped = _add(window, FakeView("Vanilla", "/srv/c", "stopped"))
     _add(window, FakeView("Cata", "/srv/d", "loop"))
     panel = _open(tray)
     _row(panel, "WotLK").action.click()
-    assert window.opened == [("game-wotlk", Path("/srv/a"))]
+    assert online.played == 1 and window.opened == []
     panel = _open(tray)
     _row(panel, "Vanilla").action.click()
     assert stopped.starts == 1

@@ -24870,6 +24870,88 @@ def test_play_asked_for_the_realm_only_after_its_own_start_not_before(
     assert len(launched) == 1
 
 
+# -- T694: the Server tab's PLAY plays, "Launcher…" opens the launcher ---------
+
+
+def _launcher_spy(view: ControllerView) -> list[int]:
+    opened: list[int] = []
+    view.open_launcher = lambda: opened.append(1)
+    return opened
+
+
+def test_the_tabs_play_button_starts_the_game_and_does_not_open_the_launcher(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP
+
+    assert (
+        view.play_button is not None
+        and view.play_button.text() == controller_view_module.PLAY_LABEL
+    )
+    view.play_button.click()
+
+    assert len(launched) == 1, "PLAY did not start the game"
+    assert opened == [], "PLAY opened the launcher instead"
+
+
+def test_the_tabs_play_button_on_a_stopped_server_starts_it_waits_and_plays(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None)
+    opened = _launcher_spy(view)
+
+    assert view.play_button is not None
+    view.play_button.click()
+
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert wait.asked == [0] and len(launched) == 1
+    assert opened == []
+
+
+def test_the_launcher_button_opens_the_launcher_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP  # a running server: a PLAY would start the game at once
+
+    assert view.launcher_button is not None and not view.launcher_button.isHidden()
+    assert view.launcher_button.text() == "Launcher…"
+    view.launcher_button.click()
+
+    assert opened == [1]
+    assert launched == [] and not view._play_pending
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+
+
+def test_the_launcher_button_is_there_only_with_a_ready_to_play_client(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    without, _ = _play_view(ps, tmp_path, original=original, play=None)
+    assert without.launcher_button is not None and without.launcher_button.isHidden()
+    assert without.play_button is not None
+    assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
+
+
+def test_the_launcher_button_stays_usable_while_a_server_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Opening a window changes nothing, so a busy tab does not grey it."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    view._set_busy(True)
+
+    assert view.launcher_button is not None and view.launcher_button.isEnabled()
+    view._set_busy(False)
+
+
 def test_play_rewrites_the_realmlist_even_after_a_hand_edit(
     qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
 ) -> None:

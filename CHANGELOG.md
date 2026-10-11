@@ -20,6 +20,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 
 ### Changed
+- The Server tab's **Play** now starts the game; **Launcher…** opens the launcher. The tray's **Play** starts a stopped server.
 
 ## v0.9.16-Public — 2026-10-10
 

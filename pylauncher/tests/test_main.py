@@ -4604,10 +4604,10 @@ def test_one_launcher_per_server(window: Any, tmp_path: Path, launchers: Any) ->
     assert first.view is one and second.view is two
 
 
-def test_the_server_tabs_play_opens_the_launcher_and_its_make_stays_a_make(
+def test_the_server_tabs_play_plays_and_its_launcher_button_opens_the_launcher(
     window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Spec 1 + 3: the tab keeps Play / Make / ▾; its Play opens the launcher, PLAY is in it."""
+    """T694: the tab keeps Play / Make / ▾; Play plays, "Launcher…" opens the launcher."""
     from yulon.ui.controller_view import MAKE_PLAY_CLIENT_LABEL
 
     without = _server(window, tmp_path, "t187-make")
@@ -4623,8 +4623,11 @@ def test_the_server_tabs_play_opens_the_launcher_and_its_make_stays_a_make(
     assert view.play_button.text() == "Play"
     view.play_button.click()
 
-    assert played == [], "the tab played directly instead of opening the launcher"
+    assert played == [1], "the tab's Play did not play"
+    assert _key(view) not in launchers, "the tab's Play opened the launcher"
+    view.launcher_button.click()
     assert launchers[_key(view)].isVisible()
+    assert not without.launcher_button.isVisibleTo(without) or without.launcher_button.isHidden()
     assert not view.play_menu_button.isHidden(), "the ▾ menu went"
     from yulon.ui.theme import PLAY_MENU_BUTTON
 

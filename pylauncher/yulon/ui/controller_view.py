@@ -933,6 +933,7 @@ def ask_to_set_client_dir(parent: QWidget, manifest: Manifest) -> bool:
 
 MAKE_PLAY_CLIENT_LABEL = "Make a ready-to-play client…"
 PLAY_LABEL = "Play"
+LAUNCHER_LABEL = "Launcher…"
 REFRESH_PLAY_CLIENT_LABEL = "Refresh from your original client"
 DELETE_PLAY_CLIENT_LABEL = "Delete ready-to-play client…"
 CLIENT_OPTIONS_LABEL = "Client options…"
@@ -9034,6 +9035,7 @@ class ControllerView(QWidget):
             b
             for b in (
                 self.play_button,
+                self.launcher_button,
                 self.play_menu_button,
                 self.play_cancel_button,
                 self.steam_button,
@@ -12204,6 +12206,7 @@ class ControllerView(QWidget):
         self.play_cancel_button.clicked.connect(self._cancel_play_download)
         self._made: _MadePlayClient | None = None
         self.play_button: QPushButton | None = None
+        self.launcher_button: QPushButton | None = None
         self.play_menu_button: QPushButton | None = None
         self.play_menu = QMenu(tab)
         self.play_menu.setToolTipsVisible(True)
@@ -12238,11 +12241,11 @@ class ControllerView(QWidget):
         self.play_button.setProperty("primary", True)
         if has_play:
             self.play_button.setIcon(dadcraft_icon("play", COLOR_GOLD_LIGHT, 14))
-            # T187 made this press open the launcher; the tooltip still said it
-            # started the game (T189).
+            # T694: PLAY plays; the launcher is its own button beside it.
             self.play_button.setToolTip(
-                "Open this server's launcher, where you choose the realm address, the "
-                "account and the display, and press PLAY to start World of Warcraft."
+                "Start this server if it is stopped, wait for the realm, then start World of "
+                "Warcraft logged in at the launcher's realm address. The address, account and "
+                "display are chosen under Launcher…."
             )
         else:
             self.play_button.setToolTip(
@@ -12251,6 +12254,13 @@ class ControllerView(QWidget):
             )
         self.play_button.clicked.connect(self._play_pressed)
         self.play_button.setVisible(has_play or self.services.client_dir is not None)
+        self.launcher_button = QPushButton(LAUNCHER_LABEL, tab)
+        self.launcher_button.setToolTip(
+            "Open this server's launcher: the realm address, the account, the display and "
+            "the add-ons for World of Warcraft, and its own PLAY."
+        )
+        self.launcher_button.clicked.connect(self._open_the_launcher)
+        self.launcher_button.setVisible(has_play)
         self.play_menu_button = QPushButton("▾", tab)
         # Its label is the arrow: the style's own indicator would be a second (T187).
         self.play_menu_button.setObjectName(PLAY_MENU_BUTTON)
@@ -12277,17 +12287,21 @@ class ControllerView(QWidget):
 
     @Slot()
     def _play_pressed(self) -> None:
-        """The tab's Play opens the server's launcher window (T187); its Make… stays a Make….
+        """The tab's PLAY plays (T694); without a ready-to-play client it is "Make…" and makes one.
 
-        Without a ready-to-play client the button reads "Make a ready-to-play
-        client…" and does exactly that. With one, PLAY is in the launcher, which
-        is where the realm address, the account and the display are chosen.
+        `play()` starts a stopped server first, waits for the realm, writes the realm address
+        and starts the game. The launcher window, where the address, the account and the
+        display are chosen, is the "Launcher…" button beside it (`_open_the_launcher`).
         """
         self.dialog_host = None
-        if self.services.play_client_dir is not None and self.open_launcher is not None:
-            self.open_launcher()
-            return
         self.play()
+
+    @Slot()
+    def _open_the_launcher(self) -> None:
+        """The tab's "Launcher…": open this server's launcher window and start nothing (T694)."""
+        self.dialog_host = None
+        if self.open_launcher is not None:
+            self.open_launcher()
 
     def _play_parent(self) -> QWidget:
         """Where a Make…/Play/Refresh/Delete dialog opens: the launcher that pressed, or this tab.
