@@ -1341,6 +1341,12 @@ class CatalogView(QWidget):
             button.setEnabled(enabled)
 
 
+def _restart_refusal(parent: QWidget) -> str | None:
+    """Why the window cannot be replaced by a restart now (`main.close_refusal`, strictly)."""
+    refusing = getattr(parent.window(), "yulon_close_refusal", None)
+    return refusing(strict=True) if refusing is not None else None
+
+
 def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title: str) -> bool:
     """`CatalogView._offer_a_restart_instead()`'s offer, for any view that needs it (T160).
 
@@ -1359,6 +1365,17 @@ def offer_a_docker_group_restart(parent: QWidget, message: str, *, failed_title:
     argv = platform.docker_group_reexec()
     if argv is None:
         return False
+    # T690: the exec replaces this process at once -- no job is joined, no Stop is left to
+    # carry on -- so it waits for ALL running work, strictly. Said instead of offered: the
+    # restart is one press away when the work has finished.
+    if (reason := _restart_refusal(parent)) is not None:
+        show_information(
+            parent,
+            "Yu'lon is still working",
+            f"{reason}\n\nYu'lon needs to restart to finish setting up Docker. Do that when "
+            "this is finished: restart Yu'lon by hand, or press the same button again.",
+        )
+        return True
     if said_yes(
         QMessageBox.question(
             parent,

@@ -236,6 +236,25 @@ def test_a_start_from_the_tray_shows_starting_at_once(tray: YulonTray, window: F
     assert tray.state == "between"
 
 
+def test_a_start_over_a_running_action_says_why_instead_of_doing_nothing(
+    tray: YulonTray, window: FakeWindow
+) -> None:
+    """T690 (F-4): Start from the tray after its row was built, while the tab runs a job.
+
+    Mutation: drop the `action_in_progress()` check from `YulonTray.start()`: the press
+    reaches the tab, which refuses silently (the player sees nothing happen).
+    """
+    view = _add(window, FakeView("WotLK", "/srv/a"))
+    view.action_in_progress = lambda: "Restart"  # type: ignore[attr-defined]
+    told: list[tuple[str, str]] = []
+    tray.tell = lambda title, text: told.append((title, text))  # type: ignore[method-assign]
+
+    tray.start(view)
+
+    assert view.starts == 0, "Start ran on top of a running action"
+    assert len(told) == 1 and "Restart" in told[0][1] and "WotLK" in told[0][1], told
+
+
 def test_a_tab_rebuilt_is_followed_and_the_old_one_let_go(
     tray: YulonTray, window: FakeWindow
 ) -> None:

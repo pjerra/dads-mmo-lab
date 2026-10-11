@@ -652,6 +652,16 @@ class YulonTray(QObject):
         if live is None:
             self.open_window()
             return
+        # T690 (F-4): the tab refuses a Start over a running action, silently; the tray's
+        # row may be older than that action, so the press says why nothing happens.
+        doing = getattr(live, "action_in_progress", lambda: None)()
+        if doing:
+            self.tell(
+                "Yu'lon cannot start that server yet",
+                f"{self._title_of(live)}: {doing} is still running on its Server tab. "
+                "Press Start again when it has finished.",
+            )
+            return
         live.start_server()
 
     def restart(self, view: Any) -> None:
@@ -785,11 +795,13 @@ class YulonTray(QObject):
         # T690: work that cannot be cut off is said BEFORE the question. The box below
         # offered "Stop N servers, then quit" over a Restart in flight and said only
         # "1 server is running" (measured), and the refusal came after the choice.
-        refusing = getattr(self.window, "yulon_close_refusal", None)
-        if refusing is not None and (reason := refusing()):
+        if (reason := self._work_refusal()) is not None:
             logger.info(f"tray: quit refused: {reason}")
-            self.tell("Yu'lon is still working", reason)
             self.open_window()
+            if self.confirm_quit_anyway(reason):
+                self.window.yulon_forced_quit = reason  # type: ignore[attr-defined]
+                logger.warning(f"tray: quit anyway chosen over running work: {reason}")
+                self.quit()
             return
         running = self.running_servers()
         if not running:
@@ -800,6 +812,17 @@ class YulonTray(QObject):
             self.quit()
         elif choice == "stop":
             self.stop_then_quit(running)
+
+    def _work_refusal(self) -> str | None:
+        """What the window's close would refuse over, or None (`main.close_refusal()`, T690)."""
+        refusing = getattr(self.window, "yulon_close_refusal", None)
+        return refusing() if refusing is not None else None
+
+    def confirm_quit_anyway(self, reason: str) -> bool:
+        """The refusal with its way out ("Quit anyway"), answered. A seam for the tests."""
+        from yulon.ui import quit_anyway
+
+        return quit_anyway.ask(self.window, reason)
 
     def choose_quit(self, count: int) -> str:
         """The quit box, answered: "leave", "stop" or "cancel". A seam for the tests."""

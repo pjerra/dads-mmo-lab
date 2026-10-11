@@ -13,7 +13,11 @@ and it answers with one of the kinds below. Every door asks it through
 answer for a removal). This module only holds the kinds and the plain-words
 sentence for each, Qt-free so a test can read every sentence without a widget.
 
-A door REFUSES, and does not ask "stop it anyway?". A restore stopped half-way
+A door REFUSES, and does not ask "stop it anyway?" -- except the doors that end Yu'lon
+(`yulon.ui.quit_anyway`): a refusal with no way past it would make a flag stuck by a bug
+unquittable, so a refused quit or close also offers "Quit anyway", with its cost in plain
+words. The client-folder doors keep the plain refusal; a player can always wait there.
+A Stop may be quit over (`STOP_JOB`). A restore stopped half-way
 leaves the databases half-written, and the jobs here cannot be stopped from the
 dialog anyway; `busy_reason()`'s import, reset and uninstall already refuse in
 the same way, so a player meets one behaviour for "Yu'lon is still working".
@@ -30,6 +34,14 @@ NETWORK = "network"
 TUNING = "tuning"
 PANEL = "panel"
 ACTION = "action"
+
+STOP_JOB = "Stop"
+"""The Server tab's label for a Stop, the one action a quit may leave running behind it.
+
+A Stop carries on in Docker after Yu'lon quits (the tray's own "Quit now" box says so),
+and T158's `_stop_abandon` ends a stop waiting for a world to load. Start, Restart and
+the rest are cut off by a quit, so they refuse it.
+"""
 
 KINDS: tuple[str, ...] = (
     UPDATE_BACKUP,
