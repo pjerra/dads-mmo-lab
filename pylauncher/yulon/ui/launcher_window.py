@@ -110,6 +110,9 @@ changed" and "The password is never stored" stay on the dropdowns' tooltips
 there, and are on screen from the Steam Deck's 800 up."""
 ASK_IN_THE_GAME = "Ask in the game"
 GAMES_OWN = "The game's own setting"
+CREATE_ACCOUNT = "Create an account…"
+"""Log in as's press for a new game account (T696)."""
+NO_ACCOUNTS_YET = "This server has no accounts yet."
 GAME_REMEMBERS = "As the game remembers it"
 """Log in as with nothing picked: Config.wtf's `accountName` is left as the game last wrote it."""
 SET_BY_SERVER = "set by this server"
@@ -561,6 +564,7 @@ class LauncherWindow(QWidget):
             (view.play_state_changed, self._follow_play),
             (view.launcher_saved, self._saved),
             (view.realm_badge.status_changed, self._realm_changed),
+            (view.accounts_changed, self._reload_server),
             (view.destroyed, self._view_gone),
         ]
 
@@ -814,8 +818,32 @@ class LauncherWindow(QWidget):
             "stored or written: you type it in the game."
         )
         self.account_combo.activated.connect(self._account_picked)
-        box.addWidget(self.account_combo)
+        # T696: a server with no account yet says so, above, and the press that makes one
+        # sits beside the dropdown -- not under it, where it would come between Log in as
+        # and PLAY on the D-pad. The Server tab's own "Create account…" is behind it.
+        self.no_accounts_label = _muted(NO_ACCOUNTS_YET, self.account_box)
+        self.no_accounts_label.setVisible(False)
+        box.addWidget(self.no_accounts_label)
+        self.create_account_button = QPushButton(CREATE_ACCOUNT, self.account_box)
+        self.create_account_button.setToolTip(
+            "Make a game account on this server: a name and a password."
+        )
+        self.create_account_button.clicked.connect(self._create_account)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.account_combo, 1)
+        row.addWidget(self.create_account_button)
+        box.addLayout(row)
         return self.account_box
+
+    @Slot()
+    def _create_account(self) -> None:
+        """ "Create an account…" (T696): the Server tab's own path, its dialogs over this window."""
+        view = self._alive()
+        if view is None:
+            return
+        view.dialog_host = self
+        view.create_account_from_a_dialog()
 
     def _build_right(self) -> QScrollArea:
         inner = QWidget(self)
@@ -1465,6 +1493,9 @@ class LauncherWindow(QWidget):
             )
         self.account_note.setText(note)
         self.account_note.setVisible(stale is not None or not self._compact)
+        # T696: read, and none: said, with the press that makes one beside it.
+        read = self._server.accounts if self._server is not None else None
+        self.no_accounts_label.setVisible(read == ())
         if fixed is not None:
             self._fixed(self.account_combo, fixed)
             return

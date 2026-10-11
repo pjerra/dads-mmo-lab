@@ -2011,3 +2011,61 @@ def test_play_on_a_stopped_server_whose_start_is_refused_starts_nothing(
     assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
     assert view.problem_label.text() == refused
     assert window.progress_label.text() == controller_view_module.PLAY_START_FAILED
+
+
+# -- T696: Create an account… in Log in as ---------------------------------------------
+
+
+def test_a_server_with_no_accounts_says_so_beside_create_an_account(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    empty = ServerReading(accounts=(), online=UP, announced="127.0.0.1")
+    window, view, _play = _launcher(ps, tmp_path, answer=empty)
+    _online(view)
+    assert window.no_accounts_label.isVisibleTo(window)
+    assert window.no_accounts_label.text() == launcher_window.NO_ACCOUNTS_YET
+    assert window.create_account_button.isVisibleTo(window)
+    assert window.create_account_button.text() == launcher_window.CREATE_ACCOUNT
+
+
+def test_accounts_read_or_unread_say_no_such_thing(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """Some accounts, or none read yet: "no accounts yet" would be false or a guess."""
+    window, view, _play = _launcher(ps, tmp_path)
+    assert not window.no_accounts_label.isVisibleTo(window), "said before anything was read"
+    _online(view)
+    assert not window.no_accounts_label.isVisibleTo(window), "said beside ALICE and BOB"
+
+
+def test_create_an_account_runs_the_server_tabs_create_and_reads_log_in_as_again(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boxes: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_information", lambda _p, _t, text: boxes.append(text)
+    )
+    empty = ServerReading(accounts=(), online=UP, announced="127.0.0.1")
+    window, view, _play = _launcher(ps, tmp_path, answer=empty)
+    _online(view)
+    reads = window.reads
+    assert isinstance(reads, _Reads)
+    before = reads.asked
+    hosts: list[object] = []
+
+    def asker(parent: object) -> tuple[str, str]:
+        hosts.append(parent)
+        reads.answer = SERVER
+        return ("ALICE", "pw")
+
+    view._account_asker = asker
+
+    window.create_account_button.click()
+
+    assert view.services.create_account.__self__.created == [  # type: ignore[attr-defined]
+        ("ALICE", "pw", 0)
+    ]
+    assert hosts and hosts[0] in (window, view), "asked over neither window"
+    assert reads.asked > before, "Log in as was not read again after the account was made"
+    assert not window.no_accounts_label.isVisibleTo(window)
+    offered = [window.account_combo.itemText(i) for i in range(window.account_combo.count())]
+    assert "ALICE" in offered
+    assert boxes and boxes[-1].startswith("ALICE: created")
