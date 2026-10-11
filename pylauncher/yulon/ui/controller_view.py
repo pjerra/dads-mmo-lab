@@ -10195,7 +10195,7 @@ class ControllerView(QWidget):
             return None
         return self._last_status.any_running
 
-    def teardown_work(self) -> str | None:
+    def teardown_work(self, *, quitting: bool = False) -> str | None:
         """THE predicate: which kind of work on this tab must not be cut off now, or None (T690).
 
         One list, asked by every door that tears this tab down -- through
@@ -10216,6 +10216,11 @@ class ControllerView(QWidget):
         restore, a Modules job, a network apply, a Tuning write), then the Modules
         tab's panel, last any Server action, including the stop a removal is
         already waiting for.
+
+        `quitting` is the one door that may leave a Stop running behind it: a Stop
+        carries on in Docker (`teardown.STOP_JOB`), and the tray's "Quit now" while it
+        stops servers promises exactly that. Nothing else is exempt, and a Stop beside a
+        restore is still refused for the restore.
         """
         if self._backup_before_update:
             return teardown.UPDATE_BACKUP
@@ -10233,11 +10238,17 @@ class ControllerView(QWidget):
             return teardown.TUNING
         if self.rebuild_log.running:
             return teardown.PANEL
-        if self._busy:
+        if self._busy and not (quitting and self._busy_job == teardown.STOP_JOB):
             return teardown.ACTION
         return None
 
-    def teardown_refusal(self) -> str | None:
+    def action_in_progress(self) -> str | None:
+        """The Server tab's name for the action holding the tab ("Restart"), or None."""
+        if not self._busy:
+            return None
+        return self._busy_job or "Another action"
+
+    def teardown_refusal(self, *, quitting: bool = False) -> str | None:
         """Why this tab may not be torn down now, in plain words, or None (T690).
 
         `busy_reason()`'s sentences first (the long ones the close guard has always
@@ -10246,7 +10257,7 @@ class ControllerView(QWidget):
         """
         if (reason := self.busy_reason()) is not None:
             return reason
-        if (kind := self.teardown_work()) is None:
+        if (kind := self.teardown_work(quitting=quitting)) is None:
             return None
         return teardown.sentence(
             kind,

@@ -24,6 +24,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1543,10 +1544,33 @@ def test_a_rebuild_signal_over_running_work_keeps_the_tab_and_says_when_it_appli
         getattr(view, signal_name).emit("wow-wotlk", server_dir, tmp_path / "elsewhere")
         assert _tab_for(window, server_dir) is view, "a tab was torn down under a restore"
         assert told and "restore" in told[0] and "next time" in told[0], told
+        # The change is saved, so the tab that stays must not keep reading the old folder
+        # (a refused Delete used to leave it holding the deleted ready-to-play client).
+        field = "client_dir" if signal_name == "client_dir_changed" else "play_client_dir"
+        assert getattr(view.services, field) == tmp_path / "elsewhere", field
     finally:
         view._restore_running = False
     getattr(view, signal_name).emit("wow-wotlk", server_dir, tmp_path / "elsewhere")
     assert _tab_for(window, server_dir) is not view, "a quiet tab is rebuilt as before"
+
+
+def test_a_refused_rebuild_after_a_delete_does_not_leave_the_deleted_folder_on_the_tab(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    server_dir = tmp_path / "t690-delete"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    view.services.play_client_dir = tmp_path / "play-client"  # the folder Delete just removed
+    view._restore_running = True
+    try:
+        view.play_client_dir_changed.emit("wow-wotlk", server_dir, None)
+        assert _tab_for(window, server_dir) is view
+        assert view.services.play_client_dir is None, "the tab still points at the deleted client"
+    finally:
+        view._restore_running = False
 
 
 def test_a_distro_switch_over_a_running_restore_is_refused(
@@ -1567,6 +1591,133 @@ def test_a_distro_switch_over_a_running_restore_is_refused(
         assert told and "restore" in told[0], told
     finally:
         view._restore_running = False
+
+
+@pytest.fixture
+def close_guard(window: Any) -> Iterator[Any]:
+    """The REAL close filter, installed on the real window the way `main()` installs it."""
+    guard = main._install_close_guard(window)
+    yield guard
+    window.removeEventFilter(guard)
+    guard.deleteLater()
+    window.yulon_forced_quit = ""
+
+
+def _close_by_hand(window: Any) -> bool:
+    """A Close event as the title bar sends one. True if the window accepted it."""
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QApplication
+
+    event = QCloseEvent()
+    QApplication.sendEvent(window, event)
+    return event.isAccepted()
+
+
+def _answer_quit_anyway(monkeypatch: pytest.MonkeyPatch, *replies: bool) -> list[str]:
+    from yulon.ui import quit_anyway
+
+    asked: list[str] = []
+    queue = list(replies)
+    monkeypatch.setattr(
+        quit_anyway, "ask", lambda _parent, reason: asked.append(reason) or queue.pop(0)
+    )
+    return asked
+
+
+def test_the_close_filter_lets_a_stop_be_quit_over_but_not_a_restart(
+    window: Any, close_guard: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Quit now" while the tray stops servers: its Stop sets `_busy` and was always refused.
+
+    Driven through the real filter, not a stand-in window. The box promises "a stop that
+    is already running carries on if Yu'lon quits now".
+    """
+    server_dir = tmp_path / "t690-stop"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    asked = _answer_quit_anyway(monkeypatch, False, False)
+    view._set_busy(True, "Stop")
+    try:
+        assert _close_by_hand(window), "a Stop in flight refused the quit"
+        assert asked == []
+    finally:
+        view._set_busy(False)
+    view._set_busy(True, "Restart")
+    try:
+        assert not _close_by_hand(window), "a Restart in flight let the quit through"
+        assert len(asked) == 1 and "Restart" in asked[0], asked
+    finally:
+        view._set_busy(False)
+
+
+def test_quit_anyway_lets_the_close_through_and_marks_it_as_forced(
+    window: Any, close_guard: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stuck flag must never make quitting impossible."""
+    server_dir = tmp_path / "t690-anyway"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    asked = _answer_quit_anyway(monkeypatch, False, True)
+    view._restore_running = True
+    try:
+        assert not _close_by_hand(window), "Keep waiting must keep the window"
+        assert not getattr(window, "yulon_forced_quit", "")
+        assert _close_by_hand(window), "Quit anyway did not let the close through"
+        assert "restore" in window.yulon_forced_quit
+        assert len(asked) == 2
+    finally:
+        view._restore_running = False
+
+
+def test_a_forced_quit_does_not_join_the_jobs_it_is_cutting_off(window: Any) -> None:
+    """`ControllerView.shutdown()` waits 330 s per tab: the window was gone, the process not."""
+
+    class _Tab:
+        def shutdown(self) -> None:
+            raise AssertionError("a forced quit waited on a tab's jobs")
+
+    class _Panel:
+        stopped = 0
+
+        def stop(self) -> None:
+            self.stopped += 1
+
+    panel = _Panel()
+    fake = SimpleNamespace(
+        yulon_controllers=[_Tab()],
+        yulon_log_panels=[panel],
+        yulon_launchers={},
+        yulon_forced_quit="A restore is writing",
+    )
+    stuck = main._stop_for_forced_quit(fake)
+    assert stuck == ["work Quit anyway cut off: A restore is writing"] and panel.stopped == 1
+
+
+def test_a_real_tray_quit_now_while_stopping_goes_through(
+    window: Any, close_guard: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ticket's case end to end: real tray, real window, real filter, a real tab's Stop."""
+    from tests.test_tray import FakeTrayIcon
+    from yulon.ui.tray import YulonTray
+
+    server_dir = tmp_path / "t690-quitnow"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    quits: list[int] = []
+    asked = _answer_quit_anyway(monkeypatch)
+    tray = YulonTray(window, icon_factory=FakeTrayIcon, available=lambda: True)
+    tray.install()
+    tray.quit_app = lambda: quits.append(1)  # type: ignore[method-assign]
+    try:
+        view._set_busy(True, "Stop")
+        tray._stopping = [view]
+        tray.choose_while_stopping = lambda count: "quit"  # type: ignore[method-assign]
+        tray.ask_to_quit()
+        assert quits == [1], "Quit now was refused while the tray's Stop ran"
+        assert asked == []
+    finally:
+        view._set_busy(False)
+        tray.uninstall()
 
 
 def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(

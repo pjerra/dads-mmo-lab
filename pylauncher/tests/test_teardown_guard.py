@@ -206,3 +206,86 @@ def test_start_from_the_tray_does_not_run_on_top_of_a_running_action(
 
     assert started == [], "Start ran on top of a running Restart"
     assert view._busy_job == "Restart", "the first job lost its lock"
+
+
+# ------------------------------------------------- a Stop may be quit over
+
+
+def test_a_stop_in_flight_is_quit_over_but_never_torn_down_otherwise(
+    qapp: object, tmp_path: Path
+) -> None:
+    """The tray's "Quit now" while it stops servers: "a stop that is already running carries on".
+
+    Quitting is the one door a Stop may be left running behind (it carries on in Docker, and
+    T158's `_stop_abandon` ends a load wait); every other door, and every other action,
+    still refuses. Mutation: drop the `quitting` clause from `teardown_work()`.
+    """
+    view, _fake, _ = _view(tmp_path)
+    view._set_busy(True, "Stop")
+    assert view.teardown_refusal() is not None, "a client-folder change over a Stop"
+    assert view.forget_refusal() is not None, "a removal over a Stop"
+    assert view.teardown_refusal(quitting=True) is None, "Quit now was refused over a Stop"
+    view._set_busy(False)
+    for job in ("Start", "Restart", "Recreate containers"):
+        view._set_busy(True, job)
+        assert view.teardown_refusal(quitting=True) is not None, job
+        view._set_busy(False)
+
+
+def test_a_stop_does_not_hide_other_work_from_the_quit(qapp: object, tmp_path: Path) -> None:
+    view, _fake, _ = _view(tmp_path)
+    view._set_busy(True, "Stop")
+    view._restore_running = True
+    refusal = view.teardown_refusal(quitting=True)
+    assert refusal is not None and "restore" in refusal
+
+
+# ------------------------------------------- the docker-group restart (an execv)
+
+
+def _parent_with(refusal: Any) -> Any:
+    from PySide6.QtWidgets import QWidget
+
+    parent = QWidget()
+    parent.yulon_close_refusal = refusal  # type: ignore[attr-defined]
+    return parent
+
+
+@pytest.mark.parametrize("busy", [True, False])
+def test_the_docker_group_restart_waits_for_work_that_cannot_be_cut_off(
+    qapp: object, monkeypatch: pytest.MonkeyPatch, busy: bool
+) -> None:
+    """`os.execv` replaces the process with nothing joined: it asked no one before."""
+    from PySide6.QtWidgets import QMessageBox
+
+    from yulon import platform
+    from yulon.ui import catalog_view
+
+    asked_strict: list[bool] = []
+
+    def refusal(strict: bool = False) -> str | None:
+        asked_strict.append(strict)
+        return "A restore is writing into this server's databases." if busy else None
+
+    execs: list[int] = []
+    told: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(platform, "docker_group_reexec", lambda: ["yulon"])
+    monkeypatch.setattr(
+        platform, "restart_under_docker_group", lambda reexec=None: execs.append(1) or False
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: int(QMessageBox.StandardButton.Yes),
+    )
+    monkeypatch.setattr(catalog_view, "show_information", lambda *a, **k: told.append(a))
+
+    catalog_view.offer_a_docker_group_restart(
+        _parent_with(refusal), "Docker is set up.", failed_title="Install failed"
+    )
+
+    assert asked_strict and all(asked_strict), "the restart must ask strictly (no Stop exemption)"
+    assert execs == ([] if busy else [1])
+    assert bool(told) == busy
+    if busy:
+        assert "restore" in str(told[0])
