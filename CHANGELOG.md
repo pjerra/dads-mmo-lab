@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- Bringing in a server with Auction House Bot from another computer no longer stops on a missing character.
 
 ### Changed
 

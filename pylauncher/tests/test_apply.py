@@ -2454,6 +2454,69 @@ def test_without_a_reader_the_report_says_the_guid_was_not_checked(tmp_path: Pat
     assert any("not checked" in s.lower() for s in report2.skipped), report2.skipped
 
 
+def test_a_deferred_exists_check_asks_nothing_starts_nothing_and_says_so(tmp_path: Path) -> None:
+    """T679: a move-in installs the module before its characters are loaded."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")  # an empty characters database: the check would refuse
+    started: list[int] = []
+
+    def start() -> bool:
+        started.append(1)
+        return True
+
+    report = Applier(tmp_path, git=git, sql=reader, start_database=start).install(
+        _shipped("mod-ah-bot"), {"bot_guid": "42", "bot_account": "7"}, defer_exists=True
+    )
+
+    assert reader.queries == []
+    assert started == []
+    said = [s for s in report.skipped if apply_module.DEFERRED_EXISTS_NOTE in s]
+    assert [s.split(":")[0] for s in said] == ["bot_guid=42", "bot_account=7"]
+    conf = (tmp_path / "env/dist/etc/modules/mod_ahbot.conf").read_text(encoding="utf-8")
+    assert "AuctionHouseBot.GUID = 42\n" in conf
+
+
+def test_a_deferred_check_covers_every_guid_of_a_list(tmp_path: Path) -> None:
+    """mod-ah-bot-plus takes a list; each GUID is deferred, none is asked."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")
+    report = Applier(tmp_path, git=git, sql=reader).install(
+        _shipped("mod-ah-bot-plus"), {"bot_guid": "42,43"}, defer_exists=True
+    )
+    assert reader.queries == []
+    said = [s for s in report.skipped if apply_module.DEFERRED_EXISTS_NOTE in s]
+    assert [s.split(":")[0] for s in said] == ["bot_guid=42", "bot_guid=43"]
+
+
+def test_a_deferred_check_still_refuses_an_answer_that_cannot_be_used(tmp_path: Path) -> None:
+    """Only the does-it-exist question waits: the shape of the answer is still checked now."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    with pytest.raises(ApplyRefusal, match="is not"):
+        Applier(tmp_path, git=git, sql=_FakeReader(rows="")).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "4 2", "bot_account": "7"}, defer_exists=True
+        )
+    assert git.calls == []
+    with pytest.raises(ApplyRefusal, match="no value for"):
+        Applier(tmp_path, git=git, sql=_FakeReader(rows="")).install(
+            _shipped("mod-ah-bot"), {"bot_account": "7"}, defer_exists=True
+        )
+    assert git.calls == []
+
+
+def test_the_normal_install_still_refuses_a_guid_that_names_no_character(tmp_path: Path) -> None:
+    """T679: the guard is only waived when the move asks; the default install is unchanged."""
+    git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+    reader = _FakeReader(rows="")
+    with pytest.raises(
+        ApplyRefusal, match="no character in this server's own database has GUID 999"
+    ):
+        Applier(tmp_path, git=git, sql=reader).install(
+            _shipped("mod-ah-bot"), {"bot_guid": "999", "bot_account": "7"}
+        )
+    assert [db for db, _ in reader.queries] == ["characters"]
+    assert git.calls == []
+
+
 class _StoppedThenStarted(_FakeReader):
     """A reader whose database answers only after the start seam has been pressed."""
 

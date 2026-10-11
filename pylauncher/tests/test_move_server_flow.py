@@ -396,7 +396,11 @@ class FakeApplier:
     world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
 
     def install(
-        self, manifest: Manifest, values: Mapping[str, str] | None = None
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        defer_exists: bool = False,
     ) -> apply.ApplyReport:
         if self.world_up():
             # The real applier's refusal of a module's SQL while the world runs.
@@ -838,11 +842,13 @@ def test_a_module_that_failed_is_asked_again_and_its_rebuild_is_not_lost(tmp_pat
     real = mv.applier.install
     calls = {"n": 0}
 
-    def fail_once(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def fail_once(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         calls["n"] += 1
         if calls["n"] == 1:
             raise apply.ApplyRefusal("the clone was cut off")
-        return real(manifest, values)
+        return real(manifest, values, **kw)
 
     mv.applier.install = fail_once  # type: ignore[method-assign]
     with pytest.raises(MoveError, match="could not be installed again"):
@@ -890,7 +896,9 @@ def test_a_module_that_declares_a_rebuild_gets_one_even_if_its_report_says_none(
     mv = Move(tmp_path)
     assert mv.plan.modules[0].manifest.build.rebuild
 
-    def install(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def install(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         return apply.ApplyReport(
             action="install", item_id=manifest.id, family=manifest.type, rebuild_required=False
         )
@@ -1001,11 +1009,13 @@ def test_a_second_module_failing_does_not_redo_the_first(tmp_path: Path) -> None
     real = mv.applier.install
     failed = {"once": False}
 
-    def flaky(manifest: Manifest, values: Mapping[str, str] | None = None) -> apply.ApplyReport:
+    def flaky(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
         if manifest.id == "mod-aoe-loot" and not failed["once"]:
             failed["once"] = True
             raise apply.ApplyRefusal("cut off")
-        return real(manifest, values)
+        return real(manifest, values, **kw)
 
     mv.applier.install = flaky  # type: ignore[method-assign]
     with pytest.raises(MoveError):
@@ -1197,3 +1207,122 @@ def test_a_folder_module_with_no_folder_route_here_is_refused(tmp_path: Path) ->
     mv.server_for = lambda d, c: replace(original(d, c), install_folder=None)  # type: ignore[method-assign]
     with pytest.raises(MoveError, match="has no module installer here"):
         mv.run()
+
+
+# =============================================================== T679: mod-ah-bot on a move-in
+
+AHBOT_COMMIT = "b" * 40
+
+
+def ahbot_facts() -> ServerFacts:
+    """The whole server of `whole_facts`, with mod-ah-bot (and its two answers) instead."""
+    base = whole_facts()
+    ahbot = STORE.load("module", "mod-ah-bot")
+    return ServerFacts(
+        spec=replace(
+            base.spec,
+            modules=(
+                PackedModule(
+                    type="module",
+                    id="mod-ah-bot",
+                    origin="catalog",
+                    repo=ahbot.source.repo,  # type: ignore[union-attr]
+                    commit=AHBOT_COMMIT,
+                ),
+            ),
+        ),
+        files=tuple(
+            (
+                replace(
+                    f,
+                    data=b'{"version": 1, "modules": {"module/mod-ah-bot": '
+                    b'{"bot_guid": "42", "bot_account": "7"}}}',
+                )
+                if f.kind == "answers"
+                else f
+            )
+            for f in base.files
+        ),
+    )
+
+
+class RealApplierOverTheMove:
+    """The REAL `apply.Applier` (its does-it-exist check included) in a move's order.
+
+    Only the clone and the database are doubles. The reader answers like the new server's
+    characters database: no row until the `data` step has loaded `acore_characters`, a row
+    for the packed bot character after it -- so the check passes or refuses on the order the
+    move really runs the steps in, not on a canned answer.
+    """
+
+    install_folder = None
+    world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
+
+    def __init__(self, events: list[str], server_dir: Path) -> None:
+        from tests.test_apply import AHBOT_DIST, _FakeGit, _FakeReader
+
+        self.events = events
+        self.server_dir = server_dir
+        self.reader = _FakeReader()
+        self.git = _FakeGit({"conf/mod_ahbot.conf.dist": AHBOT_DIST})
+        self.asked: list[str] = []
+        events_ = events
+        reader = self.reader
+        asked = self.asked
+
+        def query(db: str, statement: str) -> str:
+            asked.append(statement)
+            return "Ahbot\n" if "load:acore_characters" in events_ else ""
+
+        reader.query = query  # type: ignore[method-assign]
+
+    def install(
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        **kw: bool,
+    ) -> apply.ApplyReport:
+        self.events.append(f"module:{manifest.id}")
+        applier = apply.Applier(self.server_dir, git=self.git, sql=self.reader)  # type: ignore[arg-type]
+        return applier.install(manifest, values, **kw)
+
+
+def ahbot_move(tmp_path: Path) -> tuple[Move, RealApplierOverTheMove]:
+    mv = Move(tmp_path, facts=ahbot_facts)
+    real = RealApplierOverTheMove(mv.events, mv.target.server_dir)
+    mv.applier = real  # type: ignore[assignment]
+    return mv, real
+
+
+def test_a_server_with_the_ah_bot_is_moved_in_although_its_characters_load_last(
+    tmp_path: Path,
+) -> None:
+    """T679: the GUID check read the still-empty characters database and refused every press."""
+    mv, real = ahbot_move(tmp_path)
+    lines = mv.run()
+    order = [e for e in mv.events if e == "module:mod-ah-bot" or e == "load:acore_characters"]
+    assert order == ["module:mod-ah-bot", "load:acore_characters"]  # the step order is unchanged
+    assert real.asked == []  # nothing asked of the empty database
+    marker = move_server.read_marker(mv.target.server_dir)
+    assert marker is not None and marker["done"] == list(move_server.STEPS)
+    skipped = [line for line in lines if line.startswith("  skipped: ") and "bot_guid=42" in line]
+    assert skipped and apply.DEFERRED_EXISTS_NOTE in skipped[0]
+    assert any("bot_account=7" in line for line in lines if line.startswith("  skipped: "))
+    conf = mv.target.server_dir / "env/dist/etc/modules/mod_ahbot.conf"
+    assert "AuctionHouseBot.GUID = 42\n" in conf.read_text(encoding="utf-8")
+
+
+def test_the_same_server_is_refused_when_the_check_is_not_deferred(tmp_path: Path) -> None:
+    """The fixture is honest: ask the question in this order and it does refuse, by name."""
+    mv, real = ahbot_move(tmp_path)
+    installed = real.install
+
+    def asks(
+        manifest: Manifest, values: Mapping[str, str] | None = None, **kw: bool
+    ) -> apply.ApplyReport:
+        return installed(manifest, values)  # the check, as every normal install makes it
+
+    real.install = asks  # type: ignore[method-assign]
+    with pytest.raises(MoveError, match="no character in this server's own database has GUID 42"):
+        mv.run()
+    assert not [e for e in mv.events if e.startswith("load:")]
