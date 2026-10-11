@@ -8300,6 +8300,10 @@ class ControllerView(QWidget):
         self._status_ask_out = 0
         self._status_pending = False
         self._verdict_pending = False
+        # T668: whether the built-in accounts were asked about since the database last came
+        # up, and whether that ask is out.
+        self._seeded_asked = False
+        self._seeded_pending = False
         # What the dashboard last failed with, logged once per change (T194).
         self._verdict_said: str | None = None
         # T124's count: one ask in flight at a time, for `_status_pending`'s reason.
@@ -10120,6 +10124,12 @@ class ControllerView(QWidget):
         if status.distro is not None:
             self._distro_answered(status.distro)
         self._ask_about_the_import(status)
+        # T668: once each time the database is found running; asked again after it was down.
+        if not status.db:
+            self._seeded_asked = False
+        elif not stale and not self._seeded_asked:
+            self._seeded_asked = True
+            self.refresh_seeded_accounts()
         self.status_changed.emit(status)
         self._ask_again_if_superseded(superseded)
 
@@ -11096,7 +11106,19 @@ class ControllerView(QWidget):
         ]
         # T657: the one line a Start says when it renamed the bot settings for the module, as
         # a note and not a problem; the next Start that renames nothing takes it away.
-        # T668: and the one it says about CMaNGOS's built-in accounts, locked or not lockable.
+        self._show_the_notice()
+        if said:
+            text = "The server started, but " + " Also, ".join(said)
+            self.problem_label.setText(text)
+            return text
+        return None
+
+    def _show_the_notice(self) -> None:
+        """The Server tab's notes: the bot settings renamed (T657), the built-in accounts (T668).
+
+        Notes and not problems: what a Start did on its own, or that the built-in accounts
+        were locked -- or could not be, which says they still log in with their own name.
+        """
         notes = [
             note
             for note in (
@@ -11105,14 +11127,40 @@ class ControllerView(QWidget):
             )
             if isinstance(note, str) and note
         ]
-        renamed = " ".join(notes)
-        self.notice_label.setText(renamed)
-        self.notice_label.setVisible(bool(renamed))
-        if said:
-            text = "The server started, but " + " Also, ".join(said)
-            self.problem_label.setText(text)
-            return text
-        return None
+        text = " ".join(notes)
+        self.notice_label.setText(text)
+        self.notice_label.setVisible(bool(text))
+
+    @Slot()
+    def refresh_seeded_accounts(self) -> None:
+        """T668: lock CMaNGOS's built-in accounts on a server whose database is already up.
+
+        For a server Docker restarted by itself (`restart: unless-stopped`), which would
+        otherwise serve the seeded logins until the player pressed Start. Off the GUI thread;
+        it starts nothing, asks nothing while the database is down, and a second ask does
+        nothing (the rows are no longer seeded). A game whose controller has no such method,
+        or whose accounts are not seeded, asks nothing.
+        """
+        lock = getattr(self.services.controller, "lock_seeded_accounts_if_up", None)
+        if not callable(lock) or self._seeded_pending:
+            return
+        # It reads the install's password file: a stopped WSL distro is not read (T133).
+        if self._waits_for_the_distro("seeded accounts", self.refresh_seeded_accounts):
+            return
+        self._seeded_pending = True
+        self._run(_quiet(lock), self._seeded_done, self._seeded_failed)
+
+    @Slot(object)
+    def _seeded_done(self, result: object) -> None:
+        self._seeded_pending = False
+        if isinstance(result, _DockerSilent):
+            return  # Docker away: the poll says so; the next time the database is up asks again
+        self._show_the_notice()
+
+    @Slot(object)
+    def _seeded_failed(self, exc: object) -> None:
+        self._seeded_pending = False
+        logger.warning(f"could not lock the built-in accounts: {exc}")
 
     def _check_the_channel(self) -> None:
         """Ask whether the saved credential still works, off the GUI thread.
@@ -15132,7 +15180,13 @@ class ControllerView(QWidget):
 
     @Slot()
     def refresh_accounts(self) -> None:
-        """Read the list, off the GUI thread: it is a `docker exec` and a query."""
+        """Read the list, off the GUI thread: it is a `docker exec` and a query.
+
+        T668: first lock CMaNGOS's built-in accounts if the database is up and they are
+        still seeded (a no-op on every other game), so the Accounts tab never loads beside
+        a server that still takes ADMINISTRATOR as its own password.
+        """
+        self.refresh_seeded_accounts()
         admin = self.services.accounts
         if admin is None:
             return

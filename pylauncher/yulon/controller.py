@@ -454,6 +454,22 @@ class Controller:
             return None
         return seeded_accounts.settle(entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
+    def lock_seeded_accounts_if_up(self) -> str | None:
+        """T668: the same lock for a server whose database is already running; the line or None.
+
+        For the app opening on a server Docker restarted by itself. Starts nothing; a note
+        said earlier stays on `seeded_accounts_locked` until the next Start. Never raises.
+        """
+        entry = self.entry or _entry_for(self.spec)
+        if entry is None:
+            return None
+        said = seeded_accounts.settle(
+            entry, self.spec, self.server_dir, wsl_distro=self.wsl_distro, start_database=False
+        )
+        if said is not None:
+            self.seeded_accounts_locked = said
+        return said
+
     def refuse_an_old_compose(self) -> None:
         """Raise `StartRefused` when this machine's Compose is one that stops every Start (T658).
 
