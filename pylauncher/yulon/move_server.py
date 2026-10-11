@@ -1070,7 +1070,11 @@ class ModuleApplier(Protocol):
     """The Modules tab's applier, as far as a move needs it (`apply.Applier`)."""
 
     def install(
-        self, manifest: Manifest, values: Mapping[str, str] | None = None
+        self,
+        manifest: Manifest,
+        values: Mapping[str, str] | None = None,
+        *,
+        defer_exists: bool = False,
     ) -> apply.ApplyReport: ...
 
 
@@ -1373,7 +1377,9 @@ class MovedInInstall:
                         yield from self._left_over
                         self._left_over.clear()
                 else:
-                    report = server.applier.install(manifest, values)
+                    # The characters are loaded by the `data` step, after this one: a "does
+                    # this character exist" question now reads an empty database (T679).
+                    report = server.applier.install(manifest, values, defer_exists=True)
             except apply.ApplyError as exc:
                 raise MoveError(
                     f"{manifest.name} could not be installed again: {exc} Press Bring from "

@@ -698,6 +698,12 @@ class ApplyRefusal(ApplyError, SaidByYulon):
     """An `ApplyError` whose message is Yu'lon's own sentence, shown as written (T214)."""
 
 
+DEFERRED_EXISTS_NOTE = (
+    "not checked against the database yet: on a move to this computer the characters are put "
+    "in after the modules, and this answer is the one the old server already used"
+)
+"""What a move-in's module install says in place of the does-it-exist check (T679)."""
+
 _STARTED_DB_LINE = "started the database alone; the world server was left stopped"
 
 DATABASE_LEFT_UP = (
@@ -3676,6 +3682,7 @@ class Applier:
         expect_head: str | None = None,
         record_move: bool = False,
         replace_addons: bool = False,
+        defer_exists: bool = False,
     ) -> ApplyReport:
         """`_install()`, saying so when it stops with a database it started still up (T476).
 
@@ -3687,6 +3694,12 @@ class Applier:
 
         `replace_addons` is the player's yes to replacing an add-on folder of theirs
         at an outside add-on's name (`players_addons()`, T613 review round 1).
+
+        `defer_exists` is True from a move-in only (T679): the module goes in before the
+        old server's characters are loaded, so a question like "is there a character with
+        this GUID" would read an empty database and refuse a good answer. Each such
+        check is reported as not made (`skipped`) instead; every other check, and every
+        install that does not pass it, is unchanged.
         """
         self._refuse_a_server_source(manifest)
         self._refuse_a_route_item_that_is_more(manifest)
@@ -3707,6 +3720,7 @@ class Applier:
                 expect_head=expect_head,
                 record_move=record_move,
                 replace_addons=replace_addons,
+                defer_exists=defer_exists,
             )
 
     def _refuse_a_route_item_that_is_more(self, manifest: Manifest) -> None:
@@ -3749,6 +3763,7 @@ class Applier:
         record_move: bool = False,
         restore: LastUpdate | None = None,
         replace_addons: bool = False,
+        defer_exists: bool = False,
     ) -> ApplyReport:
         """Clone or copy, deploy, patch, run install-time SQL, activate conf, copy client/DBC.
 
@@ -3795,7 +3810,7 @@ class Applier:
         does not reach.
         """
         vals = self._values(manifest, values)
-        self._check_values(manifest, "install", vals, log)
+        self._check_values(manifest, "install", vals, log, defer_exists=defer_exists)
         # T115, before anything is written: a relative install run again over
         # values nobody can read would compound them, so it is refused here.
         undo = self._undo_values(manifest)
@@ -5216,7 +5231,13 @@ class Applier:
             raise
 
     def _check_values(
-        self, manifest: Manifest, action: When, vals: Mapping[str, str], log: _Log
+        self,
+        manifest: Manifest,
+        action: When,
+        vals: Mapping[str, str],
+        log: _Log,
+        *,
+        defer_exists: bool = False,
     ) -> None:
         """Refuse an answer this action cannot use, BEFORE anything is written.
 
@@ -5245,7 +5266,7 @@ class Applier:
                     f"{manifest.id}: {prompt.question} — {problem}, and {value!r} is not. "
                     f"Nothing was changed."
                 )
-            self._check_exists(manifest, prompt, vals, log, db_asked)
+            self._check_exists(manifest, prompt, vals, log, db_asked, defer_exists=defer_exists)
 
     def _check_exists(
         self,
@@ -5254,6 +5275,8 @@ class Applier:
         vals: Mapping[str, str],
         log: _Log,
         db_asked: list[bool] | None = None,
+        *,
+        defer_exists: bool = False,
     ) -> None:
         """Ask the database whether the thing this answer names is really there.
 
@@ -5290,6 +5313,7 @@ class Applier:
                     {**vals, prompt.key: guid},
                     log,
                     db_asked,
+                    defer_exists=defer_exists,
                 )
             return
         unsafe = sorted(
@@ -5302,6 +5326,12 @@ class Applier:
                 f"{manifest.id}: {', '.join(unsafe)} cannot be used in a database question "
                 f"(letters, digits, dot, dash and underscore only). Nothing was changed."
             )
+        if defer_exists:
+            # T679: a move-in installs its modules BEFORE the old server's characters are
+            # loaded, so the question would read an empty database and refuse an answer the
+            # old server proved. Said, not asked, and the database is not even started for it.
+            log.skipped.append(f"{prompt.key}={vals[prompt.key]}: {DEFERRED_EXISTS_NOTE}")
+            return
         if not isinstance(self.sql, SqlReader):
             log.skipped.append(
                 f"{prompt.key}={vals[prompt.key]}: NOT checked against the database "
