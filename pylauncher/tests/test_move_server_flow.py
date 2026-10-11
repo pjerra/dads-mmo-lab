@@ -1214,17 +1214,19 @@ def test_a_folder_module_with_no_folder_route_here_is_refused(tmp_path: Path) ->
 AHBOT_COMMIT = "b" * 40
 
 
-def ahbot_facts() -> ServerFacts:
-    """The whole server of `whole_facts`, with mod-ah-bot (and its two answers) instead."""
+def ahbot_facts(
+    module_id: str = "mod-ah-bot", answers: str = '"bot_guid": "42", "bot_account": "7"'
+) -> ServerFacts:
+    """The whole server of `whole_facts`, with an AH bot module (and its answers) instead."""
     base = whole_facts()
-    ahbot = STORE.load("module", "mod-ah-bot")
+    ahbot = STORE.load("module", module_id)
     return ServerFacts(
         spec=replace(
             base.spec,
             modules=(
                 PackedModule(
                     type="module",
-                    id="mod-ah-bot",
+                    id=module_id,
                     origin="catalog",
                     repo=ahbot.source.repo,  # type: ignore[union-attr]
                     commit=AHBOT_COMMIT,
@@ -1235,8 +1237,9 @@ def ahbot_facts() -> ServerFacts:
             (
                 replace(
                     f,
-                    data=b'{"version": 1, "modules": {"module/mod-ah-bot": '
-                    b'{"bot_guid": "42", "bot_account": "7"}}}',
+                    data=(
+                        f'{{"version": 1, "modules": {{"module/{module_id}": {{{answers}}}}}}}'
+                    ).encode(),
                 )
                 if f.kind == "answers"
                 else f
@@ -1258,8 +1261,10 @@ class RealApplierOverTheMove:
     install_folder = None
     world_up: Callable[[], bool] = staticmethod(lambda: False)  # type: ignore[assignment]
 
-    def __init__(self, events: list[str], server_dir: Path) -> None:
+    def __init__(self, events: list[str], server_dir: Path, *, guarded: bool = False) -> None:
         from tests.test_apply import AHBOT_DIST, _FakeGit, _FakeReader
+
+        self.guarded = guarded
 
         self.events = events
         self.server_dir = server_dir
@@ -1283,13 +1288,29 @@ class RealApplierOverTheMove:
         **kw: bool,
     ) -> apply.ApplyReport:
         self.events.append(f"module:{manifest.id}")
-        applier = apply.Applier(self.server_dir, git=self.git, sql=self.reader)  # type: ignore[arg-type]
+        if self.guarded:
+            # Tortoise's applier: a subclass whose `install()` names every keyword itself.
+            from yulon.controller_wow_tortoise import autoupdate
+
+            applier: apply.Applier = autoupdate.GuardedApplier(
+                self.server_dir,
+                arming=lambda: autoupdate.Arming(enabled=False),
+                world_running=lambda: False,
+                git=self.git,
+                sql=self.reader,
+            )
+        else:
+            applier = apply.Applier(self.server_dir, git=self.git, sql=self.reader)  # type: ignore[arg-type]
         return applier.install(manifest, values, **kw)
 
 
-def ahbot_move(tmp_path: Path) -> tuple[Move, RealApplierOverTheMove]:
-    mv = Move(tmp_path, facts=ahbot_facts)
-    real = RealApplierOverTheMove(mv.events, mv.target.server_dir)
+def ahbot_move(tmp_path: Path, *, guarded: bool = False) -> tuple[Move, RealApplierOverTheMove]:
+    # Tortoise's guard refuses a module that hands SQL to the server's updater (mod-ah-bot
+    # does); mod-ah-bot-plus carries the same does-it-exist question and no SQL.
+    module_id = "mod-ah-bot-plus" if guarded else "mod-ah-bot"
+    answers = '"bot_guid": "42"' if guarded else '"bot_guid": "42", "bot_account": "7"'
+    mv = Move(tmp_path, facts=lambda: ahbot_facts(module_id, answers))
+    real = RealApplierOverTheMove(mv.events, mv.target.server_dir, guarded=guarded)
     mv.applier = real  # type: ignore[assignment]
     return mv, real
 
@@ -1326,3 +1347,20 @@ def test_the_same_server_is_refused_when_the_check_is_not_deferred(tmp_path: Pat
     with pytest.raises(MoveError, match="no character in this server's own database has GUID 42"):
         mv.run()
     assert not [e for e in mv.events if e.startswith("load:")]
+
+
+def test_a_move_in_over_tortoises_guarded_applier_passes_the_deferral_through(
+    tmp_path: Path,
+) -> None:
+    """The move's module step over the REAL `GuardedApplier`, whose `install()` lists its keywords.
+
+    Without the keyword there it is a `TypeError`, not an `ApplyError`, so the move gave no
+    "press again" message at all. The deferral must reach the base applier's check.
+    """
+    mv, real = ahbot_move(tmp_path, guarded=True)
+    lines = mv.run()
+    assert real.asked == []
+    assert "module:mod-ah-bot-plus" in mv.events
+    assert any(apply.DEFERRED_EXISTS_NOTE in line for line in lines if "bot_guid=42" in line)
+    marker = move_server.read_marker(mv.target.server_dir)
+    assert marker is not None and marker["done"] == list(move_server.STEPS)
