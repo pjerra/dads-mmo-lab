@@ -1436,8 +1436,12 @@ def test_a_controller_tab_carries_its_server_dir_as_a_tooltip(window: Any, tmp_p
     catalog.installed.emit("wow-wotlk", server_dir, None)
 
     tabs = window.property("tabs")
-    index = tabs.indexOf(_tab_for(window, server_dir))
-    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+    view = _tab_for(window, server_dir)
+    index = tabs.indexOf(view)
+    # T693: and how it is, on a second line -- the rail has no room for it.
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}\nOffline"
+    view.realm_badge.set_status("partial")
+    assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}\nPartly up"
 
 
 def test_the_logs_tab_sits_under_the_catalog_and_stays_there(window: Any, tmp_path: Any) -> None:
@@ -2308,20 +2312,11 @@ def _leave(bar: Any) -> None:
 
 
 def _strip_of(window: Any, view: Any) -> Any:
-    """The tab's button strip: ▶ and × side by side (T187), where T95's × alone sat."""
+    """The tab's button strip: its ▶ (T187), where T95's × sat until T693 took it off."""
     from PySide6.QtWidgets import QTabBar
 
     tabs = window.property("tabs")
     return tabs.tabBar().tabButton(tabs.indexOf(view), QTabBar.ButtonPosition.RightSide)
-
-
-def _x_of(window: Any, view: Any) -> Any:
-    from PySide6.QtWidgets import QToolButton
-
-    from yulon.ui.theme import FORGET_TAB_BUTTON
-
-    strip = _strip_of(window, view)
-    return None if strip is None else strip.findChild(QToolButton, FORGET_TAB_BUTTON)
 
 
 def _play_of(window: Any, view: Any) -> Any:
@@ -2333,14 +2328,17 @@ def _play_of(window: Any, view: Any) -> Any:
     return None if strip is None else strip.findChild(QToolButton, LAUNCH_TAB_BUTTON)
 
 
-def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
-    """Decided by page type, not index: Catalog is 0 and T93 puts Logs at 1."""
+def test_only_server_tabs_carry_a_play_and_no_tab_carries_an_x(window: Any, tmp_path: Any) -> None:
+    """T693: the sidebar × is gone; a server tab carries its ▶ alone, and Catalog nothing.
+
+    Decided by page type, not index: Catalog is 0 and T93 puts Logs at 1.
+    """
     from PySide6.QtWidgets import QTabBar, QToolButton
 
     from yulon.ui.controller_view import ControllerView
-    from yulon.ui.theme import FORGET_TAB_BUTTON
+    from yulon.ui.theme import FORGET_TAB_BUTTON, LAUNCH_TAB_BUTTON
 
-    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-has-x", None)
+    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t693-no-x", None)
     tabs = window.property("tabs")
     bar = tabs.tabBar()
     for index in range(tabs.count()):
@@ -2350,61 +2348,25 @@ def test_only_server_tabs_carry_an_x(window: Any, tmp_path: Any) -> None:
         assert left is None
         if isinstance(page, ControllerView):
             assert right is not None
-            assert right.findChild(QToolButton, FORGET_TAB_BUTTON) is not None
+            buttons = right.findChildren(QToolButton)
+            assert [b.objectName() for b in buttons] == [LAUNCH_TAB_BUTTON]
+            assert right.findChild(QToolButton, FORGET_TAB_BUTTON) is None
+            assert all(b.text() != "×" for b in buttons), "an × is still on the rail"
         else:
-            assert right is None, f"{tabs.tabText(index)!r} has an ×"
+            assert right is None, f"{tabs.tabText(index)!r} has a tab button"
 
 
-def test_the_x_shows_on_the_hovered_tab_and_the_current_one_and_nowhere_else(
-    window: Any, tmp_path: Any
-) -> None:
-    catalog = _catalog_view(window)
-    catalog.installed.emit("wow-wotlk", tmp_path / "t95-first", None)
-    catalog.installed.emit("wow-wotlk", tmp_path / "t95-second", None)
-    first, second = _tab_for(window, tmp_path / "t95-first"), _tab_for(
-        window, tmp_path / "t95-second"
-    )
-    tabs = window.property("tabs")
-    bar = tabs.tabBar()
-    x_first, x_second = _x_of(window, first), _x_of(window, second)
-    assert tabs.currentWidget() is second
-
-    assert x_first.isHidden() and not x_second.isHidden(), "only the current tab's × at rest"
-    _hover(bar, tabs.indexOf(first))
-    assert not x_first.isHidden() and not x_second.isHidden(), "hover shows it, current keeps it"
-    _leave(bar)
-    assert x_first.isHidden() and not x_second.isHidden()
-    tabs.setCurrentWidget(first)
-    assert not x_first.isHidden() and x_second.isHidden(), "the × follows the current tab"
-    shown = [
-        index
-        for index in range(tabs.count())
-        if (x := _x_of(window, tabs.widget(index))) is not None and not x.isHidden()
-    ]
-    assert shown == [tabs.indexOf(first)], "an × is showing on a tab nobody is on or over"
-
-
-def test_the_x_is_not_a_gamepad_stop_and_is_exempt_from_the_touch_floor(
-    window: Any, tmp_path: Any
-) -> None:
-    from PySide6.QtCore import Qt
-
-    _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t95-size", None)
-    x = _x_of(window, _tab_for(window, tmp_path / "t95-size"))
-    x.ensurePolished()
-    assert x.focusPolicy() == Qt.FocusPolicy.NoFocus
-    assert x.maximumWidth() <= 18 and x.maximumHeight() <= 18, x.maximumSize()
-
-
-def test_pressing_the_x_is_the_same_removal(
+def test_with_the_x_gone_the_removal_is_still_on_the_server_tab(
     window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """T693: T95's way out of a dead end survives the ×: the Danger zone's button removes."""
     from yulon import forgetting
 
     asked = _answer(monkeypatch, True)
-    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t95-x-press")
+    view, stops = _removable_tab(window, monkeypatch, tmp_path / "t693-remove")
 
-    _x_of(window, view).click()
+    assert view.forget_install_button is not None
+    view.forget_install_button.click()
 
     assert [title for title, _, _ in asked] == [forgetting.TITLE]
     assert stops == [1]
@@ -4719,7 +4681,7 @@ def test_a_server_folder_with_an_ampersand_keeps_it_on_its_tab(window: Any, tmp_
         assert "\n" in title, ("the folder is not on the tab", title)
         assert QKeySequence.mnemonic(title).isEmpty(), title
         assert "Raids & Dungeons" in title.replace("&&", "&"), title
-        assert tabs.tabToolTip(index) == f"WoW WotLK — {server_dir}"
+        assert tabs.tabToolTip(index).startswith(f"WoW WotLK — {server_dir}\n")
     finally:
         for folder in (server_dir, other):
             _tab_for(window, folder).uninstalled.emit("wow-wotlk", folder)
@@ -4805,19 +4767,19 @@ def _key(view: Any) -> tuple[str, Path]:
     return (view.entry.id, view.services.controller.server_dir)
 
 
-def test_each_server_tab_has_a_play_beside_its_x_shown_with_it(
+def test_each_server_tab_has_a_play_shown_on_the_hovered_or_current_tab(
     window: Any, tmp_path: Path, launchers: Any
 ) -> None:
-    """Spec 1: ▶ beside the T95 ×, on the hovered or current tab only, never a pad stop."""
+    """Spec 1: ▶ on the hovered or current tab only, never a pad stop (the × is gone, T693)."""
     from PySide6.QtCore import Qt
 
     first = _server(window, tmp_path, "t187-first")
     second = _server(window, tmp_path, "t187-second")
     tabs = window.property("tabs")
     play_first, play_second = _play_of(window, first), _play_of(window, second)
-    assert play_first is not None and play_first.parent() is _x_of(window, first).parent()
+    assert play_first is not None and play_first.parent() is _strip_of(window, first)
     assert play_first.text() == "▶"
-    assert "launcher" in play_first.toolTip().casefold()
+    assert "game" in play_first.toolTip().casefold()
     assert tabs.currentWidget() is second
     assert play_first.isHidden() and not play_second.isHidden()
     _hover(tabs.tabBar(), tabs.indexOf(first))
@@ -4832,12 +4794,28 @@ def test_each_server_tab_has_a_play_beside_its_x_shown_with_it(
     assert strip.geometry().width() <= tabs.tabBar().width(), "the strip is wider than the rail"
 
 
-def test_the_sidebar_play_opens_the_servers_launcher_and_again_raises_the_same_one(
+def test_the_sidebar_play_plays_through_the_server_tabs_play(
+    window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T699 (option B): the rail's ▶ is the Server tab's PLAY, not a way to the launcher."""
+    view = _server(window, tmp_path, "t699-rail-play", play=True)
+    played: list[object] = []
+    monkeypatch.setattr(view, "play", lambda: played.append(view.dialog_host))
+
+    _play_of(window, view).click()
+
+    assert played == [None], "the ▶ did not play, or played with a launcher's dialog host"
+    assert launchers == {}, "the ▶ opened the launcher window"
+
+
+def test_the_sidebar_play_without_a_ready_to_play_client_opens_the_launcher_once(
     window: Any, tmp_path: Path, launchers: Any
 ) -> None:
+    """Nothing to play yet: the launcher window, where Make… is (the tray's rule, T694)."""
     from yulon.ui.launcher_window import LauncherWindow
 
-    view = _server(window, tmp_path, "t187-open", play=True)
+    view = _server(window, tmp_path, "t187-open")
+    assert view.services.play_client_dir is None
     _play_of(window, view).click()
 
     launcher = launchers[_key(view)]
@@ -4878,7 +4856,9 @@ def test_the_server_tabs_play_plays_and_its_launcher_button_opens_the_launcher(
     view = _server(window, tmp_path, "t187-tab-play", play=True)
     played: list[int] = []
     monkeypatch.setattr(view, "play", lambda: played.append(1))
-    assert view.play_button.text() == "Play"
+    from yulon.ui.controller_view import PLAY_LABEL, PLAY_STARTS_IT_LABEL
+
+    assert view.play_button.text() in (PLAY_LABEL, PLAY_STARTS_IT_LABEL)  # T699: by its state
     view.play_button.click()
 
     assert played == [1], "the tab's Play did not play"
@@ -4915,7 +4895,7 @@ def test_a_rebuilt_tab_is_followed_by_its_open_launcher(
 def test_removing_the_server_closes_its_launcher_and_forgets_its_place(
     window: Any, tmp_path: Path, launchers: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review Focus 4: the × closes the launcher before the tab goes; nothing calls a dead view."""
+    """Review Focus 4: a removal closes the launcher first; no call reaches a dead view."""
     import shiboken6
 
     from yulon import ui_settings
@@ -4926,7 +4906,7 @@ def test_removing_the_server_closes_its_launcher_and_forgets_its_place(
     launcher = window.yulon_open_launcher(*key)
     ui_settings.remember_launcher(*key, addresses=["10.0.0.5"])
 
-    _x_of(window, view).click()
+    view.forget_install_button.click()
     _collect_deleted()
 
     assert key not in launchers
@@ -5719,7 +5699,9 @@ def test_a_rebuilt_tab_gets_its_new_badge_s_dot_and_the_old_badge_lets_go(
 
         made.realm_badge.set_status("running")
         assert _dot_is(_tab_dot(window, made), COLOR_UNCOMMON)
-        assert old.realm_badge.receivers(SIGNAL("status_changed(QString)")) == 0
+        # The window's dot let go; the one left is the old tab's own status pill (T699),
+        # which goes with that tab.
+        assert old.realm_badge.receivers(SIGNAL("status_changed(QString)")) == 1
         old.realm_badge.set_status("restarting")  # still alive until its deferred delete
         assert not _dot_is(_tab_dot(window, made), COLOR_RARE)
         process_events()  # the old view's deferred delete

@@ -260,7 +260,6 @@ def _dot_pixels(image, hex_colour: str) -> int:  # noqa: ANN001  (a QImage)
         ("running", theme.COLOR_UNCOMMON),
         ("starting", theme.COLOR_GOLD_BRIGHT),
         ("stopping", theme.COLOR_GOLD_BRIGHT),
-        ("partial", theme.COLOR_GOLD_BRIGHT),
         ("restarting", theme.COLOR_RARE),
     ],
 )
@@ -310,3 +309,31 @@ def test_an_unknown_realm_shows_no_dot_at_all(qapp: object) -> None:
     assert unknown.size() == plain.size()
     assert unknown.convertToFormat(plain.format()) == plain, "an unknown realm draws a dot"
     assert _icon_image("stopped").convertToFormat(plain.format()) != plain, "the probe is blind"
+
+
+def _dot_shape(status: str) -> frozenset[tuple[int, int]]:
+    """Where the dot is drawn at all, whatever its colour: its shape alone."""
+    from yulon.ui.sidebar import status_dot_geometry
+
+    image = _icon_image(status)
+    centre, _radius, halo = status_dot_geometry(image.width())
+    return frozenset(
+        (x, y)
+        for y in range(image.height())
+        for x in range(image.width())
+        if (x + 0.5 - centre.x()) ** 2 + (y + 0.5 - centre.y()) ** 2 <= halo**2
+        and image.pixelColor(x, y).alpha() > 128
+    )
+
+
+def test_the_rail_dots_shape_says_the_state_without_its_colour(qapp: object) -> None:
+    """T699: the pill's shapes on the rail too -- up a dot, partly up a triangle, on its way
+    half filled, stopped a ring -- so a player who cannot tell green from amber can read it.
+
+    Mutation: draw every filled state as the plain dot and two of these shapes are the same.
+    """
+    shapes = {s: _dot_shape(s) for s in ("running", "partial", "starting", "stopped")}
+    assert len(set(shapes.values())) == 4, "two states draw the same shape"
+    assert _dot_shape("stopping") == shapes["starting"], "on its way reads one way"
+    # Partly up is the triangle, in the in-between gold (it left the filled-dot test above).
+    assert _dot_pixels(_icon_image("partial"), theme.COLOR_GOLD_BRIGHT) > 10

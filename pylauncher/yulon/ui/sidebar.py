@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QSize, Qt, Slot
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, Slot
 from PySide6.QtGui import QBrush, QColor, QIcon, QKeyEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QStyle,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon.ui.server_status import pill_for
 from yulon.ui.theme import (
     COLOR_GOLD_BRIGHT,
     COLOR_RARE,
@@ -104,7 +105,15 @@ def server_tab_icon(status: str) -> QIcon:
     painter.drawEllipse(centre, halo, halo)
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
     fill = DOT_FILLS.get(tone)
-    if fill is not None:
+    shape = pill_for(status).shape
+    if fill is not None and shape in ("triangle", "half"):
+        # T699: the pill's own shape, so the rail reads without colour too: PARTLY UP a
+        # triangle, a realm on its way (starting, stopping, restarting) half filled.
+        from yulon.ui.widgets.server_cards import paint_shape
+
+        box = QRectF(centre.x() - radius, centre.y() - radius, 2 * radius, 2 * radius)
+        paint_shape(painter, shape, fill, box)
+    elif fill is not None:
         painter.setBrush(QColor(fill))
         painter.drawEllipse(centre, radius, radius)
     else:

@@ -224,20 +224,26 @@ def test_a_refusal_over_a_folder_that_is_entirely_gone_points_at_the_server_tab_
     assert "Forget this install" not in message
 
 
-def test_an_unclaimed_folder_that_still_exists_is_pointed_at_the_x(tmp_path: Path) -> None:
-    """T95: forgetting a folder that is still there is allowed now (decision 1), so say how."""
+def test_an_unclaimed_folder_that_still_exists_is_pointed_at_the_danger_zone(
+    tmp_path: Path,
+) -> None:
+    """T95: forgetting a folder that is still there is allowed now (decision 1), so say how.
+
+    T693: the sidebar's × is gone, so the sentence names the two ways that are left.
+    """
     message = purge.refusal_for(Ownership.UNCLAIMED, tmp_path)
     assert "gone for good" not in message
-    assert "press the × on its tab in the sidebar" in message
+    assert "×" not in message, "points at the sidebar × that is gone"
     assert "deleting nothing" in message or "without deleting anything" in message
-    assert '"Remove from Yu\'lon…" on the Server tab' in message, "the gamepad way (decision 4)"
+    assert '"Remove from Yu\'lon…" in the Danger zone of its Server tab' in message
+    assert "right-click menu" in message
     assert "Forget this install" not in message
 
 
-def test_a_wsl_installs_missing_host_path_gets_the_x_and_not_the_gone_clause(
+def test_a_wsl_installs_missing_host_path_gets_the_removal_and_not_the_gone_clause(
     tmp_path: Path,
 ) -> None:
-    """No "gone for good" for a distro path, and the × still works on a WSL tab (T95).
+    """No "gone for good" for a distro path, and Remove from Yu'lon still works on a WSL tab (T95).
 
     `folder_is_gone()` cannot answer for a distro path (review, T34 round 2):
     `server_dir` for a WSL install is a path on THIS process, not inside the
@@ -248,7 +254,7 @@ def test_a_wsl_installs_missing_host_path_gets_the_x_and_not_the_gone_clause(
     message = purge.refusal_for(Ownership.UNCLAIMED, gone, wsl_distro="dml-arch")
     assert "Nothing here says Yu'lon installed it" in message
     assert "gone for good" not in message
-    assert "press the × on its tab in the sidebar" in message
+    assert "in the Danger zone of its Server tab" in message
     # Mutation: ignore `wsl_distro` in `refusal_for()`'s clause condition and
     # this fails — the gone clause would appear for a folder path this process
     # cannot prove is gone from the distro's point of view.

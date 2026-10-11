@@ -22,6 +22,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from yulon.ui.server_status import sidebar_line
+
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QTabWidget
 
@@ -111,4 +113,16 @@ def retitle_controller_tabs(tabs: QTabWidget, views: Iterable[ControllerView]) -
             # The short title leaves out the "WoW " and the folder, so the
             # tooltip carries both: the whole game name and the whole path.
             # A tooltip is not read for shortcuts, so its "&" stays single.
-            tabs.setTabToolTip(index, f"{view.entry.name} — {view.services.controller.server_dir}")
+            tabs.setTabToolTip(index, tab_tooltip(view))
+
+
+def tab_tooltip(view: ControllerView) -> str:
+    """A server tab's tooltip: the whole name, the whole path, and how it is (T693).
+
+    The rail is 64 px wide, room for the dot and the short name only; the one line
+    of state ("Online · 3 players", "Starting", "Offline") is read here, on hover.
+    """
+    verdict = view.last_verdict
+    players = verdict.players if verdict is not None else None
+    state = sidebar_line(view.realm_badge.status, players)
+    return f"{view.entry.name} — {view.services.controller.server_dir}\n{state}"

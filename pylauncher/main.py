@@ -602,10 +602,13 @@ def build_window() -> object:
     from yulon.ui.logs_view import LogsView
     from yulon.ui.move_in import move_in_for_app
     from yulon.ui.sidebar import SidebarPins, server_tab_icon
-    from yulon.ui.tab_titles import controller_tab_titles, retitle_controller_tabs
+    from yulon.ui.tab_titles import (
+        controller_tab_titles,
+        retitle_controller_tabs,
+        tab_tooltip,
+    )
     from yulon.ui.theme import (
         CHECK_UPDATES_BUTTON,
-        FORGET_TAB_BUTTON,
         LAUNCH_TAB_BUTTON,
         SETTINGS_BUTTON,
         TAB_BUTTONS,
@@ -1331,19 +1334,19 @@ def build_window() -> object:
         header.follow(
             views[position].realm_badge,
             title=titles[position],
-            tooltip=tabs.tabToolTip(tabs.currentIndex()),
+            # The tab tooltip's first line: its second, the state (T693), would go stale here.
+            tooltip=tabs.tabToolTip(tabs.currentIndex()).split("\n")[0],
         )
 
     tabs.currentChanged.connect(follow_the_tab_on_screen)
 
     def _tab_buttons(key: tuple[str, Path], name: str) -> QWidget:
-        """A server tab's ▶ and × side by side (T187), on the side T95's × alone had.
+        """A server tab's ▶ (T187), on the side T95's × had; the × is gone (T693).
 
-        Side by side, not stacked: on this West rail Qt hands a tab button its
-        sizeHint as it stands, so a 42 x 18 strip fits across the 64px rail and
-        the tab is no longer than the × made it (measured offscreen 2026-10-02).
-        Each button keeps its room while hidden, so showing them moves nothing.
-        Parented to the bar, which deletes the strip with its tab.
+        Remove from Yu'lon stays in the Server tab's Danger zone and in this tab's
+        right-click menu, so T95's way out of a dead end is still there; the × sat 6 px
+        from the rail's most-pressed control. The ▶ keeps its room while hidden, so
+        showing it moves nothing. Parented to the bar, which deletes the strip with its tab.
         """
         strip = QWidget(tabs.tabBar())
         strip.setObjectName(TAB_BUTTONS)
@@ -1354,35 +1357,33 @@ def build_window() -> object:
         play.setObjectName(LAUNCH_TAB_BUTTON)
         play.setText("▶")
         play.setAutoRaise(True)
-        # Not a gamepad stop, for the ×'s reason: the Server tab's Play is the pad's way.
+        # Not a gamepad stop: the Server tab's PLAY is the pad's way.
         play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        play.setToolTip(f"Play: open the game launcher for {name}")
+        play.setToolTip(
+            f"Play {name}: start it if it is stopped, wait for the realm, then the game"
+        )
         play.setAccessibleName("Play")
-        play.clicked.connect(lambda _checked=False, k=key: open_launcher(*k))
-        for button in (play, _forget_button(key, name, strip)):
-            policy = button.sizePolicy()
-            policy.setRetainSizeWhenHidden(True)
-            button.setSizePolicy(policy)
-            row.addWidget(button)
+        play.clicked.connect(lambda _checked=False, k=key: play_from_the_rail(*k))
+        policy = play.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        play.setSizePolicy(policy)
+        row.addWidget(play)
         return strip
 
-    def _forget_button(key: tuple[str, Path], name: str, parent: QWidget) -> QToolButton:
-        """The × for one server tab, in its strip (`_tab_buttons`).
+    def play_from_the_rail(game: str, server_dir: object) -> None:
+        """The rail's ▶ plays (T699, owner's option B), as the Server tab's PLAY and the tray do.
 
-        `QTabBar.removeTab()` deletes a tab's buttons (measured offscreen, 2026-09-24).
+        A server with no ready-to-play client has nothing to play yet: its launcher window
+        opens, where "Make a ready-to-play client" is the way on (the tray's rule, T694).
         """
-        button = QToolButton(parent)
-        button.setObjectName(FORGET_TAB_BUTTON)
-        button.setText("×")
-        button.setAutoRaise(True)
-        # Not a gamepad stop: a control that comes and goes with the mouse would
-        # be a destructive target in the D-pad chain, and a stale entry in the
-        # navigator's cache. The Server tab's button is the gamepad's route.
-        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        button.setToolTip(f"{forgetting.BUTTON_LABEL} {name}")
-        button.setAccessibleName(forgetting.BUTTON_LABEL)
-        button.clicked.connect(lambda _checked=False, k=key: request_removal(*k))
-        return button
+        view = controllers.get((game, Path(str(server_dir))))
+        if view is None:
+            return
+        if view.services.play_client_dir is None:
+            open_launcher(game, server_dir)
+            return
+        view.dialog_host = None
+        view.play()
 
     def rebuild_refused(live: Any, title: str, saved: str) -> bool:
         """A rebuild is a teardown: True, after saying why, if the tab has work not to be cut.
@@ -1583,8 +1584,14 @@ def build_window() -> object:
             index = tabs.indexOf(view)
             if index != -1:
                 tabs.setTabIcon(index, server_tab_icon(status))
+                # T693: and the one line of state, on hover: the rail has no room for it.
+                tabs.setTabToolTip(index, tab_tooltip(view))
 
         view.realm_badge.status_changed.connect(show_status_dot)
+        # Every poll too: the player count moves without the badge's word changing.
+        view.status_changed.connect(
+            lambda _status, view=view: show_status_dot(view.realm_badge.status, view)
+        )
         status_dots[key] = show_status_dot
         show_status_dot(view.realm_badge.status)
         # T95: the ×, on a server page only. Catalog (and T93's Logs) never get

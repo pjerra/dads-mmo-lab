@@ -519,9 +519,9 @@ def refusal_for(
     else:
         # T95: the adopted install's way off the list. Forgetting it deletes nothing.
         sentence += (
-            " To stop Yu'lon listing it without deleting anything, press the × on its tab in "
-            f'the sidebar, or "{forgetting.BUTTON_LABEL}" on the Server tab or in the tab\'s '
-            "right-click menu."
+            " To stop Yu'lon listing it without deleting anything, press "
+            f'"{forgetting.BUTTON_LABEL}" in the Danger zone of its Server tab, or in its '
+            "sidebar tab's right-click menu."
         )
     return sentence
 
