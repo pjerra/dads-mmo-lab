@@ -16,6 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
+- The update check no longer offers an older build as the newest once a version has a tenth patch release.
 
 ### Changed
 

@@ -23,7 +23,28 @@ defaults:
     working-directory: pylauncher
 
 jobs:
+  # T669: a `-Public` tag must sort above every other public tag, or the update
+  # check offers the wrong release (or none). Runs first and gates the build, so
+  # a mistyped tag costs a red run and no artifacts rather than a bad release.
+  # A no-op on a branch (manual run) and on a non-public tag.
+  tag-order:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # every tag, to compare against
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: A public tag must sort above the previous public tag
+        shell: bash
+        run: python build/check_tag_order.py --tag "${GITHUB_REF_NAME}"
+
   build:
+    needs: tag-order
     strategy:
       fail-fast: false
       matrix:
