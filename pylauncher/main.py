@@ -569,6 +569,7 @@ def build_window() -> object:
     )
 
     from yulon import __version__, forgetting, play_client, ui_settings
+    from yulon.catalog import native
     from yulon.catalog.catalog import load_catalog
     from yulon.install_wiring import installer_for_app
     from yulon.selfupdate.apply import (
@@ -767,6 +768,8 @@ def build_window() -> object:
         installed_games=state.installed_dirs(),
         # T601 level 2: "Bring from another computer…" on each tile.
         move_in=move_in_for_app(catalog),
+        # T702: the drive is judged as soon as the server folder is chosen.
+        ready_check=native.early_refusal,
     )
     tabs, update_bar, _splitter = build_catalog_tab(window, catalog_view, log_panel)
     # T388: where the screen is smaller than the 960x640 floor the contents
