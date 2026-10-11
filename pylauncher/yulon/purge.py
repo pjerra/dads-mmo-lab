@@ -74,6 +74,7 @@ discovered afterwards.
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
@@ -89,6 +90,7 @@ from yulon.catalog.native import (
     forget_stopped_build,
 )
 from yulon.catalog.snapshot import BACKUPS_FOLDER
+from yulon.kept_backups import PARTIAL, kept_backups_path
 from yulon.log import get_logger
 from yulon.ownership import Ownership
 from yulon.said import SaidByYulon
@@ -255,10 +257,6 @@ class PurgeReport:
     """Where a backups folder that was a link out of the install really is; left as it was."""
 
 
-KEPT_BACKUPS_SUFFIX = " - kept backups"
-"""The folder an uninstall moves the backups to is `<server folder name> - kept backups`."""
-
-
 @dataclass(frozen=True)
 class BackupsFound:
     """What this install's backups folder is, read off the disk (T677)."""
@@ -269,24 +267,6 @@ class BackupsFound:
     """Where `keep_backups()` will put it: beside the server folder, a name nobody has."""
     linked_to: Path | None = None
     """Where the backups folder really is when it leads OUT of the install; never touched."""
-
-
-def kept_backups_path(server_dir: Path) -> Path:
-    """Where this install's backups go: beside the server folder, never onto an earlier set.
-
-    The first free of `<name> - kept backups`, `<name> - kept backups (2)`, and so on. It is a
-    sibling of the server folder on purpose: removing the server folder already needs write
-    access to that parent, so a move there cannot fail for a reason the removal would not
-    share, and a move inside one disk is a rename that copies nothing. The name is a function
-    of the disk and not of the clock, so the dialog can say the exact folder before the press.
-    """
-    base = f"{server_dir.name}{KEPT_BACKUPS_SUFFIX}"
-    candidate = server_dir.parent / base
-    number = 2
-    while os.path.lexists(candidate):
-        candidate = server_dir.parent / f"{base} ({number})"
-        number += 1
-    return candidate
 
 
 def _strictly_inside(path: Path, root: Path) -> bool:
@@ -321,28 +301,146 @@ def find_backups(server_dir: Path) -> BackupsFound:
     return BackupsFound(source=real, destination=kept_backups_path(server_dir))
 
 
-def keep_backups(found: BackupsFound) -> Path | None:
-    """Move the backups out of the server folder, or refuse before anything is removed.
+@dataclass
+class KeptState:
+    """Where the backups are once they have been kept, and how: a failure message needs both."""
 
-    A failed move is a refusal and never a skipped step: the folder removed next would take
-    the backups with it.
+    where: Path | None = None
+    copied: bool = False
+    """True when `where` holds a copy and the originals are still in the server folder."""
+
+
+def rename_would_work(source: Path, destination: Path) -> bool:
+    """Whether renaming `source` to `destination` will work, asked without writing anything.
+
+    A rename needs both folders on one disk and write access to both parents. Any doubt, or a
+    look that fails, answers False, which is the copy path: a copy is always safe to attempt.
+    """
+    parent = destination.parent
+    try:
+        return (
+            os.stat(source).st_dev == os.stat(parent).st_dev
+            and os.access(parent, os.W_OK | os.X_OK)
+            and os.access(source.parent, os.W_OK | os.X_OK)
+        )
+    except OSError:
+        return False
+
+
+def prepare_backups(found: BackupsFound, state: KeptState) -> None:
+    """Before the first thing is removed: copy the backups now if they cannot simply be renamed.
+
+    The move itself waits until just before the server folder goes (`keep_backups`), so a Docker
+    failure leaves the server installed with its backups where its Maintenance tab lists them.
+    But a move that cannot work must stop the press while nothing has been removed, and only a
+    real attempt proves that, so a rename the preflight doubts is done as a checked copy here.
     """
     if found.source is None or found.destination is None:
-        return None
+        return
+    if rename_would_work(found.source, found.destination):
+        return
+    _copy_backups(found.source, found.destination, state, nothing_removed=True)
+
+
+def keep_backups(found: BackupsFound, state: KeptState) -> None:
+    """Just before the server folder is removed: move the backups out, or copy and check them.
+
+    A rename that fails (a disk the preflight did not see coming) falls back to the checked
+    copy. If that fails too, this raises and the folder is NOT removed.
+    """
+    if found.source is None or found.destination is None or state.where is not None:
+        return
     try:
         os.rename(found.source, found.destination)
     except OSError as exc:
+        logger.info(f"uninstall: could not rename {found.source} ({exc}); copying instead")
+        _copy_backups(found.source, found.destination, state, nothing_removed=False, why=exc)
+        return
+    state.where = found.destination
+
+
+def _copy_backups(
+    source: Path,
+    destination: Path,
+    state: KeptState,
+    *,
+    nothing_removed: bool,
+    why: OSError | None = None,
+) -> None:
+    """Copy `source` to `destination` through a `.partial` name, check it, and only then name it.
+
+    The check is the copy's own: the same files, folders and sizes as the original. A copy that
+    fails or does not match is discarded and the press refuses, in words that say where the
+    backups still are.
+    """
+    partial = Path(str(destination) + PARTIAL)
+    try:
+        if os.path.lexists(partial):
+            raise OSError(f"{partial} is already there")
+        try:
+            shutil.copytree(source, partial, symlinks=True)
+            problem = _differences(source, partial)
+            if problem:
+                raise OSError(problem)
+            os.rename(partial, destination)
+        except (OSError, shutil.Error):
+            _discard(partial)
+            raise
+    except (OSError, shutil.Error) as exc:
+        tried = f"they could not be moved ({why}), and " if why is not None else ""
+        where_things_are = (
+            "Nothing was removed and your backups are where they were."
+            if nothing_removed
+            else "The containers, volumes and images have already been removed; the server folder "
+            "and your backups are still where they were, so the uninstall can be run again."
+        )
         raise PurgeRefusal(
-            f"Yu'lon could not move your backups from {found.source} to {found.destination} "
-            f"({exc}), and the uninstall deletes the folder they are in. Nothing was removed. "
-            f"Move that folder somewhere safe yourself, then uninstall again. (A backups folder "
-            f"that is its own disk or mount cannot be moved from here.)"
+            f"Yu'lon could not keep your backups out of the folder this deletes: {tried}"
+            f"copying {source} to {destination} failed ({exc}). {where_things_are} Free some "
+            f"space or make the folder beside the server writable, or move the backups folder "
+            f"somewhere safe yourself, then uninstall again."
         ) from exc
-    return found.destination
+    state.where = destination
+    state.copied = True
 
 
-def _telling_where_the_backups_went(exc: Exception, kept: Path) -> PurgeError:
-    """The failure, with the folder the backups moved to named in the sentence the player reads.
+def _discard(partial: Path) -> None:
+    """Remove a half-made copy this call started. Never raises: the refusal is the news."""
+    try:
+        if os.path.lexists(partial):
+            rmtree.remove_tree(partial)
+    except OSError as exc:
+        logger.warning(f"uninstall: could not remove the half-made copy {partial}: {exc}")
+
+
+def _items_under(root: Path) -> dict[str, int]:
+    """Every folder (-1) and file (its size) under `root`; links are listed, never entered."""
+    found: dict[str, int] = {}
+    for folder, dirs, files in os.walk(root, followlinks=False):
+        base = os.path.relpath(folder, root)
+        for name in dirs:
+            found[os.path.join(base, name)] = -1
+        for name in files:
+            found[os.path.join(base, name)] = os.lstat(os.path.join(folder, name)).st_size
+    return found
+
+
+def _differences(source: Path, copy: Path) -> str:
+    """ "" when `copy` holds exactly what `source` does (same names, same sizes), else why not."""
+    original, made = _items_under(source), _items_under(copy)
+    if original == made:
+        return ""
+    missing = sorted(set(original) - set(made))
+    different = sorted(name for name in original if name in made and original[name] != made[name])
+    first = (missing or different)[0] if (missing or different) else "an extra item"
+    return (
+        f"the copy does not match the original ({len(original)} items there, {len(made)} in the "
+        f"copy; first difference: {first})"
+    )
+
+
+def _telling_where_the_backups_went(exc: Exception, state: KeptState) -> PurgeError:
+    """The failure, with the folder the backups are in named in the sentence the player reads.
 
     Yu'lon's own sentence (a refusal, a Docker refusal) is kept as written with the note after
     it, and its Details stay. Anything else -- another program's words, a bug's -- goes under
@@ -350,7 +448,10 @@ def _telling_where_the_backups_went(exc: Exception, kept: Path) -> PurgeError:
     the player is certain to read where their backups are. Always a `PurgeRefusal`, which is a
     `PurgeError`, so every `except PurgeError` still catches it.
     """
-    note = f"Your backups were moved to {kept}."
+    if state.copied:
+        note = f"A complete copy of your backups is in {state.where}."
+    else:
+        note = f"Your backups were moved to {state.where}."
     if isinstance(exc, SaidByYulon):
         wrapped = PurgeRefusal(f"{exc} {note}")
         wrapped.detail = exc.detail
@@ -817,22 +918,24 @@ class Uninstaller:
                 f"Yu'lon could not look at this install's backups folder ({exc}), so it cannot "
                 f"keep your backups out of the folder this deletes. Nothing was removed."
             ) from exc
-        backups_kept = keep_backups(found)
+        state = KeptState()
+        prepare_backups(found, state)
 
-        # Everything from here changes the machine. Once the backups have moved, a failure
-        # below must say where they are: the Maintenance tab no longer lists them.
+        # Everything from here changes the machine. The backups move just before the server
+        # folder goes, so a Docker failure leaves them where they were; once they have moved or
+        # been copied, a failure must say where they are.
         try:
             return self._remove_the_rest(
                 targets,
                 keep_characters=keep_characters,
                 secret_kept=secret_kept,
-                backups_kept=backups_kept,
-                backups_linked_to=found.linked_to,
+                found=found,
+                state=state,
             )
         except Exception as exc:
-            if backups_kept is None:
+            if state.where is None:
                 raise
-            raise _telling_where_the_backups_went(exc, backups_kept) from exc
+            raise _telling_where_the_backups_went(exc, state) from exc
 
     def _remove_the_rest(
         self,
@@ -840,8 +943,8 @@ class Uninstaller:
         *,
         keep_characters: bool,
         secret_kept: Path | None,
-        backups_kept: Path | None,
-        backups_linked_to: Path | None,
+        found: BackupsFound,
+        state: KeptState,
     ) -> PurgeReport:
         """Everything `_run` does after the refusals and the backups' move; see `_run`."""
         # --- everything below this line changes the machine ---------------
@@ -967,6 +1070,9 @@ class Uninstaller:
             # Its own words, which never ask the person to delete the copy by hand.
             warnings.append(leftover)
 
+        # T677: the backups leave the folder only now, after every step that can fail and
+        # before the one that cannot be undone. A failure here stops the folder's removal.
+        keep_backups(found, state)
         # T677: a backups link is taken off as a link, so the removal cannot walk through it.
         try:
             release_backups_link(self.server_dir)
@@ -1004,8 +1110,8 @@ class Uninstaller:
             folder_removed=True,
             record_forgotten=forgotten,
             warnings=tuple(warnings),
-            backups_kept=backups_kept,
-            backups_linked_to=backups_linked_to,
+            backups_kept=state.where,
+            backups_linked_to=found.linked_to,
         )
 
     def _keep_the_password(self, targets: _Targets, *, keep_characters: bool) -> Path | None:

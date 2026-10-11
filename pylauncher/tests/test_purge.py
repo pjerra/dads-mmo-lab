@@ -1528,18 +1528,123 @@ def test_a_folder_removal_that_fails_after_the_move_names_the_kept_backups(
     assert (kept / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
 
 
-def test_a_docker_step_that_fails_after_the_move_names_the_kept_backups(tmp_path: Path) -> None:
-    rec, _backups = _server_with_backup(tmp_path)
+@pytest.mark.parametrize("seam", ["remove_containers", "remove_volume"])
+def test_a_docker_step_that_fails_leaves_the_server_installed_with_its_backups(
+    tmp_path: Path, seam: str
+) -> None:
+    """Review round 2: the backups move just before the folder goes, not first.
+
+    A Docker failure used to leave the backups moved out of an install that was still there,
+    so the Maintenance tab listed none. Now nothing has moved when a Docker step fails.
+    """
+    rec, backups = _server_with_backup(tmp_path)
+
+    def fail(*_args: object) -> object:
+        raise docker.DockerCommandError("volume is in use")
+
+    uninstaller = rec.uninstaller(**{seam: fail})
+    with pytest.raises(docker.DockerCommandError) as caught:
+        uninstaller.run(keep_characters=False)
+    assert "Your backups" not in str(caught.value)
+    assert (backups / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert [p.name for p in tmp_path.iterdir()] == [rec.server_dir.name]
+
+
+def test_the_move_happens_after_every_docker_step_and_before_the_folder_goes(
+    tmp_path: Path,
+) -> None:
+    rec, backups = _server_with_backup(tmp_path)
+    seen: dict[str, bool] = {}
+
+    def last_docker_step_then_look(ref: str) -> str:
+        seen["still_in_the_server"] = (backups / BACKUP_NAME).exists()
+        return ""
+
+    def look_at_the_folder_step(path: Path) -> None:
+        seen["gone_from_the_server"] = not (backups / BACKUP_NAME).exists()
+
+    rec.uninstaller(
+        remove_image=last_docker_step_then_look, remove_folder=look_at_the_folder_step
+    ).run(keep_characters=False)
+    assert seen == {"still_in_the_server": True, "gone_from_the_server": True}
+
+
+def _cannot_rename(monkeypatch: pytest.MonkeyPatch, backups: Path) -> None:
+    """Make the rename of the backups folder fail the way a second disk does (EXDEV)."""
+    real = os.rename
+
+    def rename(src: object, dst: object) -> None:
+        if Path(str(src)) == backups.resolve():
+            raise OSError(18, "Invalid cross-device link")
+        real(src, dst)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(purge.os, "rename", rename)
+
+
+def test_a_rename_that_fails_is_copied_and_checked_instead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preflight said a rename would work and it did not: copy, check, then let it go on."""
+    rec, backups = _server_with_backup(tmp_path)
+    (backups / "second.sql").write_text("-- another\n", encoding="utf-8")
+    _cannot_rename(monkeypatch, backups)
+    report = _real_removal(rec).run(keep_characters=False)
+    assert not rec.server_dir.exists()
+    assert report.backups_kept is not None
+    assert (report.backups_kept / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert (report.backups_kept / "second.sql").read_text(encoding="utf-8") == "-- another\n"
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".partial")] == []
+
+
+def test_a_backups_folder_on_another_disk_is_copied_before_anything_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the preflight can tell a rename cannot work, the copy is made at once.
+
+    So a Docker failure afterwards still leaves a complete copy, and the message says where.
+    """
+    monkeypatch.setattr(
+        purge, "rename_would_work", lambda source, destination: False, raising=False
+    )
+    rec, backups = _server_with_backup(tmp_path)
 
     def fail(name: str) -> None:
         raise docker.DockerCommandError("volume is in use")
 
     uninstaller = rec.uninstaller(remove_volume=fail)
     kept = uninstaller.plan().backups_to
+    assert kept is not None
     with pytest.raises(purge.PurgeRefusal) as caught:
         uninstaller.run(keep_characters=False)
-    assert f"Your backups were moved to {kept}." in str(caught.value)
-    assert caught.value.detail == "volume is in use"  # Docker's words stay under Details
+    assert f"A complete copy of your backups is in {kept}." in str(caught.value)
+    assert (kept / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert (
+        backups / BACKUP_NAME
+    ).exists()  # the originals are still in the install that is still there
+
+
+def test_a_copy_that_does_not_match_the_original_is_refused_and_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check is the copy's own: a file missing from it stops the press, one rule at a time."""
+    monkeypatch.setattr(
+        purge, "rename_would_work", lambda source, destination: False, raising=False
+    )
+    real = shutil.copytree
+
+    def drop_one_file(src: object, dst: object, **kwargs: object) -> object:
+        made = real(src, dst, **kwargs)  # type: ignore[arg-type]
+        (Path(str(dst)) / BACKUP_NAME).unlink()
+        return made
+
+    monkeypatch.setattr(purge.shutil, "copytree", drop_one_file)
+    rec, backups = _server_with_backup(tmp_path)
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        _real_removal(rec).run(keep_characters=False)
+    assert "Nothing was removed" in str(caught.value)
+    assert (backups / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert [p.name for p in tmp_path.iterdir()] == [rec.server_dir.name]  # no .partial left
+    assert not any(step.startswith(("snapshot", "remove_")) for step in rec.order), rec.order
 
 
 def test_a_plain_purge_error_after_the_move_is_said_by_yulon_with_its_words_in_details(
@@ -1564,3 +1669,82 @@ def test_a_failure_with_no_backups_to_name_is_raised_as_it_was(tmp_path: Path) -
     with pytest.raises(purge.PurgeRefusal) as caught:
         rec.uninstaller(remove_folder=_failing(original)).run(keep_characters=False)
     assert caught.value is original
+
+
+# -- 10. the production ownership seam (T677 round 2) -----------------------
+#
+# Every other test here injects `claim=`, and none of the three production constructions does,
+# so `purge._default_claim` -- the only thing standing between a hand-built folder and the
+# delete -- was never run: a mutation of it survived the whole suite.
+
+PRODUCTION = [
+    ("wow-wotlk", "_for_wotlk", "azerothcore"),
+    ("wow-vanilla", "_for_vanilla", "cmangos"),
+    ("wow-centurion", "_for_centurion", "trinitycore"),
+]
+OWNERSHIP_REFUSAL = "Nothing here says Yu'lon installed it"
+
+
+def _production_uninstaller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str, factory: str
+) -> tuple[purge.Uninstaller, Path, list[str]]:
+    from yulon.ui import controller_view
+
+    asked: list[str] = []
+
+    def no_project(*_args: object, **_kwargs: object) -> None:
+        asked.append("docker")  # never reaches a real Docker: the project is simply unknown
+        return None
+
+    monkeypatch.setattr(docker, "install_project", no_project)
+    folder = tmp_path / "server"
+    folder.mkdir()
+    services = getattr(controller_view, factory)(load_catalog().get(game), folder, None, None)
+    assert services.uninstall is not None
+    return services.uninstall, folder, asked
+
+
+@pytest.mark.parametrize(("game", "factory", "family"), PRODUCTION)
+def test_the_production_uninstaller_refuses_a_folder_yulon_did_not_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str, factory: str, family: str
+) -> None:
+    uninstaller, folder, asked = _production_uninstaller(tmp_path, monkeypatch, game, factory)
+    (folder / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")  # someone's own
+    plan = uninstaller.plan()
+    assert plan.refusal.startswith(OWNERSHIP_REFUSAL), plan.refusal
+    assert asked == []  # refused before Docker was asked anything
+
+
+@pytest.mark.parametrize(("game", "factory", "family"), PRODUCTION)
+def test_the_production_uninstaller_accepts_a_folder_yulon_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, game: str, factory: str, family: str
+) -> None:
+    uninstaller, folder, asked = _production_uninstaller(tmp_path, monkeypatch, game, factory)
+    native.write_state(
+        folder,
+        native.InstallState(game_id=game, install_id=composegen.install_id(folder), family=family),
+    )
+    plan = uninstaller.plan()
+    assert OWNERSHIP_REFUSAL not in plan.refusal
+    # It got past the ownership proof to the next question, the Docker project:
+    assert "cannot tell which Docker project" in plan.refusal, plan.refusal
+    assert asked == ["docker"]
+
+
+def test_a_copied_install_record_does_not_prove_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state file copied from another folder names that folder's id: refused, not accepted."""
+    uninstaller, folder, _asked = _production_uninstaller(
+        tmp_path, monkeypatch, "wow-wotlk", "_for_wotlk"
+    )
+    native.write_state(
+        folder,
+        native.InstallState(
+            game_id="wow-wotlk",
+            install_id=composegen.install_id(tmp_path / "somewhere-else"),
+            family="azerothcore",
+        ),
+    )
+    plan = uninstaller.plan()
+    assert "cannot read" in plan.refusal or "cannot prove" in plan.refusal, plan.refusal

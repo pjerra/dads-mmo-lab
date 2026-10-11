@@ -721,3 +721,23 @@ def test_clean_up_uses_the_list_already_read_and_never_reads_on_the_gui_thread(
     monkeypatch.setattr(backup_shelf.Seam, "read", boom)
     accept_with(monkeypatch, lambda d: None)
     view.clean_up_backups()
+
+
+# ------------------------------------------- backups an uninstall kept (T677)
+
+
+def test_the_list_shows_the_backups_an_earlier_uninstall_kept_and_restore_can_pick_one(
+    view: ControllerView, tmp_path: Path
+) -> None:
+    kept = tmp_path.parent / f"{tmp_path.name} - kept backups"
+    kept.mkdir()
+    name = "20261001_100000_acore_characters.sql"
+    (kept / name).write_bytes(dump_of("acore_characters"))
+    view.refresh_backups()
+    (line,) = texts(view)
+    assert "kept from an earlier uninstall" in line
+    assert "acore_characters" in line
+    view.backup_list.setCurrentRow(0)
+    assert view._selected_backup() == kept / name
+    assert view.delete_backup_button.isEnabled() is False
+    assert "earlier uninstall" in view.delete_backup_button.toolTip()
