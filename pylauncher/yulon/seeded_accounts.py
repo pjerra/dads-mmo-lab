@@ -28,8 +28,9 @@ server has ever listened) and a rebuild's recreate. Every existing TBC/Vanilla i
 one of them without the player doing anything. Cores whose accounts are not `mangos_srp6` are
 not asked anything (Tortoise seeds no such accounts; AzerothCore and TrinityCore seed none).
 
-Best effort: a database that cannot be asked never stops a start (the server could not start
-without it), but the line returned says the accounts could not be locked and are still open.
+Best effort: a database that cannot be asked, or a password that cannot be read, never stops a
+start, but the line returned says the accounts could not be locked and are still open. A name
+is said as locked only when its UPDATE changed a row.
 """
 
 from __future__ import annotations
@@ -78,11 +79,14 @@ def _is_seeded(name: str, s: str, v: str) -> bool:
         return False
 
 
-def lock(ask: Callable[[str], str], run: Callable[[str], object], schema: str) -> list[str]:
+def lock(ask: Callable[[str], str], schema: str) -> list[str]:
     """Give every still-seeded account a random password; the names changed, in `NAMES` order.
 
-    `ask` runs a SELECT and returns its tab-separated rows; `run` runs an UPDATE. `schema` is
-    the auth database's name. Raises whatever `ask`/`run` raise.
+    `ask` runs the statements it is given in ONE client session and returns the rows of the
+    last SELECT, tab-separated; `schema` is the auth database's name. A name is returned only
+    when its guarded UPDATE changed a row (`ROW_COUNT()`, asked in the same session since the
+    count is per connection): a password set between the read and the write is not named.
+    Raises whatever `ask` raises.
     """
     names = ", ".join(_text_literal(name) for name in NAMES)
     rows = ask(f"SELECT username, s, v FROM {schema}.account WHERE username IN ({names});")
@@ -97,12 +101,14 @@ def lock(ask: Callable[[str], str], run: Callable[[str], object], schema: str) -
             continue
         old_s, old_v = found[name]
         new_s, new_v = mangos_srp6_credentials(name, secrets.token_hex(16))
-        run(
+        counted = ask(
             f"UPDATE {schema}.account SET v = {_text_literal(new_v)}, s = {_text_literal(new_s)}"
             f" WHERE username = {_text_literal(name)}"
             f" AND v = {_text_literal(old_v)} AND s = {_text_literal(old_s)};"
+            " SELECT ROW_COUNT();"
         )
-        changed.append(name)
+        if counted.strip() == "1":
+            changed.append(name)
     return changed
 
 
@@ -115,15 +121,16 @@ def settle(
 ) -> str | None:
     """Lock this server's seeded accounts before a start; the line to say, or None.
 
-    None when the core does not seed them, the password cannot be read, or nothing was
-    still seeded. Never raises: see the module docstring.
+    None when the core does not seed them or nothing was still seeded. A password that cannot
+    be read is `NOT_LOCKED`, like a database that cannot be asked. Never raises: see the
+    module docstring.
     """
     if entry.accounts.scheme != SCHEME:
         return None
     password = entry.install.db_password(server_dir)
     if password is None:
         logger.warning(f"{entry.id}: the database password could not be read; accounts not locked")
-        return None
+        return NOT_LOCKED.format(why="the database password could not be read")
     native = entry.install.native
     client = native.db.client if native is not None else "mysql"
 
@@ -138,7 +145,7 @@ def settle(
             because="the built-in accounts were not locked",
             wsl_distro=wsl_distro,
         )
-        changed = lock(ask, ask, entry.databases.auth)
+        changed = lock(ask, entry.databases.auth)
     except docker.DockerCommandError as exc:
         logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
         return NOT_LOCKED.format(why=_why(exc))
