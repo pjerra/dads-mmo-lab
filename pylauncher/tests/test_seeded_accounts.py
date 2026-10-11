@@ -450,3 +450,184 @@ def test_the_log_carries_no_verifier_or_salt(
     logged = caplog.text
     for name in SEEDED:
         assert str(db.rows[name]["v"]) not in logged and str(db.rows[name]["s"]) not in logged
+
+
+# -- review round 2: a server Docker brought back, and the notice's second line -------------
+
+
+def test_the_notice_says_how_to_use_administrator_again(db: AuthDb, tmp_path: Path) -> None:
+    said = settle(tmp_path)
+    assert said is not None
+    assert said.endswith("To use ADMINISTRATOR again, set its password in the Accounts tab.")
+    assert len(said) < 400, "short"
+
+
+def test_a_player_who_kept_their_own_administrator_is_not_told_to_set_one(
+    db: AuthDb, tmp_path: Path
+) -> None:
+    s, v = _credentials("ADMINISTRATOR", "my-own-long-secret", 0x55)
+    db.rows["ADMINISTRATOR"]["s"], db.rows["ADMINISTRATOR"]["v"] = s, v
+    said = settle(tmp_path)
+    assert said is not None and "To use ADMINISTRATOR again" not in said
+
+
+def test_asked_with_the_database_down_it_starts_nothing_and_reads_nothing(
+    db: AuthDb, tmp_path: Path
+) -> None:
+    said = seeded_accounts.settle(
+        TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
+    )
+    assert said is None
+    assert db.statements == [] and db.databases_started == 0
+    assert any(db.seeded_state(n) for n in SEEDED)
+
+
+def test_asked_with_the_database_up_it_locks_without_starting_anything(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+    said = seeded_accounts.settle(
+        TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
+    )
+    assert said is not None and "ADMINISTRATOR" in said
+    assert db.databases_started == 0
+    assert not any(db.seeded_state(n) for n in SEEDED)
+    again = seeded_accounts.settle(
+        TBC, TBC.container_spec(), an_install(tmp_path), start_database=False
+    )
+    assert again is None and len(db.updates()) == 4
+
+
+def test_the_controller_locks_an_install_whose_database_is_already_up(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(docker, "status", lambda **_k: [TBC.container_spec().db])
+    controller = Controller(TBC.container_spec(), an_install(tmp_path))
+    controller.entry = TBC
+    said = controller.lock_seeded_accounts_if_up()
+    assert said is not None and controller.seeded_accounts_locked == said
+    assert controller.lock_seeded_accounts_if_up() is None
+    assert controller.seeded_accounts_locked == said, "the earlier note stays until a Start"
+    assert len(db.updates()) == 4
+
+
+# the Server tab and the Accounts tab, built the way main.py builds them
+
+
+@pytest.fixture
+def inline_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from yulon.ui import controller_view
+    from yulon.ui.widgets.job import run_inline
+
+    monkeypatch.setattr(controller_view, "threaded_job_runner", lambda _parent: run_inline)
+
+
+def _view(server_dir: Path, entry: CatalogEntry = TBC) -> object:
+    from tests.conftest import process_events
+    from yulon.ui.controller_view import ControllerServices, ControllerView
+
+    services = ControllerServices.for_entry(entry, server_dir, None, None)
+    services.dashboard = None  # the verdict reads container state; not what these are about
+    view = ControllerView(entry, services)
+    process_events(10)
+    return view
+
+
+def _tick(view: object) -> None:
+    from tests.conftest import process_events
+
+    view._tick()  # type: ignore[attr-defined]
+    process_events(10)
+
+
+def test_opening_the_app_on_a_database_docker_already_started_locks_the_accounts(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    up = [TBC.container_spec().db]
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        _tick(view)
+        assert not any(db.seeded_state(n) for n in SEEDED), "locked without a press of Start"
+        assert "ADMINISTRATOR" in view.notice_label.text()  # type: ignore[attr-defined]
+        assert not view.notice_label.isHidden()  # type: ignore[attr-defined]
+        asked = len(db.statements)
+        _tick(view)
+        assert len(db.statements) == asked, "one ask while the database stays up"
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_database_that_goes_down_and_comes_back_is_asked_again(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    up = [TBC.container_spec().db]
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        _tick(view)
+        asked = len(db.statements)
+        up.clear()
+        _tick(view)
+        up.append(TBC.container_spec().db)
+        _tick(view)
+        assert len(db.statements) == asked + 1, "one more read, no more writes"
+        assert len(db.updates()) == 4
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_a_database_that_comes_up_later_is_asked_when_it_does(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    up: list[str] = []
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        _tick(view)
+        assert db.statements == [], "database down: nothing asked, nothing started"
+        up.append(TBC.container_spec().db)
+        _tick(view)
+        assert not any(db.seeded_state(n) for n in SEEDED)
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_the_accounts_tab_loading_its_list_locks_them_first(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    from tests.conftest import process_events
+
+    up: list[str] = []  # the opening poll finds nothing running, so only the tab can lock
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        assert db.statements == []
+        up.append(TBC.container_spec().db)
+        listing = type("Listing", (), {"problem": "", "accounts": []})()
+        accounts = type("Accounts", (), {"listing": staticmethod(lambda: listing)})()
+        view.services.accounts = accounts  # type: ignore[attr-defined]
+        view.refresh_accounts()  # type: ignore[attr-defined]
+        process_events(10)
+        assert not any(db.seeded_state(n) for n in SEEDED)
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]
+
+
+def test_on_a_stopped_distro_neither_reading_runs_until_it_is_up(
+    qapp: object, db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inline_jobs: None
+) -> None:
+    up: list[str] = []  # the opening poll finds nothing running
+    monkeypatch.setattr(docker, "status", lambda **_k: list(up))
+    view = _view(an_install(tmp_path))
+    try:
+        up.append(TBC.container_spec().db)
+        view.services.controller.wsl_distro = "Ubuntu-test"  # type: ignore[attr-defined]
+        view._distro = "stopped"  # type: ignore[attr-defined]
+        view.refresh_seeded_accounts()  # type: ignore[attr-defined]
+        assert db.statements == [], "a stopped distro is not read"
+        assert view._waiting_on_distro, "kept for when WSL says it runs"  # type: ignore[attr-defined]
+        view._distro_answered("running")  # type: ignore[attr-defined]
+        assert not any(db.seeded_state(n) for n in SEEDED)
+    finally:
+        view.shutdown()  # type: ignore[attr-defined]

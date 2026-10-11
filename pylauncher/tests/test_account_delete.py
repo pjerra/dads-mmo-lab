@@ -1116,3 +1116,10 @@ def test_a_delete_that_lands_at_once_does_not_wait(wotlk: _Server) -> None:
     assert outcome.done is True
     assert wotlk.slept == []
     assert "still removing" not in outcome.text
+
+
+@pytest.fixture(autouse=True)
+def _no_database_container_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T668: loading the list first asks which containers run (to lock CMaNGOS's built-in
+    accounts when the database is up); nothing here runs one, and no test shells out to Docker."""
+    monkeypatch.setattr(docker, "status", lambda **_k: [])

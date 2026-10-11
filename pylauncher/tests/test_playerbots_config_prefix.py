@@ -554,6 +554,7 @@ def test_the_server_tab_says_a_rename_as_a_note_not_a_problem() -> None:
         problem_label=_Label(),
         notice_label=_Label(),
     )
+    view._show_the_notice = lambda: ControllerView._show_the_notice(view)  # type: ignore[arg-type]
     assert ControllerView._say_zone_problem(view) is None  # type: ignore[arg-type]
     assert (view.notice_label.text, view.notice_label.visible) == (
         "Yu'lon renamed 5 settings",

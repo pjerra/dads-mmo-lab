@@ -22,6 +22,12 @@ seed carries. Every value in a statement is a hex literal.
 **Idempotent.** The second run reads the random `v`, sees it is not the seeded one, and writes
 nothing.
 
+**Also without a press of Start (`start_database=False`).** A server Docker restarts after a
+reboot (`restart: unless-stopped`) serves the seeded rows until the player presses something. The
+Server tab asks `settle()` once each time its poll finds the database running (it asks nothing
+while it is down), and the Accounts tab asks before it reads its list, both off the GUI thread and
+only once WSL says the distro runs. It starts nothing and is idempotent.
+
 **When.** Right before every start of the world, beside the T657 key rename: `Controller.start()`
 (Start, Restart, recreate), the install's `up` (so a new install is locked before its auth
 server has ever listened) and a rebuild's recreate. Every existing TBC/Vanilla install reaches
@@ -61,6 +67,8 @@ LOCKED = (
     "passwords nobody knows. Make your own account in the Accounts tab; accounts you made are "
     "untouched."
 )
+ADMINISTRATOR_AGAIN = " To use ADMINISTRATOR again, set its password in the Accounts tab."
+"""Added when ADMINISTRATOR was among the locked: a player who kept their own is not told this."""
 NOT_LOCKED = (
     "Yu'lon could not lock the server's built-in accounts ({why}). Until it can, ADMINISTRATOR, "
     "GAMEMASTER, MODERATOR and PLAYER still log in with their own name as the password, and "
@@ -118,8 +126,13 @@ def settle(
     server_dir: Path,
     *,
     wsl_distro: str | None = None,
+    start_database: bool = True,
 ) -> str | None:
     """Lock this server's seeded accounts before a start; the line to say, or None.
+
+    `start_database=False` is for the app opening on a server Docker brought back by itself
+    (`restart: unless-stopped`): it asks only when the database container is already running
+    and starts nothing, so a stopped server stays stopped.
 
     None when the core does not seed them or nothing was still seeded. A password that cannot
     be read is `NOT_LOCKED`, like a database that cannot be asked. Never raises: see the
@@ -127,6 +140,12 @@ def settle(
     """
     if entry.accounts.scheme != SCHEME:
         return None
+    if not start_database:
+        try:
+            if spec.db not in set(docker.status(wsl_distro=wsl_distro)):
+                return None
+        except docker.DockerCommandError:
+            return None
     password = entry.install.db_password(server_dir)
     if password is None:
         logger.warning(f"{entry.id}: the database password could not be read; accounts not locked")
@@ -138,13 +157,14 @@ def settle(
         return docker.sql_query(spec.db, client, password, None, statement, wsl_distro=wsl_distro)
 
     try:
-        docker.start_database(
-            spec,
-            server_dir,
-            timeout=DB_HEALTHY_TIMEOUT,
-            because="the built-in accounts were not locked",
-            wsl_distro=wsl_distro,
-        )
+        if start_database:
+            docker.start_database(
+                spec,
+                server_dir,
+                timeout=DB_HEALTHY_TIMEOUT,
+                because="the built-in accounts were not locked",
+                wsl_distro=wsl_distro,
+            )
         changed = lock(ask, entry.databases.auth)
     except docker.DockerCommandError as exc:
         logger.warning(f"{entry.id}: the seeded accounts were not locked: {exc}")
@@ -152,7 +172,8 @@ def settle(
     if not changed:
         return None
     logger.info(f"{entry.id}: gave the seeded accounts {', '.join(changed)} random passwords")
-    return LOCKED.format(names=", ".join(changed))
+    line = LOCKED.format(names=", ".join(changed))
+    return line + ADMINISTRATOR_AGAIN if "ADMINISTRATOR" in changed else line
 
 
 def _why(exc: Exception) -> str:
