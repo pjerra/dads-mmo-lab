@@ -113,29 +113,21 @@ def test_interactive_controls_declare_a_touch_target_floor() -> None:
     assert MIN_FONT_PX >= 12
 
 
-def test_the_tab_x_is_exempt_by_id_and_the_floor_rule_is_untouched() -> None:
-    """T95: the × is the one tab-bar tool button below the floor.
+def test_the_tab_play_is_exempt_by_id_and_the_floor_rule_is_untouched() -> None:
+    """T187, T95: the ▶ is the one tab-bar tool button below the floor, exempt by objectName.
 
-    Exempt by objectName, never by negation.
+    T693 took the × off the rail, and its rule with it: no QSS names it any more.
     """
-    from yulon.ui.theme import FORGET_TAB_BUTTON, _build_qss, _touch
-
-    qss = _build_qss(1.0)
-    rule = qss.split(f"QTabBar QToolButton#{FORGET_TAB_BUTTON} {{")[1].split("}")[0]
-    assert "max-width: 18px" in rule and "max-height: 18px" in rule
-    floor = qss.split("QTabBar QToolButton {")[1].split("}")[0]
-    assert f"min-width: {_touch(30, 1.0)};" in floor, "the scroll arrows lost their floor"
-
-
-def test_the_tab_play_is_exempt_by_id_like_the_x() -> None:
-    """T187: the ▶ beside the × has the ×'s size, so the two fit across the rail."""
-    from yulon.ui.theme import LAUNCH_TAB_BUTTON, _build_qss
+    from yulon.ui.theme import LAUNCH_TAB_BUTTON, _build_qss, _touch
 
     qss = _build_qss(1.0)
     rule = qss.split(f"QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{")[1].split("}")[0]
     assert "max-width: 18px" in rule and "max-height: 18px" in rule
     assert "border: none" in rule
-    # Gold at rest (fix round 1), so it reads apart from the muted ×.
+    floor = qss.split("QTabBar QToolButton {")[1].split("}")[0]
+    assert f"min-width: {_touch(30, 1.0)};" in floor, "the scroll arrows lost their floor"
+    assert "tab-forget" not in qss, "a rule for the sidebar × that T693 removed"
+    # Gold at rest (fix round 1).
     from yulon.ui.theme import COLOR_GOLD_LIGHT
 
     assert f"color: {COLOR_GOLD_LIGHT};" in rule

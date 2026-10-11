@@ -408,3 +408,35 @@ def test_the_server_tab_has_no_install_status_twice(qapp: object, ps: _Ps, tmp_p
     _poll(view, ps, "ac-database\n")
     assert [row.line.word for row in view.service_rows if row.line][1:] == ["Stopped", "Stopped"]
     _ = WOTLK
+
+
+def test_play_on_a_partly_up_server_asks_to_start_the_rest_not_a_stopped_one(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PARTLY UP's PLAY reads "PLAY (starts it)", and its question must not call it stopped."""
+    asked: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cvm, "_ask_with", lambda _parent, title, text, _yes, *_a: asked.append((title, text))
+    )
+    view = _view(ps, tmp_path)
+    _poll(view, ps, DB_AND_WORLD)
+    assert view.play_button.text() == cvm.PLAY_STARTS_IT_LABEL  # type: ignore[union-attr]
+
+    view.play()
+
+    assert len(asked) == 1
+    title, text = asked[0]
+    assert "stopped" not in text.casefold(), text
+    assert "login server" in text.casefold(), "the question does not say what is down"
+    assert not view._play_pending, "a cancelled question left Play waiting"
+
+
+def test_play_on_a_stopped_server_still_says_stopped(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(cvm, "_ask_with", lambda _p, _t, text, _y, *_a: asked.append(text))
+    view = _view(ps, tmp_path)
+    _poll(view, ps, "")
+    view.play()
+    assert asked == ["The server is stopped. Start it first?"]

@@ -2537,7 +2537,7 @@ def test_only_server_tabs_carry_a_play_and_no_tab_carries_an_x(window: Any, tmp_
     from PySide6.QtWidgets import QTabBar, QToolButton
 
     from yulon.ui.controller_view import ControllerView
-    from yulon.ui.theme import FORGET_TAB_BUTTON, LAUNCH_TAB_BUTTON
+    from yulon.ui.theme import LAUNCH_TAB_BUTTON
 
     _catalog_view(window).installed.emit("wow-wotlk", tmp_path / "t693-no-x", None)
     tabs = window.property("tabs")
@@ -2551,7 +2551,7 @@ def test_only_server_tabs_carry_a_play_and_no_tab_carries_an_x(window: Any, tmp_
             assert right is not None
             buttons = right.findChildren(QToolButton)
             assert [b.objectName() for b in buttons] == [LAUNCH_TAB_BUTTON]
-            assert right.findChild(QToolButton, FORGET_TAB_BUTTON) is None
+            assert right.findChild(QToolButton, "tab-forget") is None
             assert all(b.text() != "×" for b in buttons), "an × is still on the rail"
         else:
             assert right is None, f"{tabs.tabText(index)!r} has a tab button"

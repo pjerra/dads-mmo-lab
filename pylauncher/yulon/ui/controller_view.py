@@ -1005,6 +1005,7 @@ PLAY_LABEL = "PLAY"
 PLAY_WHEN_READY_LABEL = "PLAY when ready"
 """PLAY while the server is starting (T699): pressed, it waits for the realm, then plays."""
 PLAY_STARTS_IT_LABEL = "PLAY (starts it)"
+PLAY_ASK_STOPPED = "The server is stopped. Start it first?"
 """PLAY while the server is down or partly up: pressed, it asks to start it, then plays."""
 LAUNCHER_LABEL = "Launcher…"
 PLAY_OPTIONS_LABEL = "Play options ▾"
@@ -9334,9 +9335,9 @@ class ControllerView(QWidget):
         for press in side:
             side_column.addWidget(press)
         # At their own width: the name and the pill keep the card's spare room.
-        for press in (self.play_button, *side):
-            if press is not None:
-                press.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for fixed in (self.play_button, *side):
+            if fixed is not None:
+                fixed.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         presses.addLayout(side_column)
         top.addLayout(presses)
         outer.addLayout(top)
@@ -13701,10 +13702,14 @@ class ControllerView(QWidget):
                 return
             self._play_check_stale()
             return
+        partly = server_status.partly_up_sentence(
+            status if isinstance(status, InstallStatus) else None
+        )
         answer = _ask_with(
             self._play_parent(),
             "Start the server?",
-            "The server is stopped. Start it first?",
+            # T699: a partly-up server is not "stopped"; say which part is down.
+            f"{partly.split(' Press ')[0]} Start it first?" if partly else PLAY_ASK_STOPPED,
             "Start and play",
         )
         if answer != "yes":

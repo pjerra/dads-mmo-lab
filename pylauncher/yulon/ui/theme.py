@@ -134,19 +134,11 @@ across platforms: missing faces fall through to the platform UI font, which is
 exactly the modern look the brief asks for."""
 
 
-FORGET_TAB_BUTTON = "tab-forget"
-"""objectName of the × a server's sidebar tab carries (T95, `main.py`).
-
-One spelling for the widget and its QSS rule. That rule is the one exemption
-from the tab-bar tool-button touch floor.
-"""
-
-
 LAUNCH_TAB_BUTTON = "tab-play"
-"""objectName of the ▶ beside the × on a server's sidebar tab: opens its launcher (T187).
+"""objectName of the ▶ on a server's sidebar tab: plays that server (T187, T699).
 
-Sized and exempted from the touch floor exactly as the × is, for the same reason;
-the Server tab's Play is the pad's and the thumb's way to the same window.
+The one exemption from the tab-bar tool-button touch floor (T95's × had the other
+until T693 took it off); the Server tab's PLAY is the pad's and the thumb's way.
 """
 
 TAB_BUTTONS = "tab-buttons"
@@ -493,31 +485,12 @@ QTabBar QToolButton::right-arrow:disabled {{
     image: {_image("arrow-right-disabled.svg")};
 }}
 
-/* T95: the × on a server's sidebar tab. Exempt, by objectName, from the scroll
-   arrows' touch floor just above. At that floor it was a 37px square on a 64px
-   rail and made every server tab 41px longer (measured offscreen 2026-09-23);
-   at 18px it costs 22. The tab under it stays the touch target, and the tab's
-   right-click entry and the Server tab's button open the same dialog. An ID
-   selector outranks the type rule above, whatever the order. */
-QTabBar QToolButton#{FORGET_TAB_BUTTON} {{
-    background-color: transparent;
-    border: none;
-    color: {COLOR_TEXT_MUTED};
-    padding: 0px;
-    min-width: 16px;
-    min-height: 16px;
-    max-width: 18px;
-    max-height: 18px;
-}}
-
-QTabBar QToolButton#{FORGET_TAB_BUTTON}:hover {{
-    color: {COLOR_DANGER};
-}}
-
-/* T187: the ▶ beside it opens the server's launcher. The same exemption and the
-   same size, so the two sit side by side across the 64px rail and the tab is no
-   longer than the × alone made it. Gold at rest, so it reads apart from the muted
-   ×, and brighter on hover, where the × goes red. */
+/* T187: the ▶ on a server's sidebar tab, which plays it (T699). Exempt, by
+   objectName, from the scroll arrows' touch floor just above: at that floor it was
+   a 37px square on a 64px rail and made every server tab 41px longer (T95's ×,
+   measured offscreen 2026-09-23); at 18px it costs 22. The tab under it stays the
+   touch target. An ID selector outranks the type rule above, whatever the order.
+   Gold at rest, brighter on hover. */
 QTabBar QToolButton#{LAUNCH_TAB_BUTTON} {{
     background-color: transparent;
     border: none;
