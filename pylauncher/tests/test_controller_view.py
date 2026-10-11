@@ -7264,6 +7264,42 @@ def test_a_ticked_uninstall_says_where_the_kept_database_password_went(
     assert str(kept) in text
 
 
+class _HasBackups(_FakeUninstall):
+    """A plan that found backups to move (T677)."""
+
+    def __init__(self, server_dir: Path, kept: Path, **kwargs: object) -> None:
+        super().__init__(server_dir, **kwargs)  # type: ignore[arg-type]
+        self.kept = kept
+
+    def plan(self) -> purge.PurgePlan:
+        return replace(super().plan(), backups_to=self.kept)
+
+
+def test_the_plan_names_the_folder_the_backups_are_moved_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """T677: the dialog said backups are untouched; it must now say exactly where they go."""
+    kept = tmp_path / "wowserver - kept backups"
+    view = _uninstall_view(ps, tmp_path, _HasBackups(tmp_path, kept))
+    view.show_uninstall_plan()
+    text = view.uninstall_label.text()
+    assert f"your backups are moved to {kept}" in text
+
+
+def test_a_finished_uninstall_says_where_the_backups_now_are(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    kept = tmp_path / "wowserver - kept backups"
+    fake = _FakeUninstall(
+        tmp_path,
+        report=purge.PurgeReport(folder_removed=True, record_forgotten=True, backups_kept=kept),
+    )
+    view = _uninstall_view(ps, tmp_path, fake)
+    view.show_uninstall_plan()
+    view.run_uninstall()
+    assert f"Your backups were kept: they are now in {kept}." in view.uninstall_label.text()
+
+
 def test_the_removal_is_signalled_up_with_the_game_and_the_folder(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

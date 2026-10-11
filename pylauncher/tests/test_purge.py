@@ -1313,3 +1313,189 @@ def test_the_map_data_volume_is_removed_whether_or_not_characters_are_kept(
     assert WORLD_DATA in rec.removed_volumes
     assert WORLD_DATA not in report.kept_volumes
     assert (f"{CENTURION_PROJECT}_db-data" in report.kept_volumes) is keep
+
+
+# -- 9. the backups survive the uninstall (T677) --------------------------
+#
+# These run the REAL folder removal (`remove_folder=None` is the production default,
+# `purge.remove_tree`) on a real temp tree. Docker's seams stay the Recorder's; the
+# folder is the thing under test. Each asserts on the FILE, never on wording.
+
+BACKUP_NAME = "20261011_120000_acore_characters.sql"
+BACKUP_BODY = "-- a player's characters\n"
+
+
+def _server_with_backup(tmp_path: Path) -> tuple[Recorder, Path]:
+    """A server folder with one backup in `sql_scripts/backups/`, as the Backup button leaves it."""
+    rec = _recorder(tmp_path)
+    backups = rec.server_dir / "sql_scripts" / "backups"
+    backups.mkdir(parents=True)
+    (backups / BACKUP_NAME).write_text(BACKUP_BODY, encoding="utf-8")
+    (rec.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    return rec, backups
+
+
+def _real_removal(rec: Recorder) -> purge.Uninstaller:
+    return rec.uninstaller(remove_folder=None)
+
+
+def _copies_of_the_backup(root: Path) -> list[Path]:
+    return [p for p in root.rglob(BACKUP_NAME) if p.is_file()]
+
+
+@pytest.mark.parametrize("keep_characters", [True, False])
+def test_the_backups_are_still_on_disk_after_the_real_folder_removal(
+    tmp_path: Path, keep_characters: bool
+) -> None:
+    """T677: the dialog says backups are not touched; the removal took the whole folder.
+
+    The answer has to hold whether or not "Keep my characters" is ticked: unticked is the
+    case the promise makes a player more willing to choose.
+    """
+    rec, _backups = _server_with_backup(tmp_path)
+    report = _real_removal(rec).run(keep_characters=keep_characters)
+    assert report.folder_removed
+    assert not rec.server_dir.exists()
+    found = _copies_of_the_backup(tmp_path)
+    assert len(found) == 1, found
+    assert found[0].read_text(encoding="utf-8") == BACKUP_BODY
+    assert report.backups_kept is not None
+    assert found[0].parent == report.backups_kept
+
+
+def test_the_kept_backups_are_outside_the_server_folder_and_beside_it(tmp_path: Path) -> None:
+    rec, _backups = _server_with_backup(tmp_path)
+    report = _real_removal(rec).run(keep_characters=False)
+    assert report.backups_kept is not None
+    assert report.backups_kept.parent == rec.server_dir.parent
+    assert rec.server_dir not in report.backups_kept.parents
+
+
+def test_an_earlier_kept_set_is_never_overwritten(tmp_path: Path) -> None:
+    """A second uninstall of a reinstalled server must not replace the first one's backups."""
+    rec, _backups = _server_with_backup(tmp_path)
+    first = _real_removal(rec).run(keep_characters=False).backups_kept
+    assert first is not None
+    (first / BACKUP_NAME).write_text("-- the first set\n", encoding="utf-8")
+
+    rec2, _backups2 = _server_with_backup(tmp_path)
+    second = _real_removal(rec2).run(keep_characters=False).backups_kept
+
+    assert second is not None
+    assert second != first
+    assert (first / BACKUP_NAME).read_text(encoding="utf-8") == "-- the first set\n"
+    assert (second / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+
+
+def test_the_plan_names_the_folder_the_run_then_uses(tmp_path: Path) -> None:
+    """The dialog must say where the backups will be, and the run must then put them there."""
+    rec, _backups = _server_with_backup(tmp_path)
+    uninstaller = _real_removal(rec)
+    plan = uninstaller.plan()
+    assert plan.backups_to is not None
+    report = uninstaller.run(keep_characters=False)
+    assert report.backups_kept == plan.backups_to
+
+
+def test_a_server_with_no_backups_leaves_nothing_beside_it(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path)
+    (rec.server_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    uninstaller = _real_removal(rec)
+    assert uninstaller.plan().backups_to is None
+    report = uninstaller.run(keep_characters=False)
+    assert report.backups_kept is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_empty_backups_folder_is_not_kept_as_a_set(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path)
+    (rec.server_dir / "sql_scripts" / "backups").mkdir(parents=True)
+    report = _real_removal(rec).run(keep_characters=False)
+    assert report.backups_kept is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="needs a folder this user cannot write to",
+)
+def test_a_backup_that_cannot_be_moved_stops_the_uninstall_before_anything_is_removed(
+    tmp_path: Path,
+) -> None:
+    """A failed move must never become a silent delete.
+
+    The folder beside the server is made unwritable, so the REAL move fails; the press must
+    refuse before the first Docker step and leave the backup where it was.
+    """
+    rec, backups = _server_with_backup(tmp_path)
+    tmp_path.chmod(0o555)
+    try:
+        with pytest.raises(purge.PurgeRefusal) as caught:
+            _real_removal(rec).run(keep_characters=False)
+    finally:
+        tmp_path.chmod(0o755)
+    assert (backups / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert rec.server_dir.exists()
+    assert "Nothing was removed" in str(caught.value)
+    assert not any(
+        step.startswith(("snapshot", "remove_", "forget")) for step in rec.order
+    ), rec.order
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform cannot make a symbolic link here")
+
+
+def test_a_backups_folder_that_is_a_link_out_of_the_install_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    """backup_shelf documents a `backups` link to another disk: the removal must not follow it.
+
+    The link goes with the server folder; the folder it points to, and every backup in it,
+    stays exactly as it was.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / BACKUP_NAME).write_text(BACKUP_BODY, encoding="utf-8")
+    rec = _recorder(tmp_path)
+    (rec.server_dir / "sql_scripts").mkdir()
+    _symlink_or_skip(rec.server_dir / "sql_scripts" / "backups", elsewhere)
+
+    uninstaller = _real_removal(rec)
+    plan = uninstaller.plan()
+    report = uninstaller.run(keep_characters=False)
+
+    assert not rec.server_dir.exists()
+    assert (elsewhere / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+    assert plan.backups_linked_to == elsewhere
+    assert report.backups_kept is None
+    assert report.backups_linked_to == elsewhere
+    assert _copies_of_the_backup(tmp_path) == [elsewhere / BACKUP_NAME]
+
+
+def test_a_backups_link_to_somewhere_inside_the_install_is_kept_too(tmp_path: Path) -> None:
+    """A link that stays inside the folder is the player's tidy layout, and its files go with it."""
+    rec = _recorder(tmp_path)
+    inside = rec.server_dir / "my-dumps"
+    inside.mkdir()
+    (inside / BACKUP_NAME).write_text(BACKUP_BODY, encoding="utf-8")
+    (rec.server_dir / "sql_scripts").mkdir()
+    _symlink_or_skip(rec.server_dir / "sql_scripts" / "backups", inside)
+
+    report = _real_removal(rec).run(keep_characters=False)
+
+    assert not rec.server_dir.exists()
+    found = _copies_of_the_backup(tmp_path)
+    assert len(found) == 1, found
+    assert found[0].read_text(encoding="utf-8") == BACKUP_BODY
+    assert report.backups_kept == found[0].parent
+
+
+def test_the_dialog_text_says_the_backups_are_moved_not_untouched() -> None:
+    """The line used to promise the folder was not touched; it is moved, and the line says so."""
+    first = purge.LEFT_BEHIND[0].lower()
+    assert "backup" in first
+    assert "moved" in first

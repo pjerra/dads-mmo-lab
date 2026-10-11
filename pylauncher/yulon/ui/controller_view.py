@@ -11706,6 +11706,16 @@ class ControllerView(QWidget):
         else:
             lines.append(f"  volumes removed: {', '.join(plan.volumes) or 'none'}")
             lines.append("  your characters go with the database volume.")
+        if plan.backups_to is not None:
+            lines.append(
+                f"  your backups are moved to {plan.backups_to} first, and stay there after "
+                "the uninstall."
+            )
+        elif plan.backups_linked_to is not None:
+            lines.append(
+                f"  your backups folder is a link to {plan.backups_linked_to}; only the link "
+                "goes, and that folder and its files stay exactly as they are."
+            )
         lines.append("It does not touch " + "; ".join(plan.left_behind) + ".")
         play = self.services.play_client_dir
         if self._play_delete_offered and play is not None:
@@ -11811,6 +11821,13 @@ class ControllerView(QWidget):
             said.append(
                 f"Its database password was kept at {report.secret_kept}, because the folder "
                 f"holding it is gone — the reinstall reads it from there."
+            )
+        if report.backups_kept is not None:
+            said.append(f"Your backups were kept: they are now in {report.backups_kept}.")
+        elif report.backups_linked_to is not None:
+            said.append(
+                f"Your backups folder was a link to {report.backups_linked_to}; that folder "
+                "and your backups in it were not touched."
             )
         if report.snapshot.path is not None:
             said.append(f"The server's last log was saved to {report.snapshot.path}.")

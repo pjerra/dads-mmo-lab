@@ -17,6 +17,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - The update check no longer offers an older build as the newest once a version has a tenth patch release.
+- Uninstall now moves your database backups to a folder beside the server folder and says where, instead of deleting them.
 
 ### Changed
 
