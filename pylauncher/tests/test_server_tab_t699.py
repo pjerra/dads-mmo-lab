@@ -610,3 +610,18 @@ def test_a_launcher_save_to_another_computers_address_is_read_again(
     _save_launcher(play, {"realm_address": "192.168.0.60"})
     view.launcher_saved.emit("")
     assert view.play_button.text() == cvm.PLAY_LABEL  # type: ignore[union-attr]
+
+
+def test_with_a_remote_realm_play_stays_greyed_while_a_local_start_runs(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "PLAY when ready" re-enables PLAY only for a Start that brings ITS realm up. For another
+    computer's realm the local Start is just a busy tab, whose press is refused (T667), so PLAY
+    stays greyed with the reason, not live for a press that would only be turned away."""
+    jobs = _Deferred()
+    view = _remote_view(ps, tmp_path, monkeypatch, jobs)
+    view.start_server()
+    assert view._busy_job == "Start"
+    assert view.play_button is not None
+    assert not view.play_button.isEnabled(), "PLAY live during a local Start for a remote realm"
+    assert cvm.reason_of(view.play_button), "greyed without saying why"
