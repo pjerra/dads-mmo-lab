@@ -782,6 +782,15 @@ class YulonTray(QObject):
             else:
                 self.open_window()
             return
+        # T690: work that cannot be cut off is said BEFORE the question. The box below
+        # offered "Stop N servers, then quit" over a Restart in flight and said only
+        # "1 server is running" (measured), and the refusal came after the choice.
+        refusing = getattr(self.window, "yulon_close_refusal", None)
+        if refusing is not None and (reason := refusing()):
+            logger.info(f"tray: quit refused: {reason}")
+            self.tell("Yu'lon is still working", reason)
+            self.open_window()
+            return
         running = self.running_servers()
         if not running:
             self.quit()

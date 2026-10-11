@@ -25885,7 +25885,7 @@ def test_the_client_folder_is_not_forgotten_while_make_is_planning(
     view.forget_client_dir()
 
     assert rows.written == [], "the client folder was forgotten under a running Make…"
-    assert said and "busy with another action" in said[-1]
+    assert said and "ready-to-play client" in said[-1]
 
 
 def test_a_plan_answering_after_the_tab_closed_opens_no_dialog(

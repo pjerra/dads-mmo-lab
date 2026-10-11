@@ -639,6 +639,8 @@ def build_window() -> object:
         yulon_log_panels: list[LogPanel]
         # The Logs tab (T93), read by `_busy_reasons()`: a support save holds the close.
         yulon_logs_view: LogsView
+        # The Catalog (T690): an install in flight holds the close, like a support save.
+        yulon_catalog_view: CatalogView
         # T192: the Catalog and Logs buttons pinned above the rail.
         yulon_sidebar_pins: SidebarPins
         # T179: the runner of the start-up sweep of temporary client copies, held
@@ -667,6 +669,8 @@ def build_window() -> object:
         yulon_show_server_tab: Callable[[str, object], None]
         yulon_show_logs: Callable[[], None]
         yulon_quit: Callable[[], bool]
+        # T690: `close_refusal()` for the tray, which asks it before its Quit question.
+        yulon_close_refusal: Callable[[], str | None]
         yulon_open_settings: Callable[[], None]
 
         def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt's own name
@@ -1373,6 +1377,23 @@ def build_window() -> object:
         button.clicked.connect(lambda _checked=False, k=key: request_removal(*k))
         return button
 
+    def rebuild_refused(live: Any, title: str, saved: str) -> bool:
+        """A rebuild is a teardown: True, after saying why, if the tab has work not to be cut.
+
+        The one question every door asks (`ControllerView.teardown_refusal()`, T690).
+        The change that asked for the rebuild is already saved, so what is told is
+        when it takes effect, and the tab stays as it is until then.
+        """
+        reason = live.teardown_refusal()
+        if reason is None:
+            return False
+        from yulon.ui.message_box import show_warning
+
+        logger.info(f"tab rebuild refused: {reason}")
+        show_warning(window, title, f"{reason}\n\n{saved}")
+        tabs.setCurrentWidget(live)
+        return True
+
     def on_client_dir_changed(game: str, server_dir: object, client_dir: object) -> None:
         """This install's client folder was set, changed or cleared (T36): rebuild its tab.
 
@@ -1392,6 +1413,13 @@ def build_window() -> object:
         cd = Path(str(client_dir)) if client_dir is not None else None
         key = (game, sd)
         if key in controllers:
+            if rebuild_refused(
+                controllers[key],
+                "Cannot rebuild this server's tab yet",
+                "The client folder has been saved, and this tab will use it the next time "
+                "Yu'lon starts.",
+            ):
+                return
             drop_controller(key)
         known = state.find(game, sd)
         add_controller(
@@ -1414,6 +1442,13 @@ def build_window() -> object:
         play = Path(str(play_client_dir)) if play_client_dir is not None else None
         key = (game, sd)
         if key in controllers:
+            if rebuild_refused(
+                controllers[key],
+                "Cannot rebuild this server's tab yet",
+                "The ready-to-play client change has been saved, and this tab will use it "
+                "the next time Yu'lon starts.",
+            ):
+                return
             drop_controller(key)
         known = state.find(game, sd)
         add_controller(
@@ -1460,7 +1495,7 @@ def build_window() -> object:
             if same:
                 tabs.setCurrentWidget(live)
                 return
-            if (reason := live.busy_reason()) is not None:
+            if (reason := live.teardown_refusal()) is not None:
                 # A rebuild is a teardown, and `busy_reason()` exists because one
                 # kind of work cannot survive being torn down: the import runs
                 # 10-30 minutes inside a blocking `subprocess.run`, so
@@ -2323,6 +2358,8 @@ def build_window() -> object:
     window.yulon_log_panels = panels
     window.yulon_controllers = controller_views
     window.yulon_logs_view = logs_view
+    window.yulon_catalog_view = catalog_view
+    window.yulon_close_refusal = lambda: close_refusal(window)
     assert isinstance(window, QWidget)
     return window
 
@@ -2441,20 +2478,31 @@ def _regain_docker_group() -> None:
 
 
 def _busy_reasons(window: object) -> list[str]:
-    """Every reason the window must not close now: each server tab's, and the Logs tab's.
+    """Every reason the window must not close now: each server tab's, the Catalog's, the Logs tab's.
 
     Module-level so a test can ask it of the real window; `close_refusal()` is
     the one caller, and it answers both the close guard and the self-update.
-    The Logs tab is here because a support save can sit in a docker read for
-    longer than the exit join waits (`in_flight().wait_all(8000)` in
+    A server tab answers `teardown_refusal()` (T690): the ONE predicate every
+    door that tears a tab down asks, which counts a Restore, a backup, a network
+    apply, a module job and a Start/Stop/Restart as well as the jobs
+    `busy_reason()` lists. The Catalog is here because an install runs on its own
+    log and belongs to no server tab (Quit used to cancel it silently). The Logs
+    tab is here because a support save can sit in a docker read for longer than
+    the exit join waits (`in_flight().wait_all(8000)` in
     `_stop_background_threads()`), and a QThread destroyed while running
     aborts the process (T93).
     """
     views: list[object] = [*getattr(window, "yulon_controllers", [])]
-    logs_view = getattr(window, "yulon_logs_view", None)
-    if logs_view is not None:
-        views.append(logs_view)
-    return [reason for view in views if (reason := getattr(view, "busy_reason", lambda: None)())]
+    for name in ("yulon_catalog_view", "yulon_logs_view"):
+        extra = getattr(window, name, None)
+        if extra is not None:
+            views.append(extra)
+    reasons: list[str] = []
+    for view in views:
+        ask = getattr(view, "teardown_refusal", None) or getattr(view, "busy_reason", None)
+        if ask is not None and (reason := ask()):
+            reasons.append(reason)
+    return reasons
 
 
 def main() -> int:

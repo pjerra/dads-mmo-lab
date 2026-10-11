@@ -108,6 +108,7 @@ from yulon import (
     server_time_zone,
     serverlock,
     sql_log_offer,
+    teardown,
     tuning,
     unbound_settings,
     useraccounts,
@@ -10146,44 +10147,93 @@ class ControllerView(QWidget):
             return None
         return self._last_status.any_running
 
+    def teardown_work(self) -> str | None:
+        """THE predicate: which kind of work on this tab must not be cut off now, or None (T690).
+
+        One list, asked by every door that tears this tab down -- through
+        `teardown_refusal()` (the window's close, the tray's Quit, the
+        self-update's restart, a changed WSL distro, a changed client folder, a
+        made or deleted ready-to-play client) and `forget_refusal()` (Remove from
+        Yu'lon). Three guards each held a shorter list before, and a Restore, a
+        backup or a Start/Stop/Restart went unseen by most of the doors; a client
+        folder changed during a backup froze the window for 7 minutes and lost the
+        backup (measured live). A new kind of work that must not be cut off is
+        added HERE and nowhere else; `test_teardown_guard.py` fails for a door that
+        does not reach this method.
+
+        Answers a `yulon.teardown` kind. The jobs `busy_reason()` lists (import,
+        reset, uninstall, play client...) are asked before it by both callers.
+        The order is the order the removal's sentences always had: the jobs that
+        run through `_run()` with nothing but their own flag (a backup, a
+        restore, a Modules job, a network apply, a Tuning write), then the Modules
+        tab's panel, last any Server action, including the stop a removal is
+        already waiting for.
+        """
+        if self._backup_before_update:
+            return teardown.UPDATE_BACKUP
+        if self._backup_running:
+            return teardown.BACKUP
+        if self._restore_running:
+            return teardown.RESTORE
+        if self._move_panel is not None and self._move_panel.running:
+            return teardown.MOVE
+        if self._module_job_running():
+            return teardown.MODULE
+        if self._network_applying:
+            return teardown.NETWORK
+        if self._tuning_writing or self._put_back_running:
+            return teardown.TUNING
+        if self.rebuild_log.running:
+            return teardown.PANEL
+        if self._busy:
+            return teardown.ACTION
+        return None
+
+    def teardown_refusal(self) -> str | None:
+        """Why this tab may not be torn down now, in plain words, or None (T690).
+
+        `busy_reason()`'s sentences first (the long ones the close guard has always
+        shown), then `teardown_work()`'s, naming what is running. A refusal, not a
+        question: see `yulon.teardown` for why.
+        """
+        if (reason := self.busy_reason()) is not None:
+            return reason
+        if (kind := self.teardown_work()) is None:
+            return None
+        return teardown.sentence(
+            kind,
+            module_job=self._module_pending or "",
+            server_job=self._busy_job,
+        )
+
     def forget_refusal(self) -> str | None:
         """Why this server may not be removed from Yu'lon right now, or None (T95).
 
-        Removing drops this tab through `drop_controller()`, which is a teardown
-        that joins this tab's jobs for a bounded time only. So everything that
-        refuses a teardown refuses this too, and so does every job that would
-        be cut off in the middle. `busy_reason()` comes first because its
-        sentences are the long ones the close guard already shows. Then the
-        jobs that run through `_run()` with nothing but their own flag: the
-        T64 backup, a manual backup, a restore (stopped half-way it leaves the
-        databases half-written), a Modules tab job (`_module_pending`, which a
-        custom-module install sets too) and a network apply. Then the Modules
-        tab's panel, which a rebuild, a database update or an adopt runs in.
-        Last is any Server action, including the stop a removal is already
-        waiting for. The sentences are `forgetting`'s; the import is local
-        so this module's import block stays as it is.
+        Removing drops this tab through `drop_controller()`, a teardown that joins
+        this tab's jobs for a bounded time only. It asks `teardown_work()` like every
+        other door and words the answer as `forgetting`'s sentences, which end in
+        "Nothing was removed." The import is local so this module's import block stays
+        as it is.
         """
         from yulon import forgetting
 
         if (reason := self.busy_reason()) is not None:
             return reason
-        if self._backup_before_update:
-            return forgetting.UPDATE_BACKUP_RUNNING
-        if self._backup_running:
-            return forgetting.BACKUP_RUNNING
-        if self._restore_running:
-            return forgetting.RESTORE_RUNNING
-        if self._move_panel is not None and self._move_panel.running:
-            return forgetting.MOVE_RUNNING
-        if self._module_job_running():
+        kind = self.teardown_work()
+        if kind is None:
+            return None
+        if kind == teardown.MODULE:
             return forgetting.module_running(self._module_pending or "a Modules tab action")
-        if self._network_applying:
-            return forgetting.NETWORK_RUNNING
-        if self.rebuild_log.running:
-            return forgetting.PANEL_RUNNING
-        if self._busy:
-            return forgetting.SERVER_ACTION_RUNNING
-        return None
+        return {
+            teardown.UPDATE_BACKUP: forgetting.UPDATE_BACKUP_RUNNING,
+            teardown.BACKUP: forgetting.BACKUP_RUNNING,
+            teardown.RESTORE: forgetting.RESTORE_RUNNING,
+            teardown.MOVE: forgetting.MOVE_RUNNING,
+            teardown.NETWORK: forgetting.NETWORK_RUNNING,
+            teardown.TUNING: forgetting.TUNING_RUNNING,
+            teardown.PANEL: forgetting.PANEL_RUNNING,
+            teardown.ACTION: forgetting.SERVER_ACTION_RUNNING,
+        }[kind]
 
     def _ask_about_the_import(self, status: InstallStatus) -> None:
         """Put the import question once per time the database comes up.
@@ -10685,7 +10735,15 @@ class ControllerView(QWidget):
 
     @Slot()
     def start_server(self) -> None:
-        """Start the install; a README §12 conflict is shown, never a raw Docker error."""
+        """Start the install; a README §12 conflict is shown, never a raw Docker error.
+
+        Refused while another action holds the tab, like `restart_from_server_tab()`
+        (T690): the tray's and the flyout's Start reach this after their row was built,
+        and a Start on top of a running job unlocks the tab when it ends while the first
+        job still runs.
+        """
+        if self._busy:
+            return
         self._disarm_actions()
         self._nothing_to_remove = False
         self._update_forget_visibility()
@@ -11914,26 +11972,30 @@ class ControllerView(QWidget):
         )
 
     def _client_dir_busy(self) -> bool:
-        """The round-2 review's guard, in `rebuild_server()`'s own words and shape.
+        """The round-2 review's guard, now the one teardown predicate (T690).
 
-        A write here does two things a running action must not race: it
-        replaces `state.json`'s record, and it makes `main.py` drop this tab
-        and rebuild it. `_set_busy()` locks the buttons; this is the second
-        half a disabled `QPushButton` does not give for free -- a press
-        already queued in Qt's event loop, or one this method is called from
-        directly in a test, still has to be told no.
+        A write here does two things a running job must not race: it replaces
+        `state.json`'s record, and it makes `main.py` drop this tab and rebuild it.
+        `_set_busy()` locks the buttons, but only for what sets `_busy`: a Restore,
+        a backup, a network apply and a Modules job do not, and the press went
+        through (measured: the rebuild froze the window for 7 minutes and the
+        backup was lost). So this asks `teardown_refusal()`, as every other door
+        does, and says what is running. It is also the half a disabled
+        `QPushButton` does not give for free -- a press already queued in Qt's
+        event loop, or one this method is called from directly in a test, still has
+        to be told no.
 
         Make… counts too (T181): from its press it plans, asks and builds from
         the client folder this press would change, and the tab rebuild this
         press ends in would cut it off.
         """
-        if not self._busy and not self._play_client_running:
+        reason = self.teardown_refusal()
+        if reason is None:
             return False
         show_information(
             self,
             "Something else is running",
-            "This server is busy with another action — wait for it to finish on the "
-            "Server tab, then press this again. Nothing was changed.",
+            f"{reason}\n\nNothing was changed.",
         )
         return True
 

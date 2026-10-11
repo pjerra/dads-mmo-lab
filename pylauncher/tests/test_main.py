@@ -1462,6 +1462,113 @@ def test_a_support_file_being_saved_refuses_the_close(window: Any, monkeypatch: 
     assert main.close_refusal(window) == "saving the support file"
 
 
+# T690: the doors that tear a tab down all ask `ControllerView.teardown_refusal()`.
+# `tests/test_teardown_guard.py` drives the view, `tests/test_teardown_doors.py` reads
+# the source for every door; these drive the real window.
+
+_WORK = [
+    ("_restore_running", "restore"),
+    ("_backup_running", "backup"),
+    ("_network_applying", "network change"),
+    ("_module_pending", "Modules tab"),
+]
+
+
+def _start(view: Any, flag: str) -> None:
+    setattr(view, flag, "install mod-x" if flag == "_module_pending" else True)
+
+
+def _stop(view: Any, flag: str) -> None:
+    setattr(view, flag, None if flag == "_module_pending" else False)
+
+
+@pytest.mark.parametrize("flag,word", _WORK)
+def test_the_close_and_the_update_see_work_no_tab_guard_used_to_count(
+    window: Any, tmp_path: Any, flag: str, word: str
+) -> None:
+    """`close_refusal()` answered None through a Restore, a backup and a network apply."""
+    server_dir = tmp_path / f"t690-close-{flag}"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    assert main.close_refusal(window) is None
+    _start(view, flag)
+    try:
+        reason = main.close_refusal(window)
+        assert reason is not None and word in reason, reason
+    finally:
+        _stop(view, flag)
+    assert main.close_refusal(window) is None
+
+
+def test_a_restart_in_flight_refuses_the_close_and_names_itself(window: Any, tmp_path: Any) -> None:
+    """Measured on m910q: Quit during a Restart said "1 server is running" and went on."""
+    server_dir = tmp_path / "t690-restart"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    view._set_busy(True, "Restart")
+    try:
+        reason = main.close_refusal(window)
+        assert reason is not None and "Restart" in reason, reason
+    finally:
+        view._set_busy(False)
+    assert main.close_refusal(window) is None
+
+
+def test_a_catalog_install_refuses_the_close(window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Catalog install is a busy reason nowhere: Quit cancelled it silently."""
+    from yulon import teardown
+
+    catalog = _catalog_view(window)
+    assert main.close_refusal(window) is None
+    # What `_run_install()` records for the length of an install, and `_on_run_finished()` clears.
+    monkeypatch.setattr(catalog, "_current", ("wow-wotlk", Path("/srv/wotlk"), None))
+    assert main.close_refusal(window) == teardown.CATALOG_INSTALL
+    assert "Stop" in teardown.CATALOG_INSTALL, "the reason must say how to end it"
+
+
+@pytest.mark.parametrize("signal_name", ["client_dir_changed", "play_client_dir_changed"])
+def test_a_rebuild_signal_over_running_work_keeps_the_tab_and_says_when_it_applies(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, signal_name: str
+) -> None:
+    """The tab was dropped under a running Restore: `shutdown()` blocked up to 330 s (measured)."""
+    from PySide6.QtWidgets import QMessageBox
+
+    server_dir = tmp_path / f"t690-{signal_name}"
+    _catalog_view(window).installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
+    view._restore_running = True
+    try:
+        getattr(view, signal_name).emit("wow-wotlk", server_dir, tmp_path / "elsewhere")
+        assert _tab_for(window, server_dir) is view, "a tab was torn down under a restore"
+        assert told and "restore" in told[0] and "next time" in told[0], told
+    finally:
+        view._restore_running = False
+    getattr(view, signal_name).emit("wow-wotlk", server_dir, tmp_path / "elsewhere")
+    assert _tab_for(window, server_dir) is not view, "a quiet tab is rebuilt as before"
+
+
+def test_a_distro_switch_over_a_running_restore_is_refused(
+    window: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    server_dir = tmp_path / "t690-distro"
+    catalog = _catalog_view(window)
+    catalog.installed.emit("wow-wotlk", server_dir, None)
+    view = _tab_for(window, server_dir)
+    told: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: told.append(a[2]))
+    view._restore_running = True
+    try:
+        catalog.adopted.emit("wow-wotlk", server_dir, None, "Ubuntu-24.04")
+        assert _tab_for(window, server_dir) is view
+        assert told and "restore" in told[0], told
+    finally:
+        view._restore_running = False
+
+
 def test_a_tab_opened_after_startup_is_still_joined_when_the_window_closes(
     window: Any, tmp_path: Any
 ) -> None:
