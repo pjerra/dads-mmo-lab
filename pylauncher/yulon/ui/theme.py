@@ -78,6 +78,27 @@ COLOR_TEXT_MUTED = "#A39A88"  # secondary text (kept above WCAG AA on every shee
 COLOR_TEXT_GOLD = "#F2C55C"  # warm accent text
 COLOR_TEXT_WARNING = "#E0A030"  # amber warning (unsupported platform, refusals)
 
+STATUS_TONES: dict[str, dict[str, str]] = {
+    "up": {"mark": "#4FBF7E", "text": "#8EE0AE", "back": "#16301F", "edge": "#2F6B46"},
+    "between": {"mark": "#E8B545", "text": "#F2CF7E", "back": "#33270F", "edge": "#7A5A1F"},
+    "partly": {"mark": "#F08A4B", "text": "#F5B98F", "back": "#3A2214", "edge": "#8A4A2A"},
+    "down": {"mark": "#A8998A", "text": "#D6C8B4", "back": "#2A2117", "edge": "#5A4D3E"},
+    "unknown": {"mark": "#8A8A96", "text": "#B0B0BA", "back": "#22222A", "edge": "#555560"},
+    "bad": {"mark": "#E05A5E", "text": "#F3B4B6", "back": "#3A1C1D", "edge": "#7A3A3C"},
+}
+"""The Server tab's state colours (T699, the owner's mockup), one place: each tone's shape
+colour (`mark`), word colour (`text`), pill fill (`back`) and pill border (`edge`).
+
+Colour is never the only signal: every tone also has its own shape and word
+(`ui.server_status`), so the states read the same without colour vision.
+"""
+
+SERVER_PLAY_BUTTON = "server-play"
+"""objectName of the Server tab's big PLAY in its top card (T699)."""
+
+SERVER_HERO = "server-hero"
+"""objectName of the Server tab's top card: name, status pill and PLAY (T699)."""
+
 # Font Hierarchies. The title face is deliberately the *same* sans stack as the
 # body: the brief asks for modern utility, and the old ornate serif list
 # ('Cinzel'/'Friz Quadrata'/'Georgia') names no face that ships on SteamOS, so
@@ -639,6 +660,24 @@ QPushButton#{LAUNCHER_PLAY_BUTTON} {{
     letter-spacing: 3px;
     min-height: {_touch(58, scale)};
     border-radius: 4px;
+}}
+
+/* T699: the Server tab's PLAY in its top card: smaller than the launcher's, bigger than a press. */
+QPushButton#{SERVER_PLAY_BUTTON} {{
+    font-size: {_px(18, scale)};
+    font-weight: bold;
+    letter-spacing: 1px;
+    min-height: {_touch(48, scale)};
+    padding: 6px 28px;
+    border-radius: 6px;
+}}
+
+/* T699: the Server tab's top card, a panel with the theme's one accent edge. */
+QFrame#{SERVER_HERO} {{
+    background-color: {COLOR_BG_PANEL};
+    border: 1px solid {COLOR_BRASS_DARK};
+    border-left: 3px solid {COLOR_GOLD_BRASS};
+    border-radius: 6px;
 }}
 
 /* T193 A20: the header's update check, a real button that fits the header.
