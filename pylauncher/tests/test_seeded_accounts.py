@@ -110,7 +110,8 @@ class AuthDb:
             r" s = _utf8mb4 X'(?P<s>[0-9A-F]+)'"
             r" WHERE username = _utf8mb4 X'(?P<name>[0-9A-F]+)'"
             r" AND v = _utf8mb4 X'(?P<oldv>[0-9A-F]+)'"
-            r" AND s = _utf8mb4 X'(?P<olds>[0-9A-F]+)';?",
+            r" AND s = _utf8mb4 X'(?P<olds>[0-9A-F]+)';"
+            r" SELECT ROW_COUNT\(\);",
             statement,
         )
         assert match is not None, f"a statement this table does not model: {statement}"
@@ -118,7 +119,8 @@ class AuthDb:
         row = next((r for n, r in self.rows.items() if n.upper() == text["name"].upper()), None)
         if row is not None and row["v"] == text["oldv"] and row["s"] == text["olds"]:
             row["v"], row["s"] = text["v"], text["s"]
-        return ""
+            return "1\n"
+        return "0\n"
 
     def updates(self) -> list[str]:
         return [s for s in self.statements if s.startswith("UPDATE")]
@@ -196,7 +198,7 @@ def test_the_statements_carry_hex_literals_and_no_password(db: AuthDb, tmp_path:
         assert re.fullmatch(
             r"UPDATE realmd\.account SET v = _utf8mb4 X'[0-9A-F]+', s = _utf8mb4 X'[0-9A-F]+'"
             r" WHERE username = _utf8mb4 X'[0-9A-F]+' AND v = _utf8mb4 X'[0-9A-F]+'"
-            r" AND s = _utf8mb4 X'[0-9A-F]+';",
+            r" AND s = _utf8mb4 X'[0-9A-F]+'; SELECT ROW_COUNT\(\);",
             statement,
         ), statement
         assert "'ADMINISTRATOR'" not in statement and "PLAYER'" not in statement
@@ -247,7 +249,9 @@ def test_a_password_changed_between_the_read_and_the_write_is_not_overwritten(
         db.before_update = None
 
     db.before_update = player_changes_it
-    settle(tmp_path)
+    said = settle(tmp_path)
+    assert said is not None and "ADMINISTRATOR" not in said, "not named: nothing was changed"
+    assert all(name in said for name in ("GAMEMASTER", "MODERATOR", "PLAYER"))
     s, v = _credentials("ADMINISTRATOR", "changed-in-the-meantime", 0x56)
     assert (db.rows["ADMINISTRATOR"]["s"], db.rows["ADMINISTRATOR"]["v"]) == (s, v)
 
@@ -323,18 +327,32 @@ def test_a_database_that_cannot_be_asked_says_so_and_never_raises(
     assert "still" in said
 
 
-def test_no_password_on_file_asks_nothing(db: AuthDb, tmp_path: Path) -> None:
+def test_no_password_on_file_asks_nothing_and_says_the_accounts_are_open(
+    db: AuthDb, tmp_path: Path
+) -> None:
     said = seeded_accounts.settle(TBC, TBC.container_spec(), tmp_path)
-    assert said is None and db.statements == []
+    assert said == seeded_accounts.NOT_LOCKED.format(why="the database password could not be read")
+    assert "still log in" in said and "ADMINISTRATOR" in said
+    assert db.statements == []
 
 
 # -- the paths that reach a start -----------------------------------------------------------
 
 
 def _controller_start(
-    monkeypatch: pytest.MonkeyPatch, server_dir: Path, entry: CatalogEntry = TBC
+    monkeypatch: pytest.MonkeyPatch,
+    server_dir: Path,
+    entry: CatalogEntry = TBC,
+    *,
+    at_start: list[int] | None = None,
+    db: AuthDb | None = None,
 ) -> Controller:
-    monkeypatch.setattr(docker, "start_staged", lambda *a, **k: True)
+    def start_staged(*_a: object, **_k: object) -> bool:
+        if at_start is not None and db is not None:
+            at_start.append(len(db.updates()))  # how many accounts were locked by now
+        return True
+
+    monkeypatch.setattr(docker, "start_staged", start_staged)
     controller = Controller(entry.container_spec(), server_dir)
     controller.entry = entry
     monkeypatch.setattr(controller, "port_conflicts", lambda: [])
@@ -356,6 +374,15 @@ def test_an_existing_install_is_repaired_by_its_next_start_and_the_start_says_so
     again = _controller_start(monkeypatch, server_dir, entry)
     assert again.seeded_accounts_locked is None
     assert len(db.updates()) == 4, "the second start rolled nothing"
+
+
+def test_the_accounts_are_locked_before_the_servers_are_started(
+    db: AuthDb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auth server must never listen with the seeded rows: lock first, then start."""
+    at_start: list[int] = []
+    _controller_start(monkeypatch, an_install(tmp_path), at_start=at_start, db=db)
+    assert at_start == [4], "all four were locked when docker.start_staged ran"
 
 
 def test_a_start_that_is_refused_locks_nothing(
