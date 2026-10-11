@@ -753,8 +753,9 @@ def test_the_plan_says_what_it_leaves_behind(tmp_path: Path) -> None:
     rec = _recorder(tmp_path)
     plan = rec.uninstaller().plan()
     left = " ".join(plan.left_behind).lower()
-    assert "backup" in left
     assert "client" in left
+    # T677: backups are no longer "left alone" -- they are moved, and the plan says so itself.
+    assert "backup" not in left
 
 
 # -- 7. the Windows read-only bit -----------------------------------------
@@ -1494,8 +1495,72 @@ def test_a_backups_link_to_somewhere_inside_the_install_is_kept_too(tmp_path: Pa
     assert report.backups_kept == found[0].parent
 
 
-def test_the_dialog_text_says_the_backups_are_moved_not_untouched() -> None:
-    """The line used to promise the folder was not touched; it is moved, and the line says so."""
-    first = purge.LEFT_BEHIND[0].lower()
-    assert "backup" in first
-    assert "moved" in first
+def test_the_not_touched_list_does_not_speak_for_the_backups() -> None:
+    """The plan's own lines say what happens to the backups (moved, a link, or none).
+
+    A fixed clause in the "does not touch" list contradicted all three: it promised a move when
+    there were no backups and when the folder was a link left alone.
+    """
+    assert not any("backup" in line.lower() for line in purge.LEFT_BEHIND)
+
+
+def _failing(exc: Exception) -> Callable[[Path], None]:
+    def fail(path: Path) -> None:
+        raise exc
+
+    return fail
+
+
+def test_a_folder_removal_that_fails_after_the_move_names_the_kept_backups(
+    tmp_path: Path,
+) -> None:
+    """T677: the move happens first, so every later failure has to say where the backups are."""
+    rec, _backups = _server_with_backup(tmp_path)
+    uninstaller = rec.uninstaller(
+        remove_folder=_failing(purge.PurgeRefusal("the folder could not be deleted (in use)"))
+    )
+    kept = uninstaller.plan().backups_to
+    assert kept is not None
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        uninstaller.run(keep_characters=False)
+    assert "the folder could not be deleted (in use)" in str(caught.value)
+    assert f"Your backups were moved to {kept}." in str(caught.value)
+    assert (kept / BACKUP_NAME).read_text(encoding="utf-8") == BACKUP_BODY
+
+
+def test_a_docker_step_that_fails_after_the_move_names_the_kept_backups(tmp_path: Path) -> None:
+    rec, _backups = _server_with_backup(tmp_path)
+
+    def fail(name: str) -> None:
+        raise docker.DockerCommandError("volume is in use")
+
+    uninstaller = rec.uninstaller(remove_volume=fail)
+    kept = uninstaller.plan().backups_to
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        uninstaller.run(keep_characters=False)
+    assert f"Your backups were moved to {kept}." in str(caught.value)
+    assert caught.value.detail == "volume is in use"  # Docker's words stay under Details
+
+
+def test_a_plain_purge_error_after_the_move_is_said_by_yulon_with_its_words_in_details(
+    tmp_path: Path,
+) -> None:
+    rec, _backups = _server_with_backup(tmp_path)
+    uninstaller = rec.uninstaller(
+        remove_folder=_failing(purge.PurgeError("another program's words"))
+    )
+    kept = uninstaller.plan().backups_to
+    with pytest.raises(purge.PurgeError) as caught:
+        uninstaller.run(keep_characters=False)
+    assert isinstance(caught.value, purge.SaidByYulon)
+    assert f"Your backups were moved to {kept}." in str(caught.value)
+    assert "another program's words" not in str(caught.value)
+    assert caught.value.detail == "another program's words"
+
+
+def test_a_failure_with_no_backups_to_name_is_raised_as_it_was(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path)
+    original = purge.PurgeRefusal("the folder could not be deleted (in use)")
+    with pytest.raises(purge.PurgeRefusal) as caught:
+        rec.uninstaller(remove_folder=_failing(original)).run(keep_characters=False)
+    assert caught.value is original
