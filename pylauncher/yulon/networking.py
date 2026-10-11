@@ -185,9 +185,11 @@ users hit today, which is why it is not gated on `enable_firewall`.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import json
 import os
 import re
+import socket
 import stat
 import subprocess
 import time
@@ -3435,6 +3437,65 @@ def realmlist_value(address: str, auth_port: int) -> str:
     if ":" in address:
         return address  # a typed `host:port` is the whole endpoint already
     return address if auth_port == STANDARD_AUTH_PORT else f"{address}:{auth_port}"
+
+
+def _can_bind(ip: str) -> bool:
+    """Whether an interface of this host owns `ip`: the OS lets a socket bind to it only then.
+
+    A UDP bind sends nothing and takes no port for long (port 0, closed at once). It
+    answers for the interfaces as they are now, so a DHCP change needs no cache.
+    """
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.bind((ip, 0))
+    except OSError:
+        return False
+    return True
+
+
+def _own_names() -> tuple[str, ...]:
+    """The names this computer calls itself, lower-cased: its host name, whole and short."""
+    try:
+        name = socket.gethostname().strip().casefold()
+    except OSError:
+        return ()
+    return (name, name.split(".")[0]) if name else ()
+
+
+def _host_of(address: str) -> str:
+    """The host in a typed realm address: `host:port` loses its port, an IPv6 literal does not."""
+    return address.rsplit(":", 1)[0] if address.count(":") == 1 else address
+
+
+def is_this_computer(
+    address: str,
+    *,
+    can_bind: Callable[[str], bool] | None = None,
+    own_names: Callable[[], Iterable[str]] | None = None,
+) -> bool:
+    """Whether a realm address typed in the launcher names the computer Yu'lon runs on (T667).
+
+    True for loopback (`127.*`, `::1`, `localhost`, `0.0.0.0`), for any address an
+    interface of this host owns (its LAN IP), and for this computer's own host name.
+    Everything else is another computer, and PLAY starts only the game for it.
+
+    A name that is not this host's own is another computer without a lookup: this
+    runs on the GUI thread (the launcher's banner) and a resolver can take its time.
+    A name that points back at this host through DNS is therefore treated as remote.
+    """
+    host = _host_of(address.strip()).strip("[]").casefold()
+    if not host:
+        return True  # an empty box is "use this computer"
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        names = {name.casefold() for name in (own_names or _own_names)()}
+        first, _, rest = host.partition(".")
+        return host in names or (first in names and rest in ("local", "lan", "home", "localdomain"))
+    return ip.is_loopback or ip.is_unspecified or bool((can_bind or _can_bind)(host))
 
 
 def realm_port_sql(entry: CatalogEntry) -> str:

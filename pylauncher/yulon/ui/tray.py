@@ -51,7 +51,7 @@ from yulon.log import get_logger
 from yulon.ui.message_box import FittedMessageBox
 from yulon.ui.tab_titles import controller_tab_titles
 from yulon.ui.theme import COLOR_DANGER, COLOR_GOLD_BRIGHT, COLOR_UNCOMMON
-from yulon.ui.tray_flyout import TrayFlyout
+from yulon.ui.tray_flyout import TrayFlyout, dot_tone
 from yulon.ui.widgets.dadcraft_decorations import realm_tone
 from yulon.ui.widgets.reasons import reason_of
 
@@ -663,10 +663,20 @@ class YulonTray(QObject):
         live.restart_from_server_tab()
 
     def play(self, view: Any) -> None:
-        """Open this server's client launcher window, the sidebar ▶'s way (T187)."""
+        """Play this server through its own tab's PLAY (T694): start it if stopped, wait, play.
+
+        A server with no ready-to-play client has nothing to play: its launcher window opens,
+        where "Make a ready-to-play client" is the way on (the sidebar ▶'s way, T187).
+        """
         live = self._current(view)
+        if live is None:
+            self.open_window()
+            return
+        if getattr(live.services, "play_client_dir", None) is not None:
+            live.play()
+            return
         opener = getattr(self.window, "yulon_open_launcher", None)
-        if live is None or opener is None:
+        if opener is None:
             self.open_window()
             return
         opener(live.entry.id, live.services.controller.server_dir)
@@ -1060,7 +1070,12 @@ class YulonTray(QObject):
             else:
                 label = f"{title} ({'starting' if realm_tone(status) == 'between' else 'stopped'})"
             action = play_menu.addAction(label)
-            action.setEnabled(is_online(status))
+            # T694: a stopped server is started by Play. Not one that is starting (the tab
+            # refuses a Play over a Start), crash-looping or unknown: Open Yu'lon is the way.
+            action.setEnabled(
+                is_online(status)
+                or (dot_tone(status) == "down" and realm_tone(status) != "unknown")
+            )
             action.triggered.connect(lambda _checked=False, v=view: self.play(v))
         play_menu.setEnabled(bool(servers))
         menu.addMenu(play_menu)

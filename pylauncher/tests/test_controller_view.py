@@ -24694,6 +24694,329 @@ def test_play_with_the_world_down_and_cancel_starts_and_plays_nothing(
     assert launched == []
 
 
+# -- T667/T672: PLAY and the address it logs in at -----------------------------
+
+
+def _this_host_owns(monkeypatch: pytest.MonkeyPatch, *addresses: str) -> None:
+    """This host's interfaces own exactly `addresses` (plus loopback, which is always its own)."""
+    monkeypatch.setattr(networking, "_can_bind", lambda ip: ip in addresses)
+    monkeypatch.setattr(networking, "_own_names", lambda: ())
+
+
+class _RealmWait:
+    """The `ready_after_start` seam: answers `verdict`, and notes what the game had done by then."""
+
+    def __init__(self, launched: list[object], verdict: str = "ready") -> None:
+        self.verdict = verdict
+        self.launched = launched
+        self.asked: list[int] = []  # how many games were started when each wait ran
+        self.cancels: list[object] = []
+
+    def __call__(self, *, cancel: object = None) -> native.StartAnswer:
+        self.asked.append(len(self.launched))
+        self.cancels.append(cancel)
+        return native.StartAnswer(self.verdict)  # type: ignore[arg-type]
+
+
+def _wait_view(
+    ps: _Ps,
+    tmp_path: Path,
+    launched: list[object],
+    *,
+    address: str | None,
+    verdict: str = "ready",
+) -> tuple[ControllerView, Path, _RealmWait]:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    if address is not None:
+        _save_launcher(play, {"realm_address": address})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play)
+    wait = _RealmWait(launched, verdict)
+    view.services.ready_after_start = wait
+    ps.names = ""
+    return view, play, wait
+
+
+def test_play_at_another_computers_address_neither_asks_starts_nor_waits_for_the_local_server(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """T667: the Steam Deck case. The server runs elsewhere; the local one is stopped."""
+    _this_host_owns(monkeypatch)
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, play, wait = _wait_view(ps, tmp_path, launched, address="192.168.0.60")
+    asked_before = len(ps.calls)
+
+    view.play()
+
+    assert boxes == [], "asked to start the local server for a remote address"
+    assert ps.calls[asked_before:] == [], "looked at (or started) the local server"
+    assert wait.asked == [], "waited for the local realm"
+    assert len(launched) == 1
+    assert _realmlist(play).startswith("set realmlist 192.168.0.60\n")
+    assert not view._play_pending
+
+
+def test_play_at_another_computers_address_writes_the_port_of_a_server_off_3724(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The remote path writes `realmlist_value()` with the entry's auth port, as the local does."""
+    _this_host_owns(monkeypatch)
+    # A second server beside 3724:
+    ports = WOTLK.ports.model_copy(update={"auth": 3725})
+    entry = WOTLK.model_copy(update={"ports": ports})
+    original = _game_client(tmp_path / "clients" / "WoW")
+    play = _built(original, tmp_path)
+    _save_launcher(play, {"realm_address": "192.168.0.60"})
+    view, _ = _play_view(ps, tmp_path, original=original, play=play, entry=entry)
+    ps.names = ""
+
+    view.play()
+
+    assert len(launched) == 1
+    assert _realmlist(play).startswith("set realmlist 192.168.0.60:3725\n")
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", None, "192.168.0.60"])
+def test_play_at_this_computers_address_asks_starts_waits_and_only_then_plays(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    address: str | None,
+) -> None:
+    """T667 keeps today's start for loopback and for this host's own LAN IP; T672 adds the wait."""
+    _this_host_owns(monkeypatch, "192.168.0.60")
+    boxes = _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=address)
+
+    view.play()
+
+    assert "The server is stopped. Start it first?" in boxes[0].text()  # type: ignore[attr-defined]
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert wait.asked == [0], "the game was started before the realm was waited for"
+    assert len(launched) == 1
+
+
+def test_play_does_not_wait_when_the_server_was_already_running(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """One wait, after PLAY's own start: a running server is not watched for a minute each press."""
+    _this_host_owns(monkeypatch)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None)
+    ps.names = WORLD_UP
+
+    view.play()
+
+    assert wait.asked == []
+    assert len(launched) == 1
+
+
+@pytest.mark.parametrize(
+    "verdict, said",
+    [
+        ("ceiling", "still loading"),
+        ("loop", "crash-looping"),
+        ("fatal", "will not come up"),
+        ("quiet", "looks stuck"),
+        ("unreadable", "Docker stopped answering"),
+    ],
+)
+def test_play_whose_realm_never_comes_up_says_so_and_starts_no_game(
+    qapp: object,
+    ps: _Ps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    launched: list[object],
+    verdict: str,
+    said: str,
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None, verdict=verdict)
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+
+    view.play()
+
+    assert wait.asked == [0]
+    assert launched == [], "the game was started into a realm that is not up"
+    text = view.play_label.text()
+    assert said in text and "not started" in text, text
+    assert failures and said in failures[0]
+    assert not view._play_pending and not view._play_after_start
+
+
+def test_play_whose_wait_broke_starts_no_game_and_says_it_could_not_wait(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def broken(*, cancel: object = None) -> native.StartAnswer:
+        raise InstallerError("no ready markers")
+
+    view.services.ready_after_start = broken
+
+    view.play()
+
+    assert launched == []
+    assert "could not wait" in view.play_label.text()
+    assert not view._play_pending
+
+
+def test_play_waits_with_a_deadline_and_a_timeout_is_said_as_one(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The shared check can run for hours; PLAY ends it at its own deadline, through `cancel`."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(controller_view_module, "PLAY_REALM_WAIT_SECONDS", 0.05)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def forever(*, cancel: threading.Event) -> native.StartAnswer:
+        # Inline, the wait holds the GUI thread, so the deadline's timer needs the loop pumped.
+        for _ in range(100):
+            if cancel.is_set():
+                return native.StartAnswer("cancelled")
+            process_events(20)
+        raise AssertionError("the deadline never set the cancel")
+
+    view.services.ready_after_start = forever  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == []
+    text = view.play_label.text()
+    assert "was not up after" in text and "not started" in text, text
+    assert not view._play_pending
+
+
+def test_cancel_during_the_wait_for_the_realm_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def pressed_cancel(*, cancel: threading.Event) -> native.StartAnswer:
+        assert not view.play_cancel_button.isHidden(), "no Cancel offered during the wait"
+        view._cancel_play_download()  # the player presses Cancel while the wait runs
+        assert cancel.is_set(), "Cancel did not reach the wait"
+        return native.StartAnswer("cancelled")
+
+    view.services.ready_after_start = pressed_cancel  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == []
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert view.play_cancel_button.isHidden()
+    assert not view._play_pending
+
+
+def test_play_asked_for_the_realm_only_after_its_own_start_not_before(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The wait is a second answer to the second press: ready once, not ready the next time."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None, verdict="ceiling")
+
+    view.play()
+    assert launched == []
+
+    wait.verdict = "ready"
+    ps.names = ""
+    view.play()
+
+    assert wait.asked == [0, 0]
+    assert len(launched) == 1
+
+
+# -- T694: the Server tab's PLAY plays, "Launcher…" opens the launcher ---------
+
+
+def _launcher_spy(view: ControllerView) -> list[int]:
+    opened: list[int] = []
+    view.open_launcher = lambda: opened.append(1)
+    return opened
+
+
+def test_the_tabs_play_button_starts_the_game_and_does_not_open_the_launcher(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP
+
+    assert (
+        view.play_button is not None
+        and view.play_button.text() == controller_view_module.PLAY_LABEL
+    )
+    view.play_button.click()
+
+    assert len(launched) == 1, "PLAY did not start the game"
+    assert opened == [], "PLAY opened the launcher instead"
+
+
+def test_the_tabs_play_button_on_a_stopped_server_starts_it_waits_and_plays(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, wait = _wait_view(ps, tmp_path, launched, address=None)
+    opened = _launcher_spy(view)
+
+    assert view.play_button is not None
+    view.play_button.click()
+
+    assert any(c[:4] == ["docker", "compose", "up", "-d"] for c in ps.calls), "never started"
+    assert wait.asked == [0] and len(launched) == 1
+    assert opened == []
+
+
+def test_the_launcher_button_opens_the_launcher_and_starts_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    opened = _launcher_spy(view)
+    ps.names = WORLD_UP  # a running server: a PLAY would start the game at once
+
+    assert view.launcher_button is not None and not view.launcher_button.isHidden()
+    assert view.launcher_button.text() == "Launcher…"
+    view.launcher_button.click()
+
+    assert opened == [1]
+    assert launched == [] and not view._play_pending
+    assert not any(c[:3] == ["docker", "compose", "up"] for c in ps.calls)
+
+
+def test_the_launcher_button_is_there_only_with_a_ready_to_play_client(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    original = _game_client(tmp_path / "clients" / "WoW")
+    without, _ = _play_view(ps, tmp_path, original=original, play=None)
+    assert without.launcher_button is not None and without.launcher_button.isHidden()
+    assert without.play_button is not None
+    assert without.play_button.text() == controller_view_module.MAKE_PLAY_CLIENT_LABEL
+
+
+def test_the_launcher_button_stays_usable_while_a_server_job_runs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Opening a window changes nothing, so a busy tab does not grey it."""
+    original = _game_client(tmp_path / "clients" / "WoW")
+    view, _ = _play_view(ps, tmp_path, original=original, play=_built(original, tmp_path))
+    view._set_busy(True)
+
+    assert view.launcher_button is not None and view.launcher_button.isEnabled()
+    view._set_busy(False)
+
+
 def test_play_rewrites_the_realmlist_even_after_a_hand_edit(
     qapp: object, ps: _Ps, tmp_path: Path, launched: list[object]
 ) -> None:
