@@ -5328,8 +5328,10 @@ class Applier:
             )
         if defer_exists:
             # T679: a move-in installs its modules BEFORE the old server's characters are
-            # loaded, so the question would read an empty database and refuse an answer the
-            # old server proved. Said, not asked, and the database is not even started for it.
+            # loaded, so the question would read an empty database and refuse the answer.
+            # The answer is the old server's own, carried in its answers file, and is not
+            # proved here. Said (DEFERRED_EXISTS_NOTE), not asked, and the database is not
+            # even started for it.
             log.skipped.append(f"{prompt.key}={vals[prompt.key]}: {DEFERRED_EXISTS_NOTE}")
             return
         if not isinstance(self.sql, SqlReader):
