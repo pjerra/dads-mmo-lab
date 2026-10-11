@@ -24851,6 +24851,86 @@ def test_cancel_during_the_wait_for_the_realm_starts_no_game(
     assert not view._play_pending
 
 
+def _warnings(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every warning box the view puts up, by its text (none is shown)."""
+    said: list[str] = []
+    monkeypatch.setattr(
+        controller_view_module, "show_warning", lambda _parent, _title, text: said.append(text)
+    )
+    return said
+
+
+def test_a_ready_answer_that_arrives_after_a_cancel_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    """The wait had already seen the realm up when Cancel was pressed: Cancel still wins."""
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    warned = _warnings(monkeypatch)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+
+    def ready_after_cancel(*, cancel: threading.Event) -> native.StartAnswer:
+        view._cancel_play_download()
+        assert cancel.is_set()
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = ready_after_cancel  # type: ignore[assignment]
+
+    view.play()
+
+    assert launched == [], "a ready answer after Cancel started the game"
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert warned and "Stopped waiting for the realm" in warned[0], "Cancel keeps its message"
+    assert not view._play_pending
+
+
+def test_a_stop_during_the_wait_ends_it_starts_no_game_and_adds_no_dialog(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    warned = _warnings(monkeypatch)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+    seen: list[bool] = []
+
+    def stop_then_ready(*, cancel: threading.Event) -> native.StartAnswer:
+        view._set_busy(True)  # the player's Stop (or Restart) takes the server
+        seen.append(cancel.is_set())
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = stop_then_ready  # type: ignore[assignment]
+
+    view.play()
+    view._set_busy(False)
+
+    assert seen == [True], "a Server action did not end the wait"
+    assert launched == [], "the game started over the player's Stop"
+    assert "Stopped waiting for the realm" in view.play_label.text()
+    assert warned == [], "a warning box on top of the player's own Stop"
+    assert not view._play_pending
+
+
+def test_closing_the_tab_during_the_wait_ends_it_and_starts_no_game(
+    qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
+) -> None:
+    _this_host_owns(monkeypatch)
+    _answer(monkeypatch, controller_view_module.QMessageBox.StandardButton.Yes)
+    view, _play, _wait = _wait_view(ps, tmp_path, launched, address=None)
+    seen: list[bool] = []
+
+    def closed_then_ready(*, cancel: threading.Event) -> native.StartAnswer:
+        view.shutdown()
+        seen.append(cancel.is_set())
+        return native.StartAnswer("ready")
+
+    view.services.ready_after_start = closed_then_ready  # type: ignore[assignment]
+
+    view.play()
+
+    assert seen == [True], "shutdown() did not end the wait"
+    assert launched == []
+
+
 def test_play_asked_for_the_realm_only_after_its_own_start_not_before(
     qapp: object, ps: _Ps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: list[object]
 ) -> None:

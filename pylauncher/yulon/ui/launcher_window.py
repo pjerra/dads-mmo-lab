@@ -126,7 +126,8 @@ STOPPED_REASON = "The server is stopped: PLAY starts it, waits for the realm, th
 REMOTE_BANNER = "Logs in at {address}, another computer"
 REMOTE_REASON = (
     "PLAY starts the game, which logs in at {address}. The server on this computer is not "
-    "started or checked for it."
+    "started or checked for it. If this is your own server's internet address, start it on "
+    "the Server tab first."
 )
 """T667: a realm address that is another computer's. PLAY writes it and starts the game; the
 Server tab's badge and the local server's words say nothing about the server it names."""

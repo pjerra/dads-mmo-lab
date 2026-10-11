@@ -16,7 +16,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 
 ### Fixed
-- **PLAY** with a realm address on another computer now starts the game without asking you to start the local server.
+- **PLAY** at another computer's address skips the local server; your own public address counts as another computer.
 - **PLAY** after starting the server now waits for the realm to come up before it starts the game.
 
 ### Changed
