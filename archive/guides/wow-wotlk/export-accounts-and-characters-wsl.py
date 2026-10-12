@@ -21,6 +21,7 @@ Standard library only, so any distro with Python 3.11 or newer runs it. Exit sta
 from __future__ import annotations
 
 import argparse
+import errno
 import getpass
 import hashlib
 import json
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -74,10 +76,24 @@ SECRETS = (
     "work out the passwords. Keep it private and delete it once the move is done. The database "
     "password and the command-channel credential are not in it."
 )
-PASSWORD_VARIABLE = "MYSQL_ROOT_PASSWORD"
+PASSWORD_VARIABLES = ("MYSQL_ROOT_PASSWORD", "DOCKER_DB_ROOT_PASSWORD")
+"""The names the server's own files use for the root password, the one compose reads first."""
 PASSWORD_FILE = ".db_password"
 STOPPED_CONTAINERS = ("auth", "world")
 DUMP_FLAGS = ("--single-transaction", "--routines", "--events", "--triggers")
+CHARSET_FLAG = "--default-character-set=utf8mb4"
+"""Host-mode clients only: a MariaDB client defaults to utf8mb3, which turns 4-byte text into
+question marks."""
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 3306
+OTHER_GAMES = (
+    # (game id, name, database container): what the script names when the server is not WotLK.
+    ("wow-tbc", "WoW TBC", "tbc-db"),
+    ("wow-vanilla", "WoW Vanilla", "vanilla-db"),
+    ("wow-tortoise", "WoW Tortoise", "tortoise-db"),
+    ("wow-centurion", "Centurion", "centurion-db"),
+    ("wow-unbound", "WoW Unbound", "ub-database"),
+)
 CHUNK = 1 << 20
 
 _BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
@@ -98,10 +114,12 @@ class Refusal(Exception):
 
 @dataclass
 class Access:
-    """How this distro reaches the server's database: through its container, or the client."""
+    """How this distro reaches the server's database: its container, or the MySQL client."""
 
     mode: str  # "docker" or "host"
     container: str | None = None
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
     env: dict[str, str] = field(default_factory=dict)
 
     def argv(self, tool: str, extra: list[str], *, stdin: bool = False) -> list[str]:
@@ -118,13 +136,62 @@ class Access:
                 tool,
                 *extra,
             ]
-        return [tool, "-h", "127.0.0.1", "-P", "3306", *extra]
+        return [tool, "-h", self.host, "-P", str(self.port), CHARSET_FLAG, *extra]
+
+
+class AccessDenied(Refusal):
+    """The database refused the password the script used."""
 
 
 DOCKER_SILENT_HINT = (
     " Docker is installed here but is not answering: start it (sudo service docker start), "
     "or add this user to the docker group, then run this again."
 )
+NO_PASSWORD = (
+    "Yu'lon's script could not find the database password: it is not in the server folder's .env "
+    "or compose files, and there is no terminal to ask for it. Run it from a terminal, or put "
+    "MYSQL_ROOT_PASSWORD in the server folder's .env, then run it again. Nothing was packed."
+)
+REFUSED_PASSWORD = (
+    "The database refused the password, so nothing was packed. Check this server's database "
+    "root password (its .env or compose file) and run this again."
+)
+NO_TYPED_PASSWORD = "No password was typed, so nothing was packed."
+RETRY_PROMPT = (
+    "The password in the server folder was refused. "
+    "Database root password (typed, not shown): "
+)
+
+
+def _not_wotlk(name: str) -> str:
+    return (
+        f"This server is {name}, not WoW WotLK. This script packs WoW WotLK servers only, so "
+        "nothing was packed."
+    )
+
+
+def _other_game_in_names(names: set[str]) -> str | None:
+    """The name of another game whose database container is among these names, if any."""
+    for _game_id, name, database in OTHER_GAMES:
+        if database in names:
+            return name
+    return None
+
+
+def _other_game_in_compose(server_dir: Path | None) -> str | None:
+    """The name of another game whose database container a compose file in the folder names."""
+    if server_dir is None:
+        return None
+    text = ""
+    for path in sorted(server_dir.glob("*compose*.y*ml")):
+        try:
+            text += path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    for _game_id, name, database in OTHER_GAMES:
+        if re.search(rf"(?<![\w-]){re.escape(database)}(?![\w-])", text):
+            return name
+    return None
 
 
 def _lit(value: str) -> str:
@@ -139,7 +206,15 @@ def _text(data: bytes) -> str:
 # ---------------------------------------------------------------- the database
 
 
-def _choose_access(server_dir: Path | None, stopped_flag: bool) -> Access:
+_ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
+_INTERPOLATION = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def _choose_access(
+    server_dir: Path | None, stopped_flag: bool, host: str, port: int
+) -> Access:
     """Docker through the server's database container when it answers, else the MySQL client."""
     docker = shutil.which("docker")
     docker_silent = False
@@ -184,6 +259,19 @@ def _choose_access(server_dir: Path | None, stopped_flag: bool) -> Access:
                             "stop), so the copies agree, then run this again. Nothing was packed."
                         )
                 return Access(mode="docker", container=CONTAINERS["db"])
+            listed = subprocess.run(
+                [docker, "ps", "-a", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            other = (
+                _other_game_in_names(set(listed.stdout.split()))
+                if listed.returncode == 0
+                else None
+            )
+            if other is not None:
+                raise Refusal(_not_wotlk(other))
     if shutil.which("mysql") and shutil.which("mysqldump"):
         if not stopped_flag:
             raise Refusal(
@@ -191,7 +279,10 @@ def _choose_access(server_dir: Path | None, stopped_flag: bool) -> Access:
                 "cannot tell whether the server is running. Stop the server first, then run "
                 "this again with --server-stopped. Nothing was packed."
             )
-        return Access(mode="host")
+        return Access(mode="host", host=host, port=port)
+    other = _other_game_in_compose(server_dir)
+    if other is not None:
+        raise Refusal(_not_wotlk(other))
     raise Refusal(
         "Yu'lon's script found neither Docker with the server's database container nor the "
         "MySQL client programs (mysql and mysqldump) in this distro, so it cannot read the "
@@ -201,40 +292,84 @@ def _choose_access(server_dir: Path | None, stopped_flag: bool) -> Access:
     )
 
 
-def _root_password(server_dir: Path | None) -> str:
-    """The database root password: the server's own .env or compose files, else asked for."""
-    if server_dir is not None:
-        for name in (
-            ".env",
-            *sorted(p.name for p in server_dir.glob("*compose*.y*ml")),
-        ):
-            try:
-                text = (server_dir / name).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            found = re.search(rf"{PASSWORD_VARIABLE}\s*[:=]\s*[\"']?([^\"'\s#]+)", text)
-            if (
-                found is not None
-                and found.group(1)
-                and not found.group(1).startswith("$")
-            ):
-                return found.group(1)
+def _env_value(raw: str) -> str:
+    """One value as an env file or a compose file reads it.
+
+    Quotes keep everything between them, `#` and spaces included. An unquoted value ends at a
+    ` #` that starts a comment.
+    """
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        end = raw.find(raw[0], 1)
+        return raw[1:end] if end != -1 else raw[1:]
+    return re.split(r"\s+#", raw, maxsplit=1)[0].rstrip()
+
+
+def _assignments(text: str) -> dict[str, str]:
+    """The KEY=VALUE and KEY: VALUE lines of a file. Comments and blank lines are skipped, and
+    the last setting of a key wins, as an env file reads it."""
+    found: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = re.sub(r"^(?:export\s+|-\s+)", "", line)
+        match = _ASSIGNMENT.match(line)
+        if match is not None:
+            found[match.group(1)] = _env_value(match.group(2))
+    return found
+
+
+def _interpolate(value: str, env: Mapping[str, str]) -> str:
+    """Compose's `${NAME:-default}` and `$NAME`: an unset or empty NAME takes the default."""
+
+    def take(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(3) or ""
+        return env.get(name) or (match.group(2) or "")
+
+    return _INTERPOLATION.sub(take, value)
+
+
+def _found_password(server_dir: Path | None) -> str | None:
+    """The first root password the server's own files name, in the order compose would use them."""
+    if server_dir is None:
+        return None
+    try:
+        env_file = _assignments(
+            (server_dir / ".env").read_text(encoding="utf-8", errors="replace")
+        )
+    except OSError:
+        env_file = {}
+    candidates: list[str] = []
+    for path in sorted(server_dir.glob("*compose*.y*ml")):
         try:
-            kept = (server_dir / PASSWORD_FILE).read_text(encoding="utf-8").strip()
-        except (OSError, ValueError):
-            kept = ""
-        if kept:
-            return kept
-    if sys.stdin.isatty():
-        typed = getpass.getpass("Database root password (typed, not shown): ")
-        if typed:
-            return typed
-    raise Refusal(
-        "Yu'lon's script could not find the database password: it is not in the server folder's "
-        ".env or compose files, and there is no terminal to ask for it. Run it from a terminal, "
-        f"or put {PASSWORD_VARIABLE} in the server folder's .env, then run it again. "
-        "Nothing was packed."
-    )
+            declared = _assignments(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        candidates += [
+            _interpolate(declared[key], env_file)
+            for key in PASSWORD_VARIABLES
+            if key in declared
+        ]
+    candidates += [
+        _interpolate(env_file[key], env_file)
+        for key in PASSWORD_VARIABLES
+        if key in env_file
+    ]
+    try:
+        candidates.append(
+            (server_dir / PASSWORD_FILE).read_text(encoding="utf-8").strip()
+        )
+    except (OSError, ValueError):
+        pass
+    return next((found for found in candidates if found), None)
+
+
+def _typed_password(prompt: str) -> str:
+    typed = getpass.getpass(prompt)
+    if not typed:
+        raise Refusal(NO_TYPED_PASSWORD)
+    return typed
 
 
 def _sql(access: Access, sql: str) -> str:
@@ -249,9 +384,12 @@ def _sql(access: Access, sql: str) -> str:
         check=False,
     )
     if proc.returncode != 0:
+        message = _text(proc.stderr).strip()
+        if "Access denied" in message or "ERROR 1045" in message:
+            raise AccessDenied("The database refused the password.")
         raise Refusal(
             "The database did not answer the question the script asks, so nothing was packed "
-            f"({_text(proc.stderr).strip()[:300] or 'no message'})."
+            f"({message[:300] or 'no message'})."
         )
     return _text(proc.stdout)
 
@@ -544,27 +682,49 @@ def _manifest_text(
 
 
 def _write_package(dest: Path, manifest: str, dumps: list[tuple[str, Path]]) -> None:
-    """Write `dest` through a `.partial`, read it back against the manifest, then rename it."""
-    # A leftover `.partial` goes first: reopening it would keep whatever mode it was made with.
+    """Write `dest` through a `.partial`, read it back against the manifest, then rename it.
+
+    The `.partial` holds every account's verifier and salt, so any failure removes it before the
+    refusal is raised, as Yu'lon's own write_package does.
+    """
     partial = dest.with_name(dest.name + ".partial")
+    # A leftover `.partial` goes first: reopening it would keep whatever mode it was made with.
     partial.unlink(missing_ok=True)
-    with (
-        os.fdopen(
-            os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), "w+b"
-        ) as raw,
-        zipfile.ZipFile(
-            raw, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
-        ) as archive,
-    ):
-        archive.writestr(MANIFEST_NAME, manifest)
-        for schema, path in dumps:
-            with (
-                path.open("rb") as source,
-                archive.open(f"db/{schema}.sql", "w", force_zip64=True) as sink,
-            ):
-                shutil.copyfileobj(source, sink, CHUNK)
-    _read_back(partial, manifest)
-    os.replace(partial, dest)
+    try:
+        with (
+            os.fdopen(
+                os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), "w+b"
+            ) as raw,
+            zipfile.ZipFile(
+                raw,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=6,
+                allowZip64=True,
+            ) as archive,
+        ):
+            archive.writestr(MANIFEST_NAME, manifest)
+            for schema, path in dumps:
+                with (
+                    path.open("rb") as source,
+                    archive.open(f"db/{schema}.sql", "w", force_zip64=True) as sink,
+                ):
+                    shutil.copyfileobj(source, sink, CHUNK)
+        _read_back(partial, manifest)
+        os.replace(partial, dest)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        if exc.errno == errno.ENOSPC:
+            raise Refusal(
+                "There is not enough free space where the package goes. Free some space or pick "
+                "another folder with --out, then run this again. Nothing was packed."
+            ) from exc
+        raise Refusal(
+            f"The package could not be written ({exc.strerror or exc}). Nothing was packed."
+        ) from exc
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 def _sha256_of(path: Path) -> str:
@@ -622,12 +782,31 @@ def _count_phrase(counts: tuple[int, int, int, int]) -> str:
 
 
 def pack(
-    server_dir: Path | None, out_dir: Path, stopped_flag: bool
+    server_dir: Path | None,
+    out_dir: Path,
+    stopped_flag: bool,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
 ) -> tuple[Path, tuple[int, int, int, int]]:
-    access = _choose_access(server_dir, stopped_flag)
-    password = _root_password(server_dir)
-    access.env = {**os.environ, "MYSQL_PWD": password}
-    databases = _databases(access)
+    access = _choose_access(server_dir, stopped_flag, host, port)
+    found = _found_password(server_dir)
+    typed = found is None
+    if found is None:
+        if not sys.stdin.isatty():
+            raise Refusal(NO_PASSWORD)
+        found = _typed_password("Database root password (typed, not shown): ")
+    access.env = {**os.environ, "MYSQL_PWD": found}
+    try:
+        databases = _databases(access)
+    except AccessDenied as first:
+        # A password found in the server folder may be stale: asked for once more, no more.
+        if typed or not sys.stdin.isatty():
+            raise Refusal(REFUSED_PASSWORD) from first
+        access.env = {**os.environ, "MYSQL_PWD": _typed_password(RETRY_PROMPT)}
+        try:
+            databases = _databases(access)
+        except AccessDenied as second:
+            raise Refusal(REFUSED_PASSWORD) from second
     wanted: list[tuple[str, str]] = []
     for role in ROLES:
         schema = SCHEMA[role]
@@ -713,6 +892,17 @@ def main(argv: list[str] | None = None) -> int:
         help="say the server is stopped (needed when only the MySQL client is "
         "there)",
     )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help="MySQL client mode only: the host (default 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="MySQL client mode only: the port (default 3306)",
+    )
     args = parser.parse_args(argv)
     out_dir = args.out or (
         Path.home() / "Documents"
@@ -722,9 +912,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not out_dir.is_dir():
             raise Refusal(f"The folder {out_dir} does not exist. Nothing was packed.")
-        dest, counts = pack(args.server_dir, out_dir, args.server_stopped)
+        if not 0 < args.port < 65536:
+            raise Refusal("The port must be between 1 and 65535. Nothing was packed.")
+        dest, counts = pack(
+            args.server_dir, out_dir, args.server_stopped, args.host, args.port
+        )
     except Refusal as exc:
         print(str(exc), file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(
+            "Yu'lon's script could not finish writing the package "
+            f"({exc.strerror or exc}). Nothing was packed.",
+            file=sys.stderr,
+        )
         return 2
     print(f"Packed {_count_phrase(counts)} into {dest}.")
     distro = os.environ.get("WSL_DISTRO_NAME")

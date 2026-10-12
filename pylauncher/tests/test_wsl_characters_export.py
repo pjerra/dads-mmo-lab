@@ -10,12 +10,15 @@ fresh server of the same game, version and modules.
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
+import os
 import re
 import stat
 import subprocess
 import sys
+import types
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -170,6 +173,8 @@ def docker(args):
         if name not in FIXTURE["containers"]:
             fail(f"Error: No such object: {name}", 1)
         return print("true" if FIXTURE["containers"][name] else "false")
+    if args[:1] == ["ps"]:
+        return print("\n".join(FIXTURE["containers"]))
     if args[:1] == ["exec"]:
         rest = args[1:]
         if rest[:1] == ["-i"]:
@@ -301,13 +306,20 @@ def _run(
     fixture: Mapping[str, Any] | None = None,
     args: Iterable[str] = (),
     conf: str | None = None,
+    env_text: str | None = None,
+    compose: Mapping[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     """Run the script; returns (process, server dir, out dir, the fake's log)."""
     root = tmp_path / "run"
     root.mkdir(parents=True, exist_ok=True)
     server = root / "server"
     server.mkdir(exist_ok=True)
-    (server / ".env").write_text(f"MYSQL_ROOT_PASSWORD={PASSWORD}\n", encoding="utf-8")
+    (server / ".env").write_text(
+        env_text if env_text is not None else f"MYSQL_ROOT_PASSWORD={PASSWORD}\n",
+        encoding="utf-8",
+    )
+    for name, body in (compose or {}).items():
+        (server / name).write_text(body, encoding="utf-8")
     if conf is not None:
         conf_file = server / "env" / "dist" / "etc" / "modules" / "playerbots.conf"
         conf_file.parent.mkdir(parents=True, exist_ok=True)
@@ -764,3 +776,265 @@ def test_the_written_package_is_read_back_before_it_takes_its_name(
     assert seen == [(dest.name + ".partial", True)]
     assert dest.exists()
     assert not (out / (dest.name + ".partial")).exists()
+
+
+# ============================================================ round 2: review fixes
+
+
+def _prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fixture: Mapping[str, Any] | None = None,
+    env_text: str | None = None,
+) -> tuple[Path, Path]:
+    """A server folder and an out folder for calls to the script's functions, the fake on PATH."""
+    root = tmp_path / "prepared"
+    root.mkdir(parents=True, exist_ok=True)
+    server = root / "server"
+    server.mkdir(exist_ok=True)
+    text = env_text if env_text is not None else f"MYSQL_ROOT_PASSWORD={PASSWORD}\n"
+    (server / ".env").write_text(text, encoding="utf-8")
+    out = root / "out"
+    out.mkdir(exist_ok=True)
+    fixture_path = root / "fixture.json"
+    fixture_path.write_text(json.dumps({**FIXTURE, **(fixture or {})}), encoding="utf-8")
+    monkeypatch.setenv("PATH", str(_write_fake_tools(root, ("docker",))))
+    monkeypatch.setenv("FAKE_DB_FIXTURE", str(fixture_path))
+    monkeypatch.setenv("FAKE_DB_LOG", str(root / "fake.log"))
+    return server, out
+
+
+def test_a_failed_read_back_leaves_no_partial_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch)
+
+    def refuse(partial: Path, manifest: str) -> None:
+        raise script.Refusal("The package did not read back as it was written. Nothing was packed.")
+
+    monkeypatch.setattr(script, "_read_back", refuse)
+    code = script.main(["--server-dir", str(server), "--out", str(out)])
+    assert code == 2
+    assert "did not read back" in capsys.readouterr().err
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("error", "sentence"),
+    [(errno.ENOSPC, "not enough free space"), (errno.EIO, "could not be written")],
+)
+def test_a_write_error_leaves_no_partial_and_says_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: int,
+    sentence: str,
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch)
+
+    def fail(*args: object, **kwargs: object) -> int:
+        raise OSError(error, os.strerror(error))
+
+    monkeypatch.setattr(script.shutil, "copyfileobj", fail)
+    code = script.main(["--server-dir", str(server), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert sentence in err and "Nothing was packed" in err
+    assert list(out.iterdir()) == []
+
+
+def test_the_dump_flags_are_the_ones_yulon_dumps_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _script()
+    monkeypatch.setattr(
+        maintenance,
+        "mysql_client",
+        lambda db_container, tool="mysql", *, client=None: tool,
+    )
+    dumper = maintenance.DockerMysql.__new__(maintenance.DockerMysql)
+    object.__setattr__(dumper, "db_container", "ac-database")
+    object.__setattr__(dumper, "client", "mysql")
+    argv = dumper._dump_argv("acore_auth", ("realmlist",))
+    flags = tuple(
+        a for a in argv[2 : argv.index("--databases")] if not a.startswith("--ignore-table=")
+    )
+    assert argv[1] == "-uroot"
+    assert flags == script.DUMP_FLAGS
+
+
+def test_host_mode_talks_utf8mb4_on_the_port_it_is_given(tmp_path: Path) -> None:
+    process, _server, _out, log = _run(
+        tmp_path,
+        tools=("mysql", "mysqldump"),
+        args=("--server-stopped", "--port", "3307"),
+    )
+    assert process.returncode == 0, process.stderr
+    entries = _entries(log)
+    assert entries
+    for entry in entries:
+        assert "--default-character-set=utf8mb4" in entry["argv"], entry
+        assert entry["argv"][entry["argv"].index("-P") + 1] == "3307", entry
+
+
+def test_a_commented_password_line_is_skipped(tmp_path: Path) -> None:
+    env = f"# MYSQL_ROOT_PASSWORD=old-value\nMYSQL_ROOT_PASSWORD={PASSWORD}\n"
+    process, _server, _out, _log = _run(tmp_path, env_text=env)
+    assert process.returncode == 0, process.stderr
+
+
+def test_a_quoted_password_keeps_its_spaces_and_hash(tmp_path: Path) -> None:
+    secret = "pw # two words"
+    process, _server, _out, _log = _run(
+        tmp_path,
+        env_text=f'MYSQL_ROOT_PASSWORD="{secret}"\n',
+        fixture={"password": secret},
+    )
+    assert process.returncode == 0, process.stderr
+
+
+def test_an_unquoted_password_ends_at_a_comment(tmp_path: Path) -> None:
+    env = f"MYSQL_ROOT_PASSWORD={PASSWORD}   # the root password\n"
+    process, _server, _out, _log = _run(tmp_path, env_text=env)
+    assert process.returncode == 0, process.stderr
+
+
+STOCK_COMPOSE = (
+    "services:\n  ac-database:\n    environment:\n"
+    "      MYSQL_ROOT_PASSWORD: ${DOCKER_DB_ROOT_PASSWORD:-password}\n"
+)
+
+
+def test_the_stock_compose_default_is_used_when_nothing_sets_the_variable(
+    tmp_path: Path,
+) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        env_text="",
+        compose={"docker-compose.yml": STOCK_COMPOSE},
+        fixture={"password": "password"},
+    )
+    assert process.returncode == 0, process.stderr
+
+
+def test_the_docker_db_root_password_from_the_env_file_is_used(tmp_path: Path) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        env_text=f"DOCKER_DB_ROOT_PASSWORD={PASSWORD}\n",
+        compose={"docker-compose.yml": STOCK_COMPOSE},
+    )
+    assert process.returncode == 0, process.stderr
+
+
+def test_a_docker_db_root_password_in_the_env_file_alone_is_used(
+    tmp_path: Path,
+) -> None:
+    process, _server, _out, _log = _run(tmp_path, env_text=f"DOCKER_DB_ROOT_PASSWORD={PASSWORD}\n")
+    assert process.returncode == 0, process.stderr
+
+
+def test_a_refused_password_is_asked_for_once_and_then_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    server, out = _prepare(
+        tmp_path,
+        monkeypatch,
+        env_text="MYSQL_ROOT_PASSWORD=wrong-pw\n",
+        fixture={"password": "typed-pw"},
+    )
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return "typed-pw"
+
+    monkeypatch.setattr(script, "getpass", types.SimpleNamespace(getpass=typed))
+    dest, _counts = script.pack(server, out, False)
+    assert len(asked) == 1
+    assert dest.exists()
+
+
+def test_a_typed_password_that_is_also_refused_is_not_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    server, out = _prepare(
+        tmp_path,
+        monkeypatch,
+        env_text="MYSQL_ROOT_PASSWORD=wrong-pw\n",
+        fixture={"password": "right-pw"},
+    )
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return "also-wrong"
+
+    monkeypatch.setattr(script, "getpass", types.SimpleNamespace(getpass=typed))
+    with pytest.raises(script.Refusal, match="refused the password"):
+        script.pack(server, out, False)
+    assert len(asked) == 1
+    assert list(out.iterdir()) == []
+
+
+def test_a_server_of_another_game_is_named_by_its_containers(tmp_path: Path) -> None:
+    process, _server, out, _log = _run(tmp_path, fixture={"containers": {"tbc-db": True}})
+    assert process.returncode == 2
+    assert "WoW TBC, not WoW WotLK" in process.stderr
+    assert list(out.iterdir()) == []
+
+
+def test_a_server_of_another_game_is_named_by_its_compose_file(tmp_path: Path) -> None:
+    compose = {"docker-compose.yml": "services:\n  db:\n    container_name: centurion-db\n"}
+    process, _server, out, _log = _run(tmp_path, tools=(), compose=compose)
+    assert process.returncode == 2
+    assert "Centurion, not WoW WotLK" in process.stderr
+    assert list(out.iterdir()) == []
+
+
+def test_the_other_games_the_script_names_match_the_catalog() -> None:
+    script = _script()
+    catalog = load_catalog()
+    assert {game_id for game_id, _name, _db in script.OTHER_GAMES} == {
+        "wow-tbc",
+        "wow-vanilla",
+        "wow-tortoise",
+        "wow-centurion",
+        "wow-unbound",
+    }
+    for game_id, name, database in script.OTHER_GAMES:
+        entry = catalog.get(game_id)
+        assert entry.name == name
+        assert entry.container_spec().db == database
+
+
+def test_a_port_out_of_range_is_refused(tmp_path: Path) -> None:
+    process, _server, out, _log = _run(
+        tmp_path, tools=("mysql", "mysqldump"), args=("--server-stopped", "--port", "70000")
+    )
+    assert process.returncode == 2
+    assert "between 1 and 65535" in process.stderr
+    assert list(out.iterdir()) == []
+
+
+def test_a_disk_error_while_dumping_is_said_in_plain_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch)
+
+    def full(*args: object, **kwargs: object) -> Path:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(script, "_dump", full)
+    code = script.main(["--server-dir", str(server), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "could not finish writing the package" in err and "Nothing was packed" in err
+    assert list(out.iterdir()) == []
