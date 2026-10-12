@@ -202,6 +202,8 @@ def client(tool, args, container):
         for flag in ("--single-transaction", "--routines", "--events", "--triggers"):
             if flag not in args:
                 fail("mysqldump was not asked for " + flag, 1)
+        if FIXTURE.get("dump_error"):
+            fail("mysqldump: " + FIXTURE["dump_error"], 2)
         database = args[args.index("--databases") + 1]
         ignore = [a.split("=", 1)[1] for a in args if a.startswith("--ignore-table=")]
         return sys.stdout.write(dump(database, ignore))
@@ -1023,7 +1025,116 @@ def test_a_port_out_of_range_is_refused(tmp_path: Path) -> None:
     assert list(out.iterdir()) == []
 
 
-def test_a_disk_error_while_dumping_is_said_in_plain_words(
+def test_an_io_error_while_dumping_is_said_in_plain_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch)
+
+    def full(*args: object, **kwargs: object) -> Path:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(script, "_dump", full)
+    code = script.main(["--server-dir", str(server), "--out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "could not finish writing the package" in err and "Nothing was packed" in err
+    assert list(out.iterdir()) == []
+
+
+# ================================================================ round 2 (cold review)
+
+
+def test_a_password_with_equals_signs_is_read_whole(tmp_path: Path) -> None:
+    secret = "ab=cd==e"
+    process, _server, _out, _log = _run(
+        tmp_path, env_text=f"MYSQL_ROOT_PASSWORD={secret}\n", fixture={"password": secret}
+    )
+    assert process.returncode == 0, process.stderr
+
+
+def test_a_single_quoted_dollar_is_literal_and_a_double_dollar_is_one_dollar(
+    tmp_path: Path,
+) -> None:
+    for text, secret in (
+        ("MYSQL_ROOT_PASSWORD='pa$word'\n", "pa$word"),
+        ("MYSQL_ROOT_PASSWORD=pa$$word\n", "pa$word"),
+    ):
+        process, _server, _out, _log = _run(
+            tmp_path / secret.replace("$", "S") / str(len(text)),
+            env_text=text,
+            fixture={"password": secret},
+        )
+        assert process.returncode == 0, (text, process.stderr)
+
+
+def test_no_password_in_the_folder_is_asked_for_when_there_is_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch, env_text="", fixture={"password": "typed-pw"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    asked: list[str] = []
+
+    def typed(prompt: str = "") -> str:
+        asked.append(prompt)
+        return "typed-pw"
+
+    monkeypatch.setattr(script, "getpass", types.SimpleNamespace(getpass=typed))
+    dest, _counts = script.pack(server, out, False)
+    assert len(asked) == 1
+    assert dest.exists()
+
+
+def test_without_a_server_folder_the_password_is_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    _server, out = _prepare(tmp_path, monkeypatch, fixture={"password": "typed-pw"})
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        script, "getpass", types.SimpleNamespace(getpass=lambda prompt="": "typed-pw")
+    )
+    dest, _counts = script.pack(None, out, False)
+    assert dest.exists()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("boom"), KeyboardInterrupt()])
+def test_any_failure_while_the_package_is_written_removes_the_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException
+) -> None:
+    script = _script()
+    dump = tmp_path / "acore_auth.sql"
+    dump.write_bytes(b"-- dump\n")
+    dest = tmp_path / "package.zip"
+
+    def explode(partial: Path, manifest: str) -> None:
+        assert partial.exists()
+        raise failure
+
+    monkeypatch.setattr(script, "_read_back", explode)
+    with pytest.raises(type(failure)):
+        script._write_package(dest, "{}", [("acore_auth", dump)])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["acore_auth.sql"]
+
+
+def test_a_failure_that_is_not_an_oserror_during_the_copy_removes_the_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    dump = tmp_path / "acore_auth.sql"
+    dump.write_bytes(b"-- dump\n")
+
+    def explode(*args: object, **kwargs: object) -> int:
+        raise ValueError("bad")
+
+    monkeypatch.setattr(script.shutil, "copyfileobj", explode)
+    with pytest.raises(ValueError):
+        script._write_package(tmp_path / "package.zip", "{}", [("acore_auth", dump)])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["acore_auth.sql"]
+
+
+def test_a_full_disk_is_said_so_whichever_step_hit_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script = _script()
@@ -1033,8 +1144,24 @@ def test_a_disk_error_while_dumping_is_said_in_plain_words(
         raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
 
     monkeypatch.setattr(script, "_dump", full)
-    code = script.main(["--server-dir", str(server), "--out", str(out)])
+    assert script.main(["--server-dir", str(server), "--out", str(out)]) == 2
     err = capsys.readouterr().err
-    assert code == 2
-    assert "could not finish writing the package" in err and "Nothing was packed" in err
+    assert "not enough free space" in err and "--out" in err and "Nothing was packed" in err
+
+
+def test_a_dump_that_stops_on_a_full_disk_is_said_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch, fixture={"dump_error": "Got errno 28 on write"})
+    assert script.main(["--server-dir", str(server), "--out", str(out)]) == 2
+    err = capsys.readouterr().err
+    assert "not enough free space" in err and "Nothing was packed" in err
     assert list(out.iterdir()) == []
+
+
+def test_the_readme_says_how_to_fetch_the_script_and_which_python_it_needs() -> None:
+    readme = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("export-accounts-and-characters-wsl.py") :]
+    assert "curl" in section and SCRIPT.name in section.split("curl", 1)[1].splitlines()[0]
+    assert "Python 3.11" in section

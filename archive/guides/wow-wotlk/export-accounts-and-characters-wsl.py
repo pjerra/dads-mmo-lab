@@ -143,6 +143,10 @@ class AccessDenied(Refusal):
     """The database refused the password the script used."""
 
 
+DISK_FULL = (
+    "There is not enough free space where the package goes (the disk is full). Free some space "
+    "or pick another folder with --out, then run this again. Nothing was packed."
+)
 DOCKER_SILENT_HINT = (
     " Docker is installed here but is not answering: start it (sudo service docker start), "
     "or add this user to the docker group, then run this again."
@@ -199,6 +203,11 @@ def _lit(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "''")
 
 
+def _disk_full_message(message: str) -> bool:
+    """Does a client's error text say the disk is full? (errno 28, or its strerror)"""
+    return "errno 28" in message.lower() or "no space left" in message.lower()
+
+
 def _text(data: bytes) -> str:
     return data.decode("utf-8", "replace")
 
@@ -208,7 +217,7 @@ def _text(data: bytes) -> str:
 
 _ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
 _INTERPOLATION = re.compile(
-    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+    r"(\$\$)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)"
 )
 
 
@@ -296,12 +305,14 @@ def _env_value(raw: str) -> str:
     """One value as an env file or a compose file reads it.
 
     Quotes keep everything between them, `#` and spaces included. An unquoted value ends at a
-    ` #` that starts a comment.
+    ` #` that starts a comment. A single-quoted value is literal, so its `$` is doubled here and
+    `_interpolate` turns it back into one `$`.
     """
     raw = raw.strip()
     if raw[:1] in ("'", '"'):
         end = raw.find(raw[0], 1)
-        return raw[1:end] if end != -1 else raw[1:]
+        inner = raw[1:end] if end != -1 else raw[1:]
+        return inner.replace("$", "$$") if raw[0] == "'" else inner
     return re.split(r"\s+#", raw, maxsplit=1)[0].rstrip()
 
 
@@ -324,8 +335,10 @@ def _interpolate(value: str, env: Mapping[str, str]) -> str:
     """Compose's `${NAME:-default}` and `$NAME`: an unset or empty NAME takes the default."""
 
     def take(match: re.Match[str]) -> str:
-        name = match.group(1) or match.group(3) or ""
-        return env.get(name) or (match.group(2) or "")
+        if match.group(1):
+            return "$"
+        name = match.group(2) or match.group(4) or ""
+        return env.get(name) or (match.group(3) or "")
 
     return _INTERPOLATION.sub(take, value)
 
@@ -630,6 +643,8 @@ def _dump(access: Access, database: str, target: Path) -> list[str]:
             argv, stdout=sink, stderr=subprocess.PIPE, env=access.env, check=False
         )
     if proc.returncode != 0:
+        if _disk_full_message(_text(proc.stderr)):
+            raise Refusal(DISK_FULL)
         raise Refusal(
             f"mysqldump could not dump {database} ({_text(proc.stderr).strip()[:300]}). "
             "Nothing was packed."
@@ -715,10 +730,7 @@ def _write_package(dest: Path, manifest: str, dumps: list[tuple[str, Path]]) -> 
     except OSError as exc:
         partial.unlink(missing_ok=True)
         if exc.errno == errno.ENOSPC:
-            raise Refusal(
-                "There is not enough free space where the package goes. Free some space or pick "
-                "another folder with --out, then run this again. Nothing was packed."
-            ) from exc
+            raise Refusal(DISK_FULL) from exc
         raise Refusal(
             f"The package could not be written ({exc.strerror or exc}). Nothing was packed."
         ) from exc
@@ -921,6 +933,9 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            print(DISK_FULL, file=sys.stderr)
+            return 2
         print(
             "Yu'lon's script could not finish writing the package "
             f"({exc.strerror or exc}). Nothing was packed.",
