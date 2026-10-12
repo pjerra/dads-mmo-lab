@@ -17,6 +17,9 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 - The Maintenance tab lists the backups an earlier uninstall kept, so a reinstall can restore them.
 ### Fixed
+- Move files Yu'lon writes can be read by you alone, and a pack's leftover copy can be deleted from Backups.
+- The Console tab now refuses a shutdown command typed with a leading ! as it does one with a dot.
+- An update saved to your Downloads folder never replaces or deletes a file of yours with the same name.
 - A server build now waits for Docker and tries once more when Docker stops answering during it.
 - The command channel now proves itself once the world is up, and **Turn on the command channel** gives its tries back.
 - **Bring from another computer…** is pressable again on a game's tile right after **Remove from Yu'lon**.
