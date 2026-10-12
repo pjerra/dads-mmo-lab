@@ -127,6 +127,13 @@ A quick one-page reference for creating player accounts. Useful to bookmark and 
 
 ## 🛠️ Scripts & Tools
 
+### `export-accounts-and-characters-wsl.py` — Pack Accounts and Characters from WSL
+**Platform: Windows (WSL2)**
+
+For a WotLK server inside a WSL distro that was built by the DML Launcher or the old bash installer. Inside that distro, run `python3 export-accounts-and-characters-wsl.py --server-dir <server folder>`. It writes one private file with the accounts and characters, and nothing else: no world database, no config files, no modules. On the new computer, open a fresh WotLK server in Yu'lon and choose **Bring in accounts and characters…** on its Maintenance tab. The file holds every account's login verifier, so keep it private.
+
+---
+
 ### `install-wow-wotlk.sh` — Automated Installer
 **Platform: Steam Deck**
 
