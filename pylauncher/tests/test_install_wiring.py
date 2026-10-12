@@ -62,7 +62,7 @@ def _without_import_service(entry: CatalogEntry) -> CatalogEntry:
 
 def test_the_fixed_password_is_the_entry_value_or_the_acore_default() -> None:
     assert install_wiring.DEFAULT_DB_ROOT_PASSWORD == "password"
-    assert install_wiring.fixed_db_password(WOTLK) == WOTLK.install.password.value
+    assert install_wiring.fixed_db_password(WOTLK) == "password", "WotLK publishes no value (T748)"
     blank = WOTLK.model_copy(
         update={
             "install": WOTLK.install.model_copy(

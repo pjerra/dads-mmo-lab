@@ -45,6 +45,10 @@ from yulon.catalog.installer import (
 )
 from yulon.controller import Controller, StartRefused
 
+WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
+"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
+for a folder with no record give the render this value."""
+
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
 UNBOUND = CATALOG.get("wow-unbound")
@@ -314,7 +318,7 @@ def test_a_channel_missing_its_command_port_line_is_not_read_as_on(tmp_path: Pat
         install_id=composegen.install_id(tmp_path, platform_id=_linux),
         create=never,
         channel_for=never,
-        db_password=WOTLK.install.db_password(tmp_path),
+        db_password=(WOTLK.install.db_password(tmp_path) or WOTLK_TEST_SECRET),
     )
     assert tab.is_enabled() is not True
 

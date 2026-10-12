@@ -23,6 +23,10 @@ from yulon import platform, resources
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
 
+WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
+"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
+for a folder with no record give the render this value."""
+
 WOTLK = load_catalog().get("wow-wotlk")
 TBC = load_catalog().get("wow-tbc")
 
@@ -49,10 +53,14 @@ CONF_BEFORE = (
 
 
 def _installed(tmp_path: Path) -> Path:
-    """A server dir with the three compose files, as an install has them."""
+    """A server dir with the three compose files and the record, as an install has them (T748)."""
     from yulon.catalog import composegen
 
-    plan = composegen.render(WOTLK, tmp_path, templates_root=resources.installers_dir())
+    secret = "wotlk-0123456789abcdef"
+    (tmp_path / ".db_password").write_text(secret + "\n", encoding="utf-8")
+    plan = composegen.render(
+        WOTLK, tmp_path, templates_root=resources.installers_dir(), db_password=secret
+    )
     composegen.write_plan(plan, tmp_path)
     return tmp_path
 
@@ -307,6 +315,7 @@ def _enabled_text(server_dir: Path) -> str:
         server_dir,
         templates_root=resources.installers_dir(),
         world_env=setup._world_env(WOTLK, WOTLK.operations.enable_env),
+        db_password=WOTLK_TEST_SECRET,
     ).override
 
 
@@ -580,7 +589,11 @@ def _installed_with_label(tmp_path: Path) -> Path:
     from yulon.catalog import composegen
 
     plan = composegen.render(
-        WOTLK, tmp_path, templates_root=resources.installers_dir(), bind_label=":z"
+        WOTLK,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        bind_label=":z",
+        db_password=WOTLK_TEST_SECRET,
     )
     composegen.write_plan(plan, tmp_path)
     return tmp_path

@@ -693,6 +693,15 @@ landed 2026-08-24 and has waited for this caller since). The templates spell
 Tortoise's time-derived, unpersisted password is gone. Plaintext in the CMaNGOS confs is
 unavoidable (the emulator reads files) and those are 0600.
 
+**T748 (2026-10-12, owner decision "do t748 also").** WotLK and Unbound are `generated` now,
+with `legacy: "password"`. A fresh folder mints `wotlk-` or `unbound-` plus 16 hex, written to
+`.db_password` by a `db-password` stage that runs after the clones and before `generate-compose`
+(the clone needs an empty folder, and the record must exist before the database starts). An
+install made before this has no record, and it is recognised by its own compose file: the first
+line is `GENERATED_MARKER`, which the upstream AzerothCore checkout does not carry. It keeps
+`password`, or the `DB_ROOT_PASSWORD` already in its own `.env`. Nothing is migrated. An old
+folder's compose text changes only when the app next re-renders it, and its password does not.
+
 ### Ready
 
 `docker.wait_ready(ReadySpec)` keeps the measured mechanics — `StartedAt` + `logs --since`,

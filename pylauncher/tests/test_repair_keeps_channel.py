@@ -26,6 +26,10 @@ from yulon.catalog import composegen, native
 from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 
+WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
+"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
+for a folder with no record give the render this value."""
+
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
 TBC = CATALOG.get("wow-tbc")
@@ -56,7 +60,9 @@ def _context(server_dir: Path) -> native.StageContext:
             family="azerothcore",
         ),
         cancel=None,
-        secrets=native.Secrets(db_password=WOTLK.install.db_password(server_dir)),
+        secrets=native.Secrets(
+            db_password=(WOTLK.install.db_password(server_dir) or WOTLK_TEST_SECRET)
+        ),
     )
 
 
@@ -86,7 +92,7 @@ def _tab(server_dir: Path) -> channel_setup.InstallChannel:
         install_id=composegen.install_id(server_dir, platform_id=_linux),
         create=never,
         channel_for=never,
-        db_password=WOTLK.install.db_password(server_dir),
+        db_password=(WOTLK.install.db_password(server_dir) or WOTLK_TEST_SECRET),
     )
 
 

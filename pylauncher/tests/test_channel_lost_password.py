@@ -42,6 +42,10 @@ from yulon.ui import controller_view as controller_view_module
 from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
+WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
+"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
+for a folder with no record give the render this value."""
+
 CATALOG = load_catalog()
 FAMILIES = ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise", "wow-centurion"]
 FORGOTTEN = "Forgotten_99"

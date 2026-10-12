@@ -57,7 +57,9 @@ def test_wotlk_entry_matches_the_controller_spec() -> None:
     wotlk = load_catalog().get("wow-wotlk")
     assert wotlk.container_spec() == docker_ctl.SPEC
     assert wotlk.has_manifests is True
-    assert wotlk.install.password == PasswordPlan(mode="fixed", value="password")
+    assert wotlk.install.password == PasswordPlan(
+        mode="generated", file=".db_password", prefix="wotlk-", legacy="password"
+    )
     assert wotlk.emulator.sources[0].url == (
         "https://github.com/mod-playerbots/azerothcore-wotlk.git"
     )
@@ -434,7 +436,7 @@ def test_db_password_prefers_a_fixed_one_then_the_generated_file(tmp_path: Path)
     catalog = load_catalog()
 
     wotlk = catalog.get("wow-wotlk").install
-    assert wotlk.db_password(tmp_path) == "password", "a fixed password wins outright"
+    assert wotlk.db_password(tmp_path) is None, "a fresh folder: nothing is knowable yet (T748)"
 
     tbc = catalog.get("wow-tbc").install
     assert tbc.password.file, "wow-tbc is expected to generate its password"
@@ -462,14 +464,16 @@ def test_db_password_is_none_when_the_file_cannot_be_read(tmp_path: Path) -> Non
 def test_every_entry_says_how_its_password_comes_to_exist() -> None:
     """One model, two modes (phase7-decisions "Password").
 
-    WotLK's fixed `"password"` is a contract with backup, the console and every
-    archived guide. The three CMaNGOS entries generate one per install and
-    persist it at `.db_password`, prefixed so a value seen in `docker exec`
-    output says which server it belongs to. The two old optional strings let an
+    WotLK's `"password"` is the published fallback an install made before generated
+    passwords keeps (T748); a new WotLK install generates its own. The three CMaNGOS
+    entries generate one per install and persist it at `.db_password`, prefixed so a
+    value seen in `docker exec` output says which server it belongs to. The two old optional strings let an
     entry say both or neither; the model refuses that.
     """
     catalog = load_catalog()
-    assert catalog.get("wow-wotlk").install.password == PasswordPlan(mode="fixed", value="password")
+    assert catalog.get("wow-wotlk").install.password == PasswordPlan(
+        mode="generated", file=".db_password", prefix="wotlk-", legacy="password"
+    )
     generated = (("wow-tbc", "tbc-"), ("wow-vanilla", "vanilla-"), ("wow-tortoise", "tortoise-"))
     for game_id, prefix in generated:
         plan = catalog.get(game_id).install.password
@@ -646,7 +650,7 @@ def test_ready_markers_are_literal_unless_the_entry_says_regex() -> None:
         ReadyMarkers(world="")
 
 
-def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> None:
+def test_a_game_with_a_one_shot_import_service_has_a_published_password_to_fall_back_to() -> None:
     """The invariant that keeps the import gate and the Server tab on one password.
 
 
@@ -695,15 +699,20 @@ def test_a_game_with_a_one_shot_import_service_must_carry_a_fixed_password() -> 
 
     """
 
-    generated = [
+    # T748: the probe takes the folder's own password (`import_gate_for(entry, server_dir=…)`),
+    # so a generated plan is allowed here. It must still name the published value an old folder
+    # keeps, which is what the folder-less gate answers the Server tab with.
+    unanswerable = [
         entry.id
         for entry in load_catalog().games
-        if entry.containers.db_import and entry.install.password.mode != "fixed"
+        if entry.containers.db_import
+        and entry.install.password.mode != "fixed"
+        and entry.install.password.legacy is None
     ]
 
-    assert not generated, (
-        "these name a one-shot import service but generate their password, so the "
-        f"import gate would authenticate with the catalogue's fixed value: {generated}"
+    assert not unanswerable, (
+        "these name a one-shot import service but have no published password for a folder "
+        f"with no record: {unanswerable}"
     )
 
     assert any(

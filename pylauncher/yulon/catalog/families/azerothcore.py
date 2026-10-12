@@ -436,6 +436,10 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
             *patch_stage,
+            # Never recorded, and before the compose file exists: a folder with a compose file
+            # and no record is an install made before generated passwords (T748). It comes after
+            # the clones, which need an empty folder or their own checkout.
+            Stage("db-password", self._db_password, recorded=False),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),
             Stage("client-data", self._client_data, cancel_note=DOWNLOAD_CANCEL_NOTE),
@@ -1353,10 +1357,11 @@ class AzerothCoreInstaller(StagedInstaller):
         service" are the same skip, worded here and not in the spine (A7).
         """
         service = self.entry.containers.db_import
-        if self._probe is None or not service:
+        probe, reset = self._gate_for(ctx.server_dir)
+        if probe is None or not service:
             yield "This server has no separate database import step."
             return
-        yield from self.stage_import(ctx, CallableGate(self._probe, self._reset), service)
+        yield from self.stage_import(ctx, CallableGate(probe, reset), service)
 
 
 def _sql_of(lines: Sequence[str]) -> tuple[str, ...]:

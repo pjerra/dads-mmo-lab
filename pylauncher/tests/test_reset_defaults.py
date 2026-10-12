@@ -237,6 +237,9 @@ def _cmangos_compose(server: Path, entry: CatalogEntry = TBC) -> None:
     list(engine.stage_generate_compose(_context(server, password, entry)))
 
 
+WOTLK_RECORD = "wotlk-0123456789abcdef"
+
+
 def _wotlk_stack(server: Path, *, channel: bool = False) -> bytes:
     """The override the install's OWN compose stage writes (and the channel press, if asked)."""
     engine = AzerothCoreInstaller(
@@ -245,7 +248,9 @@ def _wotlk_stack(server: Path, *, channel: bool = False) -> bytes:
             platform_id=_linux, selinux_enforcing=lambda: False, fs_type=lambda path: "ext4"
         ),
     )
-    list(engine.stage_generate_compose(_context(server, "password", WOTLK, "azerothcore")))
+    # A new install's record (T748); the reset reads the same file the install wrote.
+    (server / ".db_password").write_text(WOTLK_RECORD + "\n", encoding="utf-8")
+    list(engine.stage_generate_compose(_context(server, WOTLK_RECORD, WOTLK, "azerothcore")))
     if channel:
         channel_setup.enable(
             WOTLK, server, templates_root=resources.installers_dir(), world_running=False
