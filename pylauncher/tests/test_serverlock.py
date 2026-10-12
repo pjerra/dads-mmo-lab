@@ -382,7 +382,7 @@ def _watch_secrets(
         monkeypatch.setattr(module, name, watched)
 
     wrap(platform, "write_private_atomically")
-    wrap(cmangos, "_write_secret")
+    wrap(native, "write_secret")
     wrap(conf, "_write")
     return seen
 

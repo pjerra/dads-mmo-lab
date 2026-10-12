@@ -186,13 +186,14 @@ EXCEPTIONS: dict[tuple[str, str], tuple[str, frozenset[str]]] = {
         f"relabelling the server folder for SELinux when Yu'lon could not: {_TYPED}",
         frozenset({"chcon -Rt container_file_t {…}"}),
     ),
-    **{
-        ("yulon/catalog/families/cmangos.py", owner): (
-            f"deleting a database volume whose password is lost: {_TYPED}",
-            frozenset({"docker volume rm {…}_db-data"}),
-        )
-        for owner in ("_db_password", "_password_origin_note")
-    },
+    ("yulon/catalog/native.py", "_db_password"): (
+        f"deleting a database volume whose password is lost: {_TYPED}",
+        frozenset({"docker volume rm {…}_db-data"}),
+    ),
+    ("yulon/catalog/families/cmangos.py", "_password_origin_note"): (
+        f"deleting a database volume whose password is lost: {_TYPED}",
+        frozenset({"docker volume rm {…}_db-data"}),
+    ),
     ("yulon/catalog/families/cmangos.py", "_refuse_to_patch_what_will_not_be_rebuilt"): (
         f"removing the images so the next install compiles again: {_TYPED}",
         frozenset({"docker image rm"}),

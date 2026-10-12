@@ -45,6 +45,7 @@ from pathlib import Path, PurePosixPath
 from yulon import platform, playerbots_keys, tuning
 from yulon.catalog import bot_dashboard, time_zone
 from yulon.catalog.catalog import (
+    BASE_COMPOSE_FILE,
     NATIVE_DEFAULT_DB_PORT,
     CatalogEntry,
     CmangosData,
@@ -55,7 +56,7 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-BASE_FILE = "docker-compose.yml"
+BASE_FILE = BASE_COMPOSE_FILE
 OVERRIDE_FILE = "docker-compose.override.yml"
 BUILD_FILE = "docker-compose.build.yml"
 DOTENV_FILE = ".env"
@@ -1683,7 +1684,13 @@ def write_plan(
         if _write_one(path, text, replaceable=name in replaceable):
             written.append(path)
     if plan.dotenv:
-        written.append(write_dotenv(server_dir, plan.dotenv))
+        # Reported only when the bytes change: `write_plan()` answers `()` for a second run over
+        # the same plan, and a generated plan's `.env` is part of that (T748).
+        env = server_dir / DOTENV_FILE
+        before = env.read_bytes() if env.is_file() else None
+        write_dotenv(server_dir, plan.dotenv)
+        if env.read_bytes() != before:
+            written.append(env)
     return tuple(written)
 
 

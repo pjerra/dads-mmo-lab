@@ -21,7 +21,7 @@ import pytest
 
 from yulon import dbsecret, docker, logsnap, platform, purge
 from yulon.catalog import composegen, native
-from yulon.catalog.catalog import load_catalog
+from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.catalog.families.cmangos import CmangosInstaller
 from yulon.controller_wow_wotlk import docker_ctl
 from yulon.ownership import Ownership
@@ -161,9 +161,14 @@ class Recorder:
         return purge.Uninstaller(**seams)  # type: ignore[arg-type]
 
 
+WOTLK_RECORD = "wotlk-0123456789abcdef"
+"""The record a NEW WotLK install writes (T748); the purge fixtures are new installs."""
+
+
 def _recorder(tmp_path: Path, **kwargs: object) -> Recorder:
     server_dir = tmp_path / "wowserver"
     server_dir.mkdir(exist_ok=True)
+    (server_dir / ".db_password").write_text(WOTLK_RECORD + "\n", encoding="utf-8")
     return Recorder(server_dir, **kwargs)  # type: ignore[arg-type]
 
 
@@ -682,6 +687,7 @@ def test_the_kept_volume_is_the_name_a_reinstall_to_this_folder_recomputes(
     """
     server_dir = tmp_path / "wowserver"
     server_dir.mkdir(exist_ok=True)
+    (server_dir / ".db_password").write_text(WOTLK_RECORD + "\n", encoding="utf-8")
     project = composegen.project_name(GAME, server_dir)
     rec = Recorder(server_dir, project=project)
     report = rec.uninstaller().run(keep_characters=True)
@@ -964,7 +970,8 @@ def test_a_ticked_purge_refuses_when_the_password_it_would_have_to_keep_is_gone(
     kept, its key is gone, and nothing can put either back. Refused here the
     user still has the folder, the file and the choice.
     """
-    rec = _recorder(tmp_path)  # a folder with no `.db_password` in it
+    rec = _recorder(tmp_path)
+    (rec.server_dir / ".db_password").unlink()  # a folder with no `.db_password` in it
     with pytest.raises(purge.PurgeError) as caught:
         rec.uninstaller(game=GENERATED_GAME).run(keep_characters=True)
     message = str(caught.value)
@@ -994,14 +1001,17 @@ def test_a_fixed_password_install_keeps_no_copy_of_a_password_the_catalog_carrie
 ) -> None:
     """The gated family, and the reason the gate could not have found this bug.
 
-    `wow-wotlk` is `fixed`: the value is in `catalog.json`, so the folder never
-    held the only copy and there is nothing for a purge to rescue. Copying it
-    into the config directory anyway would spread a secret for no reason and
-    make the ticked path look tested on a family where it is trivially true.
+    A game whose password is `fixed` keeps the value in `catalog.json`, so the folder never
+    holds the only copy and there is nothing for a purge to rescue. Copying it into the config
+    directory anyway would spread a secret for no reason. No shipped entry is fixed any more
+    (T748), so the rule is asked of a copy of the WotLK entry whose plan is fixed.
     """
-    rec = _recorder(tmp_path)
-    report = rec.uninstaller().run(keep_characters=True)
-    assert report.kept_volumes and report.secret_kept is None
+    data = load_catalog().get("wow-wotlk").model_dump(mode="json")
+    data["install"]["password"] = {"mode": "fixed", "value": "password"}
+    fixed = CatalogEntry.model_validate(data)
+    server_dir = tmp_path / "wowserver"
+    server_dir.mkdir()
+    assert dbsecret.at_risk(fixed.install, server_dir) == dbsecret.AtRisk()
     assert not (platform.config_dir() / dbsecret.DIR_NAME).exists()
 
 

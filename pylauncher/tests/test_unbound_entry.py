@@ -118,12 +118,18 @@ def test_it_has_its_own_containers_ports_and_soap() -> None:
     assert entry.install.native.image_prefix == "yulon.local/ac-unbound-"
 
 
-def test_its_database_password_plan_is_the_fixed_one_the_import_gate_reads() -> None:
-    """`import_gate_for` reads `fixed_db_password`; a generated plan would give the check the
-    wrong password (T552's cold review)."""
+def test_its_database_password_plan_is_generated_with_the_published_fallback() -> None:
+    """T748: a new Unbound folder gets its own password; an old one keeps the published value.
+
+    `import_gate_for(entry, server_dir=…)` reads the folder's own password, and the folder-less
+    gate answers the published fallback, which `fixed_db_password()` returns."""
     entry = unbound()
-    assert entry.install.password.mode == "fixed"
-    assert fixed_db_password(entry) == fixed_db_password(load_catalog().get("wow-wotlk"))
+    assert entry.install.password.mode == "generated"
+    assert entry.install.password.prefix == "unbound-"
+    assert entry.install.password.legacy == "password"
+    assert (
+        fixed_db_password(entry) == fixed_db_password(load_catalog().get("wow-wotlk")) == "password"
+    )
     probe, reset = import_gate_for(entry)
     assert probe is not None and reset is not None
 
@@ -435,7 +441,15 @@ def test_the_installer_runs_the_patch_and_lua_stages_and_wotlks_tuple_is_unchang
     names = make_installer(unbound()).stage_names()
     assert "patch-sources" in names and "lua-and-sql" in names
     wotlk = make_installer(load_catalog().get("wow-wotlk")).stage_names()
-    assert wotlk == AzerothCoreInstaller.STAGE_NAMES
+    # The recorded tuple is unchanged. T748 adds one unrecorded stage before generate-compose,
+    # which `stage_names()` lists and `STAGE_NAMES` (the historical record) does not.
+    before = AzerothCoreInstaller.STAGE_NAMES.index("generate-compose")
+    expected = (
+        AzerothCoreInstaller.STAGE_NAMES[:before]
+        + ("db-password",)
+        + AzerothCoreInstaller.STAGE_NAMES[before:]
+    )
+    assert wotlk == expected
     assert "patch-sources" not in wotlk and "lua-and-sql" not in wotlk
 
 

@@ -559,3 +559,18 @@ def test_a_shallow_checkout_asks_github_how_far_the_packed_commit_is() -> None:
     )
     assert asked == [("mod-playerbots/azerothcore-wotlk", WOTLK.emulator.sources[0].rev, CORE)]
     assert (got[0].pin, got[0].ahead) == (CORE, 0)  # behind the pin: the catch-up reading
+
+
+def test_an_old_wotlk_password_is_a_published_word_and_does_not_refuse_the_pack(
+    tmp_path: Path,
+) -> None:
+    """T748: an install made before generated passwords has `password`, a published word.
+
+    A conf that merely says the word is not a leaked secret, so the pack goes through, as it
+    does for a fixed password. A generated value found in a file still refuses (above).
+    """
+    server = wotlk_server(tmp_path)
+    (server / "env" / "dist" / "etc" / "worldserver.conf").write_bytes(
+        b"Rate.XP.Kill = 3\nMyNote = password\n"
+    )
+    facts(server, secret_password="password")  # the published value an old folder carries
