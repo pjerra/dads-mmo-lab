@@ -695,12 +695,17 @@ unavoidable (the emulator reads files) and those are 0600.
 
 **T748 (2026-10-12, owner decision "do t748 also").** WotLK and Unbound are `generated` now,
 with `legacy: "password"`. A fresh folder mints `wotlk-` or `unbound-` plus 16 hex, written to
-`.db_password` by a `db-password` stage that runs after the clones and before `generate-compose`
-(the clone needs an empty folder, and the record must exist before the database starts). An
-install made before this has no record, and it is recognised by its own compose file: the first
-line is `GENERATED_MARKER`, which the upstream AzerothCore checkout does not carry. It keeps
-`password`, or the `DB_ROOT_PASSWORD` already in its own `.env`. Nothing is migrated. An old
-folder's compose text changes only when the app next re-renders it, and its password does not.
+`.db_password` by a `db-password` stage that runs after the clones and before `generate-compose`.
+Which install is old is read from its own record, never from a missing file: the guard's fresh
+`.yulon-install.json` carries `"db_password": "generated"` (additive, like `family` in 7.1), and
+a record without that key was written before T748. Such an install keeps `password`, or the
+`DB_ROOT_PASSWORD` already in its own `.env`; nothing is migrated and the key is never added to
+it. A folder with no record at all (adopted where it is) reads as before, `password`. A new
+install whose `.db_password` is gone has no knowable password: readers answer None and the
+CMaNGOS refusal applies. A database volume kept with no copy of its password (an install removed
+before T748) opens with `password`, and the reinstall writes that down. The compose text names
+`${DB_ROOT_PASSWORD:?…}` only, so an old folder's compose text changes when the app next renders
+it and its `.env` gains `DB_ROOT_PASSWORD=password`; its password does not change.
 
 ### Ready
 

@@ -403,6 +403,7 @@ class AzerothCoreInstaller(StagedInstaller):
     STAGE_NAMES: ClassVar[tuple[str, ...]] = (
         "clone-core",
         "clone-modules",
+        "db-password",
         "generate-compose",
         "build",
         "client-data",
@@ -411,7 +412,10 @@ class AzerothCoreInstaller(StagedInstaller):
         "up",
         "ready",
     )
-    """Pinned by `test_wotlk_stage_names_are_the_historical_tuple`; see the module docstring."""
+    """Pinned by `test_wotlk_stage_names_are_the_historical_tuple`; see the module docstring.
+
+    `db-password` (T748) is never recorded, so no state file names it and an older build reading
+    a newer folder's record meets nothing it does not know."""
 
     PATCH_STAGE: ClassVar[str] = "patch-sources"
     LUA_STAGE: ClassVar[str] = "lua-and-sql"
@@ -436,9 +440,9 @@ class AzerothCoreInstaller(StagedInstaller):
             Stage("clone-core", self._clone_core),
             Stage("clone-modules", self._clone_modules),
             *patch_stage,
-            # Never recorded, and before the compose file exists: a folder with a compose file
-            # and no record is an install made before generated passwords (T748). It comes after
-            # the clones, which need an empty folder or their own checkout.
+            # T748: never recorded, and before `generate-compose` writes `.env` and before the
+            # database is first started, so the password exists on disk before anything uses
+            # it. After the clones, which need an empty folder or their own checkout.
             Stage("db-password", self._db_password, recorded=False),
             Stage("generate-compose", self.stage_generate_compose),
             Stage("build", self.stage_build, cancel_note=build_cancel_note()),

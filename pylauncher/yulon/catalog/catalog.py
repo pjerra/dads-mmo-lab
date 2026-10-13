@@ -78,29 +78,32 @@ class Emulator(_Strict):
 
 
 INSTALL_RECORD = ".yulon-install.json"
-"""This app's own state file for an install, written by the install spine (`native.STATE_FILE`)."""
+"""This app's own record of an install, written by the install spine (`native.STATE_FILE`)."""
 
-BASE_COMPOSE_FILE = "docker-compose.yml"
-"""The base compose file (`composegen.BASE_FILE`), which marks an install past `db-password`."""
+RECORD_PASSWORD_KEY = "db_password"
+"""The install record's key that says how the install's database password came to exist (T748).
+
+`"generated"` in a record the spine wrote when it claimed a fresh folder for a game whose plan is
+`generated`. Absent from every record written before T748, which is exactly the fact a legacy
+WotLK or Unbound install is told apart by: like `family` (7.1), the key is additive, and a
+record without it was written by a build that predates it."""
+
+RECORD_GENERATED = "generated"
 
 
-def is_install_folder(server_dir: Path) -> bool:
-    """Whether `server_dir`'s base compose file is one this app generated (T748).
+def record_says_generated(server_dir: Path) -> bool:
+    """Whether the install record in `server_dir` says its password was generated (T748).
 
-    That is the footprint of an install that got past `generate-compose`. The state file is
-    no evidence: the spine writes it at the start of every run. The upstream AzerothCore
-    checkout ships a `docker-compose.yml` too, so presence is no evidence either; the first
-    line is what `composegen` writes and checks (`GENERATED_MARKER`). A new install has its
-    record before that file is written, so a generated compose file with no record can only
-    be an install made before generated passwords.
+    The install's OWN record decides, never a missing password file: a new install writes this
+    key before its folder holds anything else, so a new install whose `.db_password` has gone
+    missing still says so here and is never mistaken for an old one. A folder with no readable
+    record answers False -- it is not provably a new install.
     """
-    from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
-
     try:
-        first = (server_dir / BASE_COMPOSE_FILE).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        parsed = json.loads((server_dir / INSTALL_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    return composegen.is_marker_line(first.split("\n", 1)[0].rstrip("\r"))
+    return isinstance(parsed, dict) and parsed.get(RECORD_PASSWORD_KEY) == RECORD_GENERATED
 
 
 class PasswordPlan(_Strict):
@@ -114,10 +117,10 @@ class PasswordPlan(_Strict):
 
     `legacy` is the password an install made BEFORE this plan carries, and it is what
     such an install keeps: WotLK's and Unbound's published `password`. Only a generated
-    plan names one. An install with a `file` is a new install and reads the file; one
-    with no file but a footprint (`is_install_folder()`) is an old install, and it keeps
-    `legacy` (or the `DB_ROOT_PASSWORD` its own `.env` already sets). Nothing is migrated
-    and nothing is written for an old install.
+    plan names one. Which install is which is the install's own record
+    (`record_says_generated()`): a new one reads its `file`; one whose record predates
+    generated passwords keeps `legacy` (or the `DB_ROOT_PASSWORD` its own `.env` already
+    sets). Nothing is migrated and nothing is written for an old install.
 
     `fixed` is a game that publishes one password in `value` and has no record at all. No
     shipped entry uses it any more; the model keeps it for the games that will.
@@ -1968,11 +1971,11 @@ class Install(_Strict):
     def db_password(self, server_dir: Path) -> str | None:
         """The database root password for an install at `server_dir`, if knowable.
 
-        A `fixed` plan answers its value. A `generated` plan answers the record its file
-        holds. With no file, an install made before generated passwords answers its
-        `legacy_password()`; a fresh folder answers None. None also means the entry names
-        a file that cannot be read, which is deliberately not the same answer as a guess:
-        a caller decides what to do about it rather than being handed one.
+        A `fixed` plan answers its value. A `generated` plan answers what its file holds.
+        With no file, a folder whose record predates generated passwords answers its
+        `legacy_password()`, and a new install whose file is gone answers None. None also
+        means the entry names a file that cannot be read, which is deliberately not the same
+        answer as a guess: a caller decides what to do about it rather than being handed one.
         """
         if self.password.mode == "fixed":
             return self.password.value
@@ -1996,13 +1999,16 @@ class Install(_Strict):
     def legacy_password(self, server_dir: Path) -> str | None:
         """The password an install made before generated passwords has, if `server_dir` is one.
 
-        None unless the plan names a `legacy` value AND the folder has this app's footprint: a
-        fresh folder has no legacy password, and a caller must mint one for it. An old folder
-        whose own `.env` already sets `DB_ROOT_PASSWORD` keeps that value, the one compose has
-        been using; otherwise it keeps the published `legacy`. Nothing is written here.
+        None unless the plan names a `legacy` value AND the folder's own record does not say
+        its password was generated (`record_says_generated()`). A folder with no record at all
+        (one adopted where it is, or made by a script) answers the legacy value too: that is
+        what every reader answered for it before T748, and a NEW install always has a record
+        before it has a password. An old folder whose own `.env` already sets
+        `DB_ROOT_PASSWORD` keeps that value, the one compose has been using; otherwise it keeps
+        the published `legacy`. Nothing is written here.
         """
         legacy = self.password.legacy
-        if legacy is None or not is_install_folder(server_dir):
+        if legacy is None or record_says_generated(server_dir):
             return None
         from yulon.catalog import composegen  # noqa: PLC0415 - composegen imports this module
 

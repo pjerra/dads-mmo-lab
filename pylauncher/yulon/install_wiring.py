@@ -95,6 +95,7 @@ from yulon.said import with_details
 from yulon.ui import lines
 
 if TYPE_CHECKING:
+    from yulon.apply import RootPassword
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
 
 logger = get_logger(__name__)
@@ -150,8 +151,8 @@ def import_gate_for(
     new install's probe asks with the password its database was created with (T748).
     Without one, the published fallback is used: correct for an old folder and not
     for a new one, which is why the engine passes the folder and the Server tab
-    must too (`ui/controller_view.py`, BLOCKED on the redesign). A game with no import
-    service never reaches the line.
+    passes its own (`ui/controller_view.py`). The folder's password is read when the
+    database is first asked, not here. A game with no import service never reaches the line.
 
     `apply` and the two controller modules are imported inside the function on
     purpose: `controller_wow_wotlk.modules` imports THIS module at module scope
@@ -166,15 +167,24 @@ def import_gate_for(
     from yulon.controller_wow_wotlk import maintenance as wotlk_maintenance
     from yulon.controller_wow_wotlk import repair as wotlk_repair
 
+    password: RootPassword
     if server_dir is None:
         password = fixed_db_password(entry)
     else:
-        # The folder's own password (T748). A folder whose password cannot be read is
-        # answered as the CMaNGOS gates answer it: the probe says so, and reset refuses.
-        known = entry.install.db_password(server_dir)
-        if known is None:
-            return _unreadable_import_gate(entry, server_dir)
-        password = known
+        folder = server_dir
+
+        def password() -> str:
+            # The folder's own password (T748), read when the database is first asked, so a
+            # tab built for a server inside a stopped WSL distro does not start it (T133).
+            known = entry.install.db_password(folder)
+            if known is None:
+                raise _PasswordUnknown(
+                    f"this install's database password is not knowable: "
+                    f"{entry.install.password.file} could not be read in {folder}, so its "
+                    "databases cannot be asked what state they are in"
+                )
+            return known
+
     # `client=` on BOTH. This function is entry-driven -- it builds the import
     # gate for whichever game is being installed, not for WotLK -- so an
     # unbound seam here falls back to `mysql` on the three CMaNGOS games, which
@@ -189,32 +199,24 @@ def import_gate_for(
     mysql = wotlk_maintenance.DockerMysql(spec.db, password, wsl_distro=wsl_distro, client=client)
 
     def probe() -> docker.ImportState:
-        return wotlk_repair.import_state(
-            sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
-        )
+        try:
+            return wotlk_repair.import_state(
+                sql, mysql, lambda: docker.health(spec.db, wsl_distro=wsl_distro)
+            )
+        except _PasswordUnknown as exc:
+            return docker.ImportState("unreadable", str(exc))
 
     def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
-        return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
+        try:
+            return wotlk_repair.reset_unfinished(sql, mysql, everything=everything, seeded=seeded)
+        except _PasswordUnknown as exc:
+            raise InstallerError(f"Nothing was dropped: {exc}.") from exc
 
     return probe, reset
 
 
-def _unreadable_import_gate(
-    entry: CatalogEntry, server_dir: Path
-) -> tuple[docker.ImportProbe, docker.ResetUnfinished]:
-    """The gate for a folder whose password is not knowable: asks nothing, drops nothing."""
-    reason = (
-        f"this install's database password is not knowable: {entry.install.password.file} could "
-        f"not be read in {server_dir}, so its databases cannot be asked what state they are in"
-    )
-
-    def probe() -> docker.ImportState:
-        return docker.ImportState("unreadable", reason)
-
-    def reset(*, everything: bool = False, seeded: bool = False) -> tuple[str, ...]:
-        raise InstallerError(f"Nothing was dropped: {reason}.")
-
-    return probe, reset
+class _PasswordUnknown(InstallerError):
+    """A folder's import gate was asked, and that folder's password cannot be read (T748)."""
 
 
 SNAPSHOT_LEASE_REASON = (

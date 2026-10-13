@@ -32,10 +32,6 @@ from yulon import docker, resources, soap
 from yulon.catalog import composegen
 from yulon.catalog.catalog import load_catalog
 
-WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
-"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
-for a folder with no record give the render this value."""
-
 WOTLK = load_catalog().get("wow-wotlk")
 INSTALL = "ab12cd34"
 ACCOUNT = setup.account_name(INSTALL)
@@ -77,12 +73,7 @@ def _server(tmp_path: Path) -> Path:
     server_dir = tmp_path / "server"
     if not server_dir.is_dir():
         server_dir.mkdir()
-        plan = composegen.render(
-            WOTLK,
-            server_dir,
-            templates_root=resources.installers_dir(),
-            db_password=WOTLK_TEST_SECRET,
-        )
+        plan = composegen.render(WOTLK, server_dir, templates_root=resources.installers_dir())
         composegen.write_plan(plan, server_dir)
     return server_dir
 

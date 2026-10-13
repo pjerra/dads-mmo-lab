@@ -32,8 +32,6 @@ from yulon.catalog.catalog import (
 )
 
 ENTRY = load_catalog().get("wow-wotlk")
-DB_PASSWORD = "wotlk-0123456789abcdef"
-"""The database password the render tests give WotLK, which generates its own per install."""
 TEMPLATES = resources.installers_dir()
 
 BOT_POPULATION = "500"
@@ -139,11 +137,7 @@ def service_names(compose_text: str) -> set[str]:
 
 def render(server_dir: Path) -> composegen.ComposePlan:
     return composegen.render(
-        ENTRY,
-        server_dir,
-        templates_root=TEMPLATES,
-        platform_id=lambda: "macos",
-        db_password=DB_PASSWORD,
+        ENTRY, server_dir, templates_root=TEMPLATES, platform_id=lambda: "macos"
     )
 
 
@@ -186,11 +180,7 @@ def test_windows_runs_the_env_dist_writers_as_root(tmp_path: Path) -> None:
     database or the client-data init would be scope nobody asked for.
     """
     plan = composegen.render(
-        ENTRY,
-        tmp_path,
-        templates_root=TEMPLATES,
-        platform_id=lambda: "windows",
-        db_password=DB_PASSWORD,
+        ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: "windows"
     )
     assert _services_with_user_key(plan.base) == WRITES_TO_BOUND_ETC
     for service in WRITES_TO_BOUND_ETC:
@@ -209,11 +199,7 @@ def test_only_windows_gets_the_root_user(tmp_path: Path, platform_id: str) -> No
     whatever uid wrote the file, which is why this is gated rather than global.
     """
     plan = composegen.render(
-        ENTRY,
-        tmp_path,
-        templates_root=TEMPLATES,
-        platform_id=lambda: platform_id,
-        db_password=DB_PASSWORD,
+        ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: platform_id
     )
     assert _services_with_user_key(plan.base) == set()
     assert "0:0" not in plan.base
@@ -227,13 +213,7 @@ def test_the_container_user_line_is_explained_where_it_is_absent(tmp_path: Path)
     measured platform difference is an absence, and absences do not survive
     refactors.
     """
-    plan = composegen.render(
-        ENTRY,
-        tmp_path,
-        templates_root=TEMPLATES,
-        platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
-    )
+    plan = composegen.render(ENTRY, tmp_path, templates_root=TEMPLATES, platform_id=lambda: "linux")
     assert plan.base.count("# user: left to the image") == len(WRITES_TO_BOUND_ETC)
 
 
@@ -502,7 +482,6 @@ def test_an_unfilled_placeholder_is_an_error_not_a_compose_file(tmp_path: Path) 
             tmp_path / "wow",
             templates_root=tmp_path,
             platform_id=lambda: "macos",
-            db_password=DB_PASSWORD,
         )
 
 
@@ -513,7 +492,6 @@ def test_a_missing_template_says_which_file(tmp_path: Path) -> None:
             tmp_path / "wow",
             templates_root=tmp_path,
             platform_id=lambda: "macos",
-            db_password=DB_PASSWORD,
         )
 
 
@@ -593,7 +571,6 @@ def test_every_unsafe_scalar_character_is_refused_in_a_world_env_value(
             templates_root=TEMPLATES,
             world_env={"AC_A_TEST_SETTING": f"on{char}off"},
             platform_id=lambda: "macos",
-            db_password=DB_PASSWORD,
         )
     assert "database root password" not in str(bad.value), "the password refusal answered instead"
 
@@ -627,8 +604,7 @@ def test_write_plan_replaces_only_the_files_the_caller_proved_replaceable(
     written = composegen.write_plan(
         render(server_dir), server_dir, replaceable=(composegen.BASE_FILE,)
     )
-    # The three compose files, and the `.env` that carries the generated DB_ROOT_PASSWORD (T748).
-    assert len(written) == 4
+    assert len(written) == 4, written  # the three files and `.env` (T748)
     assert (
         (server_dir / composegen.BASE_FILE)
         .read_text(encoding="utf-8")
@@ -655,7 +631,7 @@ def test_write_plan_rewrites_its_own_files_and_leaves_identical_ones_alone(tmp_p
         composegen.BASE_FILE,
         composegen.OVERRIDE_FILE,
         composegen.BUILD_FILE,
-        composegen.DOTENV_FILE,
+        composegen.DOTENV_FILE,  # WotLK's password reaches compose through it (T748)
     }
     assert composegen.write_plan(plan, server_dir) == ()  # idempotent by content
     # Every generated file carries the marker, which is the whole rewrite rule.
@@ -1223,11 +1199,7 @@ def test_the_image_prefix_is_the_entrys_not_a_constant(tmp_path: Path) -> None:
     tag = composegen.image_tag(tmp_path / "wow", platform_id=lambda: "linux")
     assert refs == tuple(f"yulon.local/x-{name}:{tag}" for name in native.images)
     plan = composegen.render(
-        other,
-        tmp_path / "wow",
-        templates_root=TEMPLATES,
-        platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
+        other, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
     )
     assert "yulon.local/x-worldserver:" in plan.base
     assert "yulon.local/ac-wotlk-" not in plan.base
@@ -1283,7 +1255,6 @@ def test_every_host_bind_line_carries_the_label_and_no_named_volume_does(tmp_pat
         templates_root=TEMPLATES,
         bind_label=":z",
         platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
     )
     binds = [
         line
@@ -1301,11 +1272,7 @@ def test_every_host_bind_line_carries_the_label_and_no_named_volume_does(tmp_pat
 def test_off_selinux_the_label_renders_to_nothing(tmp_path: Path) -> None:
     """The default is the empty string, so every existing install renders byte-identically."""
     plain = composegen.render(
-        ENTRY,
-        tmp_path / "wow",
-        templates_root=TEMPLATES,
-        platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
+        ENTRY, tmp_path / "wow", templates_root=TEMPLATES, platform_id=lambda: "linux"
     )
     explicit = composegen.render(
         ENTRY,
@@ -1313,7 +1280,6 @@ def test_off_selinux_the_label_renders_to_nothing(tmp_path: Path) -> None:
         templates_root=TEMPLATES,
         bind_label="",
         platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
     )
     assert plain == explicit
     assert ":z" not in plain.base and ":z" not in plain.override
@@ -1339,7 +1305,6 @@ def test_render_accepts_every_label_platform_bind_label_can_produce(tmp_path: Pa
                 templates_root=TEMPLATES,
                 bind_label=label,
                 platform_id=lambda: "linux",
-                db_password=DB_PASSWORD,
             )
             assert "{{" not in plan.base, (enforcing, fs_type)
 
@@ -1353,7 +1318,6 @@ def test_a_bind_label_that_is_not_a_mount_option_is_refused(tmp_path: Path) -> N
             templates_root=TEMPLATES,
             bind_label=":z\n  - /etc:/etc",
             platform_id=lambda: "linux",
-            db_password=DB_PASSWORD,
         )
 
 
@@ -1502,16 +1466,15 @@ def test_a_generated_password_template_may_not_mention_the_password_token(tmp_pa
         )
 
 
-def test_wotlk_reads_its_password_from_env_and_its_base_file_names_no_default(
+def test_an_old_wotlk_folder_hands_compose_its_published_password_through_env(
     tmp_path: Path,
 ) -> None:
-    """T748: WotLK is generated like the other families. The password is in `.env`, and the base
-    file asks for it with no default, so a new install's compose text never spells a password."""
+    """T748: WotLK's compose text names no password at all, not even as a default. A folder
+    with no record of a new install renders the published one, and only into `.env`."""
     plan = render(tmp_path / "wow")
-    assert plan.dotenv == {"DB_ROOT_PASSWORD": DB_PASSWORD}
-    assert "${DB_ROOT_PASSWORD:-" not in plan.base
+    assert plan.dotenv == {"DB_ROOT_PASSWORD": "password"}
     assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in plan.base
-    assert DB_PASSWORD not in plan.base
+    assert "${DB_ROOT_PASSWORD:-" not in plan.base
 
 
 # -- A16: the committed byte snapshot ------------------------------------------
@@ -1536,7 +1499,6 @@ def rendered_as_on_linux() -> dict[str, str]:
         templates_root=TEMPLATES,
         bind_label="",
         platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
     )
     actual_id = composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux")
     return {
@@ -1565,8 +1527,8 @@ def test_the_wotlk_render_reproduces_the_committed_snapshot_byte_for_byte() -> N
             composegen.install_id(LINUX_SERVER_DIR, platform_id=lambda: "linux") == LINUX_INSTALL_ID
         )
     assert f"name: yulon-wow-wotlk-{LINUX_INSTALL_ID}\n" in texts[composegen.BASE_FILE]
-    assert "${DB_ROOT_PASSWORD:-" not in texts[composegen.BASE_FILE]
     assert "${DB_ROOT_PASSWORD:?Yu'lon .env is missing}" in texts[composegen.BASE_FILE]
+    assert "${DB_ROOT_PASSWORD:-" not in texts[composegen.BASE_FILE]
     assert ":z" not in texts[composegen.BASE_FILE]
 
 
@@ -1628,7 +1590,6 @@ def test_the_family_tokens_come_from_the_entry(tmp_path: Path) -> None:
         tmp_path / "wow",
         templates_root=tmp_path,
         platform_id=lambda: "linux",
-        db_password=DB_PASSWORD,
     )
     native = ENTRY.install.native
     assert native is not None
@@ -1678,7 +1639,6 @@ def test_tokens_a_family_does_not_have_stay_unfilled_and_therefore_loud(tmp_path
             tmp_path / "wow",
             templates_root=tmp_path,
             platform_id=lambda: "linux",
-            db_password=DB_PASSWORD,
         )
 
 

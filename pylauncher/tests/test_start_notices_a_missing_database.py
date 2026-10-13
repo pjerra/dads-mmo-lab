@@ -48,12 +48,6 @@ VOLUME = "t-project_db-data"
 SPEC = WOTLK.container_spec()
 
 
-@pytest.fixture(autouse=True)
-def _a_new_install_record(tmp_path: Path) -> None:
-    """A WotLK folder here is an install, and a new one holds its generated password (T748)."""
-    (tmp_path / ".db_password").write_text("wotlk-0123456789abcdef\n", encoding="utf-8")
-
-
 class _DbDocker(_Ps):
     """`_Ps`, plus the database's volume, its health and its tables.
 

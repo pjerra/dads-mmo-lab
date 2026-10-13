@@ -18,10 +18,6 @@ from yulon import resources
 from yulon.catalog import composegen
 from yulon.catalog.catalog import load_catalog
 
-WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
-"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
-for a folder with no record give the render this value."""
-
 WOTLK = load_catalog().get("wow-wotlk")
 INSTALL = "ab12cd34"
 
@@ -85,9 +81,7 @@ class _Scripted:
 def _installed(tmp_path: Path) -> Path:
     server_dir = tmp_path / "server"
     server_dir.mkdir()
-    plan = composegen.render(
-        WOTLK, server_dir, templates_root=resources.installers_dir(), db_password=WOTLK_TEST_SECRET
-    )
+    plan = composegen.render(WOTLK, server_dir, templates_root=resources.installers_dir())
     composegen.write_plan(plan, server_dir)
     return server_dir
 
@@ -781,11 +775,7 @@ def _labelled_channel(tmp_path: Path) -> setup.InstallChannel:
     """`_channel()` over an install rendered as that host renders it, `:z` on every bind."""
     channel = _channel(tmp_path, answering=_Answering("yes"))
     plan = composegen.render(
-        WOTLK,
-        channel.server_dir,
-        templates_root=resources.installers_dir(),
-        bind_label=":z",
-        db_password=WOTLK_TEST_SECRET,
+        WOTLK, channel.server_dir, templates_root=resources.installers_dir(), bind_label=":z"
     )
     for name, text in (
         (composegen.BASE_FILE, plan.base),
@@ -805,7 +795,6 @@ def _channel_on(server_dir: Path, *, bind_label: str) -> str:
         templates_root=resources.installers_dir(),
         world_env=setup._world_env(WOTLK, operations.enable_env),
         bind_label=bind_label,
-        db_password=WOTLK_TEST_SECRET,
     ).override
 
 

@@ -45,7 +45,6 @@ from pathlib import Path, PurePosixPath
 from yulon import platform, playerbots_keys, tuning
 from yulon.catalog import bot_dashboard, time_zone
 from yulon.catalog.catalog import (
-    BASE_COMPOSE_FILE,
     NATIVE_DEFAULT_DB_PORT,
     CatalogEntry,
     CmangosData,
@@ -56,7 +55,7 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-BASE_FILE = BASE_COMPOSE_FILE
+BASE_FILE = "docker-compose.yml"
 OVERRIDE_FILE = "docker-compose.override.yml"
 BUILD_FILE = "docker-compose.build.yml"
 DOTENV_FILE = ".env"
@@ -459,8 +458,8 @@ def _slug(text: str) -> str:
 class ComposePlan:
     """The three files' text plus the `.env` keys this install needs on top of them.
 
-    `dotenv` is empty for a fixed-password game (WotLK): the catalog's value is
-    the base file's interpolation default and needs no `.env`. For a
+    `dotenv` is empty for a fixed-password game (none ships one since T748): the
+    catalog's value is the base file's interpolation default and needs no `.env`. For a
     generated-password game it carries exactly `DB_ROOT_PASSWORD`, which
     `write_plan()` merges into `.env` through `write_dotenv()` — the one writer
     of that file — so the secret is never in a compose file git can see. A
@@ -550,6 +549,11 @@ def render(
         password = db_password
     elif plan.mode == "fixed" and plan.value:
         password = plan.value
+    elif (legacy := entry.install.legacy_password(server_dir)) is not None:
+        # T748: a folder that is not provably a new install (its record predates generated
+        # passwords, or it has none) keeps the password it has always had. A new install's
+        # record says so, and it still has to be given its own.
+        password = legacy
     else:
         raise ComposeGenError(
             f"{entry.name} generates its database password per install, and none was given "

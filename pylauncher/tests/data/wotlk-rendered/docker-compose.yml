@@ -171,7 +171,9 @@ services:
       # `MYSQL_ROOT_HOST: localhost` here — a plausible hardening — deletes
       # `root@%`, and this healthcheck then never passes, so every waiter hangs
       # on a database that is running and fine.
-      test: "/usr/bin/mysql -h ac-database --protocol=TCP --user=root --password=$$MYSQL_ROOT_PASSWORD --execute \"SHOW DATABASES;\""
+      # The password rides MYSQL_PWD, never `--password=` (T748): a container's
+      # processes are in the host's `ps`, and argv is readable by every local user.
+      test: "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" /usr/bin/mysql -h ac-database --protocol=TCP --user=root --execute \"SHOW DATABASES;\""
       interval: 5s
       timeout: 10s
       retries: 40

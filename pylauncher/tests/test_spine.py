@@ -1358,16 +1358,17 @@ def test_every_sudo_outcome_survives_the_trip_up_to_the_sentence_the_user_reads(
 def test_a_new_wotlk_folder_mints_its_password_and_an_old_one_keeps_the_published_value(
     tmp_path: Path,
 ) -> None:
-    """T748: resolved before stage 1. A fresh folder mints `wotlk-` plus 16 hex; a folder with a
-    compose file this app wrote and no record is an install made before generated passwords."""
+    """T748: resolved before stage 1. A folder whose record says it is a new install mints
+    `wotlk-` plus 16 hex; one whose record predates T748 keeps the published `password`."""
     engine = _build(Recorder(), AzerothCoreInstaller)
-    fresh = engine.resolve_secrets(tmp_path / "fresh").db_password
+    new = tmp_path / "new"
+    state = native.InstallState(
+        game_id=ENTRY.id, install_id="x", family="azerothcore", db_password="generated"
+    )
+    fresh = engine.resolve_secrets(new, state).db_password
     assert fresh.startswith("wotlk-") and len(fresh) == len("wotlk-") + 16, fresh
     old = tmp_path / "old"
-    old.mkdir()
-    (old / composegen.BASE_FILE).write_text(
-        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
-    )
+    native.write_state(old, replace(state, db_password=""))
     assert engine.resolve_secrets(old) == native.Secrets("password")
 
 
@@ -3610,9 +3611,7 @@ def test_the_install_ends_by_advertising_the_address_the_seam_detected(
 
     assert _statements(rec) == [networking.realmlist_sql(ENTRY, "100.64.0.10", "100.64.0.10")]
     assert "127.0.0.1" not in _statements(rec)[0], "the loopback was written as the realm address"
-    assert rec.sql_secrets[-1].startswith(
-        "wotlk-"
-    ), "it asked the database with no generated password"
+    assert rec.sql_secrets[-1].startswith("wotlk-"), "it asked without the install's password"
     assert [line for line in said if "now advertises 100.64.0.10" in line], said
 
 

@@ -400,7 +400,7 @@ widening silent and invisible; two constants naming each other is the cheaper
 half of that trade.
 
 What the number actually buys is not the same on every platform this app ships
-to — see `_write_secret`, which measured it.
+to — see `native.write_secret`, which measured it.
 """
 
 
@@ -2699,7 +2699,7 @@ class CmangosInstaller(StagedInstaller):
 
         The password reaches these files because the emulator reads files, and
         `conf.CONF_MODE` is what that costs. What the mode buys is not the same
-        everywhere — see `_write_secret` below, which measured the same
+        everywhere — see `native.write_secret`, which measured the same
         question for `.db_password` — and `conf.py`'s constant carries the
         other half: `0o600` is correct only while the images run as root. No
         line this stage yields carries the value.
@@ -4670,6 +4670,3 @@ class _Remembering:
         a reading taken before a stage that could have changed the answer.
         """
         return self.inner.adoption_gaps()
-
-
-_write_secret = native_secret.write_secret

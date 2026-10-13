@@ -34,10 +34,6 @@ from yulon.catalog.catalog import load_catalog
 from yulon.catalog.families.azerothcore import AzerothCoreInstaller
 from yulon.catalog.installer import InstallOptions
 
-WOTLK_TEST_SECRET = "wotlk-0123456789abcdef"
-"""A stand-in for a new WotLK install's generated password (T748): tests that render or generate
-for a folder with no record give the render this value."""
-
 CATALOG = load_catalog()
 WOTLK = CATALOG.get("wow-wotlk")
 OVERRIDE = composegen.OVERRIDE_FILE
@@ -77,9 +73,7 @@ def _generate(server_dir: Path) -> str:
                 client_dir=None,
                 state=_state(server_dir),
                 cancel=None,
-                secrets=native.Secrets(
-                    db_password=(WOTLK.install.db_password(server_dir) or WOTLK_TEST_SECRET)
-                ),
+                secrets=native.Secrets(db_password=WOTLK.install.db_password(server_dir)),
             )
         )
     )
@@ -106,7 +100,7 @@ def _tab(server_dir: Path) -> channel_setup.InstallChannel:
         install_id=composegen.install_id(server_dir, platform_id=_linux),
         create=never,
         channel_for=never,
-        db_password=(WOTLK.install.db_password(server_dir) or WOTLK_TEST_SECRET),
+        db_password=WOTLK.install.db_password(server_dir),
     )
 
 
@@ -212,7 +206,7 @@ def test_a_labelled_override_changed_after_enable_is_still_rolled_back(tmp_path:
         WOTLK,
         tmp_path,
         templates_root=resources.installers_dir(),
-        db_password=(WOTLK.install.db_password(tmp_path) or WOTLK_TEST_SECRET),
+        db_password=WOTLK.install.db_password(tmp_path),
         bind_label=":z",
         platform_id=_linux,
     ).override

@@ -109,12 +109,15 @@ from yulon.catalog import (
 )
 from yulon.catalog.catalog import (
     INSTALL_RECORD,
+    RECORD_GENERATED,
+    RECORD_PASSWORD_KEY,
     CatalogEntry,
     EmulatorSource,
     NativeInstall,
     ReadyMarkers,
     SqlPhase,
     SqlPlan,
+    record_says_generated,
 )
 from yulon.catalog.git_head import read_head_file
 from yulon.catalog.installer import (
@@ -4802,6 +4805,17 @@ class InstallState:
     by an update that lands. ADDITIVE, for `source_revs`' reason.
     """
 
+    db_password: str = ""
+    """`RECORD_GENERATED` when this record was made for a fresh folder whose password is generated.
+
+    T748. Written once, by the guard's fresh record, before the folder holds anything else, so
+    a new install says so before it has a `.db_password` or a database. Empty in every record
+    written before T748, and that is how a WotLK or Unbound install made with the published
+    password is told apart from a new one whose file has gone missing: from its own record,
+    never from a missing file. Never set on an existing record, so an old install is never
+    promoted to a generated one. ADDITIVE, for `source_revs`' reason.
+    """
+
     def rev_for(self, repo: str) -> SourceRev | None:
         """This install's record for `repo`, or None if it has none."""
         return next((rev for rev in self.source_revs if rev.repo == repo), None)
@@ -4981,6 +4995,7 @@ def _parse_state(server_dir: Path, *, valid: Sequence[str]) -> InstallState | No
         unknown=unknown,
         source_revs=_parse_source_revs(parsed.get("source_revs"), path),
         refused_updates=_parse_refused(parsed.get("refused_updates")),
+        db_password=secret if isinstance(secret := parsed.get(RECORD_PASSWORD_KEY), str) else "",
     )
 
 
@@ -5090,6 +5105,10 @@ def write_state(server_dir: Path, state: InstallState) -> None:
         payload["source_revs"] = {rev.repo: _rev_record(rev) for rev in state.source_revs}
     if state.refused_updates:
         payload["refused_updates"] = dict(state.refused_updates)
+    if state.db_password:
+        # T748: only on a record made for a new install, so every other file is byte for byte
+        # what it was.
+        payload[RECORD_PASSWORD_KEY] = state.db_password
     if state.last_error and state.error_run:
         # T207: only beside a failure, so a file with none is byte for byte as before.
         payload["error_run"] = state.error_run
@@ -8094,7 +8113,7 @@ class StagedInstaller:
             client_dir=opts.client_dir,
             state=state,
             cancel=cancel,
-            secrets=self.resolve_secrets(server_dir),
+            secrets=self.resolve_secrets(server_dir, state),
             installing=True,
         )
 
@@ -13315,7 +13334,7 @@ class StagedInstaller:
             return ask(server_dir)
         return composegen.install_id(server_dir, platform_id=self._seams.platform_id)
 
-    def resolve_secrets(self, server_dir: Path) -> Secrets:
+    def resolve_secrets(self, server_dir: Path, state: InstallState | None = None) -> Secrets:
         """The database password this install uses, decided before stage 1.
 
         `fixed` is the catalog value. `generated` reads the file a previous run
@@ -13360,11 +13379,10 @@ class StagedInstaller:
         try:
             return Secrets(path.read_text(encoding="utf-8").strip())
         except FileNotFoundError:
-            # No record, but this folder is an install made before generated passwords
-            # (T748): it keeps the password it was made with, and nothing is minted.
-            legacy = self.entry.install.legacy_password(server_dir)
-            if legacy is not None:
-                return Secrets(legacy)
+            # T748: an install whose own record predates generated passwords keeps the
+            # password it was made with, and nothing is minted for it.
+            if plan.legacy is not None and self._made_before_generated(server_dir, state):
+                return Secrets(self._legacy_value(server_dir, plan.legacy))
             kept = dbsecret.recall(self.entry.id, self._install_id(server_dir))
             if kept is not None:
                 logger.info(
@@ -13372,12 +13390,53 @@ class StagedInstaller:
                     "when this install was removed"
                 )
                 return Secrets(kept.password)
+            if plan.legacy is not None and self._kept_volume_exists(server_dir):
+                # A database this folder's earlier install left behind with no copy of its
+                # password: an install removed before generated passwords kept none, because
+                # its password was the published one (T748). That is the password it opens
+                # with; the `db-password` stage writes it down.
+                logger.info(
+                    f"{self._db_volume(server_dir)} was kept with no copy of its password; "
+                    "using the published one an install made before generated passwords had"
+                )
+                return Secrets(self._legacy_value(server_dir, plan.legacy))
             return Secrets(f"{plan.prefix}{token_hex(8)}")
         except OSError as exc:
             raise InstallerError(
                 f"{path} exists but could not be read ({exc}), so this install cannot know its "
                 "own database password. Nothing was started."
             ) from exc
+
+    @staticmethod
+    def _made_before_generated(server_dir: Path, state: InstallState | None) -> bool:
+        """Whether `server_dir` is not provably a new install, by its own record (T748).
+
+        The record decides, never a missing file: a new install's record says
+        `RECORD_GENERATED` from the moment the folder is claimed. `state` is the record the
+        install run is about to write, for the one fresh folder the spine claims late (a
+        checkout, `_claim_before_writing()`); every other caller passes none and the record
+        on disk answers. A folder with no record at all (adopted where it is) keeps the
+        published password, as every reader answers for it.
+        """
+        if state is not None and state.db_password == RECORD_GENERATED:
+            return False
+        return not record_says_generated(server_dir)
+
+    @staticmethod
+    def _legacy_value(server_dir: Path, legacy: str) -> str:
+        """An old folder's password: what its own `.env` sets, else the published `legacy`."""
+        return composegen.dotenv_value(server_dir, "DB_ROOT_PASSWORD") or legacy
+
+    def _kept_volume_exists(self, server_dir: Path) -> bool:
+        """Whether this folder's database volume exists; False when Docker will not say.
+
+        False is the safe side: the minted value then meets `db-password`'s own volume check,
+        which raises Docker's refusal in full rather than this guess.
+        """
+        try:
+            return self._seams.volume_exists(self._db_volume(server_dir))
+        except docker.DockerCommandError:
+            return False
 
     def _db_password(self, ctx: StageContext) -> Iterator[str]:
         """Persist the generated secret, or refuse to replace one the database already has.
@@ -13421,9 +13480,9 @@ class StagedInstaller:
         if path.is_file():
             yield f"The database password is already in {plan.file}; keeping it."
             return
-        if self.entry.install.legacy_password(ctx.server_dir) is not None:
-            # An install made before generated passwords (T748): it keeps the password its
-            # database was created with, and a record written now would contradict that.
+        if plan.legacy is not None and ctx.state.db_password != RECORD_GENERATED:
+            # An install whose record predates generated passwords (T748): it keeps the
+            # password its database was created with, and nothing is written for it.
             yield (
                 f"This install was made before generated passwords, so it keeps the password it "
                 f"has. Nothing was written to {plan.file}."
@@ -13455,6 +13514,23 @@ class StagedInstaller:
                 f"Put this install's database password back into {plan.file} from the copy "
                 f"Yu'lon kept when the folder was removed. The database in {volume} is the one "
                 "your characters are in. Back that file up."
+            )
+            return
+        if (
+            exists
+            and plan.legacy is not None
+            and ctx.secrets.db_password == self._legacy_value(ctx.server_dir, plan.legacy)
+        ):
+            # T748: a database kept from an install made before generated passwords, which kept
+            # no copy because its password was the published one. `resolve_secrets()` chose that
+            # password for it; writing it down makes this folder a record like any other.
+            try:
+                write_secret(path, ctx.secrets.db_password)
+            except OSError as exc:
+                raise InstallerError(f"{path} could not be written: {exc}") from exc
+            yield (
+                f"The database in {volume} was kept from an install made before generated "
+                f"passwords, so it keeps the password it has. Wrote that to {plan.file}."
             )
             return
         if exists:
@@ -13860,8 +13936,16 @@ class StagedInstaller:
                     f"({', '.join(sorted(leftovers)[:5])}). Nothing was written. Pick an empty "
                     "folder, or remove that one yourself if you no longer want it."
                 )
-        return existing or InstallState(
-            game_id=self.entry.id, install_id=install_id, family=self.family
+        if existing is not None:
+            return existing
+        # A fresh record says how this install's password comes to exist (T748), so a reader
+        # never has to guess it from a file that may have gone missing.
+        generated = self.entry.install.password.mode == "generated"
+        return InstallState(
+            game_id=self.entry.id,
+            install_id=install_id,
+            family=self.family,
+            db_password=RECORD_GENERATED if generated else "",
         )
 
     def _refuse_foreign_containers(self, server_dir: Path, install_id: str) -> None:

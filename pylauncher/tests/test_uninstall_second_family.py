@@ -109,15 +109,10 @@ def test_the_cmangos_folder_holds_the_only_key_to_the_volume_a_ticked_purge_keep
     ), "the folder held the only copy of the password that volume was created with"
 
     wotlk = entry_for(WOTLK)
-    assert wotlk.install.password.mode == "generated"
-    old = tmp_path / "old-wotlk"
-    old.mkdir()
-    (old / composegen.BASE_FILE).write_text(
-        composegen.GENERATED_MARKER + "\nservices: {}\n", encoding="utf-8"
-    )
+    assert wotlk.install.password.legacy == "password"
     assert (
-        wotlk.install.db_password(old) == "password"
-    ), "an install made before generated passwords keeps the published value (T748)"
+        wotlk.install.db_password(tmp_path / "never-existed") == "password"
+    ), "a WotLK folder with no record of a new install has the published key (T748)"
 
 
 def test_the_reinstall_a_ticked_purge_promises_is_refused_on_the_cmangos_tree(
