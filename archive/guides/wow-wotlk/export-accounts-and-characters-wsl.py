@@ -14,7 +14,7 @@ config files, not the modules. The database password is never written into the f
 **Secrets.** The file holds every account's login verifier and salt. Keep it private, and delete
 it once the move is done. It is created readable by you only.
 
-Standard library only, so any distro with Python 3.11 or newer runs it. Exit status: 0 packed,
+Standard library only, so any distro with Python 3.10 or newer runs it. Exit status: 0 packed,
 2 refused (the reason is printed in plain words and nothing was packed).
 """
 
@@ -28,9 +28,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -95,6 +97,13 @@ OTHER_GAMES = (
     ("wow-unbound", "WoW Unbound", "ub-database"),
 )
 CHUNK = 1 << 20
+MIN_PYTHON = (3, 10)
+WORK_PREFIX = ".yulon-move-work-"
+"""A run's dump folder is `<prefix><pid>-<random>`, so a later run can tell a dead run's from a
+live one's."""
+PARTIAL_SUFFIX = ".zip.partial"
+STALE_PARTIAL_SECONDS = 600
+"""A `.partial` this old, from before the current run began, is an earlier run's leftover."""
 
 _BOT_PREFIX = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 _DUMP_HEADER = re.compile(rb"(?:\A|\n)--\s+(MySQL|MariaDB)\s+dump\s")
@@ -216,9 +225,6 @@ def _text(data: bytes) -> str:
 
 
 _ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
-_INTERPOLATION = re.compile(
-    r"(\$\$)|\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)"
-)
 
 
 def _choose_access(
@@ -246,8 +252,9 @@ def _choose_access(
                 if inspect.stdout.strip() != "true":
                     raise Refusal(
                         f"The server's database container {CONTAINERS['db']} is stopped, so "
-                        "there is nothing to read. Start the server with its docker compose "
-                        "files, then run this again. Nothing was packed."
+                        "there is nothing to read. Start only the database "
+                        f"(docker compose start {CONTAINERS['db']}) and keep the world and auth "
+                        "servers stopped, then run this again. Nothing was packed."
                     )
                 for name in STOPPED_CONTAINERS:
                     state = subprocess.run(
@@ -264,8 +271,10 @@ def _choose_access(
                     )
                     if state.returncode == 0 and state.stdout.strip() == "true":
                         raise Refusal(
-                            "The server is running. Stop the server first (its docker compose "
-                            "stop), so the copies agree, then run this again. Nothing was packed."
+                            "The server is running. Stop only the game servers "
+                            f"(docker compose stop {CONTAINERS['world']} {CONTAINERS['auth']}) "
+                            "and leave the database running, so the copies agree, then run this "
+                            "again. Nothing was packed."
                         )
                 return Access(mode="docker", container=CONTAINERS["db"])
             listed = subprocess.run(
@@ -281,17 +290,18 @@ def _choose_access(
             )
             if other is not None:
                 raise Refusal(_not_wotlk(other))
+    other = _other_game_in_compose(server_dir)
+    if other is not None:
+        raise Refusal(_not_wotlk(other))
     if shutil.which("mysql") and shutil.which("mysqldump"):
         if not stopped_flag:
             raise Refusal(
                 "This script can only see the database through the MySQL client, and that "
-                "cannot tell whether the server is running. Stop the server first, then run "
-                "this again with --server-stopped. Nothing was packed."
+                "cannot tell whether the server is running. Stop the world and auth servers "
+                "(leave the database running), then run this again with --server-stopped. "
+                "Nothing was packed."
             )
         return Access(mode="host", host=host, port=port)
-    other = _other_game_in_compose(server_dir)
-    if other is not None:
-        raise Refusal(_not_wotlk(other))
     raise Refusal(
         "Yu'lon's script found neither Docker with the server's database container nor the "
         "MySQL client programs (mysql and mysqldump) in this distro, so it cannot read the "
@@ -301,46 +311,174 @@ def _choose_access(
     )
 
 
-def _env_value(raw: str) -> str:
-    """One value as an env file or a compose file reads it.
+_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ESCAPE = re.compile(r"\\(?:[abcfnrtv$\"\\]|0\d{0,3})")
+_ESCAPED = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    '"': '"',
+    "\\": "\\",
+}
 
-    Quotes keep everything between them, `#` and spaces included. An unquoted value ends at a
-    ` #` that starts a comment. A single-quoted value is literal, so its `$` is doubled here and
-    `_interpolate` turns it back into one `$`.
-    """
+
+def _expand(value: str, known: Mapping[str, str]) -> str:
+    """Compose's variable substitution: `$$` is one `$`; `$NAME` and `${NAME}`; and the forms
+    `${NAME:-d}` (unset or empty), `${NAME-d}` (unset), `${NAME:+d}` (set and not empty),
+    `${NAME+d}` (set). A default is itself expanded. `known` holds final values: they are
+    pasted as they are and never read again."""
+    out: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        following = value[index + 1 : index + 2]
+        if char != "$":
+            out.append(char)
+            index += 1
+        elif following == "$":
+            out.append("$")
+            index += 2
+        elif following == "{":
+            end = _closing_brace(value, index + 2)
+            name = _VARIABLE_NAME.match(value, index + 2, end) if end != -1 else None
+            if end == -1 or name is None:
+                out.append(char)
+                index += 1
+                continue
+            rest = value[name.end() : end]
+            out.append(_substitute(name.group(0), rest, known))
+            index = end + 1
+        else:
+            name = _VARIABLE_NAME.match(value, index + 1)
+            if name is None:
+                out.append(char)
+                index += 1
+            else:
+                out.append(known.get(name.group(0), ""))
+                index = name.end()
+    return "".join(out)
+
+
+def _closing_brace(value: str, start: int) -> int:
+    """The `}` that closes a `${` whose body starts at `start`, nested `${...}` skipped."""
+    depth = 1
+    index = start
+    while index < len(value):
+        if value.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if value[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def _substitute(name: str, rest: str, known: Mapping[str, str]) -> str:
+    current = known.get(name)
+    for operator in (":-", "-", ":+", "+", ":?", "?"):
+        if rest.startswith(operator):
+            operand = _expand(rest[len(operator) :], known)
+            empty_counts = operator.startswith(":")
+            missing = current is None or (empty_counts and current == "")
+            if operator.endswith("-"):
+                return operand if missing else str(current)
+            if operator.endswith("+"):
+                return "" if missing else operand
+            return "" if missing else str(current)
+    return current or ""
+
+
+def _expand_escapes(text: str) -> str:
+    """The escapes compose-go reads inside double quotes; `\\$` becomes the `$$` that stands
+    for a literal dollar."""
+
+    def one(match: re.Match[str]) -> str:
+        escape = match.group(0)[1:]
+        if escape == "$":
+            return "$$"
+        if escape[0] == "0":
+            digits = escape[1:]
+            return chr(int(digits, 8) & 0xFF) if digits else "\0"
+        return _ESCAPED[escape]
+
+    return _ESCAPE.sub(one, text)
+
+
+def _quoted_value(raw: str) -> str:
+    """The inside of a quoted value, up to its closing quote: a backslash before the quote
+    keeps the quote and goes; any other backslash stays, as compose-go reads it."""
+    quote = raw[0]
+    chars: list[str] = []
+    escaped = False
+    for char in raw[1:]:
+        if char != quote:
+            if not escaped and char == "\\":
+                escaped = True
+                continue
+            if escaped:
+                escaped = False
+                chars.append("\\")
+            chars.append(char)
+        elif escaped:
+            escaped = False
+            chars.append(char)
+        else:
+            return "".join(chars)
+    return "".join(chars)
+
+
+def _dotenv_value(raw: str, known: Mapping[str, str]) -> str:
+    """One `.env` value in its final form, as `docker compose` reads it (compose-go's dotenv):
+    single quotes are literal; double quotes take escapes and `$` substitution; an unquoted
+    value ends at a space followed by `#`, and takes `$` substitution."""
     raw = raw.strip()
-    if raw[:1] in ("'", '"'):
-        end = raw.find(raw[0], 1)
-        inner = raw[1:end] if end != -1 else raw[1:]
-        return inner.replace("$", "$$") if raw[0] == "'" else inner
-    return re.split(r"\s+#", raw, maxsplit=1)[0].rstrip()
+    if raw[:1] == "'":
+        return _quoted_value(raw)
+    if raw[:1] == '"':
+        return _expand(_expand_escapes(_quoted_value(raw)), known)
+    return _expand(raw.split(" #", 1)[0].rstrip(), known)
 
 
-def _assignments(text: str) -> dict[str, str]:
-    """The KEY=VALUE and KEY: VALUE lines of a file. Comments and blank lines are skipped, and
-    the last setting of a key wins, as an env file reads it."""
+def _dotenv(text: str) -> dict[str, str]:
+    """The `.env` file as a map of final values. Later lines see earlier ones; the last
+    setting of a key wins."""
     found: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-        line = re.sub(r"^(?:export\s+|-\s+)", "", line)
+        line = re.sub(r"^export\s+", "", line)
         match = _ASSIGNMENT.match(line)
         if match is not None:
-            found[match.group(1)] = _env_value(match.group(2))
+            found[match.group(1)] = _dotenv_value(match.group(2), found)
     return found
 
 
-def _interpolate(value: str, env: Mapping[str, str]) -> str:
-    """Compose's `${NAME:-default}` and `$NAME`: an unset or empty NAME takes the default."""
-
-    def take(match: re.Match[str]) -> str:
-        if match.group(1):
-            return "$"
-        name = match.group(2) or match.group(4) or ""
-        return env.get(name) or (match.group(3) or "")
-
-    return _INTERPOLATION.sub(take, value)
+def _compose_assignments(text: str) -> dict[str, str]:
+    """The `KEY: value`, `KEY=value` and `- KEY=value` lines of a compose file, as written (a
+    quoted value loses its quotes; compose still substitutes inside them)."""
+    found: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _ASSIGNMENT.match(re.sub(r"^-\s+", "", line))
+        if match is None:
+            continue
+        raw = match.group(2).strip()
+        if raw[:1] in ("'", '"'):
+            end = raw.find(raw[0], 1)
+            found[match.group(1)] = raw[1:end] if end != -1 else raw[1:]
+        else:
+            found[match.group(1)] = raw.split(" #", 1)[0].rstrip()
+    return found
 
 
 def _found_password(server_dir: Path | None) -> str | None:
@@ -348,7 +486,7 @@ def _found_password(server_dir: Path | None) -> str | None:
     if server_dir is None:
         return None
     try:
-        env_file = _assignments(
+        env_file = _dotenv(
             (server_dir / ".env").read_text(encoding="utf-8", errors="replace")
         )
     except OSError:
@@ -356,19 +494,17 @@ def _found_password(server_dir: Path | None) -> str | None:
     candidates: list[str] = []
     for path in sorted(server_dir.glob("*compose*.y*ml")):
         try:
-            declared = _assignments(path.read_text(encoding="utf-8", errors="replace"))
+            declared = _compose_assignments(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
         except OSError:
             continue
         candidates += [
-            _interpolate(declared[key], env_file)
+            _expand(declared[key], env_file)
             for key in PASSWORD_VARIABLES
             if key in declared
         ]
-    candidates += [
-        _interpolate(env_file[key], env_file)
-        for key in PASSWORD_VARIABLES
-        if key in env_file
-    ]
+    candidates += [env_file[key] for key in PASSWORD_VARIABLES if key in env_file]
     try:
         candidates.append(
             (server_dir / PASSWORD_FILE).read_text(encoding="utf-8").strip()
@@ -706,25 +842,22 @@ def _write_package(dest: Path, manifest: str, dumps: list[tuple[str, Path]]) -> 
     # A leftover `.partial` goes first: reopening it would keep whatever mode it was made with.
     partial.unlink(missing_ok=True)
     try:
-        with (
-            os.fdopen(
-                os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600), "w+b"
-            ) as raw,
-            zipfile.ZipFile(
+        fd = os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w+b") as raw:
+            with zipfile.ZipFile(
                 raw,
                 "w",
                 compression=zipfile.ZIP_DEFLATED,
                 compresslevel=6,
                 allowZip64=True,
-            ) as archive,
-        ):
-            archive.writestr(MANIFEST_NAME, manifest)
-            for schema, path in dumps:
-                with (
-                    path.open("rb") as source,
-                    archive.open(f"db/{schema}.sql", "w", force_zip64=True) as sink,
-                ):
-                    shutil.copyfileobj(source, sink, CHUNK)
+            ) as archive:
+                archive.writestr(MANIFEST_NAME, manifest)
+                for schema, path in dumps:
+                    with path.open("rb") as source:
+                        with archive.open(
+                            f"db/{schema}.sql", "w", force_zip64=True
+                        ) as sink:
+                            shutil.copyfileobj(source, sink, CHUNK)
         _read_back(partial, manifest)
         os.replace(partial, dest)
     except OSError as exc:
@@ -737,6 +870,35 @@ def _write_package(dest: Path, manifest: str, dumps: list[tuple[str, Path]]) -> 
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, but belongs to someone else
+    return True
+
+
+def _sweep_leftovers(out_dir: Path, started: float) -> None:
+    """Remove what an earlier run of this script left in the output folder when it was killed
+    before it could clean up: its dump folder (the owner's process is gone) and its `.partial`
+    package (older than this run and than a few minutes). Both hold every account's verifier.
+    Anything else in the folder is left alone."""
+    for work in out_dir.glob(f"{WORK_PREFIX}*"):
+        pid = re.fullmatch(rf"{re.escape(WORK_PREFIX)}(\d+)-.*", work.name)
+        if pid is None or not work.is_dir() or _pid_is_alive(int(pid.group(1))):
+            continue
+        shutil.rmtree(work, ignore_errors=True)
+    for partial in out_dir.glob(f"yulon-move-{GAME_ID}-*{PARTIAL_SUFFIX}"):
+        try:
+            age = partial.stat().st_mtime
+        except OSError:
+            continue
+        if age < started and age < time.time() - STALE_PARTIAL_SECONDS:
+            partial.unlink(missing_ok=True)
 
 
 def _sha256_of(path: Path) -> str:
@@ -800,6 +962,7 @@ def pack(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
 ) -> tuple[Path, tuple[int, int, int, int]]:
+    started = time.time()
     access = _choose_access(server_dir, stopped_flag, host, port)
     found = _found_password(server_dir)
     typed = found is None
@@ -858,7 +1021,8 @@ def pack(
         raise Refusal(
             f"{dest.name} already exists, so the script did not overwrite it."
         )
-    work = Path(tempfile.mkdtemp(prefix=".yulon-move-work-", dir=out_dir))
+    _sweep_leftovers(out_dir, started)
+    work = Path(tempfile.mkdtemp(prefix=f"{WORK_PREFIX}{os.getpid()}-", dir=out_dir))
     try:
         members: list[dict[str, object]] = []
         dumps: list[tuple[str, Path]] = []
@@ -886,7 +1050,38 @@ def pack(
     return dest, counts
 
 
+def _end_on_signal(number: int, _frame: object) -> None:
+    """Closing the WSL window (SIGHUP) or a kill (SIGTERM) ends the run the way an exit does,
+    so the dump folder and the `.partial` package are removed on the way out."""
+    raise SystemExit(128 + number)
+
+
 def main(argv: list[str] | None = None) -> int:
+    if tuple(sys.version_info[:2]) < MIN_PYTHON:
+        found = ".".join(str(part) for part in sys.version_info[:2])
+        print(
+            f"This script needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, and this is "
+            f"Python {found}. Run it with a newer python3, then run this again. Nothing was "
+            "packed.",
+            file=sys.stderr,
+        )
+        return 2
+    caught = [
+        (number, signal.signal(number, _end_on_signal))
+        for number in (
+            getattr(signal, "SIGHUP", None),
+            getattr(signal, "SIGTERM", None),
+        )
+        if number is not None
+    ]
+    try:
+        return _main(argv)
+    finally:
+        for number, previous in caught:
+            signal.signal(number, previous if previous is not None else signal.SIG_DFL)
+
+
+def _main(argv: list[str] | None) -> int:
     parser = argparse.ArgumentParser(
         description="Pack a WotLK server's accounts and characters for a move to Yu'lon."
     )

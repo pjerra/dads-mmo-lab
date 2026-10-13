@@ -90,7 +90,7 @@ FIXTURE: dict[str, Any] = {
 one bot character, the release names of each ledger, and the one module row."""
 
 FAKE_DB = r"""
-import json, os, re, sys
+import json, os, re, sys, time
 from pathlib import Path
 
 FIXTURE = json.loads(Path(os.environ["FAKE_DB_FIXTURE"]).read_text(encoding="utf-8"))
@@ -202,6 +202,11 @@ def client(tool, args, container):
         for flag in ("--single-transaction", "--routines", "--events", "--triggers"):
             if flag not in args:
                 fail("mysqldump was not asked for " + flag, 1)
+        if FIXTURE.get("hang_dump"):
+            sys.stdout.write("-- MySQL dump 10.13  half a dump\n")
+            sys.stdout.flush()
+            open(os.environ["FAKE_DB_LOG"] + ".hanging", "w").close()
+            time.sleep(60)
         if FIXTURE.get("dump_error"):
             fail("mysqldump: " + FIXTURE["dump_error"], 2)
         database = args[args.index("--databases") + 1]
@@ -481,7 +486,7 @@ def test_a_running_server_is_refused_in_docker_mode(tmp_path: Path) -> None:
         },
     )
     assert process.returncode == 2
-    assert "Stop the server" in process.stderr
+    assert "Stop only the game servers" in process.stderr
     assert list(out.iterdir()) == []
 
 
@@ -1164,4 +1169,194 @@ def test_the_readme_says_how_to_fetch_the_script_and_which_python_it_needs() -> 
     readme = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
     section = readme[readme.index("export-accounts-and-characters-wsl.py") :]
     assert "curl" in section and SCRIPT.name in section.split("curl", 1)[1].splitlines()[0]
-    assert "Python 3.11" in section
+    assert "Python 3.10" in section
+
+
+# ================================================================ round 3 (cold review)
+
+
+@pytest.mark.parametrize(
+    ("env_line", "secret"),
+    [
+        ("DOCKER_DB_ROOT_PASSWORD='pa$word'", "pa$word"),
+        ("DOCKER_DB_ROOT_PASSWORD=pa$$word", "pa$word"),
+        ('DOCKER_DB_ROOT_PASSWORD="a\\"b"', 'a"b'),
+        ('DOCKER_DB_ROOT_PASSWORD="a\\$b"', "a$b"),
+        ("DOCKER_DB_ROOT_PASSWORD=a#b", "a#b"),
+        ("DOCKER_DB_ROOT_PASSWORD=a b # note", "a b"),
+        ("DOCKER_DB_ROOT_PASSWORD=${BASE:-x}1\nBASE=ignored-later", "x1"),
+    ],
+)
+def test_the_stock_compose_layout_gets_the_env_value_in_its_final_form(
+    tmp_path: Path, env_line: str, secret: str
+) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        env_text=env_line + "\n",
+        compose={"docker-compose.yml": STOCK_COMPOSE},
+        fixture={"password": secret},
+    )
+    assert process.returncode == 0, (env_line, process.stderr)
+
+
+def test_a_dash_default_applies_only_when_the_variable_is_unset(tmp_path: Path) -> None:
+    compose = STOCK_COMPOSE.replace(":-password", "-password")
+    unset, _s, _o, _l = _run(
+        tmp_path / "unset",
+        env_text="",
+        compose={"docker-compose.yml": compose},
+        fixture={"password": "password"},
+    )
+    assert unset.returncode == 0, unset.stderr
+    empty, _s, out, _l = _run(
+        tmp_path / "empty",
+        env_text="DOCKER_DB_ROOT_PASSWORD=\n",
+        compose={"docker-compose.yml": compose},
+        fixture={"password": "password"},
+    )
+    assert empty.returncode == 2 and "password" in empty.stderr.lower()
+    assert list(out.iterdir()) == []
+
+
+def test_a_running_server_is_told_to_stop_only_the_game_servers(tmp_path: Path) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        fixture={
+            "containers": {"ac-database": True, "ac-authserver": True, "ac-worldserver": False}
+        },
+    )
+    assert process.returncode == 2
+    assert "docker compose stop ac-worldserver ac-authserver" in process.stderr
+    assert "leave the database running" in process.stderr
+
+
+def test_a_stopped_database_is_told_to_start_only_the_database(tmp_path: Path) -> None:
+    process, _server, _out, _log = _run(
+        tmp_path,
+        fixture={
+            "containers": {"ac-database": False, "ac-authserver": False, "ac-worldserver": False}
+        },
+    )
+    assert process.returncode == 2
+    assert "docker compose start ac-database" in process.stderr
+    assert "world and auth servers stopped" in process.stderr
+
+
+def test_the_readme_says_to_stop_only_the_game_servers() -> None:
+    readme = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("export-accounts-and-characters-wsl.py") :]
+    assert "docker compose stop ac-worldserver ac-authserver" in section
+    assert "database running" in section
+
+
+def test_host_mode_names_another_game_by_its_compose_file(tmp_path: Path) -> None:
+    compose = {"docker-compose.yml": "services:\n  db:\n    container_name: tbc-db\n"}
+    process, _server, out, _log = _run(
+        tmp_path, tools=("mysql", "mysqldump"), args=("--server-stopped",), compose=compose
+    )
+    assert process.returncode == 2
+    assert "WoW TBC, not WoW WotLK" in process.stderr
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP"])
+def test_a_closed_window_or_a_kill_mid_dump_leaves_nothing_behind(
+    tmp_path: Path, signal_name: str
+) -> None:
+    import signal as signal_module
+    import time
+
+    root = tmp_path / "sig"
+    root.mkdir()
+    server = root / "server"
+    server.mkdir()
+    (server / ".env").write_text(f"MYSQL_ROOT_PASSWORD={PASSWORD}\n", encoding="utf-8")
+    out = root / "out"
+    out.mkdir()
+    fixture_path = root / "fixture.json"
+    fixture_path.write_text(json.dumps({**FIXTURE, "hang_dump": True}), encoding="utf-8")
+    log = root / "fake.log"
+    env = {
+        "PATH": str(_write_fake_tools(root, ("docker",))),
+        "HOME": str(root / "home"),
+        "LANG": "C.UTF-8",
+        "FAKE_DB_FIXTURE": str(fixture_path),
+        "FAKE_DB_LOG": str(log),
+    }
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "--server-dir", str(server), "--out", str(out)],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    marker = Path(str(log) + ".hanging")
+    try:
+        for _ in range(300):
+            if marker.exists() or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert marker.exists(), proc.communicate()
+        assert any(out.iterdir()), "the work folder should exist mid-dump"
+        proc.send_signal(getattr(signal_module, signal_name))
+        _stdout, stderr = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode != 0
+    assert list(out.iterdir()) == [], stderr
+
+
+def test_stale_leftovers_of_an_earlier_run_are_swept_and_live_ones_are_kept(
+    tmp_path: Path,
+) -> None:
+    script = _script()
+    out = tmp_path / "out"
+    out.mkdir()
+    old = datetime(2026, 1, 1).timestamp()
+    dead_work = out / ".yulon-move-work-999999999-abc"
+    dead_work.mkdir()
+    (dead_work / "acore_auth.sql").write_text("verifiers", encoding="utf-8")
+    live_work = out / f".yulon-move-work-{os.getpid()}-xyz"
+    live_work.mkdir()
+    stale_partial = out / "yulon-move-wow-wotlk-20260101-0000-keep-private.zip.partial"
+    stale_partial.write_bytes(b"x")
+    os.utime(stale_partial, (old, old))
+    fresh_partial = out / "yulon-move-wow-wotlk-20260101-0001-keep-private.zip.partial"
+    fresh_partial.write_bytes(b"x")
+    other = out / "notes.partial"
+    other.write_bytes(b"x")
+    os.utime(other, (old, old))
+    script._sweep_leftovers(out, datetime.now().timestamp())
+    assert not dead_work.exists() and not stale_partial.exists()
+    assert live_work.exists() and fresh_partial.exists() and other.exists()
+
+
+def test_a_python_older_than_the_minimum_gets_a_plain_sentence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = _script()
+    monkeypatch.setattr(script.sys, "version_info", (3, 9, 18, "final", 0))
+    assert script.main(["--help"]) == 2
+    err = capsys.readouterr().err
+    assert "Python 3.10 or newer" in err and "3.9" in err
+
+
+def test_the_readme_names_the_python_the_script_needs() -> None:
+    readme = (SCRIPT.parent / "README.md").read_text(encoding="utf-8")
+    section = readme[readme.index("export-accounts-and-characters-wsl.py") :]
+    assert "Python 3.10 or newer" in section and "3.11" not in section.split("curl")[0]
+
+
+def test_a_run_sweeps_the_dump_folder_a_killed_run_left_in_the_output_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _script()
+    server, out = _prepare(tmp_path, monkeypatch)
+    dead = out / ".yulon-move-work-999999999-abc"
+    dead.mkdir()
+    (dead / "acore_auth.sql").write_text("verifiers", encoding="utf-8")
+    dest, _counts = script.pack(server, out, False)
+    assert dest.exists() and not dead.exists()
