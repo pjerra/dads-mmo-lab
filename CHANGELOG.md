@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 - Filter the Characters and Bots lists by name as you type; the X clears the filter.
 - The Catalog's Installed button now opens that server's tab.
 - New Launcher button (the play icon in the top bar): play on a friend's server with a ready-to-play client, without installing a server.
+- Change the realm name players see in the game's realm list on the Networking tab.
 
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
