@@ -16,6 +16,8 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 ### New
 - A WotLK or Unbound server's Bots tab has **Delete every random bot…**: all or nothing, optional backup first; AddClass bots stay.
 - Filter the Characters and Bots lists by name as you type; the X clears the filter.
+- The Catalog's Installed button now opens that server's tab.
+- New Launcher button (the play icon in the top bar): play on a friend's server with a ready-to-play client, without installing a server.
 
 ### Fixed
 - A failed build in a module you just installed now says the module is new and your server still runs its old build.
