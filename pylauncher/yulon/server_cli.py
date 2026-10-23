@@ -124,7 +124,15 @@ def run(
     name = entry.name
     try:
         if verb == "status":
+            # One answer for every game, remembered or not: the box's ssh verbs ask
+            # about installs this machine may never have seen. A stopped server and
+            # no install both read "nothing is up" to the caller, and the tile only
+            # ever proceeds on exit 0, so both report the "no install" sentence and
+            # its exit code rather than a word that reads as "installed but down".
             status = controller.status()
+            if not status.world and not status.all_running:
+                say(f"Yu'lon has no {game} install. Nothing was done.")
+                return EXIT_REFUSED
             say("running" if status.all_running else "stopped")
             return EXIT_OK if status.world else EXIT_NOT_UP
         if verb == "stop":

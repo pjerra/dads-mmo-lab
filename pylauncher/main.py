@@ -2834,6 +2834,47 @@ def single_removal_refusal(view: Any) -> str | None:
     return reason
 
 
+HEADLESS_HELP = """usage: yulon [--version] [--help] [--provision]
+                  [--server start|stop|status <game id> [<server folder>]]
+
+Headless verbs for a server box with no display (each exits without opening a window):
+  --version                        print the build version and exit 0
+  --help, -h                       print this text and exit 0
+  --provision                      report Docker provisioning as JSON and exit 0, 2 or 3
+  --server start|stop|status <game id> [<server folder>]
+                                   a WoW server's Start, Stop or status with no window
+"""
+"""What `yulon --help` prints. Answered before Qt loads, so a box with no display gets it."""
+
+
+def print_headless_help() -> int:
+    """Print the headless verbs and exit 0. Before Qt, logging and the config directory."""
+    use_utf8_streams()
+    print(HEADLESS_HELP, flush=True)
+    return 0
+
+
+def _is_headless_verb(argv: list[str] | None = None) -> bool:
+    """Whether this launch is answered without a window (ssh1 task 1).
+
+    `--version` and `--help` answer before anything loads; `--provision` and
+    `--server ...` run their own headless flow. None of them may run the
+    self-update probe, which writes into the install folder (`detect._probe`):
+    on a read-only box mount that probe only logs noise. The probe lives behind
+    `build_window()`, and this predicate is the one place that rule is written
+    so a future caller can ask it instead of re-deriving it from argv.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    return (
+        "--version" in args
+        or "--help" in args
+        or "-h" in args
+        or "--provision" in args
+        or "--server" in args
+        or bool(os.environ.get("YULON_PROVISION"))
+    )
+
+
 def main() -> int:
     """Start the launcher."""
     # BEFORE ANYTHING ELSE, including logging: this is how a packaged build is
@@ -2849,6 +2890,12 @@ def main() -> int:
 
         print(__version__)
         return 0
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        # A box with no display asks what this build can do headless (spike S1):
+        # with no verb the app opens the GUI, which aborts there with no Qt
+        # platform plugin. Answered like `--version`, before logging, the
+        # config directory or Qt.
+        return print_headless_help()
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
