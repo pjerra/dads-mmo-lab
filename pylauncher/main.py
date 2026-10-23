@@ -2866,6 +2866,19 @@ def main() -> int:
         use_utf8_streams()
         args = sys.argv[1:]
         return server_cli.main(args[args.index("--server") + 1 :])
+    if "--box-check" in sys.argv[1:]:
+        # Read-only pre-check for a headless server box (`box_check`): answered beside
+        # `--server` above, before Qt starts an application or this copy claims the
+        # single instance. One JSON object on one line; writes nothing, starts
+        # nothing, needs no sudo.
+        from logging import WARNING
+
+        from yulon import box_check
+
+        # Its line is for the PC's parser; Yu'lon's log lines stay in yulon.log.
+        configure(config_dir=platform.config_dir(), stderr_level=WARNING)
+        use_utf8_streams()
+        return box_check.main()
     logger.info("Yu'lon launcher starting")
     if sys.platform == "win32":
         try:
