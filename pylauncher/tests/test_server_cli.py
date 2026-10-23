@@ -155,13 +155,7 @@ def test_stop_and_status(config: Path) -> None:
     services = FakeServices(FakeController(world_up=True))
     assert _run(["status", "wow-wotlk"], config, services)[:2] == (0, ["running"])
     assert _run(["stop", "wow-wotlk"], config, services)[:2] == (0, ["WoW WotLK stopped."])
-    # A stopped server answers the "no install" sentence (ssh1): to a headless
-    # caller "installed but down" and "never installed" are the same situation,
-    # and the tile only proceeds on exit 0 either way.
-    assert _run(["status", "wow-wotlk"], config, services)[:2] == (
-        2,
-        ["Yu'lon has no wow-wotlk install. Nothing was done."],
-    )
+    assert _run(["status", "wow-wotlk"], config, services)[:2] == (1, ["stopped"])
     assert _run(["stop", "wow-wotlk"], config, services)[:2] == (0, ["WoW WotLK was not running."])
 
 

@@ -2854,27 +2854,6 @@ def print_headless_help() -> int:
     return 0
 
 
-def _is_headless_verb(argv: list[str] | None = None) -> bool:
-    """Whether this launch is answered without a window (ssh1 task 1).
-
-    `--version` and `--help` answer before anything loads; `--provision` and
-    `--server ...` run their own headless flow. None of them may run the
-    self-update probe, which writes into the install folder (`detect._probe`):
-    on a read-only box mount that probe only logs noise. The probe lives behind
-    `build_window()`, and this predicate is the one place that rule is written
-    so a future caller can ask it instead of re-deriving it from argv.
-    """
-    args = list(sys.argv[1:] if argv is None else argv)
-    return (
-        "--version" in args
-        or "--help" in args
-        or "-h" in args
-        or "--provision" in args
-        or "--server" in args
-        or bool(os.environ.get("YULON_PROVISION"))
-    )
-
-
 def main() -> int:
     """Start the launcher."""
     # BEFORE ANYTHING ELSE, including logging: this is how a packaged build is
@@ -2895,6 +2874,7 @@ def main() -> int:
         # with no verb the app opens the GUI, which aborts there with no Qt
         # platform plugin. Answered like `--version`, before logging, the
         # config directory or Qt.
+        # Headless verbs never reach the update probe: they return before the window is built.
         return print_headless_help()
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
