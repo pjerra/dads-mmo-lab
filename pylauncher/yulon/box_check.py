@@ -12,6 +12,8 @@ no writes, no starts, no sudo. `main()` answers it before Qt loads, beside
 
 from __future__ import annotations
 
+import getpass
+import importlib
 import json
 import os
 import platform as _stdlib_platform
@@ -146,6 +148,27 @@ def detect_firewall(
     return FirewallState(tool=None, active=None)
 
 
+def _effective_user(uid: int | None) -> str:
+    """The account THIS process runs as: the passwd name for the effective uid.
+
+    `platform._linux_user(None)` answers the INVOKER under sudo (`SUDO_USER`),
+    which is the right account to invite into the group but the wrong account
+    for a read-only check: `is_root` already answers about this process, and
+    the group probe must agree with it. The passwd database is the same source
+    `_linux_user` trusts; the environment fallback is its last line too.
+    """
+    if uid is not None:
+        try:
+            pwd = importlib.import_module("pwd")
+            return str(pwd.getpwuid(uid).pw_name)
+        except (ImportError, KeyError):
+            pass
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001 - no user database; the probe degrades to a name
+        return os.environ.get("USER") or os.environ.get("USERNAME") or "deck"
+
+
 def check(
     *,
     run: RunCmd | None = None,
@@ -174,25 +197,41 @@ def check(
     git (which knows the macOS stub), `platform._docker_group_member()` for
     the exact-token group read (`dockerd` must not read as a member),
     `networking.detect_firewalld_daemon()` for firewalld's state, and
-    `preflight.free_bytes()` for the disk. The one exception is the `which`
-    half of the git question: `git_available()` reads the live PATH, which no
-    test can fake, so a `find("git")` of `None` answers `False` first and the
-    helper is only asked when the CLI is there to run.
+    `preflight.free_bytes()` for the disk. The one exception is the hand the
+    helper reads: both pass `run` and the check's own `find`, so the fake PATH
+    and the fake runner decide what is installed. Without them the `which` half
+    would read the live PATH no test can fake, and the macOS-stub half would
+    read the real `sys.platform` on a Mac suite run instead of the OS the test
+    handed in.
     """
     do: RunCmd = run if run is not None else _live
     find = which if which is not None else shutil.which
     release = os_release if os_release is not None else read_os_release()
     docker_installed = find("docker") is not None
     docker_usable = docker_installed and platform.docker_ready(run=do, timeout=_BOUNDS_SECONDS)
-    who = user if user is not None else platform._linux_user(None)
-    git_installed = find("git") is not None and git.git_available(run=do)
-    free = home_free_bytes
-    if free is None:
-        free = preflight.free_bytes(Path.home())
+    here = system if system is not None else platform.detect()
     uid = euid
     if uid is None:
         geteuid = getattr(os, "geteuid", None)
         uid = geteuid() if geteuid is not None else None
+    if user is not None:
+        who = user
+    elif uid == 0:
+        # Under sudo `platform._linux_user(None)` answers the INVOKER
+        # (`SUDO_USER`), while `is_root` above answers about THIS process --
+        # so the group probe would ask about one account and the root flag
+        # about another. The check asks whether this process may reach the
+        # daemon, so it asks about the process: the passwd name for the
+        # effective uid, falling back to the environment the same way
+        # `_linux_user` does.
+        who = _effective_user(uid)
+    else:
+        who = platform._linux_user(None)
+    sys_name = {"linux": "linux", "windows": "win32", "macos": "darwin"}[here]
+    git_installed = git.git_available(run=do, which=find, sys_platform=sys_name)
+    free = home_free_bytes
+    if free is None:
+        free = preflight.free_bytes(Path.home())
     libc_ver = libc if libc is not None else _stdlib_platform.libc_ver()
     report: BoxReport = {
         "os_id": release.get("ID") or None,

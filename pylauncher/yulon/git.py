@@ -1444,7 +1444,11 @@ def _depth_args(depth: int | None) -> list[str]:
     return [] if depth is None else ["--depth", str(depth)]
 
 
-def git_available(run: RunCmd | None = None) -> bool:
+def git_available(
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+    sys_platform: str | None = None,
+) -> bool:
     """True if the host has a `git` that can actually run, without prompting.
 
     The probe is deliberately not "is git on PATH". On a Mac with no Command
@@ -1452,11 +1456,18 @@ def git_available(run: RunCmd | None = None) -> bool:
     modal GUI installer and block until someone clicks it — from a launcher that
     is a hang, not an error. `xcode-select -p` answers the same question by
     exiting non-zero, and never opens a window.
+
+    `which` is the PATH to ask (the live one by default); `sys_platform` the
+    `sys.platform` value to behave as (the real one by default). Both exist so
+    a caller that already fakes them -- `box_check.check()` -- gets an answer
+    about its own seams instead of about the machine the suite happens to run
+    on.
     """
     do = run if run is not None else runner.run
-    if shutil.which("git") is None:
+    find = which if which is not None else shutil.which
+    if find("git") is None:
         return False
-    if sys.platform == "darwin":
+    if (sys_platform if sys_platform is not None else sys.platform) == "darwin":
         try:
             if do(["xcode-select", "-p"]).returncode != 0:
                 logger.info("git_available(): git is the Command Line Tools stub, not a real git")

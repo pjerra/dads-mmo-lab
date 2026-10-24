@@ -49,6 +49,7 @@ def _which(*names: str) -> Callable[[str], str | None]:
 
 
 def _check(run: _Run, **kwargs: object) -> BoxReport:
+    kwargs.setdefault("system", "linux")
     return box_check.check(  # type: ignore[arg-type]
         run=run, which=_which("docker", "git", "ufw"), os_release=dict(_RELEASE), **kwargs
     )
@@ -156,6 +157,38 @@ def test_a_dockerd_group_is_not_the_docker_group() -> None:
     assert _check(run, user="deck")["docker_group_member"] is False
 
 
+def test_root_under_sudo_probes_the_process_not_the_invoker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `sudo` the group probe agrees with `is_root`: both about the process.
+
+    `SUDO_USER` names the invoker, which is who a group JOIN would invite --
+    but this is a read-only check, and `is_root` already answers about the
+    process (euid 0). Probing the invoker's groups here would report "root but
+    not in docker" for the wrong account; the effective user's name keeps the
+    two answers about the same one.
+    """
+    run = (
+        _Run()
+        .answer(["docker", "info"], 0, "Server Version: 27")
+        .answer(["id", "-nG", "root"], 0, "root docker")
+        .answer(["git", "--version"], 0, "git version 2.43")
+        .answer(["ufw", "status"], 0, "Status: inactive")
+    )
+    monkeypatch.setenv("SUDO_USER", "deck")
+    report = box_check.check(
+        run=run,
+        which=_which("docker", "git", "ufw"),
+        os_release=dict(_RELEASE),
+        euid=0,
+        system="linux",
+        home_free_bytes=48 * 1024**3,
+    )
+    assert report["is_root"] is True
+    assert [["id", "-nG", "root"]] == [c for c in run.calls if c[:2] == ["id", "-nG"]]
+    assert report["docker_group_member"] is True
+
+
 def test_an_inactive_ufw_reads_as_inactive() -> None:
     run = (
         _Run()
@@ -223,6 +256,26 @@ def test_no_firewall_tool_is_null_not_a_guess() -> None:
         run=run, which=_which("docker", "git"), os_release=dict(_RELEASE), user="deck"
     )
     assert report["firewall"] == FirewallState(tool=None, active=None)
+
+
+def _live_guard(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    """Canned reads for the real `check()`; anything else fails loudly.
+
+    `main.main()` runs the check with no seams handed in, so the runner is
+    faked at `platform.runner.run` (the suite never touches a real docker CLI:
+    conftest fails it on purpose). `firewall-cmd` has no canned answer because
+    this PATH has no firewall tool named so; `id -nG <whoever>` answers from
+    the group database, so every invoker reads the same.
+    """
+    if argv[:2] == ["docker", "info"]:
+        return subprocess.CompletedProcess(argv, 0, "Server Version: 27", "")
+    if argv[:2] == ["git", "--version"]:
+        return subprocess.CompletedProcess(argv, 0, "git version 2.43", "")
+    if argv[:2] == ["ufw", "status"]:
+        return subprocess.CompletedProcess(argv, 0, "Status: inactive", "")
+    if argv[:2] == ["id", "-nG"]:
+        return subprocess.CompletedProcess(argv, 0, "deck sudo", "")
+    raise AssertionError(f"unexpected subprocess from --box-check: {argv!r}")
 
 
 def test_main_prints_one_json_line_and_returns_zero(
@@ -321,22 +374,30 @@ def test_main_reports_its_own_crash_as_one_line_not_a_traceback(
     assert "Traceback" not in capsys.readouterr().out
 
 
-def test_the_check_writes_nothing(tmp_path: Path) -> None:
-    before = {path for path in tmp_path.rglob("*")}
-    run = (
-        _Run()
-        .answer(["docker", "info"], 0, "Server Version: 27")
-        .answer(["id", "-nG", "deck"], 0, "deck sudo")
-        .answer(["git", "--version"], 0, "git version 2.43")
-        .answer(["ufw", "status"], 0, "Status: inactive")
-    )
-    box_check.check(
-        run=run,
-        which=_which("docker", "git", "ufw"),
-        os_release=dict(_RELEASE),
-        user="deck",
-        system="linux",
-        home_free_bytes=48 * 1024**3,
-    )
-    assert {path for path in tmp_path.rglob("*")} == before
-    assert run.calls, "a check that asked nothing proved nothing"
+def test_the_check_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`yulon --box-check` answers through `main.main()` and writes nowhere.
+
+    HOME/XDG dirs point at a scratch folder, `platform.config_dir()` answers
+    under it, and the folder must still be empty afterwards: the old branch sat
+    below `configure()`, which opens `yulon.log` there, and this test names the
+    branch's position by going red on the old order (proven by the mutation in
+    the report). `home_free_bytes` is not faked because the check reads the
+    real home's free space -- a read, not a write -- and the assertion is that
+    the read leaves nothing behind. One JSON line on stdout, every key present.
+    """
+    import sys
+
+    import main as launcher_main
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    monkeypatch.setattr(sys, "argv", ["yulon", "--box-check"])
+    monkeypatch.setattr(launcher_main.platform.runner, "run", _live_guard)
+    assert launcher_main.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1, f"the PC parses one line, not {len(lines)}: {lines!r}"
+    assert set(json.loads(lines[0])) == EXPECTED_KEYS
+    assert list((tmp_path / "home").rglob("*")) == []

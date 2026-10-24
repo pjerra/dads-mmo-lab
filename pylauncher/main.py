@@ -2849,6 +2849,16 @@ def main() -> int:
 
         print(__version__)
         return 0
+    if "--box-check" in sys.argv[1:]:
+        # Read-only pre-check for a headless server box (`box_check`): answered
+        # next to `--version` above, before logging opens `yulon.log` and before
+        # the docker-group re-exec -- both would break the promise the docstring
+        # makes. One JSON object on one line; writes nothing, starts nothing,
+        # needs no sudo. It also wins over `YULON_PROVISION`: a box that cannot
+        # install yet still needs a check that does not try to.
+        from yulon import box_check
+
+        return box_check.main()
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):
@@ -2866,19 +2876,6 @@ def main() -> int:
         use_utf8_streams()
         args = sys.argv[1:]
         return server_cli.main(args[args.index("--server") + 1 :])
-    if "--box-check" in sys.argv[1:]:
-        # Read-only pre-check for a headless server box (`box_check`): answered beside
-        # `--server` above, before Qt starts an application or this copy claims the
-        # single instance. One JSON object on one line; writes nothing, starts
-        # nothing, needs no sudo.
-        from logging import WARNING
-
-        from yulon import box_check
-
-        # Its line is for the PC's parser; Yu'lon's log lines stay in yulon.log.
-        configure(config_dir=platform.config_dir(), stderr_level=WARNING)
-        use_utf8_streams()
-        return box_check.main()
     logger.info("Yu'lon launcher starting")
     if sys.platform == "win32":
         try:
