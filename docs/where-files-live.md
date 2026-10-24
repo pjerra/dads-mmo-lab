@@ -36,8 +36,10 @@ Things the app asks you for, in plain words:
 - **A reboot** after enabling WSL2 on Windows.
 - **Router settings** for internet play (a DHCP reservation and TCP port forwarding) — the app
   detects and explains them; it cannot log in to your router.
-- **Your own game client.** Yu'lon never bundles, sells or distributes a game client or game
-  files. Two details worth stating plainly: WoW TBC, Vanilla and Tortoise ask you to point at a
+- **Your own game client.** Yu'lon distributes no Blizzard game files and no game client; the
+  installs fetch open-source server software, and some installs (Centurion, Unbound) also fetch
+  the client patch files or addons of their own makers. Two details worth stating plainly: WoW
+  TBC, Vanilla and Tortoise ask you to point at a
   client folder you already have, and WotLK does not — its installer never asks, because the
   server fetches AzerothCore's own client-data archive (maps, vmaps, mmaps, DBC) into a Docker
   volume. That is server-side data the server cannot run without. It is not the client you log

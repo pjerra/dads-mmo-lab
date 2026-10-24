@@ -85,8 +85,8 @@ downloads it and checks it against the release's `SHA256SUMS` before touching yo
 
 Short answers here; more in [docs/faq.md](docs/faq.md).
 
-- **"Windows protected your PC" / Defender flags Yu'lon:** the builds are unsigned — there is no
-  code-signing certificate yet, and none is promised. Check the file's SHA-256 against the
+- **"Windows protected your PC" / Defender flags Yu'lon:** the builds are unsigned for now —
+  there is no code-signing certificate. Check the file's SHA-256 against the
   release's `SHA256SUMS` (`Get-FileHash`), then More info → Run anyway. Never turn Defender off;
   if Defender quarantines Yu'lon, report it with the version. On macOS: right-click → Open.
 - **Do I need internet?** Yes, to install and update (sources, Docker images, client data). Playing
@@ -97,21 +97,21 @@ Short answers here; more in [docs/faq.md](docs/faq.md).
   `.tar.gz` instead (missing FUSE). **Why does Windows need a reboot?** WSL2.
 - **Can friends join?** On your local network, via the Networking tab. Over the internet needs
   router port forwarding you set up yourself.
-- **Is this piracy / affiliated with Blizzard, Capcom or Neople?** No — see
+- **Is this piracy / is it affiliated with the game makers?** No — see
   [Legal](#legal) below.
 
 ## Legal
 
-Yu'lon is not affiliated with, endorsed by, or associated with Blizzard Entertainment, Capcom, or
-Neople. It distributes no game files: you supply your own legally obtained game client. Read
-[DISCLAIMER.md](DISCLAIMER.md) before running a server.
+Yu'lon is not affiliated with or endorsed by Blizzard Entertainment or the makers of any game it
+can install a server for. Yu'lon distributes no Blizzard game files and no game client; the
+installs fetch open-source server software, and some installs (Centurion, Unbound) also fetch
+the client patch files or addons of their own makers. You supply your own legally obtained game
+client. Read [DISCLAIMER.md](DISCLAIMER.md) before running a server.
 
 ## Contributing
 
 Setup and conventions: [pyplan/contribution.md](pyplan/contribution.md). One rule that reaches
-players: every change adds one line to `CHANGELOG.md` under `## Unreleased`. This README is written
-on a branch and merged to `main` later; Yu'lon is [Project Yu'lon](pyplan/README.md), the plan it
-implements.
+players: every change adds one line to `CHANGELOG.md` under `## Unreleased`.
 
 ## Community & links
 
