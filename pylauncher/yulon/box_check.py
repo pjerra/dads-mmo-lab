@@ -124,7 +124,19 @@ def detect_firewall(
     here = system if system is not None else platform.detect()
     if here != "linux":
         return FirewallState(tool=None, active=None)
-    tool = platform.detect_firewall(which=find)
+    if system is not None:
+        # Seamed OS: pick ufw vs firewalld from `find` here. The shared
+        # `platform.detect_firewall()` reads the REAL host through
+        # `platform.detect()` ("netsh" on Windows, "alf" on macOS), so on a
+        # faked `system` it would answer the wrong machine.
+        if find("ufw") is not None:
+            tool = "ufw"
+        elif find("firewall-cmd") is not None:
+            tool = "firewalld"
+        else:
+            tool = "none"
+    else:
+        tool = platform.detect_firewall(which=find)
     if tool == "ufw":
         try:
             proc = do(["ufw", "status"])
@@ -240,6 +252,9 @@ def check(
         "glibc": libc_ver[1] if libc_ver[0].lower() == "glibc" else None,
         "docker_installed": docker_installed,
         "docker_usable": docker_usable,
+        # `id -nG <user>` reads the group database, not this login session, so
+        # `docker_group_member` can be true while `docker_usable` is still false
+        # until the user logs in again.
         "docker_group_member": platform._docker_group_member(do, who),
         "git_installed": git_installed,
         "free_disk_gib": free / 1024**3 if free is not None else None,

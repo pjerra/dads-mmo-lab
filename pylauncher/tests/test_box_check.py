@@ -48,10 +48,18 @@ def _which(*names: str) -> Callable[[str], str | None]:
     return find
 
 
-def _check(run: _Run, **kwargs: object) -> BoxReport:
+def _check(
+    run: object,
+    which: Callable[[str], str | None] | None = None,
+    os_release: dict[str, str] | None = None,
+    **kwargs: object,
+) -> BoxReport:
     kwargs.setdefault("system", "linux")
     return box_check.check(  # type: ignore[arg-type]
-        run=run, which=_which("docker", "git", "ufw"), os_release=dict(_RELEASE), **kwargs
+        run=run,
+        which=which if which is not None else _which("docker", "git", "ufw"),
+        os_release=dict(_RELEASE) if os_release is None else os_release,
+        **kwargs,
     )
 
 
@@ -106,8 +114,8 @@ def test_a_missing_docker_cli_is_not_usable_and_asks_nothing() -> None:
         .answer(["git", "--version"], 0, "git version 2.43")
         .answer(["ufw", "status"], 0, "Status: inactive")
     )
-    report = box_check.check(
-        run=run, which=_which("git", "ufw"), os_release=dict(_RELEASE), user="deck"
+    report = _check(
+        run, which=_which("git", "ufw"), os_release=dict(_RELEASE), user="deck"
     )
     assert report["docker_installed"] is False and report["docker_usable"] is False
     assert not [call for call in run.calls if call[:2] == ["docker", "info"]]
@@ -129,7 +137,7 @@ def test_an_exploding_daemon_probe_is_not_usable() -> None:
     def _boom(argv: list[str]) -> subprocess.CompletedProcess[str]:
         raise OSError("no such file")
 
-    report = box_check.check(
+    report = _check(
         run=_boom, which=_which("git", "ufw"), os_release=dict(_RELEASE), user="deck"
     )
     assert report["docker_installed"] is False and report["docker_usable"] is False
@@ -219,8 +227,8 @@ def test_firewalld_running_reads_as_up() -> None:
         .answer(["git", "--version"], 0, "git version 2.43")
         .answer(["firewall-cmd", "--state"], 0, "running")
     )
-    report = box_check.check(
-        run=run,
+    report = _check(
+        run,
         which=_which("docker", "git", "firewall-cmd"),
         os_release=dict(_RELEASE),
         user="deck",
@@ -236,8 +244,8 @@ def test_firewalld_stopped_reads_as_down() -> None:
         .answer(["git", "--version"], 0, "git version 2.43")
         .answer(["firewall-cmd", "--state"], 252, "not running")
     )
-    report = box_check.check(
-        run=run,
+    report = _check(
+        run,
         which=_which("docker", "git", "firewall-cmd"),
         os_release=dict(_RELEASE),
         user="deck",
@@ -252,8 +260,8 @@ def test_no_firewall_tool_is_null_not_a_guess() -> None:
         .answer(["id", "-nG", "deck"], 0, "deck docker sudo")
         .answer(["git", "--version"], 0, "git version 2.43")
     )
-    report = box_check.check(
-        run=run, which=_which("docker", "git"), os_release=dict(_RELEASE), user="deck"
+    report = _check(
+        run, which=_which("docker", "git"), os_release=dict(_RELEASE), user="deck"
     )
     assert report["firewall"] == FirewallState(tool=None, active=None)
 
@@ -271,6 +279,12 @@ def _live_guard(argv: list[str], **kwargs: object) -> subprocess.CompletedProces
         return subprocess.CompletedProcess(argv, 0, "Server Version: 27", "")
     if argv[:2] == ["git", "--version"]:
         return subprocess.CompletedProcess(argv, 0, "git version 2.43", "")
+    if argv[:2] == ["xcode-select", "-p"]:
+        # The macOS-stub probe `git_available()` runs only for a `darwin`
+        # system: the hand mutation fakes a macOS host while `main.main()`
+        # runs the check with no seams, so this answer keeps the guard loud
+        # for anything truly unexpected instead of going red on the stub.
+        return subprocess.CompletedProcess(argv, 0, "/Library/Developer/CommandLineTools", "")
     if argv[:2] == ["ufw", "status"]:
         return subprocess.CompletedProcess(argv, 0, "Status: inactive", "")
     if argv[:2] == ["id", "-nG"]:
@@ -311,8 +325,8 @@ def test_a_short_os_release_leaves_nulls() -> None:
         .answer(["git", "--version"], 0, "git version 2.43")
         .answer(["ufw", "status"], 0, "Status: active")
     )
-    report = box_check.check(
-        run=run, which=_which("docker", "git", "ufw"), os_release={}, user="deck"
+    report = _check(
+        run, which=_which("docker", "git", "ufw"), os_release={}, user="deck"
     )
     assert report["os_id"] is None and report["os_version"] is None
 
@@ -336,8 +350,8 @@ def test_a_missing_git_reads_as_missing() -> None:
         .answer(["id", "-nG", "deck"], 0, "deck docker sudo")
         .answer(["ufw", "status"], 0, "Status: active")
     )
-    report = box_check.check(
-        run=run, which=_which("docker", "ufw"), os_release=dict(_RELEASE), user="deck"
+    report = _check(
+        run, which=_which("docker", "ufw"), os_release=dict(_RELEASE), user="deck"
     )
     assert report["git_installed"] is False
     assert not [call for call in run.calls if call[:2] == ["git", "--version"]]
@@ -353,7 +367,7 @@ def test_every_command_gets_the_module_bound() -> None:
 
     box_check.runner.run = _spy  # type: ignore[method-assign,assignment]
     try:
-        box_check.check(run=None, which=_which(), os_release={}, user="nobody")
+        box_check.check(run=None, which=_which(), os_release={}, user="nobody", system="linux")
     finally:
         box_check.runner.run = real_run  # type: ignore[method-assign,assignment]
     assert seen and all(bound == box_check._BOUNDS_SECONDS for bound in seen)
@@ -396,6 +410,79 @@ def test_the_check_writes_nothing(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
     monkeypatch.setattr(sys, "argv", ["yulon", "--box-check"])
     monkeypatch.setattr(launcher_main.platform.runner, "run", _live_guard)
+    assert launcher_main.main() == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1, f"the PC parses one line, not {len(lines)}: {lines!r}"
+    assert set(json.loads(lines[0])) == EXPECTED_KEYS
+    assert list((tmp_path / "home").rglob("*")) == []
+
+def test_a_faked_host_platform_does_not_change_a_linux_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A faked Windows/macOS host still gets the Linux report when `system` is Linux.
+
+    `detect_firewall()` used to ask the real `platform.detect_firewall()`,
+    which reads the real host ("netsh" on Windows, "alf" on macOS): on such a
+    host the ufw branch went unanswered even with `system="linux"`. Faking the
+    host platform and keeping the report proves the seamed path no longer asks
+    the real one. A second, still-seamed case pins the branch the old code
+    reached: a fake `"macos"` system reports no firewall tool, whatever the
+    real host says.
+    """
+
+    def _report() -> BoxReport:
+        run = (
+            _Run()
+            .answer(["docker", "info"], 0, "Server Version: 27")
+            .answer(["id", "-nG", "deck"], 0, "deck docker sudo")
+            .answer(["git", "--version"], 0, "git version 2.43")
+            .answer(["ufw", "status"], 0, "Status: active")
+        )
+        return _check(run, user="deck")
+
+    expected = _report()["firewall"]
+    assert expected == FirewallState(tool="ufw", active=True)
+    for fake in ("macos", "windows"):
+        monkeypatch.setattr(box_check.platform, "detect", lambda fake=fake: fake)
+        assert _report()["firewall"] == expected
+    monkeypatch.setattr(box_check.platform, "detect", lambda: "linux")
+    run = (
+        _Run()
+        .answer(["docker", "info"], 0, "Server Version: 27")
+        .answer(["id", "-nG", "deck"], 0, "deck docker sudo")
+        .answer(["git", "--version"], 0, "git version 2.43")
+        .answer(["ufw", "status"], 0, "Status: active")
+    )
+    assert _check(run, user="deck", system="macos")["firewall"] == FirewallState(
+        tool=None, active=None
+    )
+
+
+def test_box_check_wins_over_the_provision_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--box-check` wins over `YULON_PROVISION=1`: one JSON line, no provision run.
+
+    `main.main()` answers the check before the provision branch, so a box that
+    cannot install yet gets a check that does not try to. The provision entry
+    is faked to fail loudly, the home tree must stay empty, and the line must
+    parse to the full key set.
+    """
+    import sys
+
+    import main as launcher_main
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "home" / ".local" / "share"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    monkeypatch.setenv("YULON_PROVISION", "1")
+    monkeypatch.setattr(sys, "argv", ["yulon", "--box-check"])
+    monkeypatch.setattr(launcher_main.platform.runner, "run", _live_guard)
+
+    def _must_not_run() -> int:
+        raise AssertionError("provisioning must not run under --box-check")
+
+    monkeypatch.setattr(launcher_main, "provision_headless", _must_not_run)
     assert launcher_main.main() == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1, f"the PC parses one line, not {len(lines)}: {lines!r}"
