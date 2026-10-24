@@ -11,7 +11,7 @@ There are **three `README.md`s**, each with a distinct audience, plus the `pypla
 
 | File | Role |
 |---|---|
-| `README.md` (repo root) | Project landing page — license, ethos, and the guide index. |
+| `README.md` (repo root) | **The front page**: what Yu'lon is, supported games, install, FAQ. |
 | `pyplan/README.md` (this file) | **The design doc**: *what* to build and *why*. Precedence on architecture. |
 | `pylauncher/README.md` | **User-facing**: what the shipped app does under the hood. |
 | `pyplan/style-guide.md` | **The code rules**: *how* to write it. Precedence on style. |
