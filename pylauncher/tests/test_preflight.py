@@ -2515,7 +2515,7 @@ def test_steamos_var_refuses_when_docker_info_unanswered() -> None:
             data_root_free=None,
             containerd_root=None,
             containerd_free=None,
-            steamos_store_on_var=True,
+            steamos_store_needs_home=True,
             var_free=2 * GIB,
         ),
     )
@@ -2531,6 +2531,65 @@ def test_steamos_var_refuses_when_docker_info_unanswered() -> None:
 def test_steamos_var_row_absent_off_steamos() -> None:
     """Off SteamOS the fact is False, so the row is not there at all (T884)."""
     report = preflight.evaluate(
-        ENTRY, SERVER_DIR, facts(steamos_store_on_var=False, var_free=1 * GIB)
+        ENTRY, SERVER_DIR, facts(steamos_store_needs_home=False, var_free=1 * GIB)
     )
     assert not [c for c in report.checks if c.name == preflight.STEAMOS_STORE_CHECK]
+
+
+def test_a_resized_var_has_no_row_however_little_is_free() -> None:
+    """T884 r2: the row is the switch's own predicate, so a 64 GiB /var has none.
+
+    Round 1 drew this row from "the store is on /var", and a Deck whose /var had
+    been resized on purpose was refused with a remedy — move the store — that
+    the switch then answered "nothing to do" to. Five hundred MB free on a
+    resized /var is the player's layout, and the generic Docker-disk row is
+    still there to refuse it with its own remedy.
+    """
+    report = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(steamos_store_needs_home=False, var_free=GIB // 2),
+    )
+    assert not [c for c in report.checks if c.name == preflight.STEAMOS_STORE_CHECK]
+
+
+def test_gather_asks_the_switch_predicate_and_never_store_on_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """T884 r2: the fact IS `platform.steamos_store_needs_home()`, asked once.
+
+    Reading `steamos_store_on_var()` here (the mutation) puts the row back on
+    every Deck whose /var was resized or is the root filesystem, and offers a
+    switch whose first act is to answer "nothing to do".
+    """
+    asked: list[str] = []
+
+    def needs_home() -> bool:
+        asked.append("needs_home")
+        return True
+
+    def never() -> bool:
+        raise AssertionError("the preflight fact must not be built from store_on_var")
+
+    monkeypatch.setattr(platform_module, "steamos_store_needs_home", needs_home)
+    monkeypatch.setattr(platform_module, "steamos_store_on_var", never)
+
+    got = preflight.gather(
+        ENTRY,
+        tmp_path,
+        platform_id=lambda: "linux",
+        docker_ready=lambda: False,
+        compose_ready=lambda: True,
+        compose_version=lambda: None,
+        disk_free=lambda _p: 100 * GIB,
+        dir_problem=lambda _p: None,
+        probe_port=lambda host, port: platform_module.PortProbe(host, port, "unknown", ""),
+        selinux=lambda: False,
+        fs_type=lambda _p: "ext2/ext3",
+        in_wsl=lambda: False,
+        steamos=lambda: True,
+        var_free=lambda: 1 * GIB,
+    )
+
+    assert asked == ["needs_home"]
+    assert got.steamos_store_needs_home is True

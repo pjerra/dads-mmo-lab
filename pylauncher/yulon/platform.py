@@ -2999,6 +2999,35 @@ STEAMOS_STORE_NOT_STARTED_STEP = (
     "Install again."
 )
 
+STEAMOS_STORE_NOTHING_TO_DO_STEP = (
+    "Docker's storage does not need moving on this Steam Deck — /var was resized, it is not a "
+    "partition of its own, or Docker's store is not on it — so nothing was changed."
+)
+"""What the switch says when the machine no longer matches the question it was offered for.
+
+Asked first, before the question: a /var resized on purpose, a /var that is the
+root filesystem, and a store the user already moved are all "leave it", and
+rewriting Docker's settings on any of them would undo a choice nobody can see
+from here (T884 round 2).
+"""
+
+STEAMOS_STORE_FAILED_STEP = 'The switch failed at "{step}", so {files}. {docker}'
+"""The recovery report: what stopped, what was put back, and whether Docker runs (T884 r2).
+
+One sentence per half rather than a stack trace: the step in the player's own
+words, then the two facts that decide what they do next.
+"""
+
+STEAMOS_STORE_NOTHING_INSTALLED = "no settings file had been installed yet"
+STEAMOS_STORE_FILES_PUT_BACK = "the settings files were put back"
+STEAMOS_STORE_FILES_PARTLY_PUT_BACK = "the settings files were put back except {names}"
+STEAMOS_STORE_FILES_NOT_PUT_BACK = "the settings files could not be put back"
+
+STEAMOS_STORE_RUNNING_AGAIN = "Docker is running again."
+STEAMOS_STORE_NOT_RUNNING_AGAIN = (
+    "Docker did not start again: restart the Steam Deck, then press Install again."
+)
+
 
 def _read_text_or_none(path: Path) -> str | None:
     """A settings file's text, or None when it is absent or unreadable (the read seam)."""
@@ -3091,17 +3120,35 @@ def steamos_store_on_var(data_root: Path | None = None) -> bool:
     return on_var(containerd_configured_root()) or on_var(chosen)
 
 
+def var_is_its_own_mount() -> bool:
+    """Is `/var` a filesystem of its own, or the root one? (T884 round 2)
+
+    The stock Deck's `/var` is its own small partition, and that is the only
+    reason the store has to move. When `/var` is the root filesystem there is
+    no small partition to escape, so nothing is rewritten: the generic
+    "Docker's disk" row still refuses with its own remedy. Unreadable `st_dev`
+    is not evidence of a separate mount either, and both answer False.
+    """
+    var = _device_of(Path("/var"))
+    root = _device_of(Path("/"))
+    return var is not None and root is not None and var != root
+
+
 def steamos_store_needs_home(data_root: Path | None = None) -> bool:
     """Should this Deck's Docker store move to `/home`? (T884)
 
-    All three of the owner's conditions: SteamOS, a `/var` still the stock small
-    size, and a store on it. A store the user already put off /var, and a /var
-    that was resized on purpose, are both kept exactly as they are.
+    All four of the owner's conditions: SteamOS, a `/var` still the stock small
+    size, a `/var` that is a partition of its own, and a store on it. A store
+    the user already put off /var, a /var that was resized on purpose, and a
+    /var that is just a folder on the root filesystem are all kept exactly as
+    they are.
     """
     if not is_steamos():
         return False
     total = _var_total_bytes()
     if total is None or total >= STEAMOS_VAR_SMALL_GIB * _GIB:
+        return False
+    if not var_is_its_own_mount():
         return False
     return steamos_store_on_var(data_root)
 
@@ -3226,29 +3273,118 @@ def steamos_store_commands(staged: Path, have_json: bool, have_toml: bool) -> li
     return commands
 
 
-def _stage_steamos_store() -> tuple[list[list[str]], tuple[str, ...]]:
-    """Merge both settings, stage what changed, and answer the commands (T884).
+@dataclass(frozen=True)
+class StorePlan:
+    """The T884 store step: what to install, and what it takes to undo it.
+
+    `existed` is read before the first command runs, because that is what
+    decides the undo: a settings file that was there gets its `.yulon-bak`
+    back, and one that was not is removed again. `folder` is the staging
+    directory, which the run removes however it ends.
+    """
+
+    commands: list[list[str]]
+    existed: tuple[tuple[Path, bool], ...] = ()
+    manual: tuple[str, ...] = ()
+    folder: Path | None = None
+
+    def restore(self, installed: Iterable[Path]) -> list[list[str]]:
+        """The commands that put exactly `installed` back the way they were (T884 r2).
+
+        Only files THIS run installed are undone: a target whose `install` never
+        ran is left alone, and the `.yulon-bak` named here is the one the same
+        run made. A file that was there before is restored by installing its
+        backup over it; one that was not is deleted.
+        """
+        put_back = set(installed)
+        commands: list[list[str]] = []
+        for target, existed in self.existed:
+            if target not in put_back:
+                continue
+            if existed:
+                backup = target.with_name(target.name + ".yulon-bak")
+                commands.append(["install", "-m", "0644", str(backup), str(target)])
+            else:
+                commands.append(["rm", "-f", str(target)])
+        return commands
+
+
+def _store_install_target(argv: Sequence[str]) -> Path | None:
+    """The settings file an `install -D ...` step writes, or None for any other step (T884)."""
+    if argv and argv[0] == "install" and "-D" in argv:
+        return Path(argv[-1])
+    return None
+
+
+def _discard_store_staging(plan: StorePlan | None) -> None:
+    """Remove the staged settings folder when a run ends, success or not (T884 round 2).
+
+    The merged files are this run's own copy in the system temp dir, and nothing
+    reads them after the `install` steps: a folder left behind after a declined
+    dialog or a failed run is litter that the next run never reuses.
+    """
+    if plan is not None and plan.folder is not None:
+        shutil.rmtree(plan.folder, ignore_errors=True)
+
+
+def _restore_names(restore: Sequence[Sequence[str]], failed: Sequence[str]) -> list[str]:
+    """Which settings files the restore could not put back, by name (T884 round 2)."""
+    not_back: list[str] = []
+    for argv in restore:
+        shown = " ".join(argv)
+        if any(_step_command(entry) == shown for entry in failed):
+            not_back.append(Path(argv[-1]).name)
+    return not_back
+
+
+def _store_failed_sentence(
+    step: str, installed: Sequence[Path], not_back: Sequence[str], ready: bool
+) -> str:
+    """The one sentence the switch reports when it stops after Docker was stopped (T884 r2)."""
+    if not installed:
+        files = STEAMOS_STORE_NOTHING_INSTALLED
+    elif not not_back:
+        files = STEAMOS_STORE_FILES_PUT_BACK
+    elif len(not_back) == len(installed):
+        files = STEAMOS_STORE_FILES_NOT_PUT_BACK
+    else:
+        files = STEAMOS_STORE_FILES_PARTLY_PUT_BACK.format(names=" and ".join(not_back))
+    docker = STEAMOS_STORE_RUNNING_AGAIN if ready else STEAMOS_STORE_NOT_RUNNING_AGAIN
+    return STEAMOS_STORE_FAILED_STEP.format(step=_step_command(step), files=files, docker=docker)
+
+
+def _stage_steamos_store() -> StorePlan:
+    """Merge both settings, stage what changed, and answer the plan (T884).
 
     The staged files are written here, as this user, into a fresh directory:
     installing them is the one part that needs root. Nothing is written when a
     merge refuses a file — the manual step says what to set instead.
+
+    This is called only after the player said yes (or, on the install path,
+    after the packages ran and before Docker is enabled), so a declined dialog
+    creates no folder at all.
     """
     json_text = _read_text_or_none(_DOCKER_DAEMON_JSON)
     toml_text = _read_text_or_none(_CONTAINERD_CONFIG)
     merged_json = merged_daemon_json(json_text)
     merged_toml = merged_containerd_config(toml_text)
     if merged_json is None or merged_toml is None:
-        return [], (STEAMOS_STORE_MANUAL_STEP,)
+        return StorePlan([], manual=(STEAMOS_STORE_MANUAL_STEP,))
     have_json = merged_json != json_text
     have_toml = merged_toml != toml_text
     if not have_json and not have_toml:
-        return [], ()
+        return StorePlan([])
+    existed = tuple(
+        (target, target.exists())
+        for target, present in ((_DOCKER_DAEMON_JSON, have_json), (_CONTAINERD_CONFIG, have_toml))
+        if present
+    )
     staged = Path(tempfile.mkdtemp(prefix="yulon-docker-store-"))
     if have_json:
         (staged / "daemon.json").write_text(merged_json, encoding="utf-8")
     if have_toml:
         (staged / "config.toml").write_text(merged_toml, encoding="utf-8")
-    return steamos_store_commands(staged, have_json, have_toml), ()
+    return StorePlan(steamos_store_commands(staged, have_json, have_toml), existed, (), staged)
 
 
 def switch_steamos_store(
@@ -3261,16 +3397,29 @@ def switch_steamos_store(
 ) -> ProvisionReport:
     """Move an existing Deck's Docker store to /home, with consent and no data move (T884).
 
-    The question comes first and says what stops and what is left behind: the
+    The machine is re-checked FIRST and asked nothing when it no longer matches
+    (`steamos_store_needs_home()`): the offer comes from a preflight that ran
+    before the dialog, and a /var resized or a store moved in between is not
+    something this may undo.
+
+    Then the question, which says what stops and what is left behind: the
     owner's decision is a consented switch, never a silent one, and the old
     data stays in /var where it is no longer shown. Only a deliberate yes runs
-    anything.
+    anything, and only a yes stages a folder.
 
     Then one `SudoSession` — the elevation path the T160 repair uses — and the
-    steps in the order that makes them reversible-ish: stop Docker and
-    containerd, back up and install both settings, start them again. The first
-    failure stops the run and is named in the report.
+    steps in the order that makes them recoverable: stop Docker and containerd,
+    back up and install both settings, start them again. Once `stop` has run,
+    ANY later failure or cancel undoes the files this run installed (the backup
+    put back, or the new file removed) and starts Docker anyway: the cleanup is
+    not cancellable, and leaving the daemon stopped with two settings moved
+    half way is the state nobody can recover from a dialog.
     """
+    if not steamos_store_needs_home(None):
+        logger.info("steamos store switch: nothing to do")
+        return ProvisionReport(
+            "linux", manual_steps=(STEAMOS_STORE_NOTHING_TO_DO_STEP,), docker_group="not-asked"
+        )
     if not _may_open_a_dialog(False, cancel):
         return ProvisionReport("linux", docker_group="not-asked")
     if not _explicit_yes(ask(STEAMOS_STORE_SWITCH_QUESTION)):
@@ -3278,38 +3427,80 @@ def switch_steamos_store(
         return ProvisionReport(
             "linux", manual_steps=(STEAMOS_STORE_DECLINED_STEP,), docker_group="not-asked"
         )
-    store, store_manual = _stage_steamos_store()
-    if not store:
-        return ProvisionReport("linux", manual_steps=store_manual, docker_group="not-asked")
+    staged = _stage_steamos_store()
+    if not staged.commands:
+        return ProvisionReport("linux", manual_steps=staged.manual, docker_group="not-asked")
     do: RunCmd = run if run is not None else _DefaultRunner(_c_locale_env())
     session = SudoSession(
         ask,
         run_input if run_input is not None else _run_with_input,
         question=SUDO_STORE_PASSWORD_QUESTION,
     )
-    plan = [
-        ["systemctl", "stop", "docker.socket", "docker", "containerd"],
-        *store,
-        ["systemctl", "start", "containerd", "docker"],
-    ]
+    stop_command = ["systemctl", "stop", "docker.socket", "docker", "containerd"]
+    start_command = ["systemctl", "start", "containerd", "docker"]
     done: list[str] = []
     skipped: list[str] = []
     stopped: str | None = None
-    for cmd in plan:
-        if cancel is not None and cancel.is_set():
-            stopped = f"{' '.join(cmd)}: stopped before it ran"
-            break
-        ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
-        done += ran
-        skipped += failed
-        if failed:
-            stopped = failed[0]
-            break
+    installed: list[Path] = []
+    stop_ran = False
+    try:
+        for index, cmd in enumerate([stop_command, *staged.commands]):
+            if cancel is not None and cancel.is_set():
+                stopped = f"{' '.join(cmd)}: stopped before it ran"
+                break
+            ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
+            done += ran
+            skipped += failed
+            if failed:
+                stopped = failed[0]
+                break
+            if index == 0:
+                stop_ran = True
+            else:
+                target = _store_install_target(cmd)
+                if target is not None:
+                    installed.append(target)
+        not_back: list[str] = []
+
+        def put_back(commands: list[list[str]]) -> None:
+            """Run the undo through the same sudo session; nothing fails the run."""
+            nonlocal not_back
+            restored, not_restored = _run_steps(
+                do, commands, sudo=True, dry_run=False, session=session
+            )
+            done.extend(restored)
+            skipped.extend(not_restored)
+            not_back = _restore_names(commands, not_restored)
+
+        if stop_ran:
+            # A stop that ran is the point of no return: from here the deck is
+            # left with Docker up and the settings this run installed undone.
+            restore = staged.restore(installed) if stopped is not None else []
+            if restore:
+                put_back(restore)
+            ran, failed = _run_steps(do, [start_command], sudo=True, dry_run=False, session=session)
+            done += ran
+            skipped += failed
+            if failed and stopped is None:
+                # The start itself is one of the boundaries: every settings file
+                # was installed by this run, so they are what has to go back.
+                stopped = failed[0]
+                late = staged.restore(installed)
+                if late:
+                    put_back(late)
+    finally:
+        _discard_store_staging(staged)
     manual: list[str] = []
     ready = False
     if stopped is None:
         ready = _wait_docker_ready(do, wait_seconds, 2.0, cancel)
         manual.append(STEAMOS_STORE_MOVED_STEP if ready else STEAMOS_STORE_NOT_STARTED_STEP)
+    elif stop_ran:
+        # Not cancellable either: the start above ran after a Stop as well, so
+        # whether Docker came back is measured with the same deadline instead
+        # of reading the cancel that stopped the store steps as a failed start.
+        ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
+        manual.append(_store_failed_sentence(stopped, installed, not_back, ready))
     elif stopped.endswith(": stopped before it ran"):
         manual.append(STEAMOS_STORE_STOPPED_STEP.format(step=_step_command(stopped)))
     elif session.outcome in ("declined", "refused", "unavailable"):
@@ -3325,40 +3516,41 @@ def switch_steamos_store(
     )
 
 
-def docker_engine_commands(
-    pm: PackageManager, *, steamos: bool, store: list[list[str]] | None = None
-) -> list[list[str]]:
-    """The (sudo-less) commands that install + enable Docker Engine via `pm`.
+DOCKER_ENABLE_COMMANDS: list[list[str]] = [["systemctl", "enable", "--now", "docker"]]
+"""Turning the engine on once it is installed and configured (T884 round 2).
 
-    **The docker-group join is deliberately not in this list**, and putting it
-    back is not a one-line append: it would need `user` again, which is why the
-    parameter is gone. The argv that grants root-equivalent access is built in
-    exactly one place — inside `_ensure_docker_linux()`'s consent branch — so
-    there is no second construction site that a gate could be added to and then
-    forgotten. It lived here, ungated, from 5.1 until 2026-08-24.
+Its own step so the Deck's store plan can be built between the package install
+and this line: `pacman` may ship `/etc/containerd/config.toml`, and the first
+start has to read the settings the plan installed.
+"""
 
-    `store` is the T884 plan that puts Docker's settings on /home. It is only
-    ever passed on SteamOS (`_ensure_docker_linux()` says when), and it goes
-    after the read-only lock is switched back on and before the daemon is
-    enabled, so the first start already writes to the new store.
+
+def docker_engine_install_commands(pm: PackageManager, *, steamos: bool) -> list[list[str]]:
+    """The (sudo-less) package steps that install Docker Engine, before it is enabled.
+
+    Split out of `docker_engine_commands()` so `_ensure_docker_linux()` can run
+    them, then build the T884 store plan from what they left on disk, then
+    enable the daemon. The order inside is the package manager's own.
     """
-    install: list[list[str]]
     if pm == "pacman":
         # docker-buildx too: the Arch script that passed the gate installed it by
         # hand, and `compose build` needs BuildKit same as every other manager here.
         install = [["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"]]
         if steamos:
-            install = [["steamos-readonly", "disable"], *install, ["steamos-readonly", "enable"]]
-            if store:
-                install.extend(store)
-    elif pm == "apt":
-        install = [
+            install = [
+                ["steamos-readonly", "disable"],
+                *install,
+                ["steamos-readonly", "enable"],
+            ]
+        return install
+    if pm == "apt":
+        return [
             ["apt-get", "update"],
             # docker-buildx too: `docker.io` ships no BuildKit plugin and the server
             # images are built with `compose up --build` (live gate, Ubuntu 24.04).
             ["apt-get", "install", "-y", "docker.io", "docker-compose-v2", "docker-buildx"],
         ]
-    elif pm == "dnf":
+    if pm == "dnf":
         # docker-buildx, and the reason is which REPO the other two packages
         # come from, not which distro this is. `moby-engine` and
         # `docker-compose` above are Fedora's own builds, so the BuildKit
@@ -3378,10 +3570,27 @@ def docker_engine_commands(
         # from Fedora's own repos and must stay in that world: against them,
         # `dnf install docker-buildx-plugin` fails outright and takes the
         # whole provision with it.
-        install = [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
-    else:
-        install = [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
-    return [*install, ["systemctl", "enable", "--now", "docker"]]
+        return [["dnf", "-y", "install", "moby-engine", "docker-compose", "docker-buildx"]]
+    return [["zypper", "--non-interactive", "install", "docker", "docker-compose"]]
+
+
+def docker_engine_commands(pm: PackageManager, *, steamos: bool) -> list[list[str]]:
+    """The (sudo-less) commands that install + enable Docker Engine via `pm`.
+
+    **The docker-group join is deliberately not in this list**, and putting it
+    back is not a one-line append: it would need `user` again, which is why the
+    parameter is gone. The argv that grants root-equivalent access is built in
+    exactly one place — inside `_ensure_docker_linux()`'s consent branch — so
+    there is no second construction site that a gate could be added to and then
+    forgotten. It lived here, ungated, from 5.1 until 2026-08-24.
+
+    The T884 store steps are deliberately NOT here either (round 2): they can
+    only be built after the packages ran, so `_ensure_docker_linux()` runs
+    `docker_engine_install_commands()`, then the store plan, then
+    `DOCKER_ENABLE_COMMANDS`. This composition is the whole plan for every
+    machine that has no store step, and it is what the consent question shows.
+    """
+    return [*docker_engine_install_commands(pm, steamos=steamos), *DOCKER_ENABLE_COMMANDS]
 
 
 DockerOnBoard = Literal["service", "snap", "rootless", "desktop", "other", "none"]
@@ -4748,13 +4957,13 @@ def _ensure_docker_linux(
     steamos = is_steamos()
     pm = linux_package_manager(which)
     # T884: on a stock Deck the store Docker is about to create lands in a few
-    # hundred MB of /var. Both settings are staged before the install runs, and
-    # go into the plan after the read-only lock is switched back off. A Deck
-    # whose store is already off /var, or whose /var was resized, is left alone.
-    store: list[list[str]] = []
-    store_manual: tuple[str, ...] = ()
-    if on_board == "none" and steamos and pm == "pacman" and steamos_store_needs_home(None):
-        store, store_manual = _stage_steamos_store()
+    # hundred MB of /var. The plan is staged only AFTER the player said yes,
+    # from what the package steps left on disk (a package may ship
+    # /etc/containerd/config.toml), and it goes in before the daemon is
+    # enabled. A Deck whose store is already off /var, whose /var was resized,
+    # or whose /var is the root filesystem is left alone.
+    store_gate = on_board == "none" and steamos and pm == "pacman"
+    install_phase: list[list[str]] = []
     if on_board in ("service", "snap"):
         starts = DOCKER_START_COMMANDS if on_board == "service" else DOCKER_SNAP_START_COMMANDS
         commands = [list(argv) for argv in starts]
@@ -4768,7 +4977,8 @@ def _ensure_docker_linux(
             ),
         )
     else:
-        commands = docker_engine_commands(pm, steamos=steamos, store=store)
+        install_phase = docker_engine_install_commands(pm, steamos=steamos)
+        commands = docker_engine_commands(pm, steamos=steamos)
         question = DOCKER_INSTALL_QUESTION
 
     # The first question, and the only one before anything runs as root: what is
@@ -4797,7 +5007,38 @@ def _ensure_docker_linux(
     if ask is not None and _may_open_a_dialog(dry_run, cancel):
         session = SudoSession(ask, run_input if run_input is not None else _run_with_input)
 
-    done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
+    staged: StorePlan | None = None
+    store_manual: tuple[str, ...] = ()
+    done: list[str] = []
+    skipped: list[str] = []
+    try:
+        if install_phase and store_gate:
+            # T884: the only path that splits. The packages run first, so a
+            # settings file one of them shipped is backed up and merged rather
+            # than replaced, and the enable comes after, so Docker's first
+            # start writes to the new store. Every other package manager and
+            # every non-Deck keeps the single run it has always had.
+            ran, failed = _run_steps(do, install_phase, sudo=True, dry_run=dry_run, session=session)
+            done += ran
+            skipped += failed
+            if steamos_store_needs_home(None):
+                staged = _stage_steamos_store()
+                store_manual = staged.manual
+                if staged.commands:
+                    ran, failed = _run_steps(
+                        do, staged.commands, sudo=True, dry_run=dry_run, session=session
+                    )
+                    done += ran
+                    skipped += failed
+            ran, failed = _run_steps(
+                do, DOCKER_ENABLE_COMMANDS, sudo=True, dry_run=dry_run, session=session
+            )
+            done += ran
+            skipped += failed
+        else:
+            done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
+    finally:
+        _discard_store_staging(staged)
     joined_ok = False
     if consent == "granted":
         # The one place this argv is built. `docker_engine_commands()` no
@@ -5186,7 +5427,11 @@ def steamos_docker_repair_commands(
        `docker_engine_commands()` installs it for the same reason.
     6. The T884 store plan (`store`), each step carried past: the repair's job is
        Docker back, and a Deck whose settings file cannot be written still gets
-       that. It goes before `daemon-reload`, so the first start reads the new root.
+       that. A store step that fails puts back the settings files this run had
+       already installed (the `.yulon-bak`, or nothing) and adds
+       `STEAMOS_STORE_MANUAL_STEP`, so Docker comes up on the old settings
+       rather than on half a move. It goes before `daemon-reload`, so the first
+       start reads the new root.
     7. `systemctl daemon-reload`, then `systemctl enable --now docker`.
 
     **No `steamos-readonly enable` at the end, and that is deliberate.** The
@@ -5581,26 +5826,55 @@ def _repair_docker_after_steamos_update(
     # T884: the same plan the install stages, only on a Deck whose /var is still
     # the stock size and whose store is on it. A merge that refuses a file gets
     # the manual step instead, and never overwrites what it could not read.
-    store, store_manual = _stage_steamos_store() if steamos_store_needs_home(None) else ([], ())
+    staged = _stage_steamos_store() if steamos_store_needs_home(None) else None
+    store = staged.commands if staged is not None else []
+    store_manual = staged.manual if staged is not None else ()
     commands = steamos_docker_repair_commands(
         devmode=find("steamos-devmode") is not None, store=store
     )
+    store_steps = {tuple(cmd) for cmd in store}
+    installed: list[Path] = []
+    store_failed = False
     refused_late: str | None = None
-    for cmd, tolerated in commands:
-        if cancel is not None and cancel.is_set():
-            stopped = f"{' '.join(cmd)}: stopped before it ran"
-            break
-        if cmd == _KEYRING_DELETION:
-            refused_late = _steamos_repair_refusal(find)
-            if refused_late is not None:
-                logger.info(f"steamos docker repair: refused before the keyring: {refused_late}")
+    try:
+        for cmd, tolerated in commands:
+            if cancel is not None and cancel.is_set():
+                stopped = f"{' '.join(cmd)}: stopped before it ran"
                 break
-        ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
-        done += ran
-        skipped += failed
-        if failed and not tolerated:
-            stopped = failed[0]
-            break
+            if cmd == _KEYRING_DELETION:
+                refused_late = _steamos_repair_refusal(find)
+                if refused_late is not None:
+                    logger.info(
+                        f"steamos docker repair: refused before the keyring: {refused_late}"
+                    )
+                    break
+            ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
+            done += ran
+            skipped += failed
+            if tuple(cmd) in store_steps:
+                if failed:
+                    # T884 r2: a store step that failed after Docker's settings
+                    # moved leaves them half done, so the files installed so far
+                    # go back the way the switch puts them back, and the repair
+                    # still finishes with its reload and enable.
+                    store_failed = True
+                    restore = staged.restore(installed) if staged is not None else []
+                    if restore:
+                        restored, not_restored = _run_steps(
+                            do, restore, sudo=True, dry_run=False, session=session
+                        )
+                        done += restored
+                        skipped += not_restored
+                else:
+                    target = _store_install_target(cmd)
+                    if target is not None:
+                        installed.append(target)
+                continue
+            if failed and not tolerated:
+                stopped = failed[0]
+                break
+    finally:
+        _discard_store_staging(staged)
 
     if stopped is None and refused_late is None and consent == "granted":
         joined, refused = _run_steps(
@@ -5641,8 +5915,16 @@ def _repair_docker_after_steamos_update(
         manual.append(DOCKER_GROUP_JOIN_FAILED_STEP.format(user=who))
     if "steamos-readonly disable" in done:
         manual.append(STEAMOS_READONLY_LEFT_OFF_STEP)
+    if store_failed and STEAMOS_STORE_MANUAL_STEP not in store_manual:
+        # T884 r2: the store step failed and the files were put back where they
+        # could be, so Docker comes up on the old settings and the sentence that
+        # says how to finish the move by hand is owed.
+        manual.append(STEAMOS_STORE_MANUAL_STEP)
     manual.extend(store_manual)
-    logger.info(f"steamos docker repair: ready={ready} stopped={stopped is not None}")
+    logger.info(
+        f"steamos docker repair: ready={ready} stopped={stopped is not None} "
+        f"store_failed={store_failed}"
+    )
     return ProvisionReport(
         "linux", tuple(done), tuple(skipped), tuple(manual), False, ready, outcome
     )

@@ -268,6 +268,45 @@ def test_a_docker_install_that_fails_stops_and_names_the_step_that_did() -> None
     assert platform.STEAMOS_READONLY_LEFT_OFF_STEP in report.manual_steps
 
 
+def test_a_store_step_that_fails_puts_the_files_back_and_still_enables_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T884 r2: the repair's store step is tolerated, and its failure is undone.
+
+    The repair's job is Docker back, so a store step that failed may not stop
+    it — but it also may not leave one settings file moved. The file this run
+    did install gets its `.yulon-bak` back, the reload and the enable still run,
+    and the manual sentence says how to finish the move by hand.
+    """
+    monkeypatch.setattr(platform, "steamos_store_needs_home", lambda data_root=None: True)
+    daemon = Path("/etc/docker/daemon.json")
+    config = Path("/etc/containerd/config.toml")
+    plan = platform.StorePlan(
+        commands=[
+            ["install", "-d", "-m", "0711", str(platform.STEAMOS_STORE_HOME / "containerd")],
+            ["install", "-D", "-m", "0644", "/tmp/staged/daemon.json", str(daemon)],
+            ["install", "-D", "-m", "0644", "/tmp/staged/config.toml", str(config)],
+        ],
+        existed=((daemon, True), (config, True)),
+    )
+    monkeypatch.setattr(platform, "_stage_steamos_store", lambda: plan)
+    config_install = f"install -D -m 0644 /tmp/staged/config.toml {config}"
+    deck = _Deck(fail={config_install: (1, "Read-only file system")})
+
+    report = _repair(deck, _answers("y")[1])
+
+    restore = f"install -m 0644 {daemon}.yulon-bak {daemon}"
+    assert restore in deck.steps
+    assert deck.steps.index(restore) > deck.steps.index(
+        f"install -D -m 0644 /tmp/staged/daemon.json {daemon}"
+    )
+    assert deck.steps.index(restore) < deck.steps.index("systemctl daemon-reload")
+    assert "systemctl daemon-reload" in deck.steps
+    assert "systemctl enable --now docker" in deck.steps
+    assert platform.STEAMOS_STORE_MANUAL_STEP in report.manual_steps
+    assert report.docker_ready, "the failed store step must not stop Docker coming back"
+
+
 def test_declining_the_repair_runs_nothing_at_all() -> None:
     deck = _Deck()
     report = _repair(deck, _answers("n")[1])

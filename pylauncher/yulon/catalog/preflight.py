@@ -175,13 +175,20 @@ class Facts:
     """
     containerd_free: int | None = None
     """Free space where `containerd_root` writes; None is "not measured", not 0."""
-    steamos_store_on_var: bool = False
-    """SteamOS, and a store Docker writes to is on the `/var` filesystem (T884).
+    steamos_store_needs_home: bool = False
+    """Should this Deck's Docker store move to `/home`? (T884)
 
-    Asked on Linux when `is_steamos()` said yes, whether or not the daemon
-    answered: the case this row exists for is a Deck where `docker info` said
-    nothing, which left every free-space row unchecked while the install's
-    image store went to a few hundred MB of /var. False is "no" or "unasked".
+    The same predicate the switch and the install act on —
+    `platform.steamos_store_needs_home()`: SteamOS, a `/var` of the stock small
+    size that is a partition of its own, and a store on it. Asked on Linux when
+    `is_steamos()` said yes, whether or not the daemon answered: the case this
+    row exists for is a Deck where `docker info` said nothing, which left every
+    free-space row unchecked while the install's image store went to a few
+    hundred MB of /var. False is "no" or "unasked".
+
+    Round 2 made this the predicate itself rather than "the store is on /var":
+    the row must be absent wherever the switch would answer "nothing to do",
+    or the remedy would offer a change the switch then refuses to make.
     """
     var_free: int | None = None
     """Free space in `/var`; None is "not measured", not 0 (T884)."""
@@ -378,7 +385,7 @@ def gather(
     fs_type: Callable[[Path], str | None] | None = None,
     in_wsl: Callable[[], bool] | None = None,
     steamos: Callable[[], bool] | None = None,
-    store_on_var: Callable[[], bool] | None = None,
+    store_needs_home: Callable[[], bool] | None = None,
     var_free: Callable[[], int | None] | None = None,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
@@ -492,7 +499,9 @@ def gather(
     # and None, the same tri-state every other unestablished fact here keeps.
     ask_steamos = steamos if steamos is not None else platform.is_steamos
     deck = ask_steamos() if here == "linux" else False
-    ask_store = store_on_var if store_on_var is not None else platform.steamos_store_on_var
+    ask_store = (
+        store_needs_home if store_needs_home is not None else platform.steamos_store_needs_home
+    )
     store_fact = ask_store() if deck else False
     ask_var_free = var_free if var_free is not None else (lambda: free(Path("/var")))
     var_free_fact = ask_var_free() if deck else None
@@ -560,7 +569,7 @@ def gather(
         data_root_free=root_free,
         containerd_root=ctr_root,
         containerd_free=ctr_free,
-        steamos_store_on_var=store_fact,
+        steamos_store_needs_home=store_fact,
         var_free=var_free_fact,
         server_dir_free=dir_free,
         same_volume=_same_volume(root, server_dir, here),
@@ -1035,8 +1044,10 @@ def evaluate(
                 held_bytes,
             )
         )
-    if facts.steamos_store_on_var:
-        # T884: this deck's store is on /var, which is a small system partition.
+    if facts.steamos_store_needs_home:
+        # T884: this deck's store is on its own small /var, and the switch can
+        # move it. The fact IS the switch's predicate, so a /var resized on
+        # purpose (or one that is just a folder on /) has no row and no offer.
         # A row of its own rather than folding into "Docker's disk" because the
         # real defect is that the other rows were UNCHECKED when `docker info`
         # said nothing, and the answer here is not "free space" but a switch.

@@ -18,6 +18,7 @@ Changed: Opening Yu'lon while it is already running brings the open window to th
 
 ### Fixed
 - Steam Deck: installing a server no longer fills the small /var partition with Docker's images; Docker's storage moves to /home.
+- Steam Deck: a Docker storage move that fails part way puts the old settings back and starts Docker again.
 - WotLK, Unbound and Conquest of Azeroth: Start moves a realm off a network address this computer no longer has.
 - Tortoise, TBC, Vanilla and Centurion: Start moves the realm off a network address this computer no longer has, as WotLK does.
 - A realmlist.wtf whose old line has a hidden byte-order mark, a tab or a UTF-16 save no longer sends Play to another server.

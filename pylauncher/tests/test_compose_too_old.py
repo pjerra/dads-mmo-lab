@@ -799,7 +799,7 @@ def _store_refuses_then_passes(rec: Recorder):  # type: ignore[no-untyped-def]
         refusing = answers.pop(0) if len(answers) > 1 else answers[0]
         return replace(
             base,
-            steamos_store_on_var=refusing,
+            steamos_store_needs_home=refusing,
             var_free=1 * preflight.GIB if refusing else None,
         )
 

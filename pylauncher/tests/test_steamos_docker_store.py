@@ -47,42 +47,21 @@ class _Run:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 
-def _deck(monkeypatch: pytest.MonkeyPatch, *, total_gib: int = 4, on_var: bool = True) -> None:
+def _deck(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    total_gib: int = 4,
+    on_var: bool = True,
+    own_mount: bool = True,
+) -> None:
     """SteamOS, a /var of `total_gib`, and everything on it (or nothing)."""
     monkeypatch.setattr(platform, "is_steamos", lambda: True)
     monkeypatch.setattr(platform, "_var_total_bytes", lambda: total_gib * GIB)
     monkeypatch.setattr(platform, "on_var", lambda _path: on_var)
+    monkeypatch.setattr(platform, "var_is_its_own_mount", lambda: own_mount)
 
 
 # ---------------------------------------------------------------- the commands
-
-
-def test_engine_commands_write_store_before_enable() -> None:
-    """T884: the settings land after the read-only lock and before Docker starts.
-
-    Before the enable, because the FIRST start reads them; after the relock,
-    because they are root writes and the lock is off for exactly the pacman run.
-    Omitted (the base) or moved after the enable, and Docker's first start
-    writes its store to /var again.
-    """
-    plan = platform.docker_engine_commands("pacman", steamos=True, store=STORE)
-
-    assert plan == [
-        ["steamos-readonly", "disable"],
-        ["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"],
-        ["steamos-readonly", "enable"],
-        *STORE,
-        ["systemctl", "enable", "--now", "docker"],
-    ]
-
-
-def test_non_steamos_commands_unchanged() -> None:
-    """`store` is SteamOS's: an apt/dnf plan that was handed one must not grow it."""
-    plain = platform.docker_engine_commands("apt", steamos=False)
-    with_store = platform.docker_engine_commands("apt", steamos=False, store=STORE)
-    assert with_store == plain
-    arch = platform.docker_engine_commands("pacman", steamos=False, store=STORE)
-    assert ["install", "-d", "-m", "0710", TARGET_DOCKER] not in arch
 
 
 def test_repair_store_before_daemon_reload() -> None:
@@ -242,6 +221,7 @@ def test_resized_var_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_switch_declined_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only a deliberate yes changes anything, and the question says what stops."""
+    _deck(monkeypatch)
     run = _Run()
     asked: list[str] = []
 
@@ -263,14 +243,15 @@ def test_switch_yes_stops_installs_and_starts_in_order(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The consented switch's order: stop, back up and install, start, and no data move."""
+    _deck(monkeypatch)
     daemon = tmp_path / "daemon.json"
     config = tmp_path / "config.toml"
     monkeypatch.setattr(platform, "_DOCKER_DAEMON_JSON", daemon)
     monkeypatch.setattr(platform, "_CONTAINERD_CONFIG", config)
     staged = tmp_path / "staged"
 
-    def staged_commands() -> tuple[list[list[str]], tuple[()]]:
-        return platform.steamos_store_commands(staged, True, True), ()
+    def staged_commands() -> platform.StorePlan:
+        return platform.StorePlan(platform.steamos_store_commands(staged, True, True))
 
     monkeypatch.setattr(platform, "_stage_steamos_store", staged_commands)
     run = _Run()
