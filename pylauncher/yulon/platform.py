@@ -2953,14 +2953,30 @@ _GIB = 1024**3
 _STEAMOS_STORE_DOCKER = STEAMOS_STORE_HOME / "docker"
 _STEAMOS_STORE_CONTAINERD = STEAMOS_STORE_HOME / "containerd"
 
-STEAMOS_STORE_MANUAL_STEP = (
-    "Docker's storage could not be moved to /home for you, because one of its settings files "
-    "could not be read. To do it yourself, set "
+_STORE_SETTINGS_BY_HAND = (
+    "To do it yourself, set "
     '"data-root": "/home/.yulon-docker/docker" in /etc/docker/daemon.json and '
     'root = "/home/.yulon-docker/containerd" in /etc/containerd/config.toml, '
     "then run: sudo systemctl restart containerd docker"
 )
+
+STEAMOS_STORE_MANUAL_STEP = (
+    "Docker's storage could not be moved to /home for you, because one of its settings files "
+    "could not be read. " + _STORE_SETTINGS_BY_HAND
+)
 """Said instead of writing when a settings file is not something this may rewrite (T884)."""
+
+STEAMOS_STORE_UNREADABLE_STEP = (
+    "Docker's storage could not be moved to /home for you, because it could not read {path}. "
+    + _STORE_SETTINGS_BY_HAND
+)
+"""Said instead when a settings file exists but this run could not read its text (T884 r4).
+
+Its own sentence because "could not be read" alone does not say which file, and
+the player has to look at that one: the whole plan is refused, neither settings
+file is written, and guessing the text from a file nobody read is the one thing
+that would overwrite a setting Docker needs.
+"""
 
 STEAMOS_STORE_SWITCH_QUESTION = (
     "Docker keeps its images in /var on this Steam Deck, and that is a small system partition, "
@@ -2993,11 +3009,6 @@ STEAMOS_STORE_NEEDS_PASSWORD_STEP = (
 STEAMOS_STORE_STOPPED_STEP = (
     'Stopped at "{step}", so Docker\'s storage was not moved. Check that the Deck is online '
     "and press Install again; if it stops at the same step twice, restart the Deck first."
-)
-
-STEAMOS_STORE_NOT_STARTED_STEP = (
-    "Docker's storage was moved, but Docker did not start. Restart the Steam Deck, then press "
-    "Install again."
 )
 
 STEAMOS_STORE_NOTHING_TO_DO_STEP = (
@@ -3376,7 +3387,12 @@ def _put_store_settings_back(outcome: StoreOutcome, run_step: StoreStepRunner) -
     )
 
 
-def _apply_store_plan(plan: StorePlan, run_step: StoreStepRunner) -> StoreOutcome:
+def _apply_store_plan(
+    plan: StorePlan,
+    run_step: StoreStepRunner,
+    *,
+    undo_step: StoreStepRunner | None = None,
+) -> StoreOutcome:
     """Install the plan's settings files, keeping this run's own copies first (T884 r3).
 
     The one place the T884 settings change happens, called by the switch, the
@@ -3391,6 +3407,11 @@ def _apply_store_plan(plan: StorePlan, run_step: StoreStepRunner) -> StoreOutcom
        its own backup with `install -m 0644`, or `rm -f` when the file was not
        there before. A restore step that fails is recorded and the rest still
        run — half a restore reported is better than an exception at this point.
+
+    `undo_step` is the runner the restore uses when it is not the same policy as
+    the plan (T884 r4): the switch's plan stops on a Stop, and exactly then its
+    settings have to go back, so the caller passes a runner that does not check
+    the cancel. Defaults to `run_step`.
     """
     stamp = _store_stamp()
     targets = [target for target in map(_store_install_target, plan.commands) if target is not None]
@@ -3432,7 +3453,7 @@ def _apply_store_plan(plan: StorePlan, run_step: StoreStepRunner) -> StoreOutcom
     )
     if stopped is None:
         return outcome
-    back = _put_store_settings_back(outcome, run_step)
+    back = _put_store_settings_back(outcome, undo_step if undo_step is not None else run_step)
     return replace(
         outcome,
         done=tuple([*outcome.done, *back.done]),
@@ -3477,6 +3498,36 @@ def _store_failed_sentence(
     return STEAMOS_STORE_FAILED_STEP.format(step=_step_command(step), files=files, docker=docker)
 
 
+@dataclass(frozen=True)
+class _UnreadableSetting:
+    """A settings file that exists but whose text this run could not read (T884 r4)."""
+
+    path: Path
+
+
+def _read_store_setting(path: Path) -> str | _UnreadableSetting | None:
+    """A settings file as text, None when it is absent, or the file when it is unreadable.
+
+    Three answers, because "not there" and "there but unreadable" are different
+    decisions (T884 r4): an absent file is replaced by a fresh one, while one
+    that exists and cannot be read is never merged over — `_stage_steamos_store()`
+    refuses the whole plan and names it. Only `FileNotFoundError` is absence: a
+    `PermissionError`, any other `OSError` and a `UnicodeDecodeError` all mean
+    "could not read", and so does a path that is a directory.
+
+    `_read_text_or_none()` keeps its own two-state answer on purpose: preflight
+    only measures where a store is, and there the default is the right reading
+    of a config nobody can see.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning(f"steamos store: could not read {path}: {exc}")
+        return _UnreadableSetting(path)
+
+
 def _stage_steamos_store() -> StorePlan:
     """Merge both settings, stage what changed, and answer the plan (T884).
 
@@ -3484,12 +3535,21 @@ def _stage_steamos_store() -> StorePlan:
     installing them is the one part that needs root. Nothing is written when a
     merge refuses a file — the manual step says what to set instead.
 
+    One file that exists but cannot be read refuses BOTH (T884 r4): its text is
+    unknown, and installing the other file would leave the Deck on half a move
+    that nobody chose. The manual step names the file that could not be read.
+
     This is called only after the player said yes (or, on the install path,
     after the packages ran and before Docker is enabled), so a declined dialog
     creates no folder at all.
     """
-    json_text = _read_text_or_none(_DOCKER_DAEMON_JSON)
-    toml_text = _read_text_or_none(_CONTAINERD_CONFIG)
+    json_read = _read_store_setting(_DOCKER_DAEMON_JSON)
+    toml_read = _read_store_setting(_CONTAINERD_CONFIG)
+    for read in (json_read, toml_read):
+        if isinstance(read, _UnreadableSetting):
+            return StorePlan([], manual=(STEAMOS_STORE_UNREADABLE_STEP.format(path=read.path),))
+    json_text = json_read if isinstance(json_read, str) else None
+    toml_text = toml_read if isinstance(toml_read, str) else None
     merged_json = merged_daemon_json(json_text)
     merged_toml = merged_containerd_config(toml_text)
     if merged_json is None or merged_toml is None:
@@ -3532,12 +3592,15 @@ def switch_steamos_store(
     again. Once `stop` has run, ANY later failure or cancel undoes the files the
     plan installed and starts Docker anyway: the cleanup is not cancellable, and
     leaving the daemon stopped with two settings moved half way is the state
-    nobody can recover from a dialog.
+    nobody can recover from a dialog. That includes a Stop pressed between two
+    settings files: the plan stops there, and the undo still runs (T884 r4).
 
-    The start is the last boundary. When every settings file WAS installed and
-    the daemon still would not come up on them, the plan's undo runs and the
-    start is issued ONCE more on the restored settings — the report says whether
-    Docker runs again and on which settings (T884 r3).
+    The start is the last boundary. A start whose exit code is 0 but whose
+    daemon never answers `docker info` is a failed switch too (T884 r4), and so
+    is one that fails outright: when every settings file WAS installed, the
+    plan's undo runs and the start is issued ONCE more on the restored
+    settings — the report says which settings Docker runs on and whether it is
+    ready (T884 r3).
     """
     if not steamos_store_needs_home(None):
         logger.info("steamos store switch: nothing to do")
@@ -3567,11 +3630,22 @@ def switch_steamos_store(
     stopped: str | None = None
     outcome: StoreOutcome | None = None
     stop_ran = False
+    ready = False
 
     def run_step(commands: list[list[str]]) -> tuple[list[str], list[str]]:
         """One block through the session; a Stop between steps stops the plan (T884 r3)."""
         if cancel is not None and cancel.is_set():
             raise _StoreStopped(f"{' '.join(commands[0])}: stopped before it ran")
+        return _run_steps(do, commands, sudo=True, dry_run=False, session=session)
+
+    def cleanup_step(commands: list[list[str]]) -> tuple[list[str], list[str]]:
+        """The same block WITHOUT the Stop, for the undo and the start (T884 r4).
+
+        A Stop after the first settings file is exactly when the restore has to
+        run; a cleanup that checked the same event would refuse and leave the
+        Deck started on half-moved settings. `start()` and the readiness poll
+        already ignore it for the same reason.
+        """
         return _run_steps(do, commands, sudo=True, dry_run=False, session=session)
 
     def start() -> tuple[list[str], list[str]]:
@@ -3595,7 +3669,7 @@ def switch_steamos_store(
         if stop_ran:
             # A stop that ran is the point of no return: from here the deck is
             # left with Docker up, and the settings this run installed undone.
-            outcome = _apply_store_plan(staged, run_step)
+            outcome = _apply_store_plan(staged, run_step, undo_step=cleanup_step)
             done += list(outcome.done)
             skipped += list(outcome.skipped)
             if outcome.step is not None:
@@ -3608,7 +3682,23 @@ def switch_steamos_store(
                 # up on them: they are what has to go back, then ONE more start on
                 # the restored settings. A second failure is reported, not retried.
                 stopped = failed[0]
-                back = _put_store_settings_back(outcome, run_step)
+                back = _put_store_settings_back(outcome, cleanup_step)
+                done += list(back.done)
+                skipped += list(back.skipped)
+                outcome = replace(outcome, restored=back.restored, not_restored=back.not_restored)
+                ran, failed = start()
+                done += ran
+                skipped += failed
+            if stopped is None:
+                ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
+            if stopped is None and not ready:
+                # T884 r4: a `systemctl start` that returned 0 is not a daemon
+                # that came up. A Deck left running on settings Docker refused is
+                # the same failure the exit code was read as success for, so the
+                # settings go back and the start is issued once more on them,
+                # while this run's undo is still here.
+                stopped = f"{' '.join(start_command)}: Docker did not answer after it started"
+                back = _put_store_settings_back(outcome, cleanup_step)
                 done += list(back.done)
                 skipped += list(back.skipped)
                 outcome = replace(outcome, restored=back.restored, not_restored=back.not_restored)
@@ -3618,10 +3708,10 @@ def switch_steamos_store(
     finally:
         _discard_store_staging(staged)
     manual: list[str] = []
-    ready = False
     if stopped is None:
-        ready = _wait_docker_ready(do, wait_seconds, 2.0, cancel)
-        manual.append(STEAMOS_STORE_MOVED_STEP if ready else STEAMOS_STORE_NOT_STARTED_STEP)
+        # Docker answered on the settings this run installed, or the switch
+        # would have stopped there and undone them.
+        manual.append(STEAMOS_STORE_MOVED_STEP)
     elif stop_ran:
         # Not cancellable either: the start above ran after a Stop as well, so
         # whether Docker came back is measured with the same deadline instead
