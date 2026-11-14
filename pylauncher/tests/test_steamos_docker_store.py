@@ -239,7 +239,7 @@ def test_switch_yes_stops_installs_and_starts_in_order(
     first = shown[0]
     last = shown[-1]
     assert first == "sudo -n systemctl stop docker.socket docker containerd"
-    assert last == "sudo -n systemctl start containerd docker"
+    assert last == "sudo -n systemctl restart containerd docker"
     assert any("daemon.json" in line for line in shown)
     assert any("config.toml" in line for line in shown)
     assert report.docker_ready and platform.STEAMOS_STORE_MOVED_STEP in report.manual_steps

@@ -132,8 +132,8 @@ def _boundary(name: str, daemon: Path, config: Path) -> Callable[[list[str]], bo
         return lambda body: body[:2] == ["install", "-D"] and body[-1] == str(daemon)
     if name == "install config.toml":
         return lambda body: body[:2] == ["install", "-D"] and body[-1] == str(config)
-    if name == "start":
-        return lambda body: body[:2] == ["systemctl", "start"]
+    if name == "restart":
+        return lambda body: body[:2] == ["systemctl", "restart"]
     raise AssertionError(f"unknown boundary {name}")
 
 
@@ -142,7 +142,7 @@ def _boundary(name: str, daemon: Path, config: Path) -> Callable[[list[str]], bo
 
 @pytest.mark.parametrize(
     "name",
-    ["backup", "mkdir", "install daemon.json", "install config.toml", "start"],
+    ["backup", "mkdir", "install daemon.json", "install config.toml", "restart"],
 )
 def test_a_failure_after_the_stop_puts_back_what_it_installed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
@@ -156,7 +156,7 @@ def test_a_failure_after_the_stop_puts_back_what_it_installed(
     """
     _deck(monkeypatch)
     daemon, config = _settings(monkeypatch, tmp_path, present=True)
-    ready = name != "start"
+    ready = name != "restart"
     run = _Deck(fail=_boundary(name, daemon, config), ready=ready)
 
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
@@ -167,20 +167,20 @@ def test_a_failure_after_the_stop_puts_back_what_it_installed(
     put_back_daemon = f"install -m 0644 {_backup_of(steps, daemon)} {daemon}"
     if name == "install config.toml":
         expected = [put_back_daemon]
-    elif name == "start":
+    elif name == "restart":
         put_back_config = f"install -m 0644 {_backup_of(steps, config)} {config}"
         expected = [put_back_config, put_back_daemon]
     else:
         expected = []
     assert _restores(steps) == expected
-    assert "systemctl start containerd docker" in steps, steps
+    assert "systemctl restart containerd docker" in steps, steps
     assert steps.index("systemctl stop docker.socket docker containerd") < steps.index(
-        "systemctl start containerd docker"
+        "systemctl restart containerd docker"
     )
-    if name != "start":
-        assert steps[-1] == "systemctl start containerd docker", steps
+    if name != "restart":
+        assert steps[-1] == "systemctl restart containerd docker", steps
     said = report.manual_steps[0]
-    assert said.startswith('The switch failed at "'), said
+    assert said.startswith('The Docker storage change failed at "'), said
     if expected:
         assert platform.STEAMOS_STORE_FILES_PUT_BACK in said
     else:
@@ -201,7 +201,7 @@ def test_files_that_were_not_there_before_are_removed_again(
     """
     _deck(monkeypatch)
     daemon, config = _settings(monkeypatch, tmp_path, present=False)
-    run = _Deck(fail=_boundary("start", daemon, config), ready=False)
+    run = _Deck(fail=_boundary("restart", daemon, config), ready=False)
 
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
 
@@ -231,7 +231,7 @@ def test_a_cancel_after_the_stop_still_starts_docker(
 
     steps = run.steps()
     assert steps[0] == "systemctl stop docker.socket docker containerd"
-    assert steps[1] == "systemctl start containerd docker", steps
+    assert steps[1] == "systemctl restart containerd docker", steps
     assert not [step for step in steps if step.startswith(("cp ", "install "))]
     said = report.manual_steps[0]
     assert platform.STEAMOS_STORE_NOTHING_INSTALLED in said

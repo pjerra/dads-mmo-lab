@@ -36,10 +36,10 @@ GIB = 1024**3
 class _Deck:
     """A scripted Deck: every argv, how many starts Docker needs, and when a Stop lands.
 
-    `ready_after_starts` is the number of `systemctl start` calls that have to
+    `ready_after_starts` is the number of `systemctl restart` calls that have to
     have run before `docker info` answers, so readiness can lag a successful
-    start. `cancel_after` runs after the named command returned, which is how a
-    player's Stop arrives between two steps of one plan.
+    restart. `cancel_after` runs after the named command returned, which is how
+    a player's Stop arrives between two steps of one plan.
     """
 
     def __init__(
@@ -61,7 +61,7 @@ class _Deck:
         if argv[:2] == ["docker", "info"]:
             up = self.starts >= self.ready_after_starts
             return subprocess.CompletedProcess(argv, 0 if up else 1, "", "")
-        if body[:2] == ["systemctl", "start"]:
+        if body[:2] == ["systemctl", "restart"]:
             self.starts += 1
         if self.cancel is not None and self.cancel_after is not None and self.cancel_after(body):
             self.cancel.set()
@@ -193,7 +193,7 @@ def test_a_stop_after_the_first_settings_file_still_puts_it_back(
     assert not [
         step for step in steps if step.startswith("install -D ") and step.endswith(str(config))
     ], steps
-    assert "systemctl start containerd docker" in steps, steps
+    assert "systemctl restart containerd docker" in steps, steps
     said = report.manual_steps[0]
     assert platform.STEAMOS_STORE_FILES_PUT_BACK in said, said
     assert platform.STEAMOS_STORE_RUNNING_AGAIN in said, said
@@ -221,7 +221,7 @@ def test_a_start_that_never_gets_ready_puts_the_settings_back_and_starts_again(
 
     steps = run.steps()
     starts = [
-        index for index, step in enumerate(steps) if step == "systemctl start containerd docker"
+        index for index, step in enumerate(steps) if step == "systemctl restart containerd docker"
     ]
     assert len(starts) == 2, steps
     for target in (daemon, config):
@@ -229,7 +229,9 @@ def test_a_start_that_never_gets_ready_puts_the_settings_back_and_starts_again(
         assert put_back in steps, steps
         assert starts[0] < steps.index(put_back) < starts[1], steps
     said = report.manual_steps[0]
-    assert said.startswith('The switch failed at "systemctl start containerd docker"'), said
+    assert said.startswith(
+        'The Docker storage change failed at "systemctl restart containerd docker"'
+    ), said
     assert platform.STEAMOS_STORE_FILES_PUT_BACK in said, said
     assert platform.STEAMOS_STORE_RUNNING_AGAIN in said, said
     assert report.docker_ready

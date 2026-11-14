@@ -17,8 +17,8 @@ pins the contract it has to keep whoever calls it:
 * the outcome says where it stopped, which files went back and which could not.
 
 The three paths are here too, because "one helper" only means something if each
-of them stops calling it in its own way: the switch still starts Docker after a
-failure and tries the restored settings ONCE when the first start fails, and
+of them stops calling it in its own way: the switch still restarts Docker after a
+failure and tries the restored settings ONCE when the first restart fails, and
 neither the repair nor the install installs the second settings file after the
 first one failed.
 
@@ -121,10 +121,10 @@ class _Steps:
 class _Deck:
     """A scripted Deck for the whole switch or the whole install.
 
-    `fail`/`raises` see the argv without its `sudo -n` prefix. `starts` counts
-    `systemctl start` calls and `docker info` only answers once more starts have
-    run than were scripted to fail, so a report that says Docker is ready has to
-    have issued the retry.
+    `fail`/`raises` see the argv without its `sudo -n` prefix. `restarts` counts
+    `systemctl restart` calls and `docker info` only answers once more restarts
+    have run than were scripted to fail, so a report that says Docker is ready
+    has to have issued the retry.
     """
 
     def __init__(
@@ -132,24 +132,26 @@ class _Deck:
         *,
         fail: Callable[[list[str]], bool] | None = None,
         raises: Callable[[list[str]], bool] | None = None,
-        start_failures: int = 0,
+        restart_failures: int = 0,
     ) -> None:
         self.calls: list[list[str]] = []
         self._fail = fail
         self._raises = raises
-        self.start_failures = start_failures
-        self.starts = 0
+        self.restart_failures = restart_failures
+        self.restarts = 0
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(argv)
         body = argv[2:] if argv[:2] == ["sudo", "-n"] else argv
         if argv[:2] == ["docker", "info"]:
-            answered = self.starts > self.start_failures
+            answered = self.restarts > self.restart_failures
             return subprocess.CompletedProcess(argv, 0 if answered else 1, "", "")
-        if body[:2] == ["systemctl", "start"]:
-            self.starts += 1
-            if self.starts <= self.start_failures:
-                return subprocess.CompletedProcess(argv, 1, "", "start job failed")
+        if argv == ["systemctl", "is-active", "docker"]:
+            return subprocess.CompletedProcess(argv, 0, "inactive\n", "")
+        if body[:2] == ["systemctl", "restart"]:
+            self.restarts += 1
+            if self.restarts <= self.restart_failures:
+                return subprocess.CompletedProcess(argv, 1, "", "restart job failed")
             return subprocess.CompletedProcess(argv, 0, "", "")
         if self._raises is not None and self._raises(body):
             raise RuntimeError("the step runner fell over")
@@ -268,24 +270,24 @@ def test_a_runner_that_raises_stops_the_plan_and_still_puts_back_what_it_install
 # --------------------------------------------------------------- the switch
 
 
-def test_a_failed_start_puts_the_settings_back_and_starts_once_more(
+def test_a_failed_restart_puts_the_settings_back_and_restarts_once_more(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A first start that fails on the new settings gets one retry on the restored ones.
+    """A first restart that fails on the new settings gets one retry on the restored ones.
 
     The retry is the point: the settings change is what the Deck might not start
     on, and the plan's own undo is the only thing that can make the old settings
-    current again. Two start calls, the restore between them, and a report that
-    says Docker is running again on the files that went back.
+    current again. Two restart calls, the restore between them, and a report
+    that says Docker is running again on the files that went back.
     """
     daemon, config = _switch_deck(monkeypatch, tmp_path)
-    run = _Deck(start_failures=1)
+    run = _Deck(restart_failures=1)
 
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
 
     steps = run.steps()
     starts = [
-        index for index, step in enumerate(steps) if step == "systemctl start containerd docker"
+        index for index, step in enumerate(steps) if step == "systemctl restart containerd docker"
     ]
     assert len(starts) == 2, steps
     put_back_daemon = f"install -m 0644 {_backup_of(run, daemon)} {daemon}"
@@ -295,7 +297,9 @@ def test_a_failed_start_puts_the_settings_back_and_starts_once_more(
     assert steps.index(put_back_daemon) > starts[0]
     assert steps.index(put_back_config) < starts[1] and steps.index(put_back_daemon) < starts[1]
     said = report.manual_steps[0]
-    assert said.startswith('The switch failed at "systemctl start containerd docker"'), said
+    assert said.startswith(
+        'The Docker storage change failed at "systemctl restart containerd docker"'
+    ), said
     assert platform.STEAMOS_STORE_FILES_PUT_BACK in said
     assert platform.STEAMOS_STORE_RUNNING_AGAIN in said
     assert report.docker_ready
@@ -311,10 +315,10 @@ def test_a_runner_that_raises_during_the_switch_still_restores_and_starts(
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
 
     steps = run.steps()
-    assert "systemctl start containerd docker" in steps, steps
+    assert "systemctl restart containerd docker" in steps, steps
     assert f"install -m 0644 {_backup_of(run, daemon)} {daemon}" in steps, steps
     assert report.manual_steps[0].startswith(
-        'The switch failed at "install -D -m 0644'
+        'The Docker storage change failed at "install -D -m 0644'
     ), report.manual_steps[0]
     assert platform.STEAMOS_STORE_FILES_PUT_BACK in report.manual_steps[0]
     assert report.docker_ready

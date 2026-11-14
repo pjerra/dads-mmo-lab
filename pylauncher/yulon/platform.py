@@ -3023,12 +3023,17 @@ rewriting Docker's settings on any of them would undo a choice nobody can see
 from here (T884 round 2).
 """
 
-STEAMOS_STORE_FAILED_STEP = 'The switch failed at "{step}", so {files}. {docker}'
+STEAMOS_STORE_FAILED_STEP = 'The Docker storage change failed at "{step}", so {files}. {docker}'
 """The recovery report: what stopped, what was put back, and whether Docker runs (T884 r2).
 
 One sentence per half rather than a stack trace: the step in the player's own
-words, then the two facts that decide what they do next.
+words, then the two facts that decide what they do next. Path-neutral since
+round 5, because the switch, the T160 repair and a fresh install all finish the
+same way now.
 """
+
+STEAMOS_STORE_ON_NEW_SETTINGS = "Docker is running on the new settings, with its storage in /home."
+"""Which settings Docker runs on when nothing went back (T884 r5)."""
 
 STEAMOS_STORE_NOTHING_INSTALLED = "no settings file had been installed yet"
 STEAMOS_STORE_FILES_PUT_BACK = "the settings files were put back"
@@ -3332,6 +3337,26 @@ class _StoreStopped(Exception):
     """A Stop pressed between store steps: the plan stops there, the cleanup still runs."""
 
 
+@dataclass(frozen=True)
+class FinishOutcome:
+    """What finishing a store change did: readiness, which settings, and the steps (T884 r5).
+
+    `stopped` is the step that failed (the restart, or one the caller reached
+    the helper with), or None. `restored`/`not_restored` are the settings files
+    this run put back and could not, across both the plan's own undo and the
+    helper's. `active` is the daemon being up while `docker info` does not
+    answer: the settings are kept, because nothing says Docker refused them.
+    """
+
+    ready: bool
+    stopped: str | None = None
+    restored: tuple[Path, ...] = ()
+    not_restored: tuple[Path, ...] = ()
+    active: bool = False
+    done: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+
 def _store_stamp() -> str:
     """This run's fixed backup stamp, in UTC (T884 r3), e.g. `20261114T031500Z`."""
     return datetime.now(UTC).strftime(_STORE_STAMP_FORMAT)
@@ -3485,7 +3510,7 @@ def _discard_store_staging(plan: StorePlan | None) -> None:
 def _store_failed_sentence(
     step: str, installed: Sequence[Path], not_back: Sequence[str], ready: bool
 ) -> str:
-    """The one sentence the switch reports when it stops after Docker was stopped (T884 r2)."""
+    """The one sentence a store change reports when it stops and puts its files back (T884 r2)."""
     if not installed:
         files = STEAMOS_STORE_NOTHING_INSTALLED
     elif not not_back:
@@ -3496,6 +3521,95 @@ def _store_failed_sentence(
         files = STEAMOS_STORE_FILES_PARTLY_PUT_BACK.format(names=" and ".join(not_back))
     docker = STEAMOS_STORE_RUNNING_AGAIN if ready else STEAMOS_STORE_NOT_RUNNING_AGAIN
     return STEAMOS_STORE_FAILED_STEP.format(step=_step_command(step), files=files, docker=docker)
+
+
+_STORE_RESTART_COMMAND = ["systemctl", "restart", "containerd", "docker"]
+"""What a finished store change ends with (T884 r5).
+
+A `restart`, never a `start`: the unit may already be active on the OLD
+settings (the install's `enable --now` started it before this run's settings
+were read), and `systemctl start` on an active unit is a no-op — Docker would
+keep running on /var while `/etc` points at /home. A restart re-reads both
+settings whatever state the units were in.
+"""
+
+
+def _finish_store_change(
+    outcome: StoreOutcome,
+    run_step: StoreStepRunner,
+    *,
+    do: RunCmd,
+    wait_seconds: float,
+    step: str | None = None,
+) -> FinishOutcome:
+    """One finish for every Deck store change: restart, prove readiness, undo if refused (T884 r5).
+
+    Called by the switch, the T160 repair and the install once `_apply_store_plan()`
+    finished, with the runner that never checks a cancel.
+
+    1. `systemctl restart containerd docker`, then wait for `docker info`.
+    2. Ready: the new settings stay, and the caller reports Docker running on
+       them. `step` is a failure that arrived BEFORE this helper (the repair's
+       `daemon-reload`/`enable --now`); it skips the first restart and goes
+       straight to the undo, because the settings must not stay on a Deck whose
+       finish never ran.
+    3. Not ready: ask `systemctl is-active docker` — the daemon may be up with
+       only THIS process unable to reach the socket, and that is not Docker
+       refusing the settings, so nothing is undone. Inactive, or the restart
+       command itself failed: the settings go back, `systemctl restart` is
+       issued once more on them, readiness is measured again, and the caller
+       reports the settings put back and whether Docker came up.
+    """
+    done: list[str] = []
+    skipped: list[str] = []
+    stopped = step
+    if stopped is None:
+        ran, failed = run_step([_STORE_RESTART_COMMAND])
+        done += ran
+        skipped += failed
+        if failed:
+            stopped = failed[0]
+        else:
+            ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
+            if ready:
+                return FinishOutcome(True, done=tuple(done), skipped=tuple(skipped))
+            if _docker_service_active(do):
+                return FinishOutcome(False, active=True, done=tuple(done), skipped=tuple(skipped))
+            stopped = f"{' '.join(_STORE_RESTART_COMMAND)}: Docker did not answer after it ran"
+    back = _put_store_settings_back(outcome, run_step)
+    done += list(back.done)
+    skipped += list(back.skipped)
+    ran, failed = run_step([_STORE_RESTART_COMMAND])
+    done += ran
+    skipped += failed
+    ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
+    return FinishOutcome(
+        ready,
+        stopped=stopped,
+        restored=(*outcome.restored, *back.restored),
+        not_restored=(*outcome.not_restored, *back.not_restored),
+        done=tuple(done),
+        skipped=tuple(skipped),
+    )
+
+
+def _store_finish_sentence(finish: FinishOutcome, *, on_new: str) -> str:
+    """The one sentence a finished store change reports, always naming its settings (T884 r5).
+
+    `on_new` is the caller's own wording for the settings that stayed (the
+    switch's data note, the repair's Press Start line, the install's install
+    line). A daemon that is up while only this process cannot reach the socket
+    keeps the settings and gets the session sentence in front of that name; a
+    restore is the failed sentence, which says what went back and whether
+    Docker came up on it.
+    """
+    if finish.stopped is not None:
+        files = [*finish.restored, *finish.not_restored]
+        not_back = [target.name for target in finish.not_restored]
+        return _store_failed_sentence(finish.stopped, files, not_back, finish.ready)
+    if finish.active:
+        return f"{STEAMOS_STORE_ON_NEW_SETTINGS} {STEAMOS_DOCKER_SESSION_STEP}"
+    return on_new
 
 
 @dataclass(frozen=True)
@@ -3588,19 +3702,21 @@ def switch_steamos_store(
 
     Then one `SudoSession` — the elevation path the T160 repair uses — and the
     steps in the order that makes them recoverable: stop Docker and containerd,
-    run the store plan (this run's own backups, then both settings), start them
-    again. Once `stop` has run, ANY later failure or cancel undoes the files the
-    plan installed and starts Docker anyway: the cleanup is not cancellable, and
-    leaving the daemon stopped with two settings moved half way is the state
-    nobody can recover from a dialog. That includes a Stop pressed between two
-    settings files: the plan stops there, and the undo still runs (T884 r4).
+    run the store plan (this run's own backups, then both settings), then
+    `_finish_store_change()`: one restart and one readiness check, the same
+    finish the repair and the install use (T884 r5). Once `stop` has run, ANY
+    later failure or cancel undoes the files the plan installed and restarts
+    Docker anyway: the cleanup is not cancellable, and leaving the daemon
+    stopped with two settings moved half way is the state nobody can recover
+    from a dialog. That includes a Stop pressed between two settings files: the
+    plan stops there, and the undo still runs (T884 r4).
 
-    The start is the last boundary. A start whose exit code is 0 but whose
-    daemon never answers `docker info` is a failed switch too (T884 r4), and so
-    is one that fails outright: when every settings file WAS installed, the
-    plan's undo runs and the start is issued ONCE more on the restored
-    settings — the report says which settings Docker runs on and whether it is
-    ready (T884 r3).
+    The finish is the last boundary. A restart that fails, or one whose daemon
+    never answers `docker info` while the unit is inactive, undoes the settings
+    and restarts once more on the restored ones. A unit that IS active with
+    `docker info` not answering is this process's session, not Docker refusing
+    the settings, so the settings are kept and the session sentence says why.
+    The report always names which settings Docker runs on (T884 r5).
     """
     if not steamos_store_needs_home(None):
         logger.info("steamos store switch: nothing to do")
@@ -3624,11 +3740,10 @@ def switch_steamos_store(
         question=SUDO_STORE_PASSWORD_QUESTION,
     )
     stop_command = ["systemctl", "stop", "docker.socket", "docker", "containerd"]
-    start_command = ["systemctl", "start", "containerd", "docker"]
     done: list[str] = []
     skipped: list[str] = []
     stopped: str | None = None
-    outcome: StoreOutcome | None = None
+    finished: FinishOutcome | None = None
     stop_ran = False
     ready = False
 
@@ -3639,21 +3754,14 @@ def switch_steamos_store(
         return _run_steps(do, commands, sudo=True, dry_run=False, session=session)
 
     def cleanup_step(commands: list[list[str]]) -> tuple[list[str], list[str]]:
-        """The same block WITHOUT the Stop, for the undo and the start (T884 r4).
+        """The same block WITHOUT the Stop, for the undo and the finish (T884 r4).
 
         A Stop after the first settings file is exactly when the restore has to
         run; a cleanup that checked the same event would refuse and leave the
-        Deck started on half-moved settings. `start()` and the readiness poll
-        already ignore it for the same reason.
+        Deck restarted on half-moved settings. The readiness poll ignores it for
+        the same reason.
         """
         return _run_steps(do, commands, sudo=True, dry_run=False, session=session)
-
-    def start() -> tuple[list[str], list[str]]:
-        """Start both services; the cleanup may not be cancelled by a raising runner."""
-        try:
-            return _run_steps(do, [start_command], sudo=True, dry_run=False, session=session)
-        except Exception as exc:  # noqa: BLE001 - the cleanup runs whatever the runner does
-            return [], [f"{' '.join(start_command)}: {exc}"]
 
     try:
         if cancel is not None and cancel.is_set():
@@ -3672,54 +3780,27 @@ def switch_steamos_store(
             outcome = _apply_store_plan(staged, run_step, undo_step=cleanup_step)
             done += list(outcome.done)
             skipped += list(outcome.skipped)
-            if outcome.step is not None:
-                stopped = outcome.step
-            ran, failed = start()
-            done += ran
-            skipped += failed
-            if failed and outcome.ok:
-                # Every settings file was installed and the daemon would not come
-                # up on them: they are what has to go back, then ONE more start on
-                # the restored settings. A second failure is reported, not retried.
-                stopped = failed[0]
-                back = _put_store_settings_back(outcome, cleanup_step)
-                done += list(back.done)
-                skipped += list(back.skipped)
-                outcome = replace(outcome, restored=back.restored, not_restored=back.not_restored)
-                ran, failed = start()
-                done += ran
-                skipped += failed
-            if stopped is None:
-                ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
-            if stopped is None and not ready:
-                # T884 r4: a `systemctl start` that returned 0 is not a daemon
-                # that came up. A Deck left running on settings Docker refused is
-                # the same failure the exit code was read as success for, so the
-                # settings go back and the start is issued once more on them,
-                # while this run's undo is still here.
-                stopped = f"{' '.join(start_command)}: Docker did not answer after it started"
-                back = _put_store_settings_back(outcome, cleanup_step)
-                done += list(back.done)
-                skipped += list(back.skipped)
-                outcome = replace(outcome, restored=back.restored, not_restored=back.not_restored)
-                ran, failed = start()
-                done += ran
-                skipped += failed
+            finished = _finish_store_change(
+                outcome,
+                cleanup_step,
+                do=do,
+                wait_seconds=wait_seconds,
+                step=outcome.step,
+            )
+            done += list(finished.done)
+            skipped += list(finished.skipped)
+            if finished.stopped is not None:
+                stopped = finished.stopped
     finally:
         _discard_store_staging(staged)
     manual: list[str] = []
-    if stopped is None:
-        # Docker answered on the settings this run installed, or the switch
-        # would have stopped there and undone them.
+    if finished is not None:
+        # One sentence for every way the store change ended — new settings,
+        # a session that cannot reach them, or a restore (T884 r5).
+        ready = finished.ready
+        manual.append(_store_finish_sentence(finished, on_new=STEAMOS_STORE_MOVED_STEP))
+    elif stopped is None:
         manual.append(STEAMOS_STORE_MOVED_STEP)
-    elif stop_ran:
-        # Not cancellable either: the start above ran after a Stop as well, so
-        # whether Docker came back is measured with the same deadline instead
-        # of reading the cancel that stopped the store steps as a failed start.
-        ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
-        files: list[Path] = [*outcome.restored, *outcome.not_restored] if outcome else []
-        not_back: list[str] = [target.name for target in outcome.not_restored] if outcome else []
-        manual.append(_store_failed_sentence(stopped, files, not_back, ready))
     elif stopped.endswith(": stopped before it ran"):
         manual.append(STEAMOS_STORE_STOPPED_STEP.format(step=_step_command(stopped)))
     elif session.outcome in ("declined", "refused", "unavailable"):
@@ -5228,6 +5309,8 @@ def _ensure_docker_linux(
 
     staged: StorePlan | None = None
     store_manual: tuple[str, ...] = ()
+    store_applied: StoreOutcome | None = None
+    store_finish: FinishOutcome | None = None
     done: list[str] = []
     skipped: list[str] = []
     try:
@@ -5260,11 +5343,33 @@ def _ensure_docker_linux(
                     skipped += list(store_outcome.skipped)
                     if store_outcome.step is not None:
                         store_manual = (*store_manual, STEAMOS_STORE_MANUAL_STEP)
+                    else:
+                        store_applied = store_outcome
             ran, failed = _run_steps(
                 do, DOCKER_ENABLE_COMMANDS, sudo=True, dry_run=dry_run, session=session
             )
             done += ran
             skipped += failed
+            if store_applied is not None:
+                # T884 r5: enable --now ran first so the daemon is on the new
+                # store, and this is the one finish every store change gets. A
+                # failed enable arrives as `step`, so the settings go back rather
+                # than staying on a Deck whose daemon never started on them.
+                store_finish = _finish_store_change(
+                    store_applied,
+                    lambda commands: _run_steps(
+                        do, commands, sudo=True, dry_run=dry_run, session=session
+                    ),
+                    do=do,
+                    wait_seconds=min(wait_seconds, 30.0),
+                    step=failed[0] if failed else None,
+                )
+                done += list(store_finish.done)
+                skipped += list(store_finish.skipped)
+                store_manual = (
+                    *store_manual,
+                    _store_finish_sentence(store_finish, on_new=STEAMOS_STORE_ON_NEW_SETTINGS),
+                )
         else:
             done, skipped = _run_steps(do, commands, sudo=True, dry_run=dry_run, session=session)
     finally:
@@ -5285,7 +5390,10 @@ def _ensure_docker_linux(
     elif dry_run:
         skipped.append(f"(dry run) usermod -aG docker {user} (asks first)")
 
-    ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
+    if store_finish is not None:
+        ready = store_finish.ready
+    else:
+        ready = False if dry_run else _wait_docker_ready(do, min(wait_seconds, 30.0), 2.0, cancel)
 
     # What HAPPENED, not what was agreed to. `consent` answers the question;
     # whether the command that follows it worked is a separate fact, and telling
@@ -6094,6 +6202,8 @@ def _repair_docker_after_steamos_update(
     # never overwrites what it could not read.
     staged: StorePlan | None = None
     store_manual: tuple[str, ...] = ()
+    store_applied: StoreOutcome | None = None
+    store_finish: FinishOutcome | None = None
     if stopped is None and refused_late is None and steamos_store_needs_home(None):
         staged = _stage_steamos_store()
         store_manual = staged.manual
@@ -6117,10 +6227,32 @@ def _repair_docker_after_steamos_update(
                         # installed; the repair still finishes with its reload and
                         # enable, so Docker comes back on the old settings.
                         store_failed = True
+                else:
+                    store_applied = store_outcome
         finally:
             _discard_store_staging(staged)
     if stopped is None and refused_late is None:
         run_repair(steamos_docker_repair_finish())
+
+    if store_applied is not None and refused_late is None:
+        # T884 r5: the reload and the enable have run, so this is the one finish
+        # every store change gets — a restart, a readiness check, and the undo
+        # when Docker will not run on the new settings. A reload or enable that
+        # failed arrives as `step`, so the settings still go back instead of
+        # staying on a Deck whose finish never ran.
+        store_finish = _finish_store_change(
+            store_applied,
+            lambda commands: _run_steps(do, commands, sudo=True, dry_run=False, session=session),
+            do=do,
+            wait_seconds=wait_seconds,
+            step=stopped,
+        )
+        done += list(store_finish.done)
+        skipped += list(store_finish.skipped)
+        if store_finish.stopped is not None:
+            stopped = store_finish.stopped
+            if store_finish.restored or store_finish.not_restored:
+                store_failed = True
 
     if stopped is None and refused_late is None and consent == "granted":
         joined, refused = _run_steps(
@@ -6135,6 +6267,12 @@ def _repair_docker_after_steamos_update(
     ready = False
     if refused_late is not None:
         manual.append(refused_late)
+    elif store_finish is not None and store_finish.stopped is not None:
+        # T884 r5: the repair reached the reload/enable or the restart on the new
+        # settings and Docker would not run on them. The sentence names the
+        # settings that went back and whether Docker came up on them.
+        ready = store_finish.ready
+        manual.append(_store_finish_sentence(store_finish, on_new=STEAMOS_STORE_ON_NEW_SETTINGS))
     elif stopped is not None and stopped.endswith(": stopped before it ran"):
         manual.append(STEAMOS_DOCKER_REPAIR_STOPPED_AT.format(step=_step_command(stopped)))
     elif stopped is not None and session.outcome in ("declined", "refused", "unavailable"):
@@ -6147,9 +6285,21 @@ def _repair_docker_after_steamos_update(
         manual.append(STEAMOS_DOCKER_STOPPED_STEP.format(step=_step_command(stopped)))
         manual.append(f"What it said: {stopped}")
     else:
-        ready = _wait_docker_ready(do, wait_seconds, 2.0, cancel)
+        ready = (
+            store_finish.ready
+            if store_finish is not None
+            else _wait_docker_ready(do, wait_seconds, 2.0, cancel)
+        )
         if ready:
             manual.append(STEAMOS_DOCKER_BACK_STEP)
+            if store_finish is not None:
+                manual.append(STEAMOS_STORE_ON_NEW_SETTINGS)
+        elif store_finish is not None and store_finish.active:
+            # T884 r5: the unit is up, so the settings stay; only this process
+            # cannot reach the socket, and the session sentence says so.
+            manual.append(
+                _store_finish_sentence(store_finish, on_new=STEAMOS_STORE_ON_NEW_SETTINGS)
+            )
         elif _docker_service_active(do):
             if outcome == "declined":
                 manual.append(DOCKER_GROUP_DECLINED_STEP.format(user=who))
