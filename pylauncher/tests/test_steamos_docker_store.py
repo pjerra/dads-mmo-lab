@@ -27,11 +27,6 @@ GIB = 1024**3
 TARGET_DOCKER = "/home/.yulon-docker/docker"
 TARGET_CONTAINERD = "/home/.yulon-docker/containerd"
 
-STORE = [
-    ["install", "-d", "-m", "0710", TARGET_DOCKER],
-    ["install", "-D", "-m", "0644", "/tmp/staged/daemon.json", "/etc/docker/daemon.json"],
-]
-
 
 class _Run:
     """Every argv the switch asked for, and an answer that succeeds."""
@@ -64,41 +59,23 @@ def _deck(
 # ---------------------------------------------------------------- the commands
 
 
-def test_repair_store_before_daemon_reload() -> None:
-    """T160's repair also puts the store right, and before the reload that reads it."""
-    commands = platform.steamos_docker_repair_commands(devmode=False, store=STORE)
-    shown = [" ".join(argv) for argv, _tolerated in commands]
+def test_store_commands_install_and_never_copy_a_backup() -> None:
+    """The plan's commands are the installs only; the backups belong to the run (T884 r3).
 
-    assert shown.index("install -d -m 0710 " + TARGET_DOCKER) < shown.index(
-        "systemctl daemon-reload"
-    )
-    assert shown.index("pacman -Sy --noconfirm docker docker-compose docker-buildx") < shown.index(
-        "install -d -m 0710 " + TARGET_DOCKER
-    )
-    tolerated = {(" ".join(argv)): tolerated for argv, tolerated in commands}
-    assert all(tolerated[" ".join(argv)] for argv in STORE), "a store failure is carried past"
+    A `cp` here was the round-2 shape: it skipped when a backup already existed,
+    so a second run could read a file an earlier one had made. The copy is
+    `_apply_store_plan()`'s, with this run's stamp, and there is exactly one
+    place that decides what a restore names.
+    """
+    staged = Path("/tmp/staged")
+    commands = platform.steamos_store_commands(staged, True, True)
 
-
-def test_store_commands_back_up_an_existing_file_once(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An existing settings file is copied to `.yulon-bak` once, and never over a backup."""
-    daemon = tmp_path / "daemon.json"
-    daemon.write_text("{}\n", encoding="utf-8")
-    config = tmp_path / "config.toml"
-    config.write_text("version = 2\n", encoding="utf-8")
-    monkeypatch.setattr(platform, "_DOCKER_DAEMON_JSON", daemon)
-    monkeypatch.setattr(platform, "_CONTAINERD_CONFIG", config)
-    staged = tmp_path / "staged"
-
-    first = platform.steamos_store_commands(staged, True, True)
-    assert ["cp", "-a", str(daemon), str(daemon) + ".yulon-bak"] in first
-    assert ["cp", "-a", str(config), str(config) + ".yulon-bak"] in first
-
-    (daemon.parent / (daemon.name + ".yulon-bak")).write_text("old\n", encoding="utf-8")
-    (config.parent / (config.name + ".yulon-bak")).write_text("old\n", encoding="utf-8")
-    second = platform.steamos_store_commands(staged, True, True)
-    assert not [argv for argv in second if argv[0] == "cp"], "the only copy was overwritten"
+    assert not [argv for argv in commands if argv[0] == "cp"]
+    shown = [" ".join(argv) for argv in commands]
+    assert shown[0] == "install -d -m 0711 " + TARGET_CONTAINERD
+    assert shown[1] == "install -d -m 0710 " + TARGET_DOCKER
+    assert shown[-2].endswith("/etc/docker/daemon.json")
+    assert shown[-1].endswith("/etc/containerd/config.toml")
 
 
 # --------------------------------------------------------------- daemon.json

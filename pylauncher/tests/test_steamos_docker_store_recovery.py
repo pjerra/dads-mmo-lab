@@ -113,6 +113,15 @@ def _restores(steps: Sequence[str]) -> list[str]:
     ]
 
 
+def _backup_of(steps: Sequence[str], target: Path) -> str:
+    """The backup THIS run made of `target`, from its own `cp -a` step (T884 r3)."""
+    for step in steps:
+        parts = step.split()
+        if parts[:2] == ["cp", "-a"] and parts[2] == str(target):
+            return parts[3]
+    raise AssertionError(f"this run made no backup of {target}: {steps}")
+
+
 def _boundary(name: str, daemon: Path, config: Path) -> Callable[[list[str]], bool]:
     """A predicate that fails the named command of the store plan, and nothing else."""
     if name == "backup":
@@ -153,15 +162,16 @@ def test_a_failure_after_the_stop_puts_back_what_it_installed(
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
 
     steps = run.steps()
-    put_back_daemon = f"install -m 0644 {daemon}.yulon-bak {daemon}"
-    put_back_config = f"install -m 0644 {config}.yulon-bak {config}"
-    expected = {
-        "backup": [],
-        "mkdir": [],
-        "install daemon.json": [],
-        "install config.toml": [put_back_daemon],
-        "start": [put_back_daemon, put_back_config],
-    }[name]
+    # T884 r3: the backups are this run's own, stamped, and the undo runs in
+    # reverse order — the last file installed is the first one put back.
+    put_back_daemon = f"install -m 0644 {_backup_of(steps, daemon)} {daemon}"
+    if name == "install config.toml":
+        expected = [put_back_daemon]
+    elif name == "start":
+        put_back_config = f"install -m 0644 {_backup_of(steps, config)} {config}"
+        expected = [put_back_config, put_back_daemon]
+    else:
+        expected = []
     assert _restores(steps) == expected
     assert "systemctl start containerd docker" in steps, steps
     assert steps.index("systemctl stop docker.socket docker containerd") < steps.index(
@@ -195,7 +205,8 @@ def test_files_that_were_not_there_before_are_removed_again(
 
     report = platform.switch_steamos_store(ask=lambda _q: "yes", run=run, wait_seconds=0.0)
 
-    assert _restores(run.steps()) == [f"rm -f {daemon}", f"rm -f {config}"]
+    # Reverse order: config.toml was installed second, so it goes first (T884 r3).
+    assert _restores(run.steps()) == [f"rm -f {config}", f"rm -f {daemon}"]
     assert platform.STEAMOS_STORE_NOT_RUNNING_AGAIN in report.manual_steps[0]
     assert not report.docker_ready
 
@@ -381,7 +392,11 @@ def test_the_store_plan_sees_a_config_toml_pacman_installed(
 
     assert report.platform == "linux"
     steps = run.bodies()
-    backup = f"cp -a {config} {config}.yulon-bak"
+    backup = next(
+        step
+        for step in steps
+        if step.split()[:2] == ["cp", "-a"] and step.split()[2] == str(config)
+    )
     install = next(step for step in steps if step.endswith(f" {config}") and " -D " in step)
     pacman = next(step for step in steps if step.startswith("pacman "))
     enable = steps.index("systemctl enable --now docker")

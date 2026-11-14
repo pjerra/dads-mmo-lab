@@ -14,6 +14,7 @@ stand-ins for `passwd` that read from /dev/tty, as the real one does.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -269,36 +270,54 @@ def test_a_docker_install_that_fails_stops_and_names_the_step_that_did() -> None
 
 
 def test_a_store_step_that_fails_puts_the_files_back_and_still_enables_docker(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """T884 r2: the repair's store step is tolerated, and its failure is undone.
+    """T884 r3: the repair's store failure goes back through the shared helper.
 
-    The repair's job is Docker back, so a store step that failed may not stop
-    it — but it also may not leave one settings file moved. The file this run
-    did install gets its `.yulon-bak` back, the reload and the enable still run,
-    and the manual sentence says how to finish the move by hand.
+    The repair's job is Docker back, so a store failure may not stop it — but it
+    also may not leave one settings file moved. The file this run did install
+    gets ITS OWN stamped backup back, not the `.yulon-bak` an earlier run left
+    (which holds different content and is still there afterwards), the reload
+    and the enable still run, and the manual sentence says how to finish the
+    move by hand.
     """
     monkeypatch.setattr(platform, "steamos_store_needs_home", lambda data_root=None: True)
-    daemon = Path("/etc/docker/daemon.json")
-    config = Path("/etc/containerd/config.toml")
+    daemon = tmp_path / "etc" / "docker" / "daemon.json"
+    config = tmp_path / "etc" / "containerd" / "config.toml"
+    daemon.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True)
+    daemon.write_text('{"log-driver": "local"}\n', encoding="utf-8")
+    config.write_text('version = 2\nroot = "/var/lib/containerd"\n', encoding="utf-8")
+    older = daemon.with_name(daemon.name + ".yulon-bak")
+    older.write_text('{"older": true}\n', encoding="utf-8")
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "daemon.json").write_text('{"data-root": "/home/.yulon-docker/docker"}\n')
+    (staged / "config.toml").write_text('version = 2\nroot = "/home/.yulon-docker/containerd"\n')
     plan = platform.StorePlan(
         commands=[
             ["install", "-d", "-m", "0711", str(platform.STEAMOS_STORE_HOME / "containerd")],
-            ["install", "-D", "-m", "0644", "/tmp/staged/daemon.json", str(daemon)],
-            ["install", "-D", "-m", "0644", "/tmp/staged/config.toml", str(config)],
+            ["install", "-D", "-m", "0644", str(staged / "daemon.json"), str(daemon)],
+            ["install", "-D", "-m", "0644", str(staged / "config.toml"), str(config)],
         ],
-        existed=((daemon, True), (config, True)),
+        folder=staged,
     )
     monkeypatch.setattr(platform, "_stage_steamos_store", lambda: plan)
-    config_install = f"install -D -m 0644 /tmp/staged/config.toml {config}"
+    config_install = f"install -D -m 0644 {staged / 'config.toml'} {config}"
     deck = _Deck(fail={config_install: (1, "Read-only file system")})
 
     report = _repair(deck, _answers("y")[1])
 
-    restore = f"install -m 0644 {daemon}.yulon-bak {daemon}"
-    assert restore in deck.steps
+    restore = next(
+        step
+        for step in deck.steps
+        if step.startswith("install -m 0644 ") and step.endswith(str(daemon))
+    )
+    assert re.fullmatch(r"install -m 0644 .*\.yulon-bak-\d{8}T\d{6}Z .*", restore), restore
+    assert restore != f"install -m 0644 {older} {daemon}", "an older run's backup was restored"
+    assert older.read_text(encoding="utf-8") == '{"older": true}\n'
     assert deck.steps.index(restore) > deck.steps.index(
-        f"install -D -m 0644 /tmp/staged/daemon.json {daemon}"
+        f"install -D -m 0644 {staged / 'daemon.json'} {daemon}"
     )
     assert deck.steps.index(restore) < deck.steps.index("systemctl daemon-reload")
     assert "systemctl daemon-reload" in deck.steps

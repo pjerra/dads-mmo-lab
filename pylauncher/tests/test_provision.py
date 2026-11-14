@@ -1618,10 +1618,14 @@ def test_the_advice_names_the_first_failure_not_the_last(
     # ...and the step three links down the chain is not what we tell them to run.
     assert "usermod" not in advice
 
-    # The neighbour that used to do the advising must be visibly out of the way:
-    # `DOCKER_GROUP_JOIN_FAILED_STEP` is the only sentence containing "To do it
-    # yourself", and this run must not produce it anywhere.
-    assert not [m for m in report.manual_steps if "To do it yourself" in m]
+    # The neighbour that used to do the advising must be visibly out of the way.
+    # It is `DOCKER_GROUP_JOIN_FAILED_STEP`, named by its own words: since T884
+    # r3 the store's manual step says "To do it yourself" too (that is what the
+    # store needs after a failed pacman), so the old phrase stopped identifying
+    # the group sentence and this run still must not produce that one anywhere.
+    assert not [
+        m for m in report.manual_steps if "adding deck to the docker group did not work" in m
+    ]
     assert any("same problem, not a second one" in m for m in report.manual_steps)
 
     # The whole message a user reads, not just the tuple: the keyring has to come

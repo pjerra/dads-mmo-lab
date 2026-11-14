@@ -28,7 +28,8 @@ import tomllib
 import urllib.request
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar
@@ -3248,17 +3249,14 @@ def steamos_store_commands(staged: Path, have_json: bool, have_toml: bool) -> li
 
     `have_json`/`have_toml` say a staged file was written, which is also what
     makes its `install` line worth running: a merge that changed nothing is not
-    staged and not installed. An existing target is backed up once, to
-    `<file>.yulon-bak`, and only when it exists and no backup does — a second
-    run must not overwrite the only copy of what the first one replaced.
+    staged and not installed.
+
+    No backup lines: the copy of what a file held is THIS run's own, named with
+    the stamp `_apply_store_plan()` takes when it starts, and made every time.
+    An earlier run's `.yulon-bak` is not its undo, and a second run that skipped
+    the copy because one existed would restore a file it never read (T884 r3).
     """
-    commands: list[list[str]] = []
-    targets = ((_DOCKER_DAEMON_JSON, have_json), (_CONTAINERD_CONFIG, have_toml))
-    for target, present in targets:
-        backup = target.with_name(target.name + ".yulon-bak")
-        if present and target.exists() and not backup.exists():
-            commands.append(["cp", "-a", str(target), str(backup)])
-    commands += [
+    commands: list[list[str]] = [
         ["install", "-d", "-m", "0711", str(_STEAMOS_STORE_CONTAINERD)],
         ["install", "-d", "-m", "0710", str(_STEAMOS_STORE_DOCKER)],
     ]
@@ -3275,38 +3273,174 @@ def steamos_store_commands(staged: Path, have_json: bool, have_toml: bool) -> li
 
 @dataclass(frozen=True)
 class StorePlan:
-    """The T884 store step: what to install, and what it takes to undo it.
+    """The T884 store step: the settings files to install, and the staging folder.
 
-    `existed` is read before the first command runs, because that is what
-    decides the undo: a settings file that was there gets its `.yulon-bak`
-    back, and one that was not is removed again. `folder` is the staging
-    directory, which the run removes however it ends.
+    What it takes to undo the step is not carried here. The backups belong to the
+    run that makes them (`<file>.yulon-bak-<stamp>`, from `_apply_store_plan()`),
+    so there is one place that decides what a restore names, whoever the caller
+    is: the switch, the repair, or the install (T884 r3).
     """
 
     commands: list[list[str]]
-    existed: tuple[tuple[Path, bool], ...] = ()
     manual: tuple[str, ...] = ()
     folder: Path | None = None
 
-    def restore(self, installed: Iterable[Path]) -> list[list[str]]:
-        """The commands that put exactly `installed` back the way they were (T884 r2).
 
-        Only files THIS run installed are undone: a target whose `install` never
-        ran is left alone, and the `.yulon-bak` named here is the one the same
-        run made. A file that was there before is restored by installing its
-        backup over it; one that was not is deleted.
-        """
-        put_back = set(installed)
-        commands: list[list[str]] = []
-        for target, existed in self.existed:
-            if target not in put_back:
-                continue
-            if existed:
-                backup = target.with_name(target.name + ".yulon-bak")
-                commands.append(["install", "-m", "0644", str(backup), str(target)])
-            else:
-                commands.append(["rm", "-f", str(target)])
-        return commands
+@dataclass(frozen=True)
+class StoreOutcome:
+    """What one run of the store plan did: finished, or where it stopped and what went back.
+
+    `step` is None when every step ran. Otherwise it is the failing step as the
+    runner shows it, or the step a Stop stopped before, and `installed`,
+    `restored` and `not_restored` say which settings files this run had written
+    and what became of them. `undo` is the exact commands that put `installed`
+    back, kept for a start that fails AFTER the plan finished (T884 r3).
+    """
+
+    step: str | None = None
+    done: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+    installed: tuple[Path, ...] = ()
+    restored: tuple[Path, ...] = ()
+    not_restored: tuple[Path, ...] = ()
+    undo: tuple[list[str], ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        """Every step ran (a plan with nothing to do is done too)."""
+        return self.step is None
+
+
+StoreStepRunner = Callable[[list[list[str]]], tuple[list[str], list[str]]]
+"""One block of argv through the caller's sudo path: (done, skipped), as `_run_steps()` answers."""
+
+_STORE_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+
+class _StoreStopped(Exception):
+    """A Stop pressed between store steps: the plan stops there, the cleanup still runs."""
+
+
+def _store_stamp() -> str:
+    """This run's fixed backup stamp, in UTC (T884 r3), e.g. `20261114T031500Z`."""
+    return datetime.now(UTC).strftime(_STORE_STAMP_FORMAT)
+
+
+def _store_backup(target: Path, stamp: str) -> Path:
+    """This run's own copy of `target`, beside it and named for the run."""
+    return target.with_name(f"{target.name}.yulon-bak-{stamp}")
+
+
+def _store_undo_commands(
+    installed: Sequence[Path], existed: Mapping[Path, bool], stamp: str
+) -> list[list[str]]:
+    """The commands that put exactly `installed` back, in reverse order (T884 r3).
+
+    A file that was there before is put back from THIS run's stamped backup; one
+    that was not is deleted. Reverse order, so the list reads the way the plan
+    ran: the last file written is the first one undone.
+    """
+    commands: list[list[str]] = []
+    for target in reversed(installed):
+        if existed[target]:
+            commands.append(
+                ["install", "-m", "0644", str(_store_backup(target, stamp)), str(target)]
+            )
+        else:
+            commands.append(["rm", "-f", str(target)])
+    return commands
+
+
+def _put_store_settings_back(outcome: StoreOutcome, run_step: StoreStepRunner) -> StoreOutcome:
+    """Run `outcome.undo`; a restore that fails is recorded and the rest still run (T884 r3)."""
+    done: list[str] = []
+    skipped: list[str] = []
+    restored: list[Path] = []
+    not_restored: list[Path] = []
+    for cmd in outcome.undo:
+        shown = " ".join(cmd)
+        try:
+            ran, failed = run_step([cmd])
+        except Exception as exc:  # noqa: BLE001 - any runner failure is a failed restore
+            ran, failed = [], [f"{shown}: {exc}"]
+        done += ran
+        skipped += failed
+        (not_restored if failed else restored).append(Path(cmd[-1]))
+    return StoreOutcome(
+        step=outcome.step,
+        done=tuple(done),
+        skipped=tuple(skipped),
+        installed=outcome.installed,
+        restored=tuple(restored),
+        not_restored=tuple(not_restored),
+    )
+
+
+def _apply_store_plan(plan: StorePlan, run_step: StoreStepRunner) -> StoreOutcome:
+    """Install the plan's settings files, keeping this run's own copies first (T884 r3).
+
+    The one place the T884 settings change happens, called by the switch, the
+    post-update repair and a fresh install so all three fail the same way:
+
+    1. For every target that exists, `cp -a <f> <f>.yulon-bak-<stamp>` — made by
+       this run, every time. A failed backup stops before its target is touched.
+    2. The plan's steps in order, stopping at the first failure: a non-zero
+       result, or ANY exception out of the runner (not only `OSError`), because
+       a caller's runner is its own subprocess policy and may raise anything.
+    3. On a stop, every target this run had installed goes back, newest first:
+       its own backup with `install -m 0644`, or `rm -f` when the file was not
+       there before. A restore step that fails is recorded and the rest still
+       run — half a restore reported is better than an exception at this point.
+    """
+    stamp = _store_stamp()
+    targets = [target for target in map(_store_install_target, plan.commands) if target is not None]
+    existed = {target: target.exists() for target in targets}
+    backups = [
+        ["cp", "-a", str(target), str(_store_backup(target, stamp))]
+        for target in targets
+        if existed[target]
+    ]
+    done: list[str] = []
+    skipped: list[str] = []
+    installed: list[Path] = []
+    stopped: str | None = None
+    for cmd in [*backups, *plan.commands]:
+        shown = " ".join(cmd)
+        try:
+            ran, failed = run_step([cmd])
+        except _StoreStopped as exc:
+            stopped = str(exc)
+            break
+        except Exception as exc:  # noqa: BLE001 - see the docstring: the runner may raise anything
+            skipped.append(f"{shown}: {exc}")
+            stopped = skipped[-1]
+            break
+        done += ran
+        skipped += failed
+        if failed:
+            stopped = failed[0]
+            break
+        target = _store_install_target(cmd)
+        if target is not None:
+            installed.append(target)
+    outcome = StoreOutcome(
+        step=stopped,
+        done=tuple(done),
+        skipped=tuple(skipped),
+        installed=tuple(installed),
+        undo=tuple(_store_undo_commands(installed, existed, stamp)),
+    )
+    if stopped is None:
+        return outcome
+    back = _put_store_settings_back(outcome, run_step)
+    return replace(
+        outcome,
+        done=tuple([*outcome.done, *back.done]),
+        skipped=tuple([*outcome.skipped, *back.skipped]),
+        restored=back.restored,
+        not_restored=back.not_restored,
+        undo=(),
+    )
 
 
 def _store_install_target(argv: Sequence[str]) -> Path | None:
@@ -3325,16 +3459,6 @@ def _discard_store_staging(plan: StorePlan | None) -> None:
     """
     if plan is not None and plan.folder is not None:
         shutil.rmtree(plan.folder, ignore_errors=True)
-
-
-def _restore_names(restore: Sequence[Sequence[str]], failed: Sequence[str]) -> list[str]:
-    """Which settings files the restore could not put back, by name (T884 round 2)."""
-    not_back: list[str] = []
-    for argv in restore:
-        shown = " ".join(argv)
-        if any(_step_command(entry) == shown for entry in failed):
-            not_back.append(Path(argv[-1]).name)
-    return not_back
 
 
 def _store_failed_sentence(
@@ -3374,17 +3498,12 @@ def _stage_steamos_store() -> StorePlan:
     have_toml = merged_toml != toml_text
     if not have_json and not have_toml:
         return StorePlan([])
-    existed = tuple(
-        (target, target.exists())
-        for target, present in ((_DOCKER_DAEMON_JSON, have_json), (_CONTAINERD_CONFIG, have_toml))
-        if present
-    )
     staged = Path(tempfile.mkdtemp(prefix="yulon-docker-store-"))
     if have_json:
         (staged / "daemon.json").write_text(merged_json, encoding="utf-8")
     if have_toml:
         (staged / "config.toml").write_text(merged_toml, encoding="utf-8")
-    return StorePlan(steamos_store_commands(staged, have_json, have_toml), existed, (), staged)
+    return StorePlan(steamos_store_commands(staged, have_json, have_toml), folder=staged)
 
 
 def switch_steamos_store(
@@ -3409,11 +3528,16 @@ def switch_steamos_store(
 
     Then one `SudoSession` — the elevation path the T160 repair uses — and the
     steps in the order that makes them recoverable: stop Docker and containerd,
-    back up and install both settings, start them again. Once `stop` has run,
-    ANY later failure or cancel undoes the files this run installed (the backup
-    put back, or the new file removed) and starts Docker anyway: the cleanup is
-    not cancellable, and leaving the daemon stopped with two settings moved
-    half way is the state nobody can recover from a dialog.
+    run the store plan (this run's own backups, then both settings), start them
+    again. Once `stop` has run, ANY later failure or cancel undoes the files the
+    plan installed and starts Docker anyway: the cleanup is not cancellable, and
+    leaving the daemon stopped with two settings moved half way is the state
+    nobody can recover from a dialog.
+
+    The start is the last boundary. When every settings file WAS installed and
+    the daemon still would not come up on them, the plan's undo runs and the
+    start is issued ONCE more on the restored settings — the report says whether
+    Docker runs again and on which settings (T884 r3).
     """
     if not steamos_store_needs_home(None):
         logger.info("steamos store switch: nothing to do")
@@ -3441,53 +3565,56 @@ def switch_steamos_store(
     done: list[str] = []
     skipped: list[str] = []
     stopped: str | None = None
-    installed: list[Path] = []
+    outcome: StoreOutcome | None = None
     stop_ran = False
+
+    def run_step(commands: list[list[str]]) -> tuple[list[str], list[str]]:
+        """One block through the session; a Stop between steps stops the plan (T884 r3)."""
+        if cancel is not None and cancel.is_set():
+            raise _StoreStopped(f"{' '.join(commands[0])}: stopped before it ran")
+        return _run_steps(do, commands, sudo=True, dry_run=False, session=session)
+
+    def start() -> tuple[list[str], list[str]]:
+        """Start both services; the cleanup may not be cancelled by a raising runner."""
+        try:
+            return _run_steps(do, [start_command], sudo=True, dry_run=False, session=session)
+        except Exception as exc:  # noqa: BLE001 - the cleanup runs whatever the runner does
+            return [], [f"{' '.join(start_command)}: {exc}"]
+
     try:
-        for index, cmd in enumerate([stop_command, *staged.commands]):
-            if cancel is not None and cancel.is_set():
-                stopped = f"{' '.join(cmd)}: stopped before it ran"
-                break
-            ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
+        if cancel is not None and cancel.is_set():
+            stopped = f"{' '.join(stop_command)}: stopped before it ran"
+        else:
+            ran, failed = _run_steps(do, [stop_command], sudo=True, dry_run=False, session=session)
             done += ran
             skipped += failed
             if failed:
                 stopped = failed[0]
-                break
-            if index == 0:
-                stop_ran = True
             else:
-                target = _store_install_target(cmd)
-                if target is not None:
-                    installed.append(target)
-        not_back: list[str] = []
-
-        def put_back(commands: list[list[str]]) -> None:
-            """Run the undo through the same sudo session; nothing fails the run."""
-            nonlocal not_back
-            restored, not_restored = _run_steps(
-                do, commands, sudo=True, dry_run=False, session=session
-            )
-            done.extend(restored)
-            skipped.extend(not_restored)
-            not_back = _restore_names(commands, not_restored)
-
+                stop_ran = True
         if stop_ran:
             # A stop that ran is the point of no return: from here the deck is
-            # left with Docker up and the settings this run installed undone.
-            restore = staged.restore(installed) if stopped is not None else []
-            if restore:
-                put_back(restore)
-            ran, failed = _run_steps(do, [start_command], sudo=True, dry_run=False, session=session)
+            # left with Docker up, and the settings this run installed undone.
+            outcome = _apply_store_plan(staged, run_step)
+            done += list(outcome.done)
+            skipped += list(outcome.skipped)
+            if outcome.step is not None:
+                stopped = outcome.step
+            ran, failed = start()
             done += ran
             skipped += failed
-            if failed and stopped is None:
-                # The start itself is one of the boundaries: every settings file
-                # was installed by this run, so they are what has to go back.
+            if failed and outcome.ok:
+                # Every settings file was installed and the daemon would not come
+                # up on them: they are what has to go back, then ONE more start on
+                # the restored settings. A second failure is reported, not retried.
                 stopped = failed[0]
-                late = staged.restore(installed)
-                if late:
-                    put_back(late)
+                back = _put_store_settings_back(outcome, run_step)
+                done += list(back.done)
+                skipped += list(back.skipped)
+                outcome = replace(outcome, restored=back.restored, not_restored=back.not_restored)
+                ran, failed = start()
+                done += ran
+                skipped += failed
     finally:
         _discard_store_staging(staged)
     manual: list[str] = []
@@ -3500,7 +3627,9 @@ def switch_steamos_store(
         # whether Docker came back is measured with the same deadline instead
         # of reading the cancel that stopped the store steps as a failed start.
         ready = _wait_docker_ready(do, wait_seconds, 2.0, None)
-        manual.append(_store_failed_sentence(stopped, installed, not_back, ready))
+        files: list[Path] = [*outcome.restored, *outcome.not_restored] if outcome else []
+        not_back: list[str] = [target.name for target in outcome.not_restored] if outcome else []
+        manual.append(_store_failed_sentence(stopped, files, not_back, ready))
     elif stopped.endswith(": stopped before it ran"):
         manual.append(STEAMOS_STORE_STOPPED_STEP.format(step=_step_command(stopped)))
     elif session.outcome in ("declined", "refused", "unavailable"):
@@ -5021,15 +5150,26 @@ def _ensure_docker_linux(
             ran, failed = _run_steps(do, install_phase, sudo=True, dry_run=dry_run, session=session)
             done += ran
             skipped += failed
-            if steamos_store_needs_home(None):
+            if failed:
+                # T884 r3: a package step or the read-only lock failed, so the
+                # settings on disk are not the ones this run meant to leave and
+                # nothing is staged or written over them. The manual sentence
+                # says how to finish the move by hand once Docker works.
+                store_manual = (STEAMOS_STORE_MANUAL_STEP,)
+            elif not dry_run and steamos_store_needs_home(None):
                 staged = _stage_steamos_store()
                 store_manual = staged.manual
                 if staged.commands:
-                    ran, failed = _run_steps(
-                        do, staged.commands, sudo=True, dry_run=dry_run, session=session
+                    store_outcome = _apply_store_plan(
+                        staged,
+                        lambda commands: _run_steps(
+                            do, commands, sudo=True, dry_run=dry_run, session=session
+                        ),
                     )
-                    done += ran
-                    skipped += failed
+                    done += list(store_outcome.done)
+                    skipped += list(store_outcome.skipped)
+                    if store_outcome.step is not None:
+                        store_manual = (*store_manual, STEAMOS_STORE_MANUAL_STEP)
             ran, failed = _run_steps(
                 do, DOCKER_ENABLE_COMMANDS, sudo=True, dry_run=dry_run, session=session
             )
@@ -5407,10 +5547,8 @@ def steamos_docker_removed(which: Callable[[str], str | None] | None = None) -> 
     return is_steamos() and find("docker") is None
 
 
-def steamos_docker_repair_commands(
-    *, devmode: bool, store: list[list[str]] | None = None
-) -> list[tuple[list[str], bool]]:
-    """The repair's (sudo-less) commands, each with whether a failure is carried past.
+def steamos_docker_repair_commands(*, devmode: bool) -> list[tuple[list[str], bool]]:
+    """The repair's (sudo-less) commands before the store change, each with whether to carry on.
 
     The upstream script's order, with its three tolerated steps tolerated and
     everything else stopping the run the way its `set -e` did:
@@ -5425,14 +5563,12 @@ def steamos_docker_repair_commands(
     4. `pacman -Sy archlinux-keyring`, carried past on failure (the script warns).
     5. Docker itself, with `docker-buildx`: `compose build` needs BuildKit, and
        `docker_engine_commands()` installs it for the same reason.
-    6. The T884 store plan (`store`), each step carried past: the repair's job is
-       Docker back, and a Deck whose settings file cannot be written still gets
-       that. A store step that fails puts back the settings files this run had
-       already installed (the `.yulon-bak`, or nothing) and adds
-       `STEAMOS_STORE_MANUAL_STEP`, so Docker comes up on the old settings
-       rather than on half a move. It goes before `daemon-reload`, so the first
-       start reads the new root.
-    7. `systemctl daemon-reload`, then `systemctl enable --now docker`.
+
+    The T884 store plan is NOT here any more (round 3): the repair calls
+    `_apply_store_plan()` after these steps — the same helper the switch and the
+    install use — so its failure stops the plan and undoes the files exactly as
+    theirs does. `steamos_docker_repair_finish()` carries the two commands that
+    follow it.
 
     **No `steamos-readonly enable` at the end, and that is deliberate.** The
     owner chose to match the upstream script, which leaves the lock off
@@ -5452,12 +5588,21 @@ def steamos_docker_repair_commands(
         (["pacman", "-Sy", "--noconfirm", "archlinux-keyring"], True),
         (["pacman", "-Sy", "--noconfirm", "docker", "docker-compose", "docker-buildx"], False),
     ]
-    commands += [(cmd, True) for cmd in store] if store else []
-    commands += [
+    return commands
+
+
+def steamos_docker_repair_finish() -> list[tuple[list[str], bool]]:
+    """The repair's last two steps, after the store plan (T884 r3).
+
+    `daemon-reload` then `enable --now docker`: the reload comes after the
+    settings are in place, so the first start reads the new root. They run
+    whether the store plan finished or was undone, because the repair's job is
+    Docker back on whatever settings the Deck has.
+    """
+    return [
         (["systemctl", "daemon-reload"], False),
         (["systemctl", "enable", "--now", "docker"], False),
     ]
-    return commands
 
 
 @dataclass(frozen=True)
@@ -5739,11 +5884,15 @@ def repair_docker_after_steamos_update(
     asked for it by `SudoSession` at the first step, once.
 
     Then `steamos_docker_repair_commands()`, in order, stopping at the first
-    failure that is not a tolerated one; the `usermod` if it was agreed to; and
-    the verification: `docker info` for up to `wait_seconds`, and when that
-    does not answer, `systemctl is-active docker` to tell a daemon that did not
-    start from one this process may not reach. Nothing starts the server; the
-    report says to press Start.
+    failure that is not a tolerated one; the T884 store plan through
+    `_apply_store_plan()` — the same helper the switch and the install use, so a
+    store failure stops it there and puts back the settings files it had
+    installed, and the repair still finishes; then
+    `steamos_docker_repair_finish()`'s reload and enable; the `usermod` if it
+    was agreed to; and the verification: `docker info` for up to `wait_seconds`,
+    and when that does not answer, `systemctl is-active docker` to tell a daemon
+    that did not start from one this process may not reach. Nothing starts the
+    server; the report says to press Start.
 
     `ask` is required: this is only ever run from the Server tab's button, and
     headless `--provision` never reaches it, so the password is never offered
@@ -5823,58 +5972,65 @@ def _repair_docker_after_steamos_update(
     done: list[str] = []
     skipped: list[str] = []
     stopped: str | None = None
-    # T884: the same plan the install stages, only on a Deck whose /var is still
-    # the stock size and whose store is on it. A merge that refuses a file gets
-    # the manual step instead, and never overwrites what it could not read.
-    staged = _stage_steamos_store() if steamos_store_needs_home(None) else None
-    store = staged.commands if staged is not None else []
-    store_manual = staged.manual if staged is not None else ()
-    commands = steamos_docker_repair_commands(
-        devmode=find("steamos-devmode") is not None, store=store
-    )
-    store_steps = {tuple(cmd) for cmd in store}
-    installed: list[Path] = []
-    store_failed = False
     refused_late: str | None = None
-    try:
+    store_failed = False
+
+    def run_repair(commands: list[tuple[list[str], bool]]) -> None:
+        """Run the repair's steps in order, stopping at the first real failure."""
+        nonlocal done, skipped, stopped, refused_late
         for cmd, tolerated in commands:
             if cancel is not None and cancel.is_set():
                 stopped = f"{' '.join(cmd)}: stopped before it ran"
-                break
+                return
             if cmd == _KEYRING_DELETION:
                 refused_late = _steamos_repair_refusal(find)
                 if refused_late is not None:
                     logger.info(
                         f"steamos docker repair: refused before the keyring: {refused_late}"
                     )
-                    break
+                    return
             ran, failed = _run_steps(do, [cmd], sudo=True, dry_run=False, session=session)
             done += ran
             skipped += failed
-            if tuple(cmd) in store_steps:
-                if failed:
-                    # T884 r2: a store step that failed after Docker's settings
-                    # moved leaves them half done, so the files installed so far
-                    # go back the way the switch puts them back, and the repair
-                    # still finishes with its reload and enable.
-                    store_failed = True
-                    restore = staged.restore(installed) if staged is not None else []
-                    if restore:
-                        restored, not_restored = _run_steps(
-                            do, restore, sudo=True, dry_run=False, session=session
-                        )
-                        done += restored
-                        skipped += not_restored
-                else:
-                    target = _store_install_target(cmd)
-                    if target is not None:
-                        installed.append(target)
-                continue
             if failed and not tolerated:
                 stopped = failed[0]
-                break
-    finally:
-        _discard_store_staging(staged)
+                return
+
+    run_repair(steamos_docker_repair_commands(devmode=find("steamos-devmode") is not None))
+
+    # T884: the same plan the install stages, only on a Deck whose /var is still
+    # the stock size and whose store is on it. Built from what the package steps
+    # left on disk. A merge that refuses a file gets the manual step instead, and
+    # never overwrites what it could not read.
+    staged: StorePlan | None = None
+    store_manual: tuple[str, ...] = ()
+    if stopped is None and refused_late is None and steamos_store_needs_home(None):
+        staged = _stage_steamos_store()
+        store_manual = staged.manual
+        try:
+            if staged.commands:
+                store_outcome = _apply_store_plan(
+                    staged,
+                    lambda commands: _run_steps(
+                        do, commands, sudo=True, dry_run=False, session=session
+                    ),
+                )
+                done += list(store_outcome.done)
+                skipped += list(store_outcome.skipped)
+                if store_outcome.step is not None:
+                    if store_outcome.step.endswith(": stopped before it ran"):
+                        # A Stop, not a failure: the repair stops where it was,
+                        # as it does between its own steps.
+                        stopped = store_outcome.step
+                    else:
+                        # The helper already stopped and put back what it had
+                        # installed; the repair still finishes with its reload and
+                        # enable, so Docker comes back on the old settings.
+                        store_failed = True
+        finally:
+            _discard_store_staging(staged)
+    if stopped is None and refused_late is None:
+        run_repair(steamos_docker_repair_finish())
 
     if stopped is None and refused_late is None and consent == "granted":
         joined, refused = _run_steps(
