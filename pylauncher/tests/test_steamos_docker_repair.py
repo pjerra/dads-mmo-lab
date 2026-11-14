@@ -35,6 +35,11 @@ _REQUIRED = "sudo: a password is required\n"
 def _on_steamos(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test here is on a Deck unless it says otherwise: the repair re-checks (T160 review)."""
     monkeypatch.setattr(platform, "is_steamos", lambda: True)
+    # T884: a simulated Deck must not read THIS box's /var. The repair stages
+    # the store plan only on a stock-small /var, and no test here is about that
+    # plan; without this pin the steps asserted below would gain or lose the
+    # store's on whatever partition the machine running the suite happens to have.
+    monkeypatch.setattr(platform, "steamos_store_needs_home", lambda data_root=None: False)
 
 
 class _Deck:

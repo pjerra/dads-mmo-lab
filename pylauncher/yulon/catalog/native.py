@@ -7709,6 +7709,14 @@ class Seams:
     """
     update_compose: Callable[[], Iterator[str]] = platform.update_compose
     """T658: put Docker's current static Compose in the user's plugin folder, asked first."""
+    switch_steamos_store: Callable[..., platform.ProvisionReport] = platform.switch_steamos_store
+    """T884: move an existing Steam Deck's Docker store to /home, asked first.
+
+    A seam for `update_compose`'s reason and one more: the real one runs sudo,
+    stops Docker and restarts it, so a test that drove the refusal through it
+    would be a test that stops the developer's daemon. `Callable[...]` because
+    it is called with `ask=` and `cancel=`.
+    """
     tag_image: Callable[[str, str], str] = docker.tag_image
     remove_image: Callable[..., str] = docker.remove_image
     """The rebuild's rollback: kept as a second tag before the compile, let go as one after.
@@ -15437,6 +15445,28 @@ class StagedInstaller:
                     dir_problem=self._seams.dir_problem,
                 )
         report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
+        if any(
+            check.name == preflight.STEAMOS_STORE_CHECK and check.verdict == "refuse"
+            for check in report_checks.checks
+        ):
+            # T884: on a Deck the store is on a small /var, whatever folder was
+            # picked, so the install would die with "no space left on device"
+            # however much room the server folder has. Asked here, where the
+            # remedy can be carried out; on a yes the machine is re-gathered,
+            # because the daemon was stopped and started and both /var readings
+            # are now different. On a no the row below refuses, with the same
+            # offer in words.
+            switched = yield from self._offer_steamos_store_switch(ask, cancel)
+            if switched:
+                facts = self._seams.gather(
+                    self.entry,
+                    server_dir,
+                    client_dir=options.client_dir,
+                    platform_id=self._seams.platform_id,
+                    docker_ready=self._seams.docker_ready,
+                    dir_problem=self._seams.dir_problem,
+                )
+                report_checks = preflight.evaluate(self.entry, server_dir, facts, spent)
         yield from preflight.lines(report_checks)
         if not report_checks.ok():
             raise InstallerError(f"{preflight.CANNOT_INSTALL_YET}\n" + report_checks.message())
@@ -15465,6 +15495,22 @@ class StagedInstaller:
         except platform.ComposeUpdateError as exc:
             raise InstallerError(f"{exc} The install was not started.") from exc
         return True
+
+    def _offer_steamos_store_switch(
+        self, ask: runner.Prompter | None, cancel: threading.Event | None = None
+    ) -> Generator[str, None, bool]:
+        """Ask to move this Deck's Docker store to /home; True once Docker answers again (T884).
+
+        Nobody to ask changes nothing: the row then refuses with the same offer
+        in words. The switch asks its own question (`STEAMOS_STORE_SWITCH_QUESTION`)
+        and carries the sudo password dialog, so this only decides whether there
+        is anyone to ask at all, and reports what it did.
+        """
+        if ask is None:
+            return False
+        report = self._seams.switch_steamos_store(ask=ask, cancel=cancel)
+        yield from provision_lines(report)
+        return report.docker_ready
 
     def _spent(self, state: InstallState, server_dir: Path) -> Spent:
         """What an earlier run of this install already spent, for the free-space rows (T112).

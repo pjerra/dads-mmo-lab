@@ -785,3 +785,69 @@ def test_a_tuning_refusal_pointing_at_repair_shows_repair(
     assert view.tuning_report.toPlainText() == IMPORT_ENDED
     assert view.repair_button.isVisibleTo(view)
     assert view.repair_label.isVisibleTo(view)
+
+
+# ------------------------------------- Docker's store on a Deck (T884) -- the offer
+
+
+def _store_refuses_then_passes(rec: Recorder):  # type: ignore[no-untyped-def]
+    """A machine whose first preflight has the store on /var, and whose second does not."""
+    answers = [True, False]
+
+    def gather(entry: object, server_dir: Path, **kwargs: object) -> preflight.Facts:
+        base = rec.gather(entry, server_dir, **kwargs)
+        refusing = answers.pop(0) if len(answers) > 1 else answers[0]
+        return replace(
+            base,
+            steamos_store_on_var=refusing,
+            var_free=1 * preflight.GIB if refusing else None,
+        )
+
+    return gather
+
+
+def test_steamos_store_offer_regathers_after_yes(tmp_path: Path) -> None:
+    """T884: the Deck's store row refuses, the switch is asked, and a yes re-gathers.
+
+    The same shape as the Compose offer above, for the same reason: the switch
+    changes what the machine reports (Docker is stopped and started, /var stops
+    being written), so a second `gather()` is the only honest answer to "does
+    this install fit now". Without it the row that provoked the yes would be
+    the row that still refuses.
+    """
+    rec = Recorder()
+    seen: list[dict[str, object]] = []
+
+    def switch(**kwargs: object) -> platform.ProvisionReport:
+        seen.append(kwargs)
+        rec.calls.append("switch-store")
+        return platform.ProvisionReport(
+            "linux",
+            done=("moved Docker's storage to /home",),
+            manual_steps=(platform.STEAMOS_STORE_MOVED_STEP,),
+            docker_ready=True,
+        )
+
+    eng = engine(rec, gather=_store_refuses_then_passes(rec), switch_steamos_store=switch)
+    lines = list(eng.run(InstallOptions(server_dir=tmp_path / "s"), ask=lambda _q: "yes"))
+
+    assert seen, "the store row refused and nothing was offered"
+    assert callable(seen[0]["ask"]), "the switch was handed no way to ask"
+    assert rec.calls.count("gather") == 2, rec.calls
+    first = rec.calls.index("gather")
+    assert first < rec.calls.index("switch-store") < rec.calls.index("gather", first + 1)
+    assert any(platform.STEAMOS_STORE_MOVED_STEP in line for line in lines), lines
+
+
+def test_steamos_store_with_no_one_to_ask_still_refuses(tmp_path: Path) -> None:
+    """With nobody to ask, the switch does not run and the row refuses with its remedy."""
+    rec = Recorder()
+
+    def switch(**kwargs: object) -> platform.ProvisionReport:  # pragma: no cover
+        rec.calls.append("switch-store")
+        return platform.ProvisionReport("linux")
+
+    eng = engine(rec, gather=_store_refuses_then_passes(rec), switch_steamos_store=switch)
+    with pytest.raises(InstallerError, match="Docker's storage on SteamOS"):
+        list(eng.run(InstallOptions(server_dir=tmp_path / "s"), ask=None))
+    assert "switch-store" not in rec.calls

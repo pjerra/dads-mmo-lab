@@ -175,6 +175,16 @@ class Facts:
     """
     containerd_free: int | None = None
     """Free space where `containerd_root` writes; None is "not measured", not 0."""
+    steamos_store_on_var: bool = False
+    """SteamOS, and a store Docker writes to is on the `/var` filesystem (T884).
+
+    Asked on Linux when `is_steamos()` said yes, whether or not the daemon
+    answered: the case this row exists for is a Deck where `docker info` said
+    nothing, which left every free-space row unchecked while the install's
+    image store went to a few hundred MB of /var. False is "no" or "unasked".
+    """
+    var_free: int | None = None
+    """Free space in `/var`; None is "not measured", not 0 (T884)."""
     server_dir_free: int | None = None
     same_volume: bool | None = None
     dir_problem: str | None = None
@@ -367,6 +377,9 @@ def gather(
     selinux: Callable[[], bool | None] | None = None,
     fs_type: Callable[[Path], str | None] | None = None,
     in_wsl: Callable[[], bool] | None = None,
+    steamos: Callable[[], bool] | None = None,
+    store_on_var: Callable[[], bool] | None = None,
+    var_free: Callable[[], int | None] | None = None,
 ) -> Facts:
     """Ask the machine everything `evaluate()` needs, refusing to invent an answer.
 
@@ -473,6 +486,16 @@ def gather(
     wsl = ask_wsl() if here == "linux" else False
     # T160, resolved late like the three above so one patch of `platform` is seen here.
     docker_gone = platform.steamos_docker_removed() if here == "linux" else False
+    # T884: the store can sit on /var while the daemon says NOTHING, and that is
+    # the case this row exists for — so these are asked off `is_steamos()` and
+    # never off `ready`. Off Linux, and off SteamOS, both are unasked: `False`
+    # and None, the same tri-state every other unestablished fact here keeps.
+    ask_steamos = steamos if steamos is not None else platform.is_steamos
+    deck = ask_steamos() if here == "linux" else False
+    ask_store = store_on_var if store_on_var is not None else platform.steamos_store_on_var
+    store_fact = ask_store() if deck else False
+    ask_var_free = var_free if var_free is not None else (lambda: free(Path("/var")))
+    var_free_fact = ask_var_free() if deck else None
     # The server folder is probed here rather than inside the `Facts(...)` call
     # below, so that the two bind probes run in the order they are reported.
     # Left inline it would be the client that goes first: the client block sits
@@ -537,6 +560,8 @@ def gather(
         data_root_free=root_free,
         containerd_root=ctr_root,
         containerd_free=ctr_free,
+        steamos_store_on_var=store_fact,
+        var_free=var_free_fact,
         server_dir_free=dir_free,
         same_volume=_same_volume(root, server_dir, here),
         dir_problem=dir_problem(server_dir),
@@ -1010,6 +1035,12 @@ def evaluate(
                 held_bytes,
             )
         )
+    if facts.steamos_store_on_var:
+        # T884: this deck's store is on /var, which is a small system partition.
+        # A row of its own rather than folding into "Docker's disk" because the
+        # real defect is that the other rows were UNCHECKED when `docker info`
+        # said nothing, and the answer here is not "free space" but a switch.
+        checks.append(_steamos_store_check(facts, refuse_root))
     checks.append(_folder_check(facts, server_dir))
     checks.append(_bind_check(facts, server_dir))
     checks.append(_selinux_check(facts))
@@ -1508,6 +1539,46 @@ ONE_VOLUME_SPACE = "Docker's disk and the server folder"
 Spelled so the row is still named "free space on Docker's disk …": that phrase
 is what a caller looking for the data-root row matches on.
 """
+
+STEAMOS_STORE_CHECK = "Docker's storage on SteamOS"
+"""The T884 row. The engine looks for this name to know the switch can help."""
+
+STEAMOS_STORE_REMEDY = (
+    "On a Steam Deck Docker keeps its images in /var, a small system partition, not in the "
+    "folder you picked. Press Install again and answer Yes to move Docker's storage to /home, "
+    'or set "data-root": "/home/.yulon-docker/docker" in /etc/docker/daemon.json and '
+    'root = "/home/.yulon-docker/containerd" in /etc/containerd/config.toml, then run '
+    "sudo systemctl restart containerd docker."
+)
+"""What the T884 row says to do, and it names both settings because both must move."""
+
+
+def _steamos_store_check(facts: Facts, refuse_gb: float) -> Check:
+    """The row for a Deck whose Docker store is on the small /var partition (T884).
+
+    A free-space row in shape only: the number is `/var`'s, and the action is
+    not "free some space" but the consented switch in the remedy. An
+    unmeasured `/var` is unchecked, like every other reading this module could
+    not take, and never a pass.
+    """
+    if facts.var_free is None:
+        return Check(
+            STEAMOS_STORE_CHECK,
+            "unchecked",
+            "the free space in /var could not be measured — that is not a pass",
+            f"Make sure there is at least {refuse_gb:.0f} GB free in /var before starting a "
+            "long build.",
+        )
+    gigabytes = facts.var_free / GIB
+    if gigabytes < refuse_gb:
+        have, need = _short_of(gigabytes, refuse_gb)
+        return Check(
+            STEAMOS_STORE_CHECK,
+            "refuse",
+            f"{have} GB free in /var, and the install needs {need} GB",
+            STEAMOS_STORE_REMEDY,
+        )
+    return Check(STEAMOS_STORE_CHECK, "pass", f"{gigabytes:.0f} GB free in /var")
 
 
 def _containerd_disk_phrase(root: Path) -> str:

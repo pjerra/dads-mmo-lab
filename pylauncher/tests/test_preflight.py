@@ -2493,3 +2493,44 @@ def test_a_tortoise_client_with_no_dbc_archive_is_refused_by_the_installs_own_ga
 
     assert [c for c in got.client_checks if c.verdict == "refuse"] == []
     assert client in probed
+
+
+# ------------------------------------------- Docker's store on a Steam Deck (T884)
+
+
+def test_steamos_var_refuses_when_docker_info_unanswered() -> None:
+    """T884: the Deck case is `docker info` said NOTHING, so the other rows are unchecked.
+
+    On a Steam Deck Docker's store is on /var, a system partition of a few
+    hundred MB. Before this row, a daemon that did not answer left every
+    free-space row unchecked — and the install died in /var with "no space left
+    on device" however much room the folder the player picked had. Gating the
+    row on a data root (the mutation) is what put it back in that hole.
+    """
+    report = preflight.evaluate(
+        ENTRY,
+        SERVER_DIR,
+        facts(
+            data_root=None,
+            data_root_free=None,
+            containerd_root=None,
+            containerd_free=None,
+            steamos_store_on_var=True,
+            var_free=2 * GIB,
+        ),
+    )
+
+    row = next(c for c in report.checks if c.name == preflight.STEAMOS_STORE_CHECK)
+    assert row.verdict == "refuse"
+    assert "2 GB free in /var" in row.detail
+    assert row.remedy == preflight.STEAMOS_STORE_REMEDY
+    assert '"data-root": "/home/.yulon-docker/docker"' in row.remedy
+    assert 'root = "/home/.yulon-docker/containerd"' in row.remedy
+
+
+def test_steamos_var_row_absent_off_steamos() -> None:
+    """Off SteamOS the fact is False, so the row is not there at all (T884)."""
+    report = preflight.evaluate(
+        ENTRY, SERVER_DIR, facts(steamos_store_on_var=False, var_free=1 * GIB)
+    )
+    assert not [c for c in report.checks if c.name == preflight.STEAMOS_STORE_CHECK]

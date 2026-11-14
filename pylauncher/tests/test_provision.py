@@ -241,6 +241,9 @@ def test_linux_runs_under_sudo_n_and_reports_password_needs(
 def test_linux_dry_run_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform.sys, "platform", "linux")
     monkeypatch.setattr(platform, "is_steamos", lambda: True)
+    # T884: a Deck whose store is on /var gets extra plan steps; this test is
+    # about the dry run asking nothing, not about where the store lives.
+    monkeypatch.setattr(platform, "steamos_store_needs_home", lambda data_root=None: False)
     run = _Run()
     report = platform.ensure_docker(
         run=run,
@@ -1125,6 +1128,11 @@ def _joins_the_docker_group(calls: list[list[str]]) -> list[list[str]]:
 def _linux(monkeypatch: pytest.MonkeyPatch, steamos: bool = False) -> None:
     monkeypatch.setattr(platform.sys, "platform", "linux")
     monkeypatch.setattr(platform, "is_steamos", lambda: steamos)
+    # T884: a simulated Deck must not read THIS box's /var. The install stages
+    # the store plan only on a stock-small /var, and no test here is about that
+    # plan; without this pin the argv lists asserted below depend on the
+    # partition the machine running the suite happens to have.
+    monkeypatch.setattr(platform, "steamos_store_needs_home", lambda data_root=None: False)
 
 
 def _which(tool: str) -> Callable[[str], str | None]:

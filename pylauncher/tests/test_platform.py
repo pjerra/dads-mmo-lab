@@ -414,7 +414,7 @@ def test_a_containerd_store_names_its_own_root(
     monkeypatch.setattr(platform, "docker_program", lambda: "docker")
     root = tmp_path / "containerd"
     root.mkdir()
-    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    monkeypatch.setattr(platform, "containerd_configured_root", lambda read=None: root)
     assert platform.docker_containerd_root(_canned(info)) == root
 
 
@@ -425,7 +425,7 @@ def test_an_overlay2_engine_has_no_containerd_root_to_measure(
     monkeypatch.setattr(platform, "docker_program", lambda: "docker")
     root = tmp_path / "containerd"
     root.mkdir()
-    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    monkeypatch.setattr(platform, "containerd_configured_root", lambda read=None: root)
     assert platform.docker_containerd_root(_canned(_OVERLAY2_INFO)) is None
 
 
@@ -438,7 +438,7 @@ def test_a_containerd_root_that_cannot_be_read_keeps_todays_answer(
     root = tmp_path / "containerd"
     if shape == "a-file":
         root.write_text("not a directory", encoding="utf-8")
-    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    monkeypatch.setattr(platform, "containerd_configured_root", lambda read=None: root)
     assert platform.docker_containerd_root(_canned(_CONTAINERD_STORE_INFO)) is None
 
 
@@ -454,7 +454,7 @@ def test_docker_desktops_wsl_integration_is_not_measured_at_the_distros_root(
     monkeypatch.setattr(platform, "docker_program", lambda: "docker")
     root = tmp_path / "containerd"
     root.mkdir()
-    monkeypatch.setattr(platform, "_CONTAINERD_ROOT", root)
+    monkeypatch.setattr(platform, "containerd_configured_root", lambda read=None: root)
     info = (
         '{"OperatingSystem": "Docker Desktop", "DockerRootDir": "/var/lib/docker", '
         '"Driver": "overlayfs", "DriverStatus": '
