@@ -2524,8 +2524,9 @@ def test_steamos_var_refuses_when_docker_info_unanswered() -> None:
     assert row.verdict == "refuse"
     assert "2 GB free in /var" in row.detail
     assert row.remedy == preflight.STEAMOS_STORE_REMEDY
-    assert '"data-root": "/home/.yulon-docker/docker"' in row.remedy
-    assert 'root = "/home/.yulon-docker/containerd"' in row.remedy
+    # T248: the line names the press, not a command; the by-hand settings are the switch's manual step.
+    assert "answer Yes to move Docker's storage to /home" in row.remedy
+    assert "systemctl" not in row.remedy
 
 
 def test_steamos_var_row_absent_off_steamos() -> None:

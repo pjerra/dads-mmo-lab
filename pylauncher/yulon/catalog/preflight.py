@@ -1556,12 +1556,10 @@ STEAMOS_STORE_CHECK = "Docker's storage on SteamOS"
 
 STEAMOS_STORE_REMEDY = (
     "On a Steam Deck Docker keeps its images in /var, a small system partition, not in the "
-    "folder you picked. Press Install again and answer Yes to move Docker's storage to /home, "
-    'or set "data-root": "/home/.yulon-docker/docker" in /etc/docker/daemon.json and '
-    'root = "/home/.yulon-docker/containerd" in /etc/containerd/config.toml, then run '
-    "sudo systemctl restart containerd docker."
+    "folder you picked. Press Install again and answer Yes to move Docker's storage to /home."
 )
-"""What the T884 row says to do, and it names both settings because both must move."""
+"""What the T884 row says to do. No command on the line (T248): the press does the move, and when
+it cannot, the switch's own manual step names both settings to set by hand."""
 
 
 def _steamos_store_check(facts: Facts, refuse_gb: float) -> Check:
