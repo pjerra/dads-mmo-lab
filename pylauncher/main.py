@@ -2924,6 +2924,19 @@ def main() -> int:
 
         print(__version__)
         return 0
+    if "--self-check-signing" in sys.argv[1:]:
+        # Before logging, config and Qt, like `--version`, and in memory only: a release step
+        # asks a built bundle whether it can sign at all (T894, open check 14). `Exception` is
+        # broad because every failure has to become an answer with an exit code, never a crash
+        # dialog: a windowed build prints nothing and only its exit code is readable.
+        from yulon.portable import identity
+
+        try:
+            print(identity.self_check())
+        except Exception as exc:
+            print(f"signing self-check: FAILED: {type(exc).__name__}: {exc}")
+            return 1
+        return 0
     configure(config_dir=platform.config_dir())
     _regain_docker_group()
     if "--provision" in sys.argv[1:] or os.environ.get("YULON_PROVISION"):

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from yulon import channel_setup, dbsecret, winacl
+from yulon.portable import identity
 
 USER = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 """A local account's SID, as `ConvertSidToStringSidW` spells one."""
@@ -552,3 +553,25 @@ def test_a_second_reader_waits_for_the_first_reader_s_check_to_finish(
     # The first reader's check narrowed it; the second found it checked and asked nothing.
     assert [folder for folder, _, _ in windows.applied] == [tmp_path]
     assert len(windows.reads) == 2
+
+
+def test_the_identity_folder_is_owner_only_before_the_key_lands_in_it(
+    tmp_path: Path, windows: FakeWindows
+) -> None:
+    """T894: the DACL is applied while `identity/` is empty, so `key.json` inherits it."""
+    identity.load_or_create(tmp_path)
+
+    folder = tmp_path / identity.DIR_NAME
+    assert [(applied, files) for applied, _, files in windows.applied] == [(folder, [])]
+
+
+def test_a_refused_dacl_still_makes_the_key(tmp_path: Path, windows: FakeWindows) -> None:
+    """T894: a profile that refuses WRITE_DAC warns; the key is still written and readable."""
+    windows.refuse_apply = OSError("this profile refuses WRITE_DAC")
+
+    made = identity.load_or_create(tmp_path)
+
+    assert (tmp_path / identity.DIR_NAME / identity.KEY_FILE).is_file()
+    reloaded = identity.load(tmp_path)
+    assert reloaded is not None
+    assert reloaded.key_id == made.key_id

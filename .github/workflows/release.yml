@@ -449,6 +449,62 @@ jobs:
           ln -s /Applications dmgroot/Applications
           hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos.dmg"
 
+      # T894, open check 14: a build that cannot sign cannot play together.
+      # THIS ONE FAILS THE JOB - no `continue-on-error`, unlike the version step
+      # above. `--self-check-signing` is answered before logging, config and Qt,
+      # in memory only, so it needs no display, no config directory and leaves
+      # nothing behind. Windows' windowed exe may print nothing; its exit code
+      # is the gate, so the answer file is `cat`-ed for whoever reads the log.
+      - name: The packaged app signs and checks (open check 14)
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -uo pipefail
+          exe="dist/yulon/yulon"
+          [ "$RUNNER_OS" = "Windows" ] && exe="dist/yulon/yulon.exe"
+          [ "$RUNNER_OS" = "Linux" ] && exe="release/Yulon-${YULON_REF}-x86_64.AppImage"
+          [ "$RUNNER_OS" = "macOS" ] && exe="dist/Yulon.app/Contents/MacOS/yulon"
+          # The same tree kill and bound the version step uses, for the same
+          # reason: a windowed bundle that hangs would cost the tag its
+          # artifacts, and `continue-on-error` cannot save a step that never
+          # returns. This step does not use `continue-on-error` at all.
+          kill_tree() {
+            local parent="$1" child
+            for child in $(ps -o pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2 == p {print $1}'); do
+              kill_tree "$child"
+            done
+            kill -9 "$parent" 2>/dev/null || true
+          }
+          answer="${RUNNER_TEMP}/self-check.txt"
+          : > "$answer"
+          # The AppImage mounts itself through FUSE, which a runner may not
+          # have; its own switch extracts and runs instead.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            APPIMAGE_EXTRACT_AND_RUN=1 "$exe" --self-check-signing > "$answer" 2>&1 &
+          else
+            "$exe" --self-check-signing > "$answer" 2>&1 &
+          fi
+          asked=$!
+          waited=0
+          while kill -0 "$asked" 2>/dev/null && [ "$waited" -lt 120 ]; do
+            sleep 1
+            waited=$((waited + 1))
+          done
+          if kill -0 "$asked" 2>/dev/null; then
+            kill_tree "$asked"
+            cat "$answer" 2>/dev/null || true
+            echo "::error title=The packaged app cannot sign::${exe} --self-check-signing was still running after ${waited}s and was killed"
+            exit 1
+          fi
+          status=0
+          wait "$asked" 2>/dev/null || status=$?
+          cat "$answer" 2>/dev/null || true
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=The packaged app cannot sign::${exe} --self-check-signing exited ${status}"
+            exit 1
+          fi
+          echo "open check 14: ${exe} signed and checked"
+
       - uses: actions/upload-artifact@v4
         with:
           name: yulon-${{ matrix.artifact }}

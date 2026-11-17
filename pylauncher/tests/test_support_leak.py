@@ -28,6 +28,7 @@ by the pattern even if those stores were never opened (T93 final review).
 
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import zipfile
@@ -37,6 +38,7 @@ from pathlib import Path
 from yulon import channel_setup, platform
 from yulon.catalog import composegen
 from yulon.catalog.catalog import load_catalog
+from yulon.portable import identity
 from yulon.state import KnownInstall
 from yulon.support import bundle, runlog
 from yulon.support.sources import InstallFacts, LiveLog, sources_for_app
@@ -362,3 +364,46 @@ def test_a_short_password_is_masked_where_it_is_written_and_named_where_it_is_no
         status = view.status.text()
         assert "very short password" in status and "already taken out" not in status, status
         assert short not in status
+
+
+def _seed_spellings(seed: bytes) -> set[bytes]:
+    """Every spelling the seed could take in a file or a member name (T894)."""
+    return {
+        seed,
+        base64.b64encode(seed),
+        base64.urlsafe_b64encode(seed),
+        seed.hex().encode("ascii"),
+    }
+
+
+def test_the_identity_key_never_reaches_the_support_zip(tmp_path: Path) -> None:
+    """T894: `identity/key.json` is this Yu'lon's private key, and a bundle must not carry it.
+
+    `gather_known` is unchanged on purpose: a bundle collects logs, snapshots and
+    confs, and there is no reader of `identity/` in it to begin with. This is the
+    control that would notice one being added.
+    """
+    planted = _plant(tmp_path)
+    config = platform.config_dir()
+    made = identity.load_or_create(config_dir=config)
+    # The seed itself, which is what every spelling below is made from.
+    seed = made._seed
+    key = config / identity.DIR_NAME / identity.KEY_FILE
+    # Control: the secret really is on disk, so a search that finds nothing means something.
+    assert base64.b64encode(seed) in key.read_bytes()
+
+    sources = sources_for_app(planted.installs, CATALOG, qt_version=QT_VERSION)
+    dest = tmp_path / "out" / "support.zip"
+    dest.parent.mkdir()
+    bundle.save(dest, sources, seams=planted.seams)
+
+    spellings = _seed_spellings(seed)
+    with zipfile.ZipFile(dest) as archive:
+        for member in archive.infolist():
+            for spelling in spellings:
+                assert spelling not in member.filename.encode(
+                    "utf-8"
+                ), f"the private seed is in a member NAME: {member.filename}"
+            data = archive.read(member)
+            for spelling in spellings:
+                assert spelling not in data, f"the private seed is in {member.filename}"
