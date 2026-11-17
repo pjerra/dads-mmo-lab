@@ -1352,19 +1352,28 @@ def test_settling_is_refused_while_a_journal_is_open(tmp_path: Path) -> None:
     assert vault.state(UID).holder_unverified is True
 
 
+def at_a_friend(base: Path) -> tuple[Vault, FakeWorlds]:
+    """A character the friend's world holds, and a dump that grows for the next move."""
+    vault, worlds = begun(base)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.dump_sequence += 1
+    return vault, worlds
+
+
 @pytest.mark.parametrize("answer", ["failed", "loaded"])
 def test_a_move_never_clears_a_holder_in_doubt(tmp_path: Path, answer: str) -> None:
-    """Round F: only `settle_holder` clears the flag; a rollback and an accepted load do not."""
-    vault, worlds = begun(tmp_path)
+    """Round G: the rollback and the accepted load both write the state, and neither clears it."""
+    vault, worlds = at_a_friend(tmp_path)
     worlds.crash = ("load", "in_step")
     with pytest.raises(Crash):
-        vault.move(UID, FRIEND, worlds.steps())
+        vault.move(UID, HOME, worlds.steps())
     worlds.crash = None
     set_unverified(vault, FRIEND)
     worlds.answers = [answer]
-    vault.resume(UID, worlds.steps())
+    assert vault.resume(UID, worlds.steps()) is not None
     state = vault.state(UID)
     assert state is not None
+    assert state.holder == (HOME if answer == "loaded" else Holder("vault"))
     assert state.holder_unverified is True
     assert state.unverified_worlds == (FRIEND,)
 
@@ -1381,6 +1390,71 @@ def test_a_state_written_before_the_worlds_in_doubt_still_loads(tmp_path: Path) 
     assert read.unverified_worlds == ()
     assert read.holder_unverified is False
     assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+
+
+# -- round G: what settling must get right ----------------------------------------
+
+
+def test_settling_to_the_world_that_holds_it_takes_it_out_of_revoked(tmp_path: Path) -> None:
+    """A world the caller names as the holder is not a world a copy stays revoked on."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    vault.abandon_move(UID)
+    state = vault.state(UID)
+    assert state is not None
+    assert state.holder == Holder("vault")
+    assert state.revoked == (FRIEND,)
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps(), from_vault=True)
+    worlds.crash = None
+    journal_path(vault).write_text("{not a journal")
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    settled = vault.settle_holder(UID, FRIEND)
+    assert settled.holder == FRIEND
+    assert settled.revoked == ()
+    assert vault.state(UID).revoked == ()
+
+
+def test_the_holder_a_broken_move_left_is_in_doubt_even_without_a_journal(
+    tmp_path: Path,
+) -> None:
+    """The state's holder is the move's source, so a torn journal cannot hide that world."""
+    vault, worlds = begun(tmp_path)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.dump_sequence += 1
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, HOME, worlds.steps())
+    worlds.crash = None
+    journal_path(vault).write_text("{not a journal")
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    state = vault.state(UID)
+    assert state is not None
+    assert state.holder == FRIEND
+    assert state.unverified_worlds == (FRIEND,)
+    settled = vault.settle_holder(UID, HOME)
+    assert settled.revoked == (FRIEND,)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+
+
+def test_settling_the_vault_with_no_good_copy_is_refused(tmp_path: Path) -> None:
+    """The vault may hold the character only if it has a copy that reads; nothing is written."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    journal_path(vault).write_text("{not a journal")
+    vault.abandon_damaged_journal(UID)
+    for copy in copies_of(vault):
+        flip_member_data(copy.path, "character.pdump")
+    before = state_json(vault)
+    with pytest.raises(VaultError) as excinfo:
+        vault.settle_holder(UID, Holder("vault"))
+    assert excinfo.value.reason == "no_copy"
+    assert state_json(vault) == before
 
 
 # -- absent right after this run's own load ---------------------------------------

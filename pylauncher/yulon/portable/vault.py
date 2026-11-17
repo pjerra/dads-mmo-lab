@@ -28,6 +28,9 @@ confirmed throws away everything played on that world since the last copy in the
 whether the ban or the erase went out before the crash. After `abandon_damaged_journal` the
 caller must find out which world holds the character -- ask both worlds -- and call
 `settle_holder` with it: until then the vault refuses every move of that character.
+`settle_holder` trusts the caller: it checks nothing against the worlds, so the caller must have
+asked them. When a move from home to a friend is settled to the friend, the caller must lock the
+home copy itself; the vault never locks. A wrong settle is corrected by the next real move only.
 
 One known limit: a folder in the place of `journal.json`, or a file the vault cannot read at all,
 stops every call for that character until it is removed by hand. Only a journal the vault could
@@ -990,8 +993,10 @@ class Vault:
                 if journal is not None:
                     raise ValueError("this character's journal parses; finish that move")
                 raise ValueError("this character has no journal to abandon")
-            worlds = list(state.unverified_worlds)
-            for world in _named_worlds(raw):
+            worlds: list[Holder] = []
+            if state.holder.kind == "friend":
+                worlds.append(state.holder)
+            for world in (*state.unverified_worlds, *_named_worlds(raw)):
                 if world not in worlds:
                     worlds.append(world)
             self._write_state(
@@ -1018,9 +1023,11 @@ class Vault:
     def settle_holder(self, uid: str, holder: Holder) -> CharacterState:
         """Write down which world holds a character whose lost move hid it, and clear the flag.
 
-        The caller has asked the worlds. Every world that damaged move named is revoked unless it
-        is home or the one that holds the character now, because a copy left there may have been
-        played on; only this call clears `holder_unverified`, so no move can start before it.
+        The caller has asked the worlds; this checks nothing against them. The settled holder
+        leaves `revoked`, and every other friend world the damaged move named is added to it,
+        because a copy left there may have been played on. Only this call clears
+        `holder_unverified`, so no move can start before it; settling to the vault needs a copy
+        that still reads, because the vault cannot hold what it lost.
         """
         folder = self.character_dir(uid)
         self.root.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
@@ -1035,7 +1042,9 @@ class Vault:
                 )
             if not state.holder_unverified:
                 raise ValueError("this character's holder was never in doubt")
-            revoked = state.revoked
+            if holder.kind == "vault" and self._best_good(uid) is None:
+                raise VaultError("no_copy", _none_good(state.name))
+            revoked = tuple(one for one in state.revoked if one != holder)
             for world in state.unverified_worlds:
                 if world.kind == "friend" and world != holder and world not in revoked:
                     revoked = (*revoked, world)
