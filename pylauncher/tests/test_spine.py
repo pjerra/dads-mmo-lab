@@ -3395,6 +3395,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "outside this app's own config directory and says nothing about writing elsewhere. "
         "A folder that cannot be listed leaves the key at two names, which refuses it"
     ),
+    ("portable/vault.py", "_entries"): (
+        "T896. Lists Yu'lon's own `play-together/` folder for the characters it keeps, and one "
+        "character's `packages/` folder for its History copies and the `.partial` leftovers a "
+        "cut-short store left. It decides no write outside this app's own config directory; "
+        "prune removes only names it made. A folder that cannot be listed answers no entries, "
+        "so nothing is removed"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
