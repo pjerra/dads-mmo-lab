@@ -7,6 +7,7 @@ drifts is a sentence the player stops trusting.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -34,6 +35,7 @@ DIGEST_A = "a" * 64
 UID = "0" * 32
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "portable" / "azerothcore-small.pdump"
+REAL_DUMP = Path(__file__).resolve().parent / "fixtures" / "portable" / "wotlk-t891.pdump"
 
 
 def small_dump() -> bytes:
@@ -120,6 +122,41 @@ def raw_manifest_of(path: Path) -> bytes:
         return z.read(package.MANIFEST_NAME)
 
 
+def patch_member_headers(
+    path: Path, member: str, *, method: int | None = None, flags: int = 0
+) -> None:
+    """Set one member's compression method and/or flag bits in its two headers.
+
+    A zip names the method and the flags in BOTH the local header and the central
+    directory, and a reader may believe either; a corruption that touched one of
+    them would be half a file, and the half a reader ignores is not the one worth
+    pinning.
+    """
+    blob = bytearray(path.read_bytes())
+    wanted = member.encode()
+    patched = 0
+    for signature, name_at, size_at, flag_at, method_at in (
+        (b"PK\x03\x04", 30, 26, 6, 8),
+        (b"PK\x01\x02", 46, 28, 8, 10),
+    ):
+        pos = blob.find(signature)
+        while pos != -1:
+            size = int.from_bytes(blob[pos + size_at : pos + size_at + 2], "little")
+            if blob[pos + name_at : pos + name_at + size] == wanted:
+                current = int.from_bytes(blob[pos + flag_at : pos + flag_at + 2], "little")
+                blob[pos + flag_at : pos + flag_at + 2] = (current | flags).to_bytes(2, "little")
+                if method is not None:
+                    blob[pos + method_at : pos + method_at + 2] = method.to_bytes(2, "little")
+                patched += 1
+            pos = blob.find(signature, pos + 4)
+    assert patched == 2, patched
+    path.write_bytes(bytes(blob))
+
+
+def not_a_package_sentence(name: str) -> str:
+    return f"{name} is not a Yu'lon character file, or it is damaged. Export the character again."
+
+
 # ------------------------------------------------------------------ round trip
 
 
@@ -151,15 +188,97 @@ def test_the_character_facts_are_read_from_the_dump() -> None:
     assert dumped.item_count == 3
 
 
+def test_references_of_the_real_wotlk_dump_match_the_hand_count(tmp_path: Path) -> None:
+    dump = REAL_DUMP.read_bytes()
+    dumped = read_dump(dump.decode("utf-8"))
+    assert dumped.name == "Raezia"
+    assert (dumped.race, dumped.class_, dumped.gender, dumped.level) == (10, 3, 1, 80)
+    assert dumped.money == 26789920
+    assert dumped.played_seconds == 42
+    assert dumped.item_count == 47
+    assert dumped.references.creatures == (7430,)
+    assert dumped.references.quests == (
+        10277,
+        10279,
+        10282,
+        10283,
+        10284,
+        10285,
+        10296,
+        10297,
+        10298,
+        10445,
+        10888,
+        10901,
+        10985,
+        11481,
+        11482,
+        11488,
+        11490,
+        11492,
+    )
+    assert dumped.references.items == (
+        2901,
+        5956,
+        5976,
+        12282,
+        20899,
+        20900,
+        20901,
+        20980,
+        24490,
+        27991,
+        28395,
+        30623,
+        30633,
+        30634,
+        30635,
+        30637,
+        31084,
+        33447,
+        33448,
+        36947,
+        36979,
+        37043,
+        37139,
+        37144,
+        37262,
+        37390,
+        37624,
+        37636,
+        37657,
+        37666,
+        37723,
+        37845,
+        37848,
+        41426,
+        43131,
+        43284,
+        43406,
+        45206,
+        51809,
+        52021,
+    )
+    dest = tmp_path / "raezia.ylchar"
+    write_package(dest, facts(), dump)
+    assert read_package(dest).dump_bytes() == dump
+
+
 def test_a_built_package_holds_no_account_name_password_salt_or_verifier(
     tmp_path: Path,
 ) -> None:
     path = pack(tmp_path)
     with zipfile.ZipFile(path) as z:
         for info in z.infolist():
-            assert info.filename.lower() == info.filename or True
             blob = z.read(info.filename).lower()
-            for word in (b"password", b"verifier", b"salt", b"sha_pass_hash", b"session_key"):
+            for word in (
+                b"username",
+                b"password",
+                b"verifier",
+                b"salt",
+                b"sha_pass_hash",
+                b"session_key",
+            ):
                 assert word not in blob, (info.filename, word)
 
     def _keys(node: object) -> list[str]:
@@ -320,55 +439,11 @@ def test_a_file_over_the_cap_is_refused_before_it_is_opened(tmp_path: Path) -> N
 
 def test_a_zip_that_unpacks_past_the_limit_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "fat.ylchar"
-    member = package.DUMP_NAME
-    manifest = {
-        "format": 1,
-        "kind": "character",
-        "made_by": {"yulon": "t", "made": AT.isoformat()},
-        "game": {
-            "id": "wow-wotlk",
-            "family": "azerothcore",
-            "client_version": "3.3.5a",
-            "build": 12340,
-        },
-        "core": {
-            "repository": "https://github.com/azerothcore/azerothcore-wotlk.git",
-            "commit": "e" * 40,
-            "uid": UID,
-            "forked_from": None,
-            "name": "Priestest",
-            "race": 1,
-            "class": 5,
-            "gender": 1,
-            "level": 12,
-            "money": 1234,
-            "played_seconds": 3600,
-            "item_count": 0,
-            "guild": None,
-        },
-        "home": {"key_fingerprint": None, "realm_name": "My Realm"},
-        "sequence": 1,
-        "parents": [],
-        "holder": {"world_fingerprint": None, "visit_id": None},
-        "played_on": [],
-        "references": {"items": [], "quests": [], "creatures": []},
-        "members": [
-            {
-                "name": member,
-                "bytes": package.MAX_UNPACKED_BYTES + 1,
-                "sha256": "0" * 64,
-            }
-        ],
-    }
-    with zipfile.ZipFile(path, "w") as out:
-        out.writestr(package.MANIFEST_NAME, json.dumps(manifest).encode())
-        with out.open(member, "w", force_zip64=True) as sink:
-            sink.write(b"\0")
-    blob = bytearray(path.read_bytes())
-    entry = blob.find(b"PK\x01\x02", blob.find(member.encode()))
-    assert entry != -1
-    blob[entry + 24 : entry + 28] = (package.MAX_UNPACKED_BYTES + 1).to_bytes(4, "little")
-    path.write_bytes(bytes(blob))
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as out:
+        with out.open(package.DUMP_NAME, "w", force_zip64=True) as sink:
+            for _ in range(65):
+                sink.write(b"\0" * (1024 * 1024))
+    assert path.stat().st_size < package.MAX_PACKAGE_BYTES
     with pytest.raises(CharacterPackageError) as raised:
         read_package(path)
     assert raised.value.reason == "unpacks_too_big"
@@ -417,6 +492,149 @@ def test_a_manifest_that_breaks_the_model_is_not_a_package(tmp_path: Path) -> No
     )
 
 
+# ------------------------------------- what the zip and the model refuse (round B)
+
+
+def test_a_deeply_nested_manifest_is_refused(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    bad = rewrite(good, tmp_path / "deep.ylchar", replace={package.MANIFEST_NAME: b"[" * 200000})
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_an_unsupported_compression_method_is_refused(tmp_path: Path) -> None:
+    bad = tmp_path / "method.ylchar"
+    bad.write_bytes(pack(tmp_path).read_bytes())
+    patch_member_headers(bad, package.MANIFEST_NAME, method=99)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_an_encrypted_member_is_refused(tmp_path: Path) -> None:
+    bad = tmp_path / "encrypted.ylchar"
+    bad.write_bytes(pack(tmp_path).read_bytes())
+    patch_member_headers(bad, package.MANIFEST_NAME, flags=1)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_member_that_turns_unreadable_after_the_package_was_read_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = pack(tmp_path)
+    found = read_package(path)
+    patch_member_headers(path, package.DUMP_NAME, method=99)
+    with pytest.raises(CharacterPackageError) as raised:
+        found.dump_bytes()
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(path.name)
+
+
+def test_a_dump_member_with_an_unknown_method_is_refused(tmp_path: Path) -> None:
+    bad = tmp_path / "dumpmethod.ylchar"
+    bad.write_bytes(pack(tmp_path).read_bytes())
+    patch_member_headers(bad, package.DUMP_NAME, method=99)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_signature_member_with_an_unknown_method_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "signed.ylchar"
+    write_package(path, facts(), small_dump(), signer=lambda manifest_bytes: b"sig")
+    patch_member_headers(path, package.SIGNATURE_NAME, method=99)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(path)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(path.name)
+
+
+def _with_played_on(manifest: dict, **fields: object) -> dict:
+    played: dict[str, object] = {"name": "My Realm", "first": "2026-11-01", "last": "2026-11-17"}
+    played.update(fields)
+    manifest["played_on"] = [played]
+    return manifest
+
+
+def test_a_level_given_as_text_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    manifest = manifest_of(good)
+    manifest["character"]["level"] = "80"
+    bad = rewrite(good, tmp_path / "text.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+@pytest.mark.parametrize("name", ["\n\x1b[31m", "My\x85Realm"])
+def test_a_played_on_name_with_control_characters_is_not_a_package(
+    tmp_path: Path, name: str
+) -> None:
+    good = pack(tmp_path)
+    manifest = _with_played_on(manifest_of(good), name=name)
+    bad = rewrite(good, tmp_path / "played.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_rate_of_infinity_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    manifest = _with_played_on(manifest_of(good), xp_rate=float("inf"))
+    bad = rewrite(good, tmp_path / "rate.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_character_name_with_a_bidi_override_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    manifest = manifest_of(good)
+    manifest["character"]["name"] = "Rae\u202ezia"
+    bad = rewrite(good, tmp_path / "bidi.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+@pytest.mark.parametrize(("sequence", "parents"), [(2, []), (1, [DIGEST_A])])
+def test_a_sequence_that_does_not_match_its_parents_is_not_a_package(
+    tmp_path: Path, sequence: int, parents: list[str]
+) -> None:
+    good = pack(tmp_path)
+    manifest = manifest_of(good)
+    manifest["sequence"] = sequence
+    manifest["parents"] = parents
+    bad = rewrite(good, tmp_path / "lineage.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+@pytest.mark.parametrize(("sequence", "parents"), [(2, ()), (1, (DIGEST_A,))])
+def test_a_sequence_that_does_not_match_its_parents_is_refused_when_writing(
+    tmp_path: Path, sequence: int, parents: tuple[str, ...]
+) -> None:
+    from pydantic import ValidationError
+
+    dest = tmp_path / "lineage.ylchar"
+    with pytest.raises(ValidationError):
+        write_package(dest, facts(sequence=sequence, parents=parents), small_dump())
+    assert not dest.exists()
+
+
 # ------------------------------------------------------------------ the dump
 
 
@@ -450,6 +668,18 @@ def test_a_dump_line_without_column_names_is_refused(tmp_path: Path) -> None:
     assert str(raised.value) == (
         "The server's dump of the character is not in the shape Yu'lon reads "
         "(line 11), so nothing was written."
+    )
+
+
+def test_a_dump_row_without_its_reference_column_is_refused(tmp_path: Path) -> None:
+    dump = small_dump() + _row("character_pet", "`id`, `owner`", "'3', '5'")
+    dest = tmp_path / "x.ylchar"
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), dump)
+    assert raised.value.reason == "dump_unreadable"
+    assert str(raised.value) == (
+        "The server's dump of the character is not in the shape Yu'lon reads "
+        "(line 16), so nothing was written."
     )
 
 
@@ -496,6 +726,67 @@ def test_a_package_past_the_cap_is_not_written(tmp_path: Path) -> None:
     assert raised.value.reason == "too_big_to_write"
     assert "more than the 8 MB a character file can be" in str(raised.value)
     assert not dest.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_destination_made_while_writing_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = b"another writer was here first"
+    real_link = os.link
+
+    def link(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        Path(dst).write_bytes(other)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(package.os, "link", link)
+    dest = tmp_path / "x.ylchar"
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), small_dump())
+    assert raised.value.reason == "exists"
+    assert str(raised.value) == (f"{dest.name} already exists, so Yu'lon did not overwrite it.")
+    assert dest.read_bytes() == other
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_two_writers_do_not_share_a_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "x.ylchar"
+    seen: list[str] = []
+    real_read = package.read_package
+
+    def read(path: Path):
+        seen.append(path.name)
+        if len(seen) == 1:
+            # While this writer is between writing and publishing, another writer
+            # starts on the same destination. It finishes first; this one must
+            # then find the destination taken rather than replace it.
+            write_package(dest, facts(uid="1" * 32), small_dump())
+        return real_read(path)
+
+    monkeypatch.setattr(package, "read_package", read)
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), small_dump())
+    assert raised.value.reason == "exists"
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_filesystem_without_hard_links_still_writes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_links(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "hard links are not permitted here")
+
+    monkeypatch.setattr(package.os, "link", no_links)
+    dest = tmp_path / "x.ylchar"
+    write_package(dest, facts(), small_dump())
+    assert read_package(dest).manifest.character.name == "Priestest"
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(uid="2" * 32), small_dump())
+    assert raised.value.reason == "exists"
     assert not list(tmp_path.glob("*.partial"))
 
 
@@ -560,7 +851,8 @@ def test_the_next_package_counts_up_and_keeps_twenty_parents_newest_first(
         small_dump(),
     )
     assert second.sequence == 2
-    prior: tuple[str, ...] = parents
+    prior: tuple[str, ...] = package.next_lineage(read_package(tmp_path / "second.ylchar"))[1]
+    assert len(prior) == 2
     for generation in range(3, 25):
         head = read_package(pack(tmp_path, sequence=generation, parents=prior))
         assert head.manifest.sequence == generation

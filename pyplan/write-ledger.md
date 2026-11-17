@@ -584,9 +584,9 @@ descriptions are written by hand.
 | `move.py::extract::open(xb)` | **new (T601)** one dump of a package written into a private folder under `sql_scripts/backups/`, checked against the manifest as it is written | no — only an import extracts, and it stops the server first |
 | `move.py::extract::unlink` | **new (T601)** that dump, after a length or SHA-256 mismatch | no — as above |
 | `move.py::file_bytes::open(?)` | **new (T624)** a READ of one small member of the package (the zip opened for reading, at most its declared length plus one byte), checked against its hash; named only because the walker sees every `open` | no — it reads the package file, writes nothing |
-| `portable/package.py::write_package::open(wb)` | **new (T893)** the character file's `.partial`, mode 0600 | yes |
-| `portable/package.py::write_package::unlink` | **new (T893)** a leftover `.partial`, and one that failed | yes |
-| `portable/package.py::write_package::replace` | **new (T893)** the `.partial` renamed once it reads back | yes |
+| `portable/package.py::write_package::open(wb)` | **new (T893)** the character file's staging file, named `<dest>.<16 hex>.partial` so two writers cannot share one, mode 0600 | yes |
+| `portable/package.py::write_package::unlink` | **new (T893)** the staging file, once it is published (under either name) or the write failed | yes |
+| `portable/package.py::write_package::replace` | **new (T893)** the staging file renamed into place, only where the filesystem has no hard links (`os.link` is the ordinary publish and is not in this walk yet; T894 teaches it) | yes |
 | `portable/package.py::_private_opener::os.open` | **new (T893)** the opener above: `O_EXCL`, mode 0600 | yes |
 | `move.py::updates_names_in_dump::open(?)` | **new (T802)** a READ of one dump member of the package (the zip opened for reading), line by line, for the `INSERT INTO `updates`` rows only, so a refusal can say which side is behind; named only because the walker sees every `open` | no — it reads the package file, writes nothing |
 | `move_flows.py::_tail_rows_of_dump::open(?)` | **new (T802)** a READ of one dump member of the package (the zip opened for reading), line by line, for the `(name, hash, state)` rows the tail proof compares; named only because the walker sees every `open` | no — it reads the package file, writes nothing |

@@ -15,7 +15,9 @@ import json
 import os
 import re
 import secrets
+import unicodedata
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -57,6 +59,17 @@ _EXTRA = re.compile(r"extras/[a-z0-9_]{1,64}\.json")
 HEX64 = r"^[0-9a-f]{64}$"
 HEX32 = r"^[0-9a-f]{32}$"
 SHA1 = r"^[0-9a-f]{40}$"
+
+_ZIP_TROUBLE = (NotImplementedError, RuntimeError, zlib.error, EOFError)
+"""What `zipfile` raises past the errors it names itself.
+
+`NotImplementedError` is an unsupported compression method and `RuntimeError` an
+encrypted entry, both decideable from the header alone; `zlib.error` and
+`EOFError` are the compressed stream ending before it should. None of them is an
+`OSError` or a `BadZipFile`, so a reader that only catches those lets them out
+of `read_package` — a traceback instead of a sentence, on a file a player
+downloaded.
+"""
 
 Signer = Callable[[bytes], bytes]
 """Signs the manifest bytes; T894 checks the answer, this ticket only stores it."""
@@ -162,13 +175,25 @@ def _megabytes(size: int) -> int:
 
 
 def _text(name: str, value: str, limit: int) -> str:
-    if not value or len(value) > limit or any(ord(c) < 32 or ord(c) == 127 for c in value):
+    """Printable text: no C0 or C1 controls, and nothing a terminal reorders.
+
+    Category "Cf" is the invisible formatting characters — the bidi overrides
+    among them — and a name holding one reads one way in a list and another way
+    in a terminal. It is refused where it is stored, before any screen sees it.
+    """
+    if (
+        not value
+        or len(value) > limit
+        or any(
+            ord(c) < 32 or 127 <= ord(c) <= 0x9F or unicodedata.category(c) == "Cf" for c in value
+        )
+    ):
         raise ValueError(f"a {name} is printable text of up to {limit} characters")
     return value
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class MadeBy(_Strict):
@@ -284,11 +309,16 @@ class Holder(_Strict):
 
 class PlayedOn(_Strict):
     key_fingerprint: str | None = Field(default=None, pattern=HEX32)
-    name: str = Field(min_length=1, max_length=100)
+    name: str
     first: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     last: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-    xp_rate: float | None = Field(default=None, ge=0)
-    drop_rate: float | None = Field(default=None, ge=0)
+    xp_rate: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    drop_rate: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        return _text("realm name", value, 100)
 
 
 class References(_Strict):
@@ -344,6 +374,12 @@ class Manifest(_Strict):
             if not re.fullmatch(r"[0-9a-f]{64}", parent):
                 raise ValueError("a parent is a manifest SHA-256")
         return value
+
+    @model_validator(mode="after")
+    def _parents_are_the_sequence_minus_one(self) -> Manifest:
+        if len(self.parents) != min(self.sequence - 1, MAX_PARENTS):
+            raise ValueError("a package names the parents its sequence counts")
+        return self
 
     @model_validator(mode="after")
     def _one_dump_and_only_listed_extras(self) -> Manifest:
@@ -426,6 +462,12 @@ class Package:
                 f"{self.path.name} does not match the list inside it ({member.name} has "
                 "another size), so Yu'lon will not open it. It is damaged, or it changed "
                 "while it was being read: copy it again.",
+            ) from exc
+        except _ZIP_TROUBLE as exc:
+            raise CharacterPackageError(
+                "not_a_package",
+                f"{self.path.name} is not a Yu'lon character file, or it is damaged. Export "
+                "the character again.",
             ) from exc
         if len(data) != member.bytes:
             raise CharacterPackageError(
@@ -590,8 +632,14 @@ def read_dump(text: str) -> DumpFacts:
         spec = REFERENCE_COLUMNS.get(table)
         if spec is not None:
             column, _kind = spec
-            raw_value = row.get(column)
-            if raw_value is None or raw_value == "0":
+            if column not in row:
+                raise CharacterPackageError(
+                    "dump_unreadable",
+                    "The server's dump of the character is not in the shape Yu'lon reads "
+                    f"(line {line_number}), so nothing was written.",
+                )
+            raw_value = row[column]
+            if raw_value == "0":
                 continue
             try:
                 value = int(raw_value)
@@ -751,21 +799,41 @@ def write_package(
             f"The character file would be {_megabytes(len(packed))} MB, more than the 8 MB "
             "a character file can be, so nothing was written.",
         )
-    partial = dest.with_name(dest.name + ".partial")
+    partial = dest.with_name(f"{dest.name}.{secrets.token_hex(8)}.partial")
+    made = False
     try:
-        partial.unlink(missing_ok=True)
         with open(partial, "wb", opener=_private_opener) as fh:
+            made = True
             fh.write(packed)
         read_package(partial)
-        partial.replace(dest)
+        try:
+            os.link(partial, dest)
+        except FileExistsError as exc:
+            raise CharacterPackageError(
+                "exists", f"{name} already exists, so Yu'lon did not overwrite it."
+            ) from exc
+        except OSError:
+            logger.info(
+                f"{name}: this filesystem has no hard links, so the finished file was "
+                "renamed into place."
+            )
+            if dest.exists():
+                raise CharacterPackageError(
+                    "exists", f"{name} already exists, so Yu'lon did not overwrite it."
+                ) from None
+            partial.replace(dest)
     except OSError as exc:
-        partial.unlink(missing_ok=True)
         raise CharacterPackageError(
             "write_failed", f"Yu'lon could not write {name}: {exc}. Nothing was written."
         ) from exc
-    except BaseException:
-        partial.unlink(missing_ok=True)
-        raise
+    finally:
+        if made:
+            try:
+                partial.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(f"{name}: a staging file could not be removed: {exc}")
     assert _PRIVATE_MODE == PRIVATE_MODE
     return manifest
 
@@ -805,7 +873,7 @@ def read_package(path: Path) -> Package:
         ) from exc
     try:
         archive = zipfile.ZipFile(path)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, zipfile.BadZipFile, *_ZIP_TROUBLE) as exc:
         raise CharacterPackageError(
             "not_a_package",
             f"{name} is not a Yu'lon character file, or it is damaged. Export the "
@@ -840,8 +908,15 @@ def read_package(path: Path) -> Package:
             if archive.getinfo(MANIFEST_NAME).file_size > MAX_MANIFEST_BYTES:
                 raise ValueError("manifest too large")
             manifest_bytes = archive.open(MANIFEST_NAME, mode="r").read()
-            raw = __import__("json").loads(manifest_bytes.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError, OSError, zipfile.BadZipFile) as exc:
+            raw = json.loads(manifest_bytes.decode("utf-8"))
+        except (
+            ValueError,
+            RecursionError,
+            UnicodeDecodeError,
+            OSError,
+            zipfile.BadZipFile,
+            *_ZIP_TROUBLE,
+        ) as exc:
             raise CharacterPackageError(
                 "not_a_package",
                 f"{name} is not a Yu'lon character file, or it is damaged. Export the "
@@ -873,7 +948,7 @@ def read_package(path: Path) -> Package:
                 "will not open it.",
             )
         try:
-            manifest = Manifest.model_validate(raw)
+            manifest = Manifest.model_validate_json(manifest_bytes)
         except ValidationError as exc:
             logger.info(f"{name}: manifest rejected: {exc}")
             raise CharacterPackageError(
@@ -912,6 +987,12 @@ def read_package(path: Path) -> Package:
                     "another size), so Yu'lon will not open it. It is damaged, or it changed "
                     "while it was being read: copy it again.",
                 ) from exc
+            except _ZIP_TROUBLE as exc:
+                raise CharacterPackageError(
+                    "not_a_package",
+                    f"{name} is not a Yu'lon character file, or it is damaged. Export the "
+                    "character again.",
+                ) from exc
             if size != member.bytes:
                 raise CharacterPackageError(
                     "wrong_size",
@@ -933,7 +1014,7 @@ def read_package(path: Path) -> Package:
                     raise ValueError("signature too large")
                 with archive.open(SIGNATURE_NAME, mode="r") as fh:
                     signature = fh.read(MAX_SIGNATURE_BYTES + 1)
-            except (OSError, zipfile.BadZipFile, ValueError) as exc:
+            except (OSError, zipfile.BadZipFile, ValueError, *_ZIP_TROUBLE) as exc:
                 raise CharacterPackageError(
                     "not_a_package",
                     f"{name} is not a Yu'lon character file, or it is damaged. Export the "
