@@ -157,6 +157,7 @@ _WORLD_DATA_NOT_MEASURED = (
     "the CMaNGOS template binds `./data` the same way, and keeps it until it is measured on "
     "Windows (T219 owner decision 2)"
 )
+_NO_CHARACTER_FILE_YET = "Yu'lon cannot export a character of this game yet"
 
 
 def _all(decision: Decision) -> dict[str, Decision]:
@@ -1488,5 +1489,16 @@ FAMILY_DECISIONS: tuple[Site, ...] = (
             "trinitycore": supported("the movement-map job's container, by `.yulon-mmaps.json`"),
         },
         scanned=False,
+    ),
+    Site(
+        "yulon.portable.package",
+        "write_package",
+        "which families' character dumps a character file is written from (T893)",
+        {
+            "azerothcore": supported(),
+            "cmangos": not_available(_NO_CHARACTER_FILE_YET),
+            "trinitycore": not_available(_NO_CHARACTER_FILE_YET),
+        },
+        hits=("'azerothcore'",),
     ),
 )
