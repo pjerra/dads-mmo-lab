@@ -153,6 +153,17 @@ def patch_member_headers(
     path.write_bytes(bytes(blob))
 
 
+def break_central_name(path: Path) -> None:
+    """Set the UTF-8 flag on the first central-directory name and make that name 0xff."""
+    blob = bytearray(path.read_bytes())
+    entry = blob.find(b"PK\x01\x02")
+    assert entry != -1
+    flags = int.from_bytes(blob[entry + 8 : entry + 10], "little")
+    blob[entry + 8 : entry + 10] = (flags | 0x800).to_bytes(2, "little")
+    blob[entry + 46] = 0xFF
+    path.write_bytes(bytes(blob))
+
+
 def not_a_package_sentence(name: str) -> str:
     return f"{name} is not a Yu'lon character file, or it is damaged. Export the character again."
 
@@ -604,13 +615,7 @@ def test_a_bzip2_member_is_not_a_package(tmp_path: Path) -> None:
 def test_a_central_name_that_is_not_utf8_is_not_a_package(tmp_path: Path) -> None:
     bad = tmp_path / "utf8.ylchar"
     bad.write_bytes(pack(tmp_path).read_bytes())
-    blob = bytearray(bad.read_bytes())
-    entry = blob.find(b"PK\x01\x02")
-    assert entry != -1
-    flags = int.from_bytes(blob[entry + 8 : entry + 10], "little")
-    blob[entry + 8 : entry + 10] = (flags | 0x800).to_bytes(2, "little")
-    blob[entry + 46] = 0xFF
-    bad.write_bytes(bytes(blob))
+    break_central_name(bad)
     with pytest.raises(CharacterPackageError) as raised:
         read_package(bad)
     assert raised.value.reason == "not_a_package"
@@ -637,6 +642,49 @@ def test_a_dump_member_with_an_unknown_method_is_refused(tmp_path: Path) -> None
         read_package(bad)
     assert raised.value.reason == "not_a_package"
     assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_dump_that_turns_into_lzma_after_the_package_was_read_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = pack(tmp_path)
+    found = read_package(path)
+    lzma_copy = rezip(path, tmp_path / "lzma.ylchar", zipfile.ZIP_LZMA)
+    flip_member_data(lzma_copy, package.DUMP_NAME)
+    path.write_bytes(lzma_copy.read_bytes())
+    with pytest.raises(CharacterPackageError) as raised:
+        found.dump_bytes()
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(path.name)
+
+
+def test_a_name_that_turns_unreadable_after_the_package_was_read_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = pack(tmp_path)
+    found = read_package(path)
+    bad = tmp_path / "utf8.ylchar"
+    bad.write_bytes(path.read_bytes())
+    break_central_name(bad)
+    path.write_bytes(bad.read_bytes())
+    with pytest.raises(CharacterPackageError) as raised:
+        found.dump_bytes()
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(path.name)
+
+
+def test_a_dump_that_is_gone_after_the_package_was_read_is_refused(tmp_path: Path) -> None:
+    path = pack(tmp_path)
+    found = read_package(path)
+    rewrite(path, tmp_path / "gone.ylchar", drop=(package.DUMP_NAME,))
+    path.write_bytes((tmp_path / "gone.ylchar").read_bytes())
+    with pytest.raises(CharacterPackageError) as raised:
+        found.dump_bytes()
+    assert raised.value.reason == "missing_member"
+    assert str(raised.value) == (
+        f"{path.name} is missing {package.DUMP_NAME}, which its list names, so Yu'lon "
+        "will not open it."
+    )
 
 
 def test_a_signature_member_with_an_unknown_method_is_refused(tmp_path: Path) -> None:
@@ -919,6 +967,48 @@ def test_a_link_failure_that_is_not_about_missing_hard_links_fails_the_write(
         write_package(dest, facts(), small_dump())
     assert raised.value.reason == "write_failed"
     assert not dest.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_link_that_reports_einval_is_a_filesystem_without_hard_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_links(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EINVAL, "invalid argument")
+
+    monkeypatch.setattr(package.os, "link", no_links)
+    dest = tmp_path / "x.ylchar"
+    write_package(dest, facts(), small_dump())
+    assert read_package(dest).dump_bytes() == small_dump()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_failed_copy_does_not_delete_another_writers_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = b"another writer was here first"
+    dest = tmp_path / "x.ylchar"
+
+    def no_links(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "hard links are not permitted here")
+
+    def failing_fsync(fd: int) -> None:
+        # Another writer takes the name over after this one created its own file
+        # there, then the copy fails: the name no longer holds this writer's
+        # file, so the cleanup must leave it alone.
+        dest.unlink()
+        dest.write_bytes(other)
+        raise OSError(errno.EIO, "the disk went away")
+
+    monkeypatch.setattr(package.os, "link", no_links)
+    monkeypatch.setattr(package.os, "fsync", failing_fsync)
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), small_dump())
+    assert raised.value.reason == "write_failed"
+    assert str(raised.value) == (
+        f"Yu'lon could not write {dest.name}: [Errno 5] the disk went away. Nothing was written."
+    )
+    assert dest.read_bytes() == other
     assert not list(tmp_path.glob("*.partial"))
 
 

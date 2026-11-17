@@ -19,7 +19,7 @@ import secrets
 import unicodedata
 import zipfile
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -472,8 +472,18 @@ class Package:
                 "Export the character again.",
             ) from exc
         try:
-            with archive, archive.open(member.name, mode="r") as fh:
-                data = fh.read(member.bytes + 1)
+            with archive:
+                try:
+                    entry = archive.getinfo(member.name)
+                except KeyError as exc:
+                    raise CharacterPackageError(
+                        "missing_member",
+                        f"{self.path.name} is missing {member.name}, which its list names, "
+                        "so Yu'lon will not open it.",
+                    ) from exc
+                _refuse_foreign_entries((entry,), self.path.name)
+                with archive.open(member.name, mode="r") as fh:
+                    data = fh.read(member.bytes + 1)
         except (OSError, KeyError, zipfile.BadZipFile) as exc:
             raise CharacterPackageError(
                 "wrong_size",
@@ -734,13 +744,41 @@ def _no_hard_links(exc: OSError) -> bool:
     this call, not a property of the volume, and a write that fell back on it
     would hide a real permission problem behind a copy that may work today.
     Named through `getattr` because not every platform defines every one.
+
+    `EINVAL` is what a FAT or exFAT volume and some network shares answer on
+    POSIX, and Windows spells the same two answers `ERROR_INVALID_FUNCTION` (1)
+    and `ERROR_NOT_SUPPORTED` (50) in `winerror` while its `errno` stays generic.
+    Neither says anything about this call; both say the volume has no hard links.
     """
     values = {
         getattr(errno, name)
         for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK")
         if hasattr(errno, name)
     }
+    if exc.errno == errno.EINVAL or getattr(exc, "winerror", None) in (1, 50):
+        return True
     return exc.errno in values
+
+
+def _remove_created_file(dest: Path, created: os.stat_result) -> None:
+    """Delete `dest` only while it is still the file this call created.
+
+    Between the exclusive create and a failure of the copy, the name can have
+    been taken over — by another writer, or by a person. A half-written character
+    file must not keep the name, and another writer's file at that name must not
+    be deleted either, so identity decides: the `(st_dev, st_ino)` pair of the
+    file the create made. A missing file is nothing to remove.
+    """
+    try:
+        now = os.lstat(dest)
+    except OSError:
+        return
+    if (now.st_dev, now.st_ino) != (created.st_dev, created.st_ino):
+        return
+    try:
+        dest.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning(f"{dest.name}: a half-written file could not be removed: {exc}")
 
 
 def _copy_into_new_file(partial: Path, dest: Path, name: str) -> None:
@@ -759,8 +797,14 @@ def _copy_into_new_file(partial: Path, dest: Path, name: str) -> None:
         raise CharacterPackageError(
             "exists", f"{name} already exists, so Yu'lon did not overwrite it."
         ) from exc
+    created = os.fstat(fd)
     try:
-        with open(partial, "rb") as source, os.fdopen(fd, "wb") as sink:
+        sink = os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with sink, open(partial, "rb") as source:
             while True:
                 chunk = source.read(1 << 20)
                 if not chunk:
@@ -769,7 +813,7 @@ def _copy_into_new_file(partial: Path, dest: Path, name: str) -> None:
             sink.flush()
             os.fsync(sink.fileno())
     except BaseException:
-        dest.unlink(missing_ok=True)
+        _remove_created_file(dest, created)
         raise
 
 
@@ -900,6 +944,27 @@ def write_package(
     return manifest
 
 
+def _refuse_foreign_entries(infos: Iterable[zipfile.ZipInfo], name: str) -> None:
+    """Refuse an entry this build cannot read: another compression method, or encryption.
+
+    A v1 file is written STORED or DEFLATED and never encrypted, so anything else
+    is not a file Yu'lon made; and `zipfile` answers a foreign method or an
+    encrypted entry with errors of its own (`lzma.LZMAError` among them) that a
+    read boundary does not name. `read_package` asks this of every entry in the
+    file; `Package.dump_bytes` asks it again of the dump it is about to read,
+    because the file may have been replaced since it was read.
+    """
+    if any(
+        info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or info.flag_bits & 0x1
+        for info in infos
+    ):
+        raise CharacterPackageError(
+            "not_a_package",
+            f"{name} is not a Yu'lon character file, or it is damaged. Export the "
+            "character again.",
+        )
+
+
 def _unsafe_name(name: str) -> bool:
     """A member name a zip can use to write somewhere it was not asked to."""
     if not name or name.startswith(("/", "\\")) or "\\" in name or ":" in name:
@@ -954,16 +1019,7 @@ def read_package(path: Path) -> Package:
                 "duplicate_name",
                 f"{name} holds two files of the same name, so it cannot be trusted.",
             )
-        if any(
-            info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
-            or info.flag_bits & 0x1
-            for info in archive.infolist()
-        ):
-            raise CharacterPackageError(
-                "not_a_package",
-                f"{name} is not a Yu'lon character file, or it is damaged. Export the "
-                "character again.",
-            )
+        _refuse_foreign_entries(archive.infolist(), name)
         if sum(info.file_size for info in archive.infolist()) > MAX_UNPACKED_BYTES:
             raise CharacterPackageError(
                 "unpacks_too_big",
