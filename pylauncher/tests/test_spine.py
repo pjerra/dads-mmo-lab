@@ -3380,6 +3380,21 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "raises `MmapsError`: the run is then recorded with nothing kept, or the start is "
         "refused, so a cut-off tile is never left for the generator to skip as finished"
     ),
+    ("portable/identity.py", "_remove_stale_key_temps"): (
+        "T894 round D. Lists Yu'lon's own `identity/` folder for a crashed create's "
+        "`key.json.<16 hex>.tmp` leftovers, to remove them once `key.json` is there and "
+        "loads. It decides no write anywhere: these are this app's own temp copies in its "
+        "own config directory, and it never says whether the app may write anywhere else. "
+        "A folder that cannot be listed leaves the temps where they are and the key still "
+        "loads"
+    ),
+    ("portable/identity.py", "_remove_temp_links_of"): (
+        "T894 round E. Lists Yu'lon's own `identity/` folder for a temp name a kill left "
+        "AFTER the link, to remove it when its `st_dev`/`st_ino` are `key.json`'s own; any "
+        "other second name is left in place and the key is refused. It decides no write "
+        "outside this app's own config directory and says nothing about writing elsewhere. "
+        "A folder that cannot be listed leaves the key at two names, which refuses it"
+    ),
 }
 """Every directory listing in the package, and why it is not `native._listing()`.
 
