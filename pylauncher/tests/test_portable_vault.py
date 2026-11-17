@@ -836,14 +836,11 @@ def test_a_refused_start_after_a_loaded_confirm_keeps_the_target_as_holder(
     result = run()
     assert result.outcome == "waiting"
     assert result.holder == target
-    locked = direction == "home->friend"
     assert result.sentence == (
         f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
-        if locked
-        else "The world is still busy, so Yu'lon did not start it."
     )
     assert result.waiting_step == "start"
-    assert result.source_locked is locked
+    assert result.source_locked is (direction == "home->friend")
     assert journal_path(vault).exists()
     assert worlds.unlocked == []
     assert vault.state(UID).holder == target
@@ -871,14 +868,11 @@ def test_a_refused_confirm_on_a_rerun_waits_and_never_rolls_back(
     assert result is not None
     assert result.outcome == "waiting"
     assert result.holder == before.holder
-    locked = direction == "home->friend"
     assert result.sentence == (
         f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
-        if locked
-        else "The world did not answer, so nothing was moved."
     )
     assert result.waiting_step == "confirm"
-    assert result.source_locked is locked
+    assert result.source_locked is (direction == "home->friend")
     assert journal_path(vault).exists()
     assert worlds.unlocked == []
     assert vault.state(UID) == before
@@ -1395,20 +1389,17 @@ def test_a_crash_inside_an_abandon_is_finished_by_resume(
 def test_a_waiting_move_says_whether_the_source_is_locked(
     tmp_path: Path, direction: str, locked: bool
 ) -> None:
-    """A refusal that claims nothing moved must not be repeated once the source is locked."""
+    """A refusal never says nothing moved once the load was sent, locked or not."""
     vault, worlds, run = a_move(tmp_path, direction)
     worlds.refuse = "confirm"
     result = run()
     assert result.outcome == "waiting"
     assert result.waiting_step == "confirm"
     assert result.source_locked is locked
-    if locked:
-        assert result.sentence == (
-            f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
-        )
-        assert "nothing was moved" not in result.sentence
-    else:
-        assert result.sentence == "The world did not answer, so nothing was moved."
+    assert result.sentence == (
+        f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+    )
+    assert "nothing was moved" not in result.sentence
     assert journal_path(vault).exists()
 
 
@@ -1520,18 +1511,28 @@ def test_an_unreadable_journal_is_not_damaged_and_is_not_moved_aside(tmp_path: P
     assert not (vault.character_dir(UID) / "journal.damaged-1.json").exists()
 
 
-def test_a_journal_that_parses_but_does_not_read_is_not_moved_aside(tmp_path: Path) -> None:
+@pytest.mark.parametrize("damage", ["missing-fields", "bad-step"])
+def test_a_journal_that_parses_but_does_not_read_is_moved_aside(
+    tmp_path: Path, damage: str
+) -> None:
+    """Valid JSON that is not this journal's shape is as dead an end as a torn file."""
     vault, worlds = begun(tmp_path)
     worlds.crash = ("load", "in_step")
     with pytest.raises(Crash):
         vault.move(UID, FRIEND, worlds.steps())
     path = journal_path(vault)
-    path.write_text('{"format": 1}')
-    with pytest.raises(VaultError) as excinfo:
-        vault.abandon_damaged_journal(UID)
-    assert excinfo.value.reason == "record_damaged"
-    assert path.exists()
-    assert not (vault.character_dir(UID) / "journal.damaged-1.json").exists()
+    if damage == "missing-fields":
+        path.write_text('{"format": 1}')
+    else:
+        record = json.loads(path.read_text())
+        record["steps"]["load"] = "dnoe"
+        path.write_text(json.dumps(record))
+    result = vault.abandon_damaged_journal(UID)
+    assert result.outcome == "waiting"
+    assert not path.exists()
+    assert (vault.character_dir(UID) / "journal.damaged-1.json").exists()
+    worlds.crash = None
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
 
 
 def test_abandoning_a_damaged_journal_marks_the_holder_unverified(tmp_path: Path) -> None:
@@ -1572,3 +1573,125 @@ def test_a_damaged_journal_without_a_state_is_no_copy(tmp_path: Path) -> None:
         vault.abandon_damaged_journal(UID)
     assert excinfo.value.reason == "no_copy"
     assert journal.read_text() == "{not a journal"
+
+
+# -- round D: the lock that may have been taken, and what a caller may do ---------
+
+
+def test_a_lock_whose_retry_is_refused_is_unlocked_again(tmp_path: Path) -> None:
+    """The ban may have gone out before the crash, so the refusal is undone through `unlock`."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("lock", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    assert worlds.banned == {"home"}
+    worlds.crash = None
+    worlds.refuse = "lock"
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == "rolled_back"
+    assert result.holder == HOME
+    assert result.sentence == "Home is already busy, so nothing was moved."
+    assert worlds.unlocked == ["home"]
+    assert worlds.banned == set()
+    assert not journal_path(vault).exists()
+    assert vault.state(UID).holder == HOME
+
+
+def test_a_move_home_is_not_abandoned(tmp_path: Path) -> None:
+    """Home is the player's own world: trying again finishes the move, taking it back cannot."""
+    vault, worlds = begun(tmp_path)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.refuse = "confirm"
+    assert vault.move(UID, HOME, worlds.steps()).outcome == "waiting"
+    worlds.refuse = None
+    before = vault.state(UID)
+    with pytest.raises(ValueError) as excinfo:
+        vault.abandon_move(UID)
+    assert str(excinfo.value) == (
+        "a move home is finished by trying again, not by taking the character back"
+    )
+    assert journal_path(vault).exists()
+    assert vault.state(UID) == before
+
+
+def test_an_abandon_refuses_a_journal_that_is_rolling_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.answers = ["failed"]
+    arm_rollback_crash(monkeypatch)
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    with pytest.raises(ValueError):
+        vault.abandon_move(UID)
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == "rolled_back"
+    assert vault.state(UID).holder == HOME
+
+
+def test_an_accepted_load_removes_its_world_from_revoked(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.refuse = "confirm"
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "waiting"
+    worlds.refuse = None
+    assert vault.abandon_move(UID).outcome == "abandoned"
+    assert FRIEND in vault.state(UID).revoked
+    result = vault.move(UID, FRIEND, worlds.steps())
+    assert result.outcome == "done"
+    assert FRIEND not in vault.state(UID).revoked
+    assert vault.state(UID).holder == FRIEND
+
+
+def test_an_abandon_picks_the_highest_sequence_copy_not_the_highest_number(
+    tmp_path: Path,
+) -> None:
+    """The live copy is the newest by lineage, and the counter never falls because of it."""
+    vault, worlds = begun(tmp_path)
+    highest = vault.store(a_package(worlds.made_dir, sequence=5), "stop")
+    vault.store(a_package(worlds.made_dir, sequence=1), "stop")
+    damaged = vault.store(a_package(worlds.made_dir, sequence=6), "before-merge")
+    flip_member_data(damaged.path, "character.pdump")
+    before = vault.state(UID)
+    assert before.sequence == 6
+    assert before.newest == damaged.file
+    worlds.dump_sequence = 2
+    worlds.refuse = "confirm"
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "waiting"
+    worlds.refuse = None
+    assert vault.abandon_move(UID).outcome == "abandoned"
+    state = vault.state(UID)
+    assert state.newest == highest.file
+    assert state.newest_digest == digest_of(highest.path)
+    assert state.sequence == 6
+
+
+def test_a_waiting_move_from_the_vault_never_says_nothing_was_moved(tmp_path: Path) -> None:
+    vault, worlds, run = a_move(tmp_path, "from-vault")
+    worlds.refuse = "confirm"
+    result = run()
+    assert result.outcome == "waiting"
+    assert result.source_locked is False
+    assert result.sentence == (
+        f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+    )
+    assert "nothing was moved" not in result.sentence
+
+
+def test_a_waiting_move_while_the_vault_holds_it_never_says_nothing_was_moved(
+    tmp_path: Path,
+) -> None:
+    vault, worlds = begun(tmp_path)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.answers = ["failed"]
+    assert vault.move(UID, HOME, worlds.steps()).outcome == "rolled_back"
+    assert vault.state(UID).holder == Holder("vault")
+    worlds.answers = []
+    worlds.refuse = "confirm"
+    result = vault.move(UID, HOME, worlds.steps())
+    assert result.outcome == "waiting"
+    assert result.source_locked is False
+    assert result.sentence == (
+        f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+    )
