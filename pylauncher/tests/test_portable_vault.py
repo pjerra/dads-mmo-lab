@@ -1144,6 +1144,7 @@ def test_a_damaged_journal_can_be_abandoned_and_kept_aside(tmp_path: Path) -> No
     with pytest.raises(ValueError):
         vault.abandon_damaged_journal(UID)
     worlds.crash = None
+    vault.settle_holder(UID, after.holder)
     assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
 
 
@@ -1199,12 +1200,17 @@ def _package_outside_the_folder(journal: dict[str, object]) -> None:
     journal["package"] = "../x.ylchar"
 
 
+def _reserved_outside_the_folder(journal: dict[str, object]) -> None:
+    journal["reserved"] = "x.ylchar"
+
+
 JOURNAL_EDITS: list[tuple[str, Callable[[dict[str, object]], None]]] = [
     ("uid-not-an-id", _uid_not_an_id),
     ("uid-of-another-character", _uid_of_another_character),
     ("steps-without-load", _no_load_step),
     ("steps-with-an-unknown-one", _an_unknown_step),
     ("package-outside-the-folder", _package_outside_the_folder),
+    ("reserved-outside-the-folder", _reserved_outside_the_folder),
 ]
 
 
@@ -1235,6 +1241,7 @@ def test_a_journal_that_names_what_it_must_not_is_damaged(
     assert not journal_path(vault).exists()
     assert (vault.character_dir(UID) / "journal.damaged-1.json").exists()
     assert worlds.events == events
+    vault.settle_holder(UID, HOME)
     assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
 
 
@@ -1253,6 +1260,127 @@ def test_a_state_that_names_another_character_is_damaged(tmp_path: Path) -> None
             call()
         assert excinfo.value.reason == "record_damaged"
     assert worlds.events == []
+
+
+# -- round F: a holder in doubt ---------------------------------------------------
+
+
+def set_unverified(vault: Vault, *worlds: Holder) -> None:
+    """The flag and the worlds a crash between the state write and the set-aside would leave."""
+    path = vault.character_dir(UID) / "state.json"
+    state = json.loads(path.read_text())
+    state["holder_unverified"] = True
+    state["unverified_worlds"] = [
+        {"kind": one.kind, "world": one.world, "visit_id": one.visit_id} for one in worlds
+    ]
+    path.write_text(json.dumps(state))
+
+
+def a_lost_move(base: Path) -> tuple[Vault, FakeWorlds, dict]:
+    """A load that crashed, a journal it can no longer read, and the state the abandon left."""
+    vault, worlds = begun(base)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    edit_journal(vault, _no_load_step)
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    return vault, worlds, state_json(vault)
+
+
+def test_a_holder_in_doubt_is_never_moved(tmp_path: Path) -> None:
+    """Round F: which world holds it is the player's to check, and only `settle_holder` says."""
+    vault, worlds, written = a_lost_move(tmp_path)
+    state = vault.state(UID)
+    assert state is not None
+    assert state.holder_unverified is True
+    assert state.unverified_worlds == (HOME, FRIEND)
+    before, events = worlds.snapshot(), list(worlds.events)
+    for target in (HOME, FRIEND, Holder("friend", world=OTHER_WORLD, visit_id=VISIT)):
+        with pytest.raises(VaultError) as excinfo:
+            vault.move(UID, target, worlds.steps())
+        assert excinfo.value.reason == "holder_unverified"
+        assert str(excinfo.value) == (
+            f"Yu'lon lost track of where {NAME} is. "
+            f"Check which world {NAME} is in before you play."
+        )
+    assert worlds.events == events
+    assert worlds.snapshot() == before
+    assert state_json(vault) == written
+    kept = vault.store(a_package(tmp_path / "made", uid=UID, sequence=2), "stop")
+    assert kept.file in [copy.file for copy in copies_of(vault)]
+    settled = vault.settle_holder(UID, FRIEND)
+    assert settled.holder == FRIEND
+    assert settled.holder_unverified is False
+    assert settled.revoked == ()
+    assert vault.state(UID) == settled
+    assert worlds.events == events
+    worlds.answers = ["loaded"]
+    assert vault.move(UID, HOME, worlds.steps()).outcome == "done"
+
+
+def test_settling_the_holder_home_revokes_the_world_it_was_leaving(tmp_path: Path) -> None:
+    vault, worlds, _ = a_lost_move(tmp_path)
+    settled = vault.settle_holder(UID, HOME)
+    assert settled.holder == HOME
+    assert settled.holder_unverified is False
+    assert settled.unverified_worlds == ()
+    assert settled.revoked == (FRIEND,)
+    worlds.answers = ["loaded"]
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+
+
+def test_settling_a_holder_that_was_never_in_doubt_is_refused(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    before = state_json(vault)
+    with pytest.raises(ValueError):
+        vault.settle_holder(UID, FRIEND)
+    assert state_json(vault) == before
+    assert worlds.events == []
+
+
+def test_settling_is_refused_while_a_journal_is_open(tmp_path: Path) -> None:
+    """A move in flight is finished or abandoned first: two records of one holder is none."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    set_unverified(vault, FRIEND)
+    with pytest.raises(VaultError) as excinfo:
+        vault.settle_holder(UID, HOME)
+    assert excinfo.value.reason == "move_open"
+    assert vault.state(UID).holder_unverified is True
+
+
+@pytest.mark.parametrize("answer", ["failed", "loaded"])
+def test_a_move_never_clears_a_holder_in_doubt(tmp_path: Path, answer: str) -> None:
+    """Round F: only `settle_holder` clears the flag; a rollback and an accepted load do not."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    set_unverified(vault, FRIEND)
+    worlds.answers = [answer]
+    vault.resume(UID, worlds.steps())
+    state = vault.state(UID)
+    assert state is not None
+    assert state.holder_unverified is True
+    assert state.unverified_worlds == (FRIEND,)
+
+
+def test_a_state_written_before_the_worlds_in_doubt_still_loads(tmp_path: Path) -> None:
+    """Round F adds `unverified_worlds`; a file written before it means the same as empty."""
+    vault, worlds = begun(tmp_path)
+    path = vault.character_dir(UID) / "state.json"
+    state = json.loads(path.read_text())
+    del state["unverified_worlds"]
+    path.write_text(json.dumps(state))
+    read = vault.state(UID)
+    assert read is not None
+    assert read.unverified_worlds == ()
+    assert read.holder_unverified is False
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
 
 
 # -- absent right after this run's own load ---------------------------------------
@@ -1629,6 +1757,7 @@ def test_a_journal_that_parses_but_does_not_read_is_moved_aside(
     assert not path.exists()
     assert (vault.character_dir(UID) / "journal.damaged-1.json").exists()
     worlds.crash = None
+    vault.settle_holder(UID, HOME)
     assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
 
 
@@ -1642,22 +1771,8 @@ def test_abandoning_a_damaged_journal_marks_the_holder_unverified(tmp_path: Path
     assert result.holder_unverified is True
     assert vault.state(UID).holder_unverified is True
     worlds.crash = None
+    assert vault.settle_holder(UID, HOME).holder_unverified is False
     assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
-    assert vault.state(UID).holder_unverified is False
-
-
-def test_a_rollback_clears_the_holder_unverified_flag(tmp_path: Path) -> None:
-    vault, worlds = begun(tmp_path)
-    worlds.crash = ("load", "in_step")
-    with pytest.raises(Crash):
-        vault.move(UID, FRIEND, worlds.steps())
-    journal_path(vault).write_text("{not a journal")
-    assert vault.abandon_damaged_journal(UID).holder_unverified is True
-    worlds.crash = None
-    worlds.answers = ["failed"]
-    result = vault.move(UID, FRIEND, worlds.steps())
-    assert result.outcome == "rolled_back"
-    assert vault.state(UID).holder_unverified is False
 
 
 def test_a_damaged_journal_without_a_state_is_no_copy(tmp_path: Path) -> None:
