@@ -716,6 +716,8 @@ def test_unknown_waits_and_keeps_the_journal(tmp_path: Path) -> None:
     assert result.sentence == (
         f"Yu'lon could not tell whether {NAME} arrived. It asks again at the next start."
     )
+    assert result.waiting_step == "confirm"
+    assert result.source_locked is True
     assert journal_path(vault).exists()
     assert vault.state(UID).holder == before.holder
     assert worlds.loads == {FRIEND_WORLD: 1}
@@ -834,7 +836,14 @@ def test_a_refused_start_after_a_loaded_confirm_keeps_the_target_as_holder(
     result = run()
     assert result.outcome == "waiting"
     assert result.holder == target
-    assert result.sentence == "The world is still busy, so Yu'lon did not start it."
+    locked = direction == "home->friend"
+    assert result.sentence == (
+        f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+        if locked
+        else "The world is still busy, so Yu'lon did not start it."
+    )
+    assert result.waiting_step == "start"
+    assert result.source_locked is locked
     assert journal_path(vault).exists()
     assert worlds.unlocked == []
     assert vault.state(UID).holder == target
@@ -862,7 +871,14 @@ def test_a_refused_confirm_on_a_rerun_waits_and_never_rolls_back(
     assert result is not None
     assert result.outcome == "waiting"
     assert result.holder == before.holder
-    assert result.sentence == "The world did not answer, so nothing was moved."
+    locked = direction == "home->friend"
+    assert result.sentence == (
+        f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+        if locked
+        else "The world did not answer, so nothing was moved."
+    )
+    assert result.waiting_step == "confirm"
+    assert result.source_locked is locked
     assert journal_path(vault).exists()
     assert worlds.unlocked == []
     assert vault.state(UID) == before
@@ -1128,7 +1144,9 @@ def test_a_damaged_journal_can_be_abandoned_and_kept_aside(tmp_path: Path) -> No
     assert not path.exists()
     assert (vault.character_dir(UID) / "journal.damaged-2.json").read_text() == "{not a journal"
     assert old.read_text() == "{an earlier one"
-    assert vault.state(UID) == before
+    after = vault.state(UID)
+    assert after.holder == before.holder
+    assert after.holder_unverified is True
     with pytest.raises(ValueError):
         vault.abandon_damaged_journal(UID)
     worlds.crash = None
@@ -1230,3 +1248,327 @@ def test_a_crash_at_every_point_then_a_rerun_ends_the_same(
     assert [(copy.kind, copy.file) for copy in copies_of(crash_vault)] == [
         (copy.kind, copy.file) for copy in copies_of(plain_vault)
     ]
+
+
+# -- round C: the confirmed load, the way out of a wait, and the truth -----------
+
+
+def arm_mark_crash_before(monkeypatch: pytest.MonkeyPatch, step: str, state: str) -> None:
+    """Die once, just BEFORE the journal says `step` is at `state`."""
+    real = vault_module._mark
+    armed = True
+
+    def flaky(path, journal, marked, marked_state):
+        nonlocal armed
+        if armed and marked == step and marked_state == state:
+            armed = False
+            raise Crash(marked)
+        return real(path, journal, marked, marked_state)
+
+    monkeypatch.setattr(vault_module, "_mark", flaky)
+
+
+@pytest.mark.parametrize("start_refused", [False, True])
+def test_a_crash_after_the_confirmed_load_is_finished_without_asking_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start_refused: bool
+) -> None:
+    """The state names the target, so the load was confirmed: a later `failed` cannot undo it."""
+    vault, worlds = begun(tmp_path)
+    arm_mark_crash_before(monkeypatch, "confirm", "done")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    assert vault.state(UID).holder == FRIEND
+    confirms = worlds.confirms
+    worlds.answers = ["failed"]
+    worlds.refuse_start = start_refused
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == ("waiting" if start_refused else "done")
+    assert result.holder == FRIEND
+    assert worlds.confirms == confirms
+    assert worlds.answers == ["failed"]
+    assert worlds.unlocked == []
+    assert vault.state(UID).holder == FRIEND
+    if start_refused:
+        assert journal_path(vault).exists()
+        assert result.waiting_step == "start"
+        assert result.source_locked is True
+    else:
+        assert not journal_path(vault).exists()
+
+
+def test_a_move_from_the_vault_with_no_good_copy_leaves_no_journal(tmp_path: Path) -> None:
+    """Nothing was done, so a later target must not be told a move is open."""
+    vault, worlds = begun(tmp_path)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.answers = ["failed"]
+    assert vault.move(UID, HOME, worlds.steps()).outcome == "rolled_back"
+    assert vault.state(UID).holder == Holder("vault")
+    for copy in copies_of(vault):
+        flip_member_data(copy.path, "character.pdump")
+    with pytest.raises(VaultError) as excinfo:
+        vault.move(UID, HOME, worlds.steps())
+    assert excinfo.value.reason == "no_copy"
+    assert not journal_path(vault).exists()
+    other = Holder("friend", world=OTHER_WORLD, visit_id=VISIT)
+    with pytest.raises(VaultError) as again:
+        vault.move(UID, other, worlds.steps())
+    assert again.value.reason == "no_copy"
+    assert not journal_path(vault).exists()
+
+
+def test_a_waiting_move_can_be_abandoned_and_the_vault_holds_it(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.refuse = "confirm"
+    waiting = vault.move(UID, FRIEND, worlds.steps())
+    assert waiting.outcome == "waiting"
+    worlds.refuse = None
+    events = list(worlds.events)
+    abandoned = vault.abandon_move(UID)
+    assert abandoned.outcome == "abandoned"
+    assert abandoned.holder == Holder("vault")
+    assert abandoned.sentence == (
+        f"{NAME} was taken back from that world. Its newest saved copy is the one that counts "
+        "now; anything played there after it is lost."
+    )
+    state = vault.state(UID)
+    assert state.holder == Holder("vault")
+    assert FRIEND in state.revoked
+    assert worlds.unlocked == []
+    assert worlds.events == events
+    assert not journal_path(vault).exists()
+    moved = vault.move(UID, HOME, worlds.steps(), from_vault=True)
+    assert moved.outcome == "done"
+    assert moved.holder == HOME
+    assert vault.state(UID).holder == HOME
+
+
+def test_a_move_is_not_abandoned_before_its_load(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("lock", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    assert journal_path(vault).exists()
+    with pytest.raises(ValueError):
+        vault.abandon_move(UID)
+
+
+def test_abandon_needs_a_journal(tmp_path: Path) -> None:
+    vault, _worlds = begun(tmp_path)
+    with pytest.raises(ValueError):
+        vault.abandon_move(UID)
+
+
+def test_a_crash_inside_an_abandon_is_finished_by_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`abandoned` is written before the undo, so a rerun finishes it and calls no step."""
+    plain_vault, plain_worlds = begun(tmp_path / "plain")
+    plain_worlds.refuse = "confirm"
+    assert plain_vault.move(UID, FRIEND, plain_worlds.steps()).outcome == "waiting"
+    plain_worlds.refuse = None
+    plain = plain_vault.abandon_move(UID)
+
+    vault, worlds = begun(tmp_path / "crash")
+    worlds.refuse = "confirm"
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "waiting"
+    worlds.refuse = None
+    arm_state_write_crash(monkeypatch)
+    with pytest.raises(Crash):
+        vault.abandon_move(UID)
+    assert journal_path(vault).exists()
+    events = list(worlds.events)
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == "abandoned"
+    assert result.holder == Holder("vault")
+    assert result.sentence == plain.sentence
+    assert vault.state(UID) == plain_vault.state(UID)
+    assert worlds.events == events
+    assert not journal_path(vault).exists()
+
+
+@pytest.mark.parametrize(
+    "direction,locked",
+    [("home->friend", True), ("friend->home", False), ("from-vault", False)],
+)
+def test_a_waiting_move_says_whether_the_source_is_locked(
+    tmp_path: Path, direction: str, locked: bool
+) -> None:
+    """A refusal that claims nothing moved must not be repeated once the source is locked."""
+    vault, worlds, run = a_move(tmp_path, direction)
+    worlds.refuse = "confirm"
+    result = run()
+    assert result.outcome == "waiting"
+    assert result.waiting_step == "confirm"
+    assert result.source_locked is locked
+    if locked:
+        assert result.sentence == (
+            f"Yu'lon could not finish moving {NAME}. It tries again at the next start."
+        )
+        assert "nothing was moved" not in result.sentence
+    else:
+        assert result.sentence == "The world did not answer, so nothing was moved."
+    assert journal_path(vault).exists()
+
+
+def test_the_counter_never_goes_down(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store made while a move is open numbers above it; adopting its own copy must not lower."""
+    vault, worlds = begun(tmp_path)
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    worlds.dump_sequence = 5
+    arm_state_write_crash(monkeypatch)
+    with pytest.raises(Crash):
+        vault.move(UID, HOME, worlds.steps())
+    outside = vault.store(a_package(worlds.made_dir, sequence=3), "stop")
+    assert vault.state(UID).last_number == outside.number
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == "done"
+    assert vault.state(UID).last_number == outside.number
+
+
+def test_the_copy_an_open_move_wrote_down_is_never_pruned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before the store names its copy, only the journal's reserved name protects it."""
+    clock = Clock()
+    vault, worlds = begun(tmp_path, clock)
+    arm_state_write_crash(monkeypatch)
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    reserved = json.loads(journal_path(vault).read_text())["reserved"]
+    assert reserved is not None
+    assert (vault.character_dir(UID) / "packages" / reserved).is_file()
+    clock.advance(days=45)
+    assert vault.prune(UID) == ()
+    assert reserved in [copy.file for copy in copies_of(vault)]
+
+
+# -- a checker that breaks --------------------------------------------------------
+
+
+def _checker_that_breaks_on_its_second_answer() -> Callable[[Package], None]:
+    """Proves a copy once; the second question about it, as `prune` asks, fails."""
+    seen: set[str] = set()
+
+    def checker(package: Package) -> None:
+        if package.digest in seen:
+            raise RuntimeError("the key store is locked")
+        seen.add(package.digest)
+
+    return checker
+
+
+def test_a_checker_that_breaks_never_breaks_a_store(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = a_vault(tmp_path, checker=_checker_that_breaks_on_its_second_answer())
+    made = tmp_path / "made"
+    made.mkdir()
+    with caplog.at_level(logging.WARNING, logger="yulon.portable.vault"):
+        stored = vault.store(a_package(made, sequence=1, signed=True), "stop")
+    assert stored.number == 1
+    assert [copy.file for copy in copies_of(vault)] == [stored.file]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "yulon.portable.vault"
+    ]
+    assert len(warnings) == 1
+    assert "RuntimeError" in warnings[0].getMessage()
+    assert "the key store is locked" not in caplog.text
+
+
+def test_a_checker_that_breaks_never_breaks_a_finished_move(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    vault = a_vault(tmp_path, checker=_checker_that_breaks_on_its_second_answer())
+    worlds = FakeWorlds(tmp_path, vault)
+    worlds.made_dir.mkdir(parents=True)
+    worlds.dump_signed = True
+    vault.store(a_package(worlds.made_dir, sequence=1, signed=True), "stop")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="yulon.portable.vault"):
+        result = vault.move(UID, FRIEND, worlds.steps())
+    assert result.outcome == "done"
+    assert not journal_path(vault).exists()
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING and record.name == "yulon.portable.vault"
+    ]
+    assert len(warnings) == 2
+    assert "the key store is locked" not in caplog.text
+
+
+# -- abandoning a journal that no longer parses, again ----------------------------
+
+
+def test_an_unreadable_journal_is_not_damaged_and_is_not_moved_aside(tmp_path: Path) -> None:
+    """An OS error is the computer's, not the record's: only a file that does not parse moves."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    path = journal_path(vault)
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(OSError):
+        vault.abandon_damaged_journal(UID)
+    assert path.is_dir()
+    assert not (vault.character_dir(UID) / "journal.damaged-1.json").exists()
+
+
+def test_a_journal_that_parses_but_does_not_read_is_not_moved_aside(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    path = journal_path(vault)
+    path.write_text('{"format": 1}')
+    with pytest.raises(VaultError) as excinfo:
+        vault.abandon_damaged_journal(UID)
+    assert excinfo.value.reason == "record_damaged"
+    assert path.exists()
+    assert not (vault.character_dir(UID) / "journal.damaged-1.json").exists()
+
+
+def test_abandoning_a_damaged_journal_marks_the_holder_unverified(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    journal_path(vault).write_text("{not a journal")
+    result = vault.abandon_damaged_journal(UID)
+    assert result.holder_unverified is True
+    assert vault.state(UID).holder_unverified is True
+    worlds.crash = None
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    assert vault.state(UID).holder_unverified is False
+
+
+def test_a_rollback_clears_the_holder_unverified_flag(tmp_path: Path) -> None:
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    journal_path(vault).write_text("{not a journal")
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    worlds.crash = None
+    worlds.answers = ["failed"]
+    result = vault.move(UID, FRIEND, worlds.steps())
+    assert result.outcome == "rolled_back"
+    assert vault.state(UID).holder_unverified is False
+
+
+def test_a_damaged_journal_without_a_state_is_no_copy(tmp_path: Path) -> None:
+    vault = a_vault(tmp_path)
+    folder = vault.character_dir(UID)
+    folder.mkdir(parents=True)
+    journal = folder / "journal.json"
+    journal.write_text("{not a journal")
+    with pytest.raises(VaultError) as excinfo:
+        vault.abandon_damaged_journal(UID)
+    assert excinfo.value.reason == "no_copy"
+    assert journal.read_text() == "{not a journal"

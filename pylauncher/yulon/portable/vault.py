@@ -76,7 +76,7 @@ HolderKind = Literal["home", "friend", "vault"]
 StepName = Literal["dump", "lock", "load", "confirm", "start"]
 StepState = Literal["pending", "started", "done", "skipped"]
 Answer = Literal["loaded", "failed", "absent", "unknown"]
-Outcome = Literal["done", "rolled_back", "waiting", "old_holder_unreachable"]
+Outcome = Literal["done", "rolled_back", "waiting", "old_holder_unreachable", "abandoned"]
 
 STEPS: tuple[StepName, ...] = ("dump", "lock", "load", "confirm", "start")
 """The five journaled steps of a move, in order. The read-back is a step of its own (9a row 1)."""
@@ -180,6 +180,8 @@ class CharacterState:
     last_number: int
     names: tuple[tuple[str, str], ...]
     revoked: tuple[Holder, ...]
+    holder_unverified: bool = False
+    """True when a damaged journal hid which world holds the character (round C)."""
 
 
 @dataclass(frozen=True)
@@ -233,6 +235,12 @@ class MoveResult:
     sentence: str | None = None
     load_failed: bool = False
     newest_at: datetime | None = None
+    waiting_step: StepName | None = None
+    """The step that left the move `waiting`, when it did."""
+    source_locked: bool = False
+    """True when the lock step is done and the source is home: the character stays banned."""
+    holder_unverified: bool = False
+    """True when a journal the vault could no longer read hid which world holds it."""
 
 
 # ---------------------------------------------------------------- the records
@@ -260,6 +268,7 @@ class _StateRecord(BaseModel):
     last_number: int
     names: dict[str, str] = Field(default_factory=dict)
     revoked: tuple[_HolderRecord, ...] = ()
+    holder_unverified: bool = False
 
 
 class _JournalRecord(BaseModel):
@@ -278,6 +287,7 @@ class _JournalRecord(BaseModel):
     rolling_back: bool
     rollback_sentence: str | None = None
     rollback_load_failed: bool = False
+    abandoned: bool = False
     steps: dict[StepName, StepState]
 
 
@@ -296,6 +306,7 @@ class _Journal:
     rollback_sentence: str | None
     rollback_load_failed: bool
     steps: dict[StepName, StepState]
+    abandoned: bool = False
 
 
 def _json_bytes(value: object) -> bytes:
@@ -323,6 +334,7 @@ def _state_obj(state: CharacterState) -> dict[str, object]:
         "last_number": state.last_number,
         "names": dict(state.names),
         "revoked": [_holder_obj(holder) for holder in state.revoked],
+        "holder_unverified": state.holder_unverified,
     }
 
 
@@ -341,6 +353,7 @@ def _journal_obj(journal: _Journal) -> dict[str, object]:
         "rolling_back": journal.rolling_back,
         "rollback_sentence": journal.rollback_sentence,
         "rollback_load_failed": journal.rollback_load_failed,
+        "abandoned": journal.abandoned,
         "steps": dict(journal.steps),
     }
 
@@ -461,6 +474,7 @@ class Vault:
                 last_number=record.last_number,
                 names=tuple(sorted(record.names.items())),
                 revoked=tuple(_holder(one) for one in record.revoked),
+                holder_unverified=record.holder_unverified,
             )
         except (ValidationError, ValueError) as exc:
             raise _record_damaged(path, folder) from exc
@@ -632,6 +646,7 @@ class Vault:
         """The state after storing `package`: the newest is the highest sequence, not the clock."""
         sequence = package.manifest.sequence
         digest = package.digest
+        last_number = max(state.last_number, number)
         if sequence > state.sequence:
             return replace(
                 state,
@@ -640,14 +655,14 @@ class Vault:
                 parents=(digest, *package.manifest.parents)[:MAX_PARENTS],
                 newest=name,
                 newest_digest=digest,
-                last_number=number,
+                last_number=last_number,
             )
         if sequence == state.sequence and digest != state.newest_digest:
             logger.warning(
                 f"{package.manifest.character.name}: two copies claim sequence {sequence}; "
                 f"{name} is kept in History only"
             )
-        return replace(state, last_number=number)
+        return replace(state, last_number=last_number)
 
     # -- pruning ------------------------------------------------------------
 
@@ -678,8 +693,17 @@ class Vault:
                 protected.add(state.newest)
             if journal is not None and journal.package is not None:
                 protected.add(journal.package)
+            if journal is not None and journal.reserved is not None:
+                protected.add(journal.reserved)
             copies = list(self.copies(uid))
-            offered = self._newest_good(uid, state, tuple(copies)).copy
+            try:
+                offered = self._newest_good(uid, state, tuple(copies)).copy
+            except Exception as exc:
+                logger.warning(
+                    f"{uid}: the signature checker failed with {type(exc).__name__}, so no "
+                    "copy was removed this time"
+                )
+                return tuple(removed)
             if offered is not None:
                 protected.add(offered.file)
             ahead = [copy for copy in copies if copy.stored_at - now > timedelta(days=1)]
@@ -790,8 +814,8 @@ class Vault:
             state = self.state(uid)
             if target.kind == "vault":
                 raise ValueError("a move never moves a character into the vault")
-            if from_vault and (state is None or state.holder.kind != "friend"):
-                raise ValueError("continuing from the vault revokes a friend's copy only")
+            if from_vault and (state is None or state.holder.kind not in ("friend", "vault")):
+                raise ValueError("continuing from the vault starts at the vault or a friend")
             if state is None:
                 raise VaultError("no_copy", _none_good("this character"))
             name = _name(state)
@@ -848,45 +872,123 @@ class Vault:
                 return None
             return self._run(folder, journal, steps)
 
-    def abandon_damaged_journal(self, uid: str) -> MoveResult:
-        """Set a `journal.json` that no longer parses aside, and send the player to check.
+    def abandon_move(self, uid: str) -> MoveResult:
+        """Take a move back from a world that will not answer, and let the vault hold it.
 
-        Only a journal the vault cannot read is moved: a journal that parses is a move to finish,
-        and `move`/`resume` keep raising `record_damaged` until the caller asks for this. The file
-        is kept under `journal.damaged-<n>.json`, never deleted here, and the state is untouched.
+        Only a move whose load was already sent can be abandoned: before that, a refusal already
+        rolls the move back by itself. No step callable is called and the source is never unlocked,
+        so a later `move(..., from_vault=True)` carries the character to another world.
         """
         folder = self.character_dir(uid)
         self.root.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
         with lease.hold(folder, "A move"):
+            journal = self._journal(folder)
+            if journal is None:
+                raise ValueError("this character has no move to abandon")
+            if not journal.abandoned and journal.steps["load"] not in ("started", "done"):
+                raise ValueError("a move is abandoned only once its load was sent")
+            return self._abandon(folder, journal)
+
+    def abandon_damaged_journal(self, uid: str) -> MoveResult:
+        """Set a `journal.json` that no longer parses aside, and send the player to check.
+
+        Only a file that was read and does not parse is moved: one the computer cannot read at
+        all is the computer's problem (`OSError`), one that parses but does not read is a move
+        whose record the caller must see, and `move`/`resume` keep raising `record_damaged` until
+        the caller asks for this. The file is kept under `journal.damaged-<n>.json`, never
+        deleted here; the state keeps its holder but says it is unverified.
+        """
+        folder = self.character_dir(uid)
+        self.root.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+        with lease.hold(folder, "A move"):
+            state = self.state(uid)
+            if state is None:
+                raise VaultError("no_copy", _none_good("this character"))
             path = folder / JOURNAL_FILE
             try:
-                journal = self._journal(folder)
-            except VaultError as exc:
-                if exc.reason != "record_damaged":
-                    raise
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                raise ValueError("this character has no journal to abandon") from None
+            try:
+                json.loads(raw)
+            except ValueError:
+                pass
             else:
+                journal = self._journal(folder)
                 if journal is not None:
                     raise ValueError("this character's journal parses; finish that move")
                 raise ValueError("this character has no journal to abandon")
+            self._write_state(folder, replace(state, holder_unverified=True))
             taken = {entry.name for entry in self._entries(folder)}
             number = 1
             while f"{DAMAGED_JOURNAL}-{number}.json" in taken:
                 number += 1
             os.replace(path, folder / f"{DAMAGED_JOURNAL}-{number}.json")
             platform.fsync_folder(folder)
-            state = self.state(uid)
-            name = _name(state)
+            name = state.name
             return MoveResult(
                 "waiting",
-                Holder("home") if state is None else state.holder,
+                state.holder,
                 sentence=(
                     f"Yu'lon lost track of {name}'s last move. "
                     f"Check which world {name} is in before you play."
                 ),
+                holder_unverified=True,
             )
+
+    def _abandon(self, folder: Path, journal: _Journal) -> MoveResult:
+        """Finish a waiting move's undo: that world is revoked and the vault holds the character.
+
+        `abandoned` is written first, so a crash at any later point reruns this through `resume`.
+        Nothing here calls a step callable or unlocks the source: the source stays banned, and the
+        newest good copy in the vault (or, failing that, the journal's own copy) is the live one.
+        """
+        path = folder / JOURNAL_FILE
+        state = self.state(journal.uid)
+        if state is None:
+            raise VaultError("no_copy", _none_good(journal.name))
+        fallback = self.newest_good(journal.uid)
+        live = fallback.copy.file if fallback.copy is not None else journal.package
+        if live is None or not (folder / PACKAGES_DIR / live).is_file():
+            raise VaultError("no_copy", fallback.sentence or _none_good(journal.name))
+        if not journal.abandoned:
+            step, mark_state = _in_flight(journal)
+            journal = _mark(path, replace(journal, abandoned=True), step, mark_state)
+        if journal.target not in state.revoked:
+            state = replace(state, revoked=(*state.revoked, journal.target))
+            self._write_state(folder, state)
+        package = fallback.package
+        if package is None:
+            try:
+                package = read_package(folder / PACKAGES_DIR / live)
+            except CharacterPackageError:
+                package = None
+        if package is not None:
+            state = replace(
+                state,
+                name=package.manifest.character.name,
+                sequence=package.manifest.sequence,
+                parents=(package.digest, *package.manifest.parents)[:MAX_PARENTS],
+                newest=live,
+                newest_digest=package.digest,
+            )
+        else:
+            state = replace(state, newest=live, newest_digest=None)
+        self._write_state(folder, replace(state, holder=Holder("vault"), holder_unverified=False))
+        self._end_journal(path)
+        return MoveResult(
+            "abandoned",
+            Holder("vault"),
+            sentence=(
+                f"{journal.name} was taken back from that world. Its newest saved copy is the "
+                "one that counts now; anything played there after it is lost."
+            ),
+        )
 
     def _run(self, folder: Path, journal: _Journal, steps: MoveSteps) -> MoveResult:
         path = folder / JOURNAL_FILE
+        if journal.abandoned:
+            return self._abandon(folder, journal)
         if journal.rolling_back:
             return self._rollback(folder, journal, steps, None)
 
@@ -896,6 +998,7 @@ class Vault:
                 journal = _mark(path, journal, "dump", "started")
                 fallback = self.newest_good(journal.uid)
                 if fallback.copy is None:
+                    self._end_journal(path)
                     raise VaultError("no_copy", fallback.sentence or _none_good(journal.name))
                 if journal.from_vault and journal.source.kind == "friend":
                     self._revoke(folder, journal)
@@ -969,6 +1072,14 @@ class Vault:
             own_load = True
 
         while journal.steps["confirm"] != "done":
+            current = self.state(journal.uid)
+            if (
+                journal.steps["confirm"] == "started"
+                and current is not None
+                and current.holder == journal.target
+            ):
+                journal = _mark(path, journal, "confirm", "done")
+                break
             rerun = journal.steps["confirm"] == "started"
             journal = _mark(path, journal, "confirm", "started")
             try:
@@ -986,6 +1097,7 @@ class Vault:
                     journal,
                     f"Yu'lon could not tell whether {journal.name} arrived. "
                     "It asks again at the next start.",
+                    sentence_is_refusal=False,
                 )
             if own_load:
                 return self._rollback(folder, journal, steps, None, load_failed=True)
@@ -1009,19 +1121,31 @@ class Vault:
         self.prune(journal.uid)
         return MoveResult("done", journal.target, newest_at=self._newest_at(journal.uid))
 
-    def _waiting(self, journal: _Journal, sentence: str) -> MoveResult:
+    def _waiting(
+        self, journal: _Journal, sentence: str | None, *, sentence_is_refusal: bool = True
+    ) -> MoveResult:
         """A refusal after the load started: the target may hold it, so nothing is undone.
 
         `StepRefused` promises a step did nothing, but once the journal says the load was sent the
         vault cannot know what the world did with it: only a `confirm` that answers `failed` proves
-        the character is not there, and only that undoes the move.
+        the character is not there, and only that undoes the move. Once the lock is done the source
+        is banned, so a refusal's "nothing was moved" is not repeated: the sentence says only that
+        the move was not finished.
         """
         current = self.state(journal.uid)
-        answer = sentence or (
+        source_locked = journal.steps["lock"] == "done" and journal.source.kind == "home"
+        generic = (
             f"Yu'lon could not finish moving {journal.name}. It tries again at the next start."
         )
+        answer = (
+            generic if sentence is None or (source_locked and sentence_is_refusal) else sentence
+        )
         return MoveResult(
-            "waiting", journal.source if current is None else current.holder, sentence=answer
+            "waiting",
+            journal.source if current is None else current.holder,
+            sentence=answer,
+            waiting_step=_in_flight(journal)[0],
+            source_locked=source_locked,
         )
 
     def _rollback(
@@ -1072,8 +1196,13 @@ class Vault:
             holder = Holder("vault")
             if journal.source not in revoked:
                 revoked = (*revoked, journal.source)
-        if current is not None and (current.holder != holder or current.revoked != revoked):
-            self._write_state(folder, replace(current, holder=holder, revoked=revoked))
+        if current is not None and (
+            current.holder != holder or current.revoked != revoked or current.holder_unverified
+        ):
+            self._write_state(
+                folder,
+                replace(current, holder=holder, revoked=revoked, holder_unverified=False),
+            )
         self._end_journal(path)
         return MoveResult("rolled_back", holder, sentence=sentence, load_failed=load_failed)
 
@@ -1126,6 +1255,7 @@ class Vault:
                 state,
                 holder=journal.target,
                 names=tuple(sorted(names.items())),
+                holder_unverified=False,
             ),
         )
 
@@ -1171,6 +1301,7 @@ class Vault:
                 rollback_sentence=record.rollback_sentence,
                 rollback_load_failed=record.rollback_load_failed,
                 steps=dict(record.steps),
+                abandoned=record.abandoned,
             )
         except (ValidationError, ValueError) as exc:
             raise _record_damaged(path, folder) from exc
