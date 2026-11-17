@@ -861,6 +861,18 @@ def test_a_temporary_key_file_is_kept_when_no_key_loaded(tmp_path: Path) -> None
     assert stale.exists(), "a temp key file was removed while no key.json was there"
 
 
+def test_a_file_named_like_a_backup_is_not_a_stale_key_temp(tmp_path: Path) -> None:
+    """Round E: only `key.json.<16 hex>.tmp` is ours; a `.backup.tmp` of someone's is not."""
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    backup = folder / f"{identity.KEY_FILE}.backup.tmp"
+    backup.write_bytes(b"a person's own copy")
+    found = identity.load_or_create(tmp_path)
+    assert found.key_id == made.key_id
+    assert backup.exists(), "a file that is not a stale temp key was deleted"
+    assert backup.read_bytes() == b"a person's own copy"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX mode is what this asserts")
 def test_a_loose_identity_folder_is_made_owner_only_before_the_key_is_read(
     tmp_path: Path,
@@ -929,6 +941,66 @@ def test_a_key_file_with_a_second_link_is_refused(tmp_path: Path) -> None:
     assert "not a plain file of this account" in str(refused.value)
     second.unlink()
     assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX link is what this asserts")
+def test_a_leftover_temp_link_of_the_key_is_removed_and_the_key_loads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Round E: a kill after the link leaves a temp name of the key; that must not lock us out."""
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+    leftover = folder / f"{identity.KEY_FILE}.0123456789abcdef.tmp"
+    os.link(key, leftover)
+    assert key.lstat().st_nlink == 2
+    caplog.set_level(logging.WARNING, logger="yulon.portable.identity")
+    found = identity.load(tmp_path)
+    assert found is not None
+    assert found.key_id == made.key_id
+    assert not leftover.exists(), "the leftover temp link was not removed"
+    assert key.lstat().st_nlink == 1
+    assert any(
+        "removed a leftover temporary key file" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ), "nothing was said about the leftover temp link"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX link is what this asserts")
+def test_a_temp_name_that_is_not_a_link_of_the_key_is_not_deleted(tmp_path: Path) -> None:
+    """Only a link OF THIS key goes: a look-alike name is somebody else's file (round E)."""
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+    elsewhere = tmp_path / "the-second-name.json"
+    os.link(key, elsewhere)
+    look_alike = folder / f"{identity.KEY_FILE}.fedcba9876543210.tmp"
+    look_alike.write_bytes(b"a crashed create of another key")
+    with pytest.raises(identity.KeyNotProtected):
+        identity.load(tmp_path)
+    assert look_alike.read_bytes() == b"a crashed create of another key"
+    elsewhere.unlink()
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX inode is what this asserts")
+def test_a_key_file_swapped_between_the_check_and_the_open_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round E: the descriptor must be the file the check passed, not a name swapped meanwhile."""
+    identity.load_or_create(tmp_path)
+    real_fstat = os.fstat
+
+    def another_inode(handle: int) -> os.stat_result:
+        fields = list(tuple(real_fstat(handle)))
+        fields[1] = fields[1] + 1  # st_ino
+        return os.stat_result(tuple(fields))
+
+    monkeypatch.setattr(identity.os, "fstat", another_inode)
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity.load(tmp_path)
+    assert "not a plain file of this account" in str(refused.value)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="an owner uid is what this asserts")

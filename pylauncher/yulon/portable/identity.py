@@ -112,6 +112,8 @@ _SELF_CHECK_SIGNATURE = bytes.fromhex(
 _TARGET = re.compile(r"^/[\x21-\x7e]*$")
 _HEX_32 = re.compile(r"[0-9a-f]{32}")
 _TIME = re.compile(r"[0-9]{1,12}")
+_KEY_TEMP = re.compile(rf"{re.escape(KEY_FILE)}\.[0-9a-f]{{16}}\.tmp")
+"""A create's temp name, matched in full: `key.json.<16 lowercase hex>.tmp` and nothing else."""
 
 _KEY_FIELDS = ("format", "algorithm", "seed", "name", "created_at")
 _FRIEND_FIELDS = (
@@ -341,33 +343,26 @@ def _key_payload(identity: Identity, created_at: str) -> bytes:
     )
 
 
-def _loose_mode(path: Path) -> int | None:
-    """On POSIX, the mode `path` has when someone other than its owner may read or write it."""
-    if os.name == "nt":
-        return None
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except OSError as exc:
-        logger.warning(f"could not read {path}'s mode: {exc}")
-        return None
-    return mode if mode & 0o077 else None
-
-
-def _plain_file_of_this_account(path: Path) -> None:
-    """On POSIX, refuse a key file that is not one plain file this account owns (round D).
+def _plain_file_of_this_account(path: Path) -> os.stat_result | None:
+    """On POSIX, refuse a key file that is not one plain file this account owns.
 
     A symlink is a name for something else -- another Yu'lon's key, a file on a share --
     and a second hard link is a copy nothing keeps private. Either way the bytes read
     could not be trusted to be this Yu'lon's, so the file is refused untouched rather
     than opened, chmod'ed or rewritten.
+
+    The one second name that is ours is a temp name a kill left after the link (round E):
+    it holds this very key, so it is removed and the key then has one name. Any other
+    second name is still refused. Answers the file's `lstat` for the open to compare.
     """
     if os.name == "nt":
-        return
-    try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote") from exc
+        return None
+    st = _lstat_or_damaged(path)
     getuid = getattr(os, "getuid", None)
+    ours = stat.S_ISREG(st.st_mode) and (getuid is None or st.st_uid == getuid())
+    if ours and st.st_nlink > 1:
+        _remove_temp_links_of(path, st)
+        st = _lstat_or_damaged(path)
     if (
         not stat.S_ISREG(st.st_mode)
         or (getuid is not None and st.st_uid != getuid())
@@ -376,9 +371,63 @@ def _plain_file_of_this_account(path: Path) -> None:
         raise KeyNotProtected(
             "Yu'lon's key file is not a plain file of this account, so it will not use it."
         )
+    return st
 
 
-def _key_object(path: Path) -> dict[str, object]:
+def _lstat_or_damaged(path: Path) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote") from exc
+
+
+def _remove_temp_links_of(path: Path, st: os.stat_result) -> None:
+    """Remove temp names that are hard links of `path` itself, and nothing else (round E).
+
+    The name alone is not enough: a create of another key that crashed leaves a file
+    named the same way, and that one is not this key and is left alone.
+    """
+    try:
+        entries = list(path.parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not _KEY_TEMP.fullmatch(entry.name):
+            continue
+        try:
+            other = os.lstat(entry)
+        except OSError:
+            continue
+        if (other.st_dev, other.st_ino) != (st.st_dev, st.st_ino):
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            logger.warning(f"could not remove {entry.name}; it is a copy of the key")
+        else:
+            logger.warning("removed a leftover temporary key file")
+
+
+def _repair_key_mode(path: Path, handle: int, st: os.stat_result) -> None:
+    """Set a key file others could read or write back to 0o600 through its open descriptor."""
+    loose = stat.S_IMODE(st.st_mode)
+    if not loose & 0o077:
+        return
+    repair = getattr(os, "fchmod", None)
+    if repair is None:  # every POSIX has it; Windows never reaches here
+        logger.warning(f"could not make {path} owner-only: no fchmod on this platform")
+        return
+    try:
+        repair(handle, KEY_MODE)
+    except OSError as exc:
+        logger.warning(f"could not make {path} owner-only: {exc}")
+    else:
+        logger.warning(
+            f"{path} was readable or writable by others ({loose:03o}); set it back to 0o600"
+        )
+
+
+def _key_object(path: Path, expected: os.stat_result | None = None) -> dict[str, object]:
     """`key.json` as the object it must be, or `KeyFileDamaged` naming only the path."""
     damaged = KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -396,6 +445,15 @@ def _key_object(path: Path) -> dict[str, object]:
         raise
     try:
         with stream:
+            opened = os.fstat(stream.fileno())
+            if expected is not None:
+                if (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+                    # The name was swapped between the check and the open (round E).
+                    raise KeyNotProtected(
+                        "Yu'lon's key file is not a plain file of this account, "
+                        "so it will not use it."
+                    )
+                _repair_key_mode(path, stream.fileno(), opened)
             raw = stream.read()
     except OSError as exc:
         raise KeyFileDamaged(f"{path} could not be read ({type(exc).__name__})") from exc
@@ -416,18 +474,7 @@ def _key_object(path: Path) -> dict[str, object]:
 
 def _load_key(path: Path) -> tuple[Identity, str]:
     """The key `path` holds and its `created_at`, after repairing its POSIX mode if wide."""
-    _plain_file_of_this_account(path)
-    loose = _loose_mode(path)
-    if loose is not None:
-        try:
-            os.chmod(path, KEY_MODE)
-        except OSError as exc:
-            logger.warning(f"could not make {path} owner-only: {exc}")
-        else:
-            logger.warning(
-                f"{path} was readable or writable by others ({loose:03o}); set it back to 0o600"
-            )
-    parsed = _key_object(path)
+    parsed = _key_object(path, _plain_file_of_this_account(path))
     seed_text = parsed["seed"]
     name_text = parsed["name"]
     assert isinstance(seed_text, str) and isinstance(name_text, str)  # checked by `_key_object`
@@ -541,12 +588,19 @@ def _create_key(path: Path, payload: bytes) -> None:
 
 
 def _remove_stale_key_temps(folder: Path) -> None:
-    """Remove temp key files a crash left, once `key.json` is there and loads (round D).
+    """Remove temp key files a crash left, once `key.json` is there and loads.
 
     Only then are they stale copies of the seed with no readers: a temp file with no
     `key.json` beside it may be all a half-finished create wrote, and this leaves it.
+    Only a create's own name is removed (round E): `key.json.<16 hex>.tmp`, in full.
     """
-    for stale in folder.glob(f"{KEY_FILE}.*.tmp"):
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return
+    for stale in entries:
+        if not _KEY_TEMP.fullmatch(stale.name):
+            continue
         try:
             stale.unlink()
         except OSError:
