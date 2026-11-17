@@ -14,11 +14,15 @@ signature collected for one can never be presented as the other. A held-back sig
 be sent as `/leave` either: the method and the target (path and query) are inside the request's
 message.
 
-**One limit, named rather than hidden (decision 10).** The nonce book lives in memory, so a request
+**Known limits, named rather than hidden.** The nonce book lives in memory, so a request
 captured in the 300 seconds before a host restarts can be replayed once after it. A book on disk
 would trade that for a file that has to be repaired; the window is the honest bound this keeps.
 The book also holds a quota per key id (`NONCE_LIMIT_PER_KEY`), so one friend's flood refuses that
-friend's requests only, never every other friend's.
+friend's requests only, never every other friend's. The key is written whole or not at all by a
+hard link, but a disk without hard links has no such step: there the key is written directly
+under its own name, so a crash in that one instant can leave a damaged key file. Yu'lon refuses a
+damaged key rather than replacing it, so that file has to be deleted by hand; the next start then
+makes a new key.
 
 **Nothing here logs the seed.** No log line, exception message, `repr` or file other than
 `key.json` holds it, and `Identity` never hands it back out.
@@ -349,11 +353,50 @@ def _loose_mode(path: Path) -> int | None:
     return mode if mode & 0o077 else None
 
 
+def _plain_file_of_this_account(path: Path) -> None:
+    """On POSIX, refuse a key file that is not one plain file this account owns (round D).
+
+    A symlink is a name for something else -- another Yu'lon's key, a file on a share --
+    and a second hard link is a copy nothing keeps private. Either way the bytes read
+    could not be trusted to be this Yu'lon's, so the file is refused untouched rather
+    than opened, chmod'ed or rewritten.
+    """
+    if os.name == "nt":
+        return
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote") from exc
+    getuid = getattr(os, "getuid", None)
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or (getuid is not None and st.st_uid != getuid())
+        or st.st_nlink != 1
+    ):
+        raise KeyNotProtected(
+            "Yu'lon's key file is not a plain file of this account, so it will not use it."
+        )
+
+
 def _key_object(path: Path) -> dict[str, object]:
     """`key.json` as the object it must be, or `KeyFileDamaged` naming only the path."""
     damaged = KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        raw = path.read_bytes()
+        handle = os.open(path, flags)
+    except OSError as exc:
+        raise KeyFileDamaged(f"{path} could not be read ({type(exc).__name__})") from exc
+    try:
+        stream = os.fdopen(handle, "rb")
+    except BaseException:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+        raise
+    try:
+        with stream:
+            raw = stream.read()
     except OSError as exc:
         raise KeyFileDamaged(f"{path} could not be read ({type(exc).__name__})") from exc
     try:
@@ -373,6 +416,7 @@ def _key_object(path: Path) -> dict[str, object]:
 
 def _load_key(path: Path) -> tuple[Identity, str]:
     """The key `path` holds and its `created_at`, after repairing its POSIX mode if wide."""
+    _plain_file_of_this_account(path)
     loose = _loose_mode(path)
     if loose is not None:
         try:
@@ -486,13 +530,34 @@ def _create_key(path: Path, payload: bytes) -> None:
             )
             _write_new_file(path, payload)
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # The key is linked in already: a temp name left behind is untidy, never a
+            # reason to undo it. The name is owner-only and holds the seed, so no path.
+            logger.warning(
+                "could not remove a temporary key file; it holds the key and is owner-only"
+            )
+
+
+def _remove_stale_key_temps(folder: Path) -> None:
+    """Remove temp key files a crash left, once `key.json` is there and loads (round D).
+
+    Only then are they stale copies of the seed with no readers: a temp file with no
+    `key.json` beside it may be all a half-finished create wrote, and this leaves it.
+    """
+    for stale in folder.glob(f"{KEY_FILE}.*.tmp"):
+        try:
+            stale.unlink()
+        except OSError:
+            logger.warning(f"could not remove {stale.name}; it holds a copy of the key")
 
 
 def load_or_create(config_dir: Path | None = None) -> Identity:
     """This Yu'lon's key pair, made once if absent. An existing key is never replaced."""
     found = load(config_dir)
     if found is not None:
+        _remove_stale_key_temps(identity_dir(config_dir))
         return found
     folder = identity_dir(config_dir)
     folder.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
@@ -512,6 +577,7 @@ def load_or_create(config_dir: Path | None = None) -> Identity:
         other = load(config_dir)
         if other is None:
             raise KeyFileDamaged(f"{path} is there and could not be read") from None
+        _remove_stale_key_temps(folder)
         return other
     platform.fsync_folder(folder)
     logger.info(f"made this Yu'lon's key pair; key id {identity.key_id}")

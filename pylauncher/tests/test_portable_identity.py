@@ -805,6 +805,62 @@ def test_a_second_creator_loads_the_first_ones_key(
     assert not [entry for entry in folder.iterdir() if entry.name.endswith(".tmp")]
 
 
+def test_a_temporary_key_file_that_cannot_be_removed_still_leaves_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Round D: the key is linked in already; failing to tidy the temp name must not undo it."""
+    real_unlink = Path.unlink
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        if self.name.endswith(".tmp"):
+            raise PermissionError("the temporary file is held open")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    caplog.set_level(logging.WARNING, logger="yulon.portable.identity")
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+    assert key.exists(), "a tidy-up failure took the key away"
+    assert made.key_id == identity.key_id_of(made.public_key)
+    signature = identity.sign_package(made, b"a manifest")
+    checked = identity.check_package(
+        b"a manifest", signature, friends=identity.FriendList(), me=made
+    )
+    assert checked.is_self
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1, f"expected one warning, saw {[r.getMessage() for r in warnings]}"
+    assert "could not remove a temporary key file" in warnings[0].getMessage()
+    seed = base64.b64decode(str(_json(key.read_bytes())["seed"]))
+    for record in caplog.records:
+        for spelling in _seed_spellings(seed):
+            assert spelling not in record.getMessage(), "the seed was logged"
+
+
+def test_leftover_temporary_key_files_are_removed_once_the_key_loads(tmp_path: Path) -> None:
+    """Round D: a crash's stale temp copy of the seed goes once the real key is there."""
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    stale = folder / f"{identity.KEY_FILE}.0123456789abcdef.tmp"
+    stale.write_bytes(identity._key_payload(made, "2020-01-01T00:00:00Z"))
+    found = identity.load_or_create(tmp_path)
+    assert found.key_id == made.key_id
+    assert not stale.exists(), "a stale copy of the key was left beside the real one"
+
+
+def test_a_temporary_key_file_is_kept_when_no_key_loaded(tmp_path: Path) -> None:
+    """Only a key that loads makes a temp copy stale: with no key.json it may be all there is."""
+    folder = tmp_path / identity.DIR_NAME
+    folder.mkdir()
+    stale = folder / f"{identity.KEY_FILE}.0123456789abcdef.tmp"
+    stale.write_bytes(
+        identity._key_payload(identity.Identity(_seed(4), "Left"), "2020-01-01T00:00:00Z")
+    )
+    made = identity.load_or_create(tmp_path)
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+    assert stale.exists(), "a temp key file was removed while no key.json was there"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX mode is what this asserts")
 def test_a_loose_identity_folder_is_made_owner_only_before_the_key_is_read(
     tmp_path: Path,
@@ -832,6 +888,78 @@ def test_an_identity_folder_of_another_account_is_refused(
         identity.load_or_create(tmp_path)
     assert "belongs to another account" in str(refused.value)
     assert not (folder / identity.KEY_FILE).exists(), "a key was made in another account's folder"
+
+
+def _a_key_of_another_yulon(tmp_path: Path) -> Path:
+    """A valid key file outside the identity folder, for the link tests to point at."""
+    outside = tmp_path / "elsewhere.json"
+    outside.write_bytes(
+        identity._key_payload(identity.Identity(_seed(3), "Elsewhere"), "2020-01-01T00:00:00Z")
+    )
+    return outside
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX link is what this asserts")
+def test_a_key_file_that_is_a_symlink_is_refused(tmp_path: Path) -> None:
+    """Round D: the key is one plain file this account made, never a name standing for another."""
+    folder = tmp_path / identity.DIR_NAME
+    folder.mkdir()
+    target = _a_key_of_another_yulon(tmp_path)
+    before = target.read_bytes()
+    key = folder / identity.KEY_FILE
+    os.symlink(target, key)
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity.load(tmp_path)
+    assert "not a plain file of this account" in str(refused.value)
+    assert key.is_symlink(), "the key file's name was changed"
+    assert target.read_bytes() == before
+    with pytest.raises(identity.KeyNotProtected):
+        identity.load_or_create(tmp_path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX link is what this asserts")
+def test_a_key_file_with_a_second_link_is_refused(tmp_path: Path) -> None:
+    """A second name for the seed is a copy nothing keeps private: refuse that key."""
+    made = identity.load_or_create(tmp_path)
+    key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
+    second = tmp_path / "a-second-name-for-the-key.json"
+    os.link(key, second)
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity.load(tmp_path)
+    assert "not a plain file of this account" in str(refused.value)
+    second.unlink()
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="an owner uid is what this asserts")
+def test_a_key_file_of_another_account_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name is not this account's to trust: refuse, and touch nothing."""
+    made = identity.load_or_create(tmp_path)
+    key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
+    before = key.read_bytes()
+    real_getuid = os.getuid
+    monkeypatch.setattr(identity.os, "getuid", lambda: real_getuid() + 1)
+    # `load`'s folder check would fire first; this is the key file's own check.
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity._load_key(key)
+    assert "not a plain file of this account" in str(refused.value)
+    assert key.read_bytes() == before
+    monkeypatch.setattr(identity.os, "getuid", real_getuid)
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+
+
+def test_a_key_made_here_passes_the_plain_file_check(tmp_path: Path) -> None:
+    """The temp name is unlinked after the link, so a freshly made key has exactly one link."""
+    made = identity.load_or_create(tmp_path)
+    key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
+    st = key.lstat()
+    assert stat.S_ISREG(st.st_mode)
+    assert st.st_nlink == 1
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+    renamed = identity.rename(made, "Still Fine", config_dir=tmp_path)
+    assert renamed.key_id == made.key_id
 
 
 def test_rename_keeps_the_key(tmp_path: Path) -> None:
