@@ -1294,7 +1294,7 @@ def test_a_holder_in_doubt_is_never_moved(tmp_path: Path) -> None:
     state = vault.state(UID)
     assert state is not None
     assert state.holder_unverified is True
-    assert state.unverified_worlds == (HOME, FRIEND)
+    assert set(state.unverified_worlds) == {HOME, FRIEND}
     before, events = worlds.snapshot(), list(worlds.events)
     for target in (HOME, FRIEND, Holder("friend", world=OTHER_WORLD, visit_id=VISIT)):
         with pytest.raises(VaultError) as excinfo:
@@ -1455,6 +1455,127 @@ def test_settling_the_vault_with_no_good_copy_is_refused(tmp_path: Path) -> None
         vault.settle_holder(UID, Holder("vault"))
     assert excinfo.value.reason == "no_copy"
     assert state_json(vault) == before
+
+
+# -- round H: where the load was going --------------------------------------------
+
+
+def test_the_target_of_a_load_is_known_without_the_journal(tmp_path: Path) -> None:
+    """A torn journal cannot hide the world the load was going to: the state says it."""
+    vault, worlds = begun(tmp_path)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    assert vault.state(UID).moving_to == FRIEND
+    journal_path(vault).write_text("{not a journal")
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    assert vault.state(UID).moving_to == FRIEND
+    settled = vault.settle_holder(UID, HOME)
+    assert FRIEND in settled.revoked
+    assert settled.moving_to is None
+
+
+def test_a_load_from_the_vault_names_its_target_without_the_journal(tmp_path: Path) -> None:
+    """The same when the vault holds it: the target is the one world it was going to."""
+    vault, worlds = begun(tmp_path)
+    other = Holder("friend", world=OTHER_WORLD, visit_id=VISIT)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    vault.abandon_move(UID)
+    assert vault.state(UID).holder == Holder("vault")
+    with pytest.raises(Crash):
+        vault.move(UID, other, worlds.steps(), from_vault=True)
+    worlds.crash = None
+    journal_path(vault).write_text("{not a journal")
+    assert vault.abandon_damaged_journal(UID).holder_unverified is True
+    assert vault.state(UID).moving_to == other
+    settled = vault.settle_holder(UID, Holder("vault"))
+    assert settled.holder == Holder("vault")
+    assert other in settled.revoked
+    assert settled.moving_to is None
+
+
+def test_a_crash_between_the_state_and_the_load_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The state knows the target before the journal says the load started, and a rerun goes on."""
+    vault, worlds = begun(tmp_path)
+    arm_mark_crash_before(monkeypatch, "load", "started")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    state = vault.state(UID)
+    assert state is not None
+    assert state.moving_to == FRIEND
+    assert json.loads(journal_path(vault).read_text())["steps"]["load"] == "pending"
+    result = vault.resume(UID, worlds.steps())
+    assert result is not None
+    assert result.outcome == "done"
+    assert vault.state(UID).moving_to is None
+
+
+def move_that_ends(base: Path, ending: str) -> Vault:
+    """A move that finished the way `ending` says, from a character standing at home."""
+    vault, worlds = begun(base)
+    if ending == "done":
+        assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+    elif ending == "rolled_back":
+        worlds.answers = ["failed"]
+        assert vault.move(UID, FRIEND, worlds.steps()).outcome == "rolled_back"
+    else:
+        worlds.crash = ("load", "in_step")
+        with pytest.raises(Crash):
+            vault.move(UID, FRIEND, worlds.steps())
+        worlds.crash = None
+        assert vault.abandon_move(UID).outcome == "abandoned"
+    return vault
+
+
+@pytest.mark.parametrize("ending", ["done", "rolled_back", "abandoned"])
+def test_a_move_that_ends_for_good_names_no_target(tmp_path: Path, ending: str) -> None:
+    vault = move_that_ends(tmp_path, ending)
+    assert vault.state(UID).moving_to is None
+
+
+def test_a_state_written_before_the_target_field_still_loads(tmp_path: Path) -> None:
+    """Round H adds `moving_to`; a file written before it means the same as no target."""
+    vault, worlds = begun(tmp_path)
+    path = vault.character_dir(UID) / "state.json"
+    state = json.loads(path.read_text())
+    del state["moving_to"]
+    path.write_text(json.dumps(state))
+    read = vault.state(UID)
+    assert read is not None
+    assert read.moving_to is None
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+
+
+def test_settling_the_vault_points_the_state_at_the_best_copy(tmp_path: Path) -> None:
+    """The vault holds the character, so its newest copy is the one the state must name."""
+    vault, worlds = begun(tmp_path)
+    vault.store(a_package(worlds.made_dir, sequence=2), "stop")
+    old = vault.store(a_package(worlds.made_dir, sequence=1), "before-visit")
+    worlds.dump_sequence = 3
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    path = vault.character_dir(UID) / "state.json"
+    stale = json.loads(path.read_text())
+    stale["newest"] = old.file
+    stale["newest_digest"] = digest_of(old.path)
+    stale["sequence"] = 1
+    stale["parents"] = []
+    path.write_text(json.dumps(stale))
+    best = max(copies_of(vault), key=lambda copy: copy.number)
+    journal_path(vault).write_text("{not a journal")
+    vault.abandon_damaged_journal(UID)
+    settled = vault.settle_holder(UID, Holder("vault"))
+    assert settled.newest == best.file
+    assert settled.newest_digest == digest_of(best.path)
+    assert settled.sequence == 3
+    assert settled.parents[0] == digest_of(best.path)
 
 
 # -- absent right after this run's own load ---------------------------------------

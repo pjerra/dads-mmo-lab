@@ -31,6 +31,8 @@ caller must find out which world holds the character -- ask both worlds -- and c
 `settle_holder` trusts the caller: it checks nothing against the worlds, so the caller must have
 asked them. When a move from home to a friend is settled to the friend, the caller must lock the
 home copy itself; the vault never locks. A wrong settle is corrected by the next real move only.
+After `settle_holder(uid, home)` for a move that had locked home, the caller must unlock the home
+copy itself: a settle calls no step.
 
 One known limit: a folder in the place of `journal.json`, or a file the vault cannot read at all,
 stops every call for that character until it is removed by hand. Only a journal the vault could
@@ -202,6 +204,8 @@ class CharacterState:
     """True when a damaged journal hid which world holds the character (round C)."""
     unverified_worlds: tuple[Holder, ...] = ()
     """The worlds that damaged move named, to revoke once the player settles the holder."""
+    moving_to: Holder | None = None
+    """The target of a load that was sent, written before the journal says it started (round H)."""
 
 
 @dataclass(frozen=True)
@@ -292,6 +296,7 @@ class _StateRecord(BaseModel):
     revoked: tuple[_HolderRecord, ...] = ()
     holder_unverified: bool = False
     unverified_worlds: tuple[_HolderRecord, ...] = ()
+    moving_to: _HolderRecord | None = None
 
 
 class _JournalRecord(BaseModel):
@@ -359,6 +364,7 @@ def _state_obj(state: CharacterState) -> dict[str, object]:
         "revoked": [_holder_obj(holder) for holder in state.revoked],
         "holder_unverified": state.holder_unverified,
         "unverified_worlds": [_holder_obj(one) for one in state.unverified_worlds],
+        "moving_to": None if state.moving_to is None else _holder_obj(state.moving_to),
     }
 
 
@@ -539,6 +545,7 @@ class Vault:
                 revoked=tuple(_holder(one) for one in record.revoked),
                 holder_unverified=record.holder_unverified,
                 unverified_worlds=tuple(_holder(one) for one in record.unverified_worlds),
+                moving_to=None if record.moving_to is None else _holder(record.moving_to),
             )
         except (ValidationError, ValueError) as exc:
             raise _record_damaged(path, folder) from exc
@@ -994,8 +1001,9 @@ class Vault:
                     raise ValueError("this character's journal parses; finish that move")
                 raise ValueError("this character has no journal to abandon")
             worlds: list[Holder] = []
-            if state.holder.kind == "friend":
-                worlds.append(state.holder)
+            for one in (state.holder, state.moving_to):
+                if one is not None and one.kind == "friend" and one not in worlds:
+                    worlds.append(one)
             for world in (*state.unverified_worlds, *_named_worlds(raw)):
                 if world not in worlds:
                     worlds.append(world)
@@ -1027,7 +1035,7 @@ class Vault:
         leaves `revoked`, and every other friend world the damaged move named is added to it,
         because a copy left there may have been played on. Only this call clears
         `holder_unverified`, so no move can start before it; settling to the vault needs a copy
-        that still reads, because the vault cannot hold what it lost.
+        that still reads and names it as the newest, because the vault cannot hold what it lost.
         """
         folder = self.character_dir(uid)
         self.root.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
@@ -1042,7 +1050,8 @@ class Vault:
                 )
             if not state.holder_unverified:
                 raise ValueError("this character's holder was never in doubt")
-            if holder.kind == "vault" and self._best_good(uid) is None:
+            best = self._best_good(uid) if holder.kind == "vault" else None
+            if holder.kind == "vault" and best is None:
                 raise VaultError("no_copy", _none_good(state.name))
             revoked = tuple(one for one in state.revoked if one != holder)
             for world in state.unverified_worlds:
@@ -1054,7 +1063,18 @@ class Vault:
                 revoked=revoked,
                 holder_unverified=False,
                 unverified_worlds=(),
+                moving_to=None,
             )
+            if best is not None:
+                live, package = best
+                settled = replace(
+                    settled,
+                    name=package.manifest.character.name,
+                    sequence=max(state.sequence, package.manifest.sequence),
+                    parents=(package.digest, *package.manifest.parents)[:MAX_PARENTS],
+                    newest=live.file,
+                    newest_digest=package.digest,
+                )
             self._write_state(folder, settled)
             return settled
 
@@ -1101,7 +1121,7 @@ class Vault:
             )
         else:
             state = replace(state, newest=live, newest_digest=None)
-        self._write_state(folder, replace(state, holder=Holder("vault")))
+        self._write_state(folder, replace(state, holder=Holder("vault"), moving_to=None))
         self._end_journal(path)
         return MoveResult(
             "abandoned",
@@ -1136,6 +1156,16 @@ class Vault:
             if best is None or package.manifest.sequence > best[1].manifest.sequence:
                 best = (copy, package)
         return best
+
+    def _note_target(self, folder: Path, journal: _Journal) -> None:
+        """Write down where the load is going before it starts, so a torn journal cannot hide it.
+
+        One state write, then the journal's mark: a crash in between leaves the journal saying
+        `pending`, and the rerun finds the target already there and does not write again.
+        """
+        state = self.state(journal.uid)
+        if state is not None and state.moving_to is None:
+            self._write_state(folder, replace(state, moving_to=journal.target))
 
     def _run(self, folder: Path, journal: _Journal, steps: MoveSteps) -> MoveResult:
         path = folder / JOURNAL_FILE
@@ -1216,6 +1246,7 @@ class Vault:
 
         own_load = False
         if journal.steps["load"] == "pending":
+            self._note_target(folder, journal)
             journal = _mark(path, journal, "load", "started")
             try:
                 steps.load(self._context(folder, journal, False))
@@ -1254,6 +1285,7 @@ class Vault:
                 )
             if own_load:
                 return self._rollback(folder, journal, steps, None, load_failed=True)
+            self._note_target(folder, journal)
             journal = _mark(path, journal, "load", "started")
             try:
                 steps.load(self._context(folder, journal, True))
@@ -1348,8 +1380,12 @@ class Vault:
             holder = Holder("vault")
             if journal.source not in revoked:
                 revoked = (*revoked, journal.source)
-        if current is not None and (current.holder != holder or current.revoked != revoked):
-            self._write_state(folder, replace(current, holder=holder, revoked=revoked))
+        if current is not None and (
+            current.holder != holder or current.revoked != revoked or current.moving_to is not None
+        ):
+            self._write_state(
+                folder, replace(current, holder=holder, revoked=revoked, moving_to=None)
+            )
         self._end_journal(path)
         return MoveResult("rolled_back", holder, sentence=sentence, load_failed=load_failed)
 
@@ -1403,6 +1439,7 @@ class Vault:
                 holder=journal.target,
                 names=tuple(sorted(names.items())),
                 revoked=tuple(one for one in state.revoked if one != journal.target),
+                moving_to=None,
             ),
         )
 
