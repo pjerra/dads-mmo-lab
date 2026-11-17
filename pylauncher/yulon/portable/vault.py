@@ -26,6 +26,10 @@ source locked, and the way on is `move(..., from_vault=True)`; abandoning a move
 confirmed throws away everything played on that world since the last copy in the vault.
 `lock` and `unlock` must be safe to call when nothing was locked, because a rerun cannot know
 whether the ban or the erase went out before the crash.
+
+One known limit: a folder in the place of `journal.json`, or a file the vault cannot read at all,
+stops every call for that character until it is removed by hand. Only a journal the vault could
+read and found unusable is set aside; a failing disk is not a bad record.
 """
 
 from __future__ import annotations
@@ -392,6 +396,20 @@ def _record_damaged(path: Path, folder: Path) -> VaultError:
     )
 
 
+def _journal_holds(record: _JournalRecord, folder: Path) -> bool:
+    """Whether the journal is this character's, carries the five steps and names no path.
+
+    A name the vault itself would give a copy is a bare file name in `packages/`; anything with a
+    separator or a dot is not one, and `_NAME` already refuses both.
+    """
+    if record.uid != folder.name or set(record.steps) != set(STEPS):
+        return False
+    return all(
+        name is None or _NAME.fullmatch(name) is not None
+        for name in (record.package, record.reserved)
+    )
+
+
 def _name(state: CharacterState | None) -> str:
     return state.name if state is not None else "this character"
 
@@ -472,6 +490,8 @@ class Vault:
             raise VaultError("newer_format", _NEWER_FORMAT)
         try:
             record = _StateRecord.model_validate(obj)
+            if record.uid != folder.name:
+                raise ValueError("the state names another character")
             return CharacterState(
                 uid=record.uid,
                 name=record.name,
@@ -1332,6 +1352,8 @@ class Vault:
             raise VaultError("newer_format", _NEWER_FORMAT)
         try:
             record = _JournalRecord.model_validate(obj)
+            if not _journal_holds(record, folder):
+                raise ValueError("the journal names something else")
             return _Journal(
                 move_id=record.move_id,
                 uid=record.uid,

@@ -1158,6 +1158,103 @@ def test_an_intact_journal_is_never_moved_aside(tmp_path: Path) -> None:
     assert journal_path(vault).read_bytes() == before
 
 
+def a_crashed_load(base: Path) -> tuple[Vault, FakeWorlds]:
+    """A move whose `load` went out and crashed after it, so the journal is worth editing."""
+    vault, worlds = begun(base)
+    worlds.crash = ("load", "in_step")
+    with pytest.raises(Crash):
+        vault.move(UID, FRIEND, worlds.steps())
+    worlds.crash = None
+    return vault, worlds
+
+
+def edit_journal(vault: Vault, edit: Callable[[dict[str, object]], None], uid: str = UID) -> None:
+    path = journal_path(vault, uid)
+    obj = json.loads(path.read_text())
+    edit(obj)
+    path.write_text(json.dumps(obj))
+
+
+def _uid_not_an_id(journal: dict[str, object]) -> None:
+    journal["uid"] = "ZZZZZ"
+
+
+def _uid_of_another_character(journal: dict[str, object]) -> None:
+    journal["uid"] = OTHER_UID
+
+
+def _no_load_step(journal: dict[str, object]) -> None:
+    steps = journal["steps"]
+    assert isinstance(steps, dict)
+    del steps["load"]
+
+
+def _an_unknown_step(journal: dict[str, object]) -> None:
+    steps = journal["steps"]
+    assert isinstance(steps, dict)
+    steps["store"] = "done"
+
+
+def _package_outside_the_folder(journal: dict[str, object]) -> None:
+    journal["package"] = "../x.ylchar"
+
+
+JOURNAL_EDITS: list[tuple[str, Callable[[dict[str, object]], None]]] = [
+    ("uid-not-an-id", _uid_not_an_id),
+    ("uid-of-another-character", _uid_of_another_character),
+    ("steps-without-load", _no_load_step),
+    ("steps-with-an-unknown-one", _an_unknown_step),
+    ("package-outside-the-folder", _package_outside_the_folder),
+]
+
+
+@pytest.mark.parametrize(
+    ("edit",),
+    [(edit,) for _, edit in JOURNAL_EDITS],
+    ids=[name for name, _ in JOURNAL_EDITS],
+)
+def test_a_journal_that_names_what_it_must_not_is_damaged(
+    tmp_path: Path, edit: Callable[[dict[str, object]], None]
+) -> None:
+    """Round E: only this character's own, whole, pathless journal is a journal."""
+    vault, worlds = a_crashed_load(tmp_path)
+    edit_journal(vault, edit)
+    before, events = worlds.snapshot(), list(worlds.events)
+    for call in (
+        lambda: vault.resume(UID, worlds.steps()),
+        lambda: vault.move(UID, FRIEND, worlds.steps()),
+        lambda: vault.abandon_move(UID),
+    ):
+        with pytest.raises(VaultError) as excinfo:
+            call()
+        assert excinfo.value.reason == "record_damaged"
+    assert worlds.events == events
+    assert worlds.snapshot() == before
+    result = vault.abandon_damaged_journal(UID)
+    assert result.outcome == "waiting"
+    assert not journal_path(vault).exists()
+    assert (vault.character_dir(UID) / "journal.damaged-1.json").exists()
+    assert worlds.events == events
+    assert vault.move(UID, FRIEND, worlds.steps()).outcome == "done"
+
+
+def test_a_state_that_names_another_character_is_damaged(tmp_path: Path) -> None:
+    """Round E: `state.json` is this character's too, so a foreign uid is not read."""
+    vault, worlds = begun(tmp_path)
+    path = vault.character_dir(UID) / "state.json"
+    state = json.loads(path.read_text())
+    state["uid"] = OTHER_UID
+    path.write_text(json.dumps(state))
+    for call in (
+        lambda: vault.state(UID),
+        lambda: vault.move(UID, FRIEND, worlds.steps()),
+    ):
+        with pytest.raises(VaultError) as excinfo:
+            call()
+        assert excinfo.value.reason == "record_damaged"
+    assert worlds.events == []
+
+
 # -- absent right after this run's own load ---------------------------------------
 
 
