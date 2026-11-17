@@ -9,7 +9,9 @@ lock with `flock`, Windows with `msvcrt.locking` on one byte of `lease`.
 
 `lease-holder.json` says whose lease it is, for the sentence the second window shows. It is
 never believed on its own: it is written only while the lock is held, and read only after the
-lock was refused, so a stale file from a dead process cannot block a live one.
+lock was refused, so a stale file from a dead process cannot block a live one. On some network
+disks the OS lock is local to each computer, so two computers sharing one config folder are not
+protected by it.
 """
 
 from __future__ import annotations
