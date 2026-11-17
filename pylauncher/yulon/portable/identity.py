@@ -371,8 +371,8 @@ def _key_object(path: Path) -> dict[str, object]:
     return parsed
 
 
-def _load_key(path: Path) -> Identity:
-    """The key `path` holds, after repairing its POSIX mode if it was found wider than 0o600."""
+def _load_key(path: Path) -> tuple[Identity, str]:
+    """The key `path` holds and its `created_at`, after repairing its POSIX mode if wide."""
     loose = _loose_mode(path)
     if loose is not None:
         try:
@@ -394,33 +394,51 @@ def _load_key(path: Path) -> Identity:
         raise KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote") from exc
     if len(seed) != 32:
         raise KeyFileDamaged(f"{path} is not a key file this Yu'lon wrote")
-    return Identity(seed, name)
+    created_at = parsed["created_at"]
+    assert isinstance(created_at, str)  # checked by `_key_object`
+    return Identity(seed, name), created_at
 
 
-def _empty_key_file(path: Path) -> bool:
-    """`True` when `key.json` holds zero bytes: a power cut before the first write, not a key."""
-    try:
-        return path.stat().st_size == 0
-    except OSError:
-        return False
+def _secure_dir_posix(folder: Path) -> None:
+    """On POSIX, make `folder` owner-only before a read or a create (round C).
+
+    The file's own 0o600 is only as private as the folder around it: a folder wider than
+    0o700 is set back to it with one warning, and a folder that belongs to another account
+    is refused rather than repaired -- that account owns the name, so it could read the key
+    whatever the mode says.
+    """
+    if os.name == "nt" or not folder.exists():
+        return
+    st = os.stat(folder)
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and st.st_uid != getuid():
+        raise KeyNotProtected(
+            "Yu'lon's key folder belongs to another account on this computer, "
+            "so it will not use it."
+        )
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & 0o077:
+        os.chmod(folder, DIR_MODE)
+        logger.warning(f"{folder} was open to other accounts ({mode:03o}); set it back to 0o700")
 
 
 def load(config_dir: Path | None = None) -> Identity | None:
     """This Yu'lon's key pair, or `None` when `key.json` is not there."""
     folder = identity_dir(config_dir)
+    _secure_dir_posix(folder)
     path = folder / KEY_FILE
     if not path.exists():
         return None
-    if _empty_key_file(path):
-        # Zero bytes is a power cut between `os.open` and the first write, not damage:
-        # `load_or_create` removes it and makes the key. Any other content is damaged.
-        return None
     winacl.secure_folder(folder, reading=True)
-    return _load_key(path)
+    return _load_key(path)[0]
 
 
-def _create_key(path: Path, payload: bytes) -> None:
-    """Create `key.json` exclusively and owner-only; a failure after the open removes it."""
+def _write_new_file(path: Path, payload: bytes) -> None:
+    """Create `path` exclusively and owner-only with `payload` in it, or remove the name.
+
+    The handle is closed once: `os.fdopen` failing is the only case that closes by hand,
+    and the stream's own `with` closes it otherwise (round B).
+    """
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     handle = os.open(path, flags, KEY_MODE)
     try:
@@ -443,6 +461,34 @@ def _create_key(path: Path, payload: bytes) -> None:
         raise
 
 
+def _create_key(path: Path, payload: bytes) -> None:
+    """Create `key.json` whole or not at all (round C).
+
+    The payload goes to a temp name in the same folder, is fsynced, and is then hard-linked
+    to `key.json`: a link either makes the name or fails with `FileExistsError`, so no reader
+    -- and no crash -- can ever see a half-written or empty key. `FileExistsError` is the
+    caller's "someone else made it" case, and the temp name is gone either way.
+
+    A filesystem without hard links falls back to the direct exclusive create of round A,
+    which has that window again; the fallback says so once, at INFO.
+    """
+    tmp = path.with_name(f"{KEY_FILE}.{secrets.token_hex(8)}.tmp")
+    try:
+        _write_new_file(tmp, payload)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise
+        except OSError as exc:
+            logger.info(
+                f"{path.parent} has no hard links ({type(exc).__name__}: {exc}); "
+                f"writing {path.name} directly"
+            )
+            _write_new_file(path, payload)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def load_or_create(config_dir: Path | None = None) -> Identity:
     """This Yu'lon's key pair, made once if absent. An existing key is never replaced."""
     found = load(config_dir)
@@ -450,6 +496,7 @@ def load_or_create(config_dir: Path | None = None) -> Identity:
         return found
     folder = identity_dir(config_dir)
     folder.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+    _secure_dir_posix(folder)
     path = folder / KEY_FILE
     if not winacl.secure_folder_checked(folder):
         # A key anyone in the profile can read is not a private key (round B). Nothing is
@@ -458,10 +505,6 @@ def load_or_create(config_dir: Path | None = None) -> Identity:
             "Yu'lon could not make its key folder private on this computer, "
             "so it did not make a key."
         )
-    if _empty_key_file(path):
-        # The name a power cut left behind: empty, so no key ever landed. Remove it, or the
-        # exclusive create below would find it and refuse.
-        path.unlink(missing_ok=True)
     identity = Identity(secrets.token_bytes(32), _default_name())
     try:
         _create_key(path, _key_payload(identity, _created_at()))
@@ -478,15 +521,13 @@ def load_or_create(config_dir: Path | None = None) -> Identity:
 def rename(identity: Identity, name: str, *, config_dir: Path | None = None) -> Identity:
     """Keep the same key pair under a new display name, written atomically over `key.json`."""
     folder = identity_dir(config_dir)
+    _secure_dir_posix(folder)
     path = folder / KEY_FILE
     winacl.secure_folder(folder)
-    loaded = _load_key(path)
+    loaded, created = _load_key(path)
     if identity.public_key != loaded.public_key:
         # A rename is a name change on the key in the file, never a way to replace it.
         raise IdentityError("this is not the key of this Yu'lon")
-    parsed = _key_object(path)
-    created = parsed["created_at"]
-    assert isinstance(created, str)  # checked by `_key_object`
     renamed = Identity(loaded._seed, name)
     platform.write_private_atomically(path, _key_payload(renamed, created))
     logger.info(f"renamed this Yu'lon to {renamed.name!r}; key id {renamed.key_id}")
@@ -607,8 +648,15 @@ class SignedRequest:
     def from_headers(cls, headers: Mapping[str, str]) -> SignedRequest:
         """The headers as a `SignedRequest`, or `RequestRefused` for a missing or malformed one."""
         lowered: dict[str, str] = {}
+        wanted = {
+            name.lower() for name in (HEADER_KEY, HEADER_TIME, HEADER_NONCE, HEADER_SIGNATURE)
+        }
         for name, value in headers.items():
             folded = str(name).lower()
+            if folded not in wanted:
+                # Any other header may arrive twice: a proxy adds its own `Via`, twice
+                # sometimes, and this app has no opinion about it (round C).
+                continue
             if folded in lowered:
                 # Two spellings of one name: a verifier that picks one lets the other be
                 # read by whoever forwards this. There is no honest sender that sends both.
@@ -865,6 +913,7 @@ class FriendList:
     def load(cls, config_dir: Path | None = None) -> FriendList:
         """The list on disk; empty when there is none, `FriendListDamaged` if it will not parse."""
         folder = identity_dir(config_dir)
+        _secure_dir_posix(folder)
         path = folder / FRIENDS_FILE
         if not path.is_file():
             return cls()
@@ -908,6 +957,7 @@ class FriendList:
         """Write the list atomically, owner-only, and answer where it went."""
         folder = identity_dir(config_dir)
         folder.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+        _secure_dir_posix(folder)
         winacl.secure_folder(folder)
         path = folder / FRIENDS_FILE
         payload = _json_bytes(

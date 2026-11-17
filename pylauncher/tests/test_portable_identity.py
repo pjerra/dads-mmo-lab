@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import secrets
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -520,6 +521,26 @@ def test_two_header_names_equal_ignoring_case_are_malformed() -> None:
     assert via_check.value.reason == "malformed"
 
 
+def test_other_headers_may_repeat() -> None:
+    """Only the four X-Yulon-* names are de-duplicated; a proxy line may arrive twice."""
+    friend = identity.Identity(_seed(1), "Mira")
+    headers = _headers(friend)
+    headers["Via"] = "1.1 one"
+    headers["via"] = "1.1 two"
+    signed = identity.SignedRequest.from_headers(headers)
+    assert signed.key_id == friend.key_id
+    sender = identity.check_request(
+        "GET",
+        "/state",
+        b"",
+        headers,
+        friends=_paired(friend),
+        nonces=identity.NonceBook(),
+        now=NOW,
+    )
+    assert sender.key_id == friend.key_id
+
+
 def test_a_package_signature_is_not_a_request_signature() -> None:
     """The domain prefixes are the only difference: without them this one WOULD be a request.
 
@@ -585,6 +606,7 @@ def test_a_package_signature_is_not_a_request_signature() -> None:
 def test_the_key_file_is_created_exclusive_and_owner_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Round C: the payload is created O_EXCL, owner-only, under a temp name, then linked in."""
     real_open = os.open
     calls: list[tuple[Path, int, int]] = []
 
@@ -594,12 +616,15 @@ def test_the_key_file_is_created_exclusive_and_owner_only(
 
     monkeypatch.setattr(identity.os, "open", watched)
     identity.load_or_create(tmp_path)
-    key_calls = [call for call in calls if call[0].name == identity.KEY_FILE]
-    assert key_calls, "key.json was never created through os.open"
+    folder = tmp_path / identity.DIR_NAME
+    key_calls = [call for call in calls if call[0].parent == folder]
+    assert key_calls, "the key was never created through os.open"
     for path, flags, mode in key_calls:
+        assert path.name.startswith(identity.KEY_FILE), f"{path.name} is not the key's name"
         assert flags & os.O_EXCL, f"{path} was created without O_EXCL"
         assert flags & os.O_CREAT
         assert mode == 0o600
+    assert (folder / identity.KEY_FILE).exists(), "nothing was linked into key.json"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX mode is what this asserts")
@@ -640,20 +665,19 @@ def test_an_existing_key_is_never_replaced(tmp_path: Path) -> None:
     assert key.read_bytes() == before
 
 
-def test_an_empty_key_file_counts_as_absent(tmp_path: Path) -> None:
-    """Zero bytes is a power cut between `os.open` and the first write, not a key file."""
+def test_an_empty_key_file_is_refused_not_replaced(tmp_path: Path) -> None:
+    """Round C: zero bytes can no longer happen, so it is damage like any other content."""
     folder = tmp_path / identity.DIR_NAME
     folder.mkdir()
     key = folder / identity.KEY_FILE
     key.write_bytes(b"")
-    assert identity.load(tmp_path) is None
-    made = identity.load_or_create(tmp_path)
-    assert key.read_bytes(), "the empty key file was adopted instead of replaced"
-    seed = identity._unb64(str(_json(key.read_bytes())["seed"]))
-    assert len(seed) == 32
-    reloaded = identity.load(tmp_path)
-    assert reloaded is not None
-    assert reloaded.key_id == made.key_id
+    inode = key.stat().st_ino
+    with pytest.raises(identity.KeyFileDamaged):
+        identity.load(tmp_path)
+    with pytest.raises(identity.KeyFileDamaged):
+        identity.load_or_create(tmp_path)
+    assert key.read_bytes() == b""
+    assert key.stat().st_ino == inode, "the empty key file was replaced"
 
 
 def test_a_damaged_key_file_is_refused_not_replaced(tmp_path: Path) -> None:
@@ -676,8 +700,30 @@ def test_a_failed_write_leaves_no_key_file(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(identity.os, "fsync", refuse)
     with pytest.raises(OSError):
         identity.load_or_create(tmp_path)
-    assert not (tmp_path / identity.DIR_NAME / identity.KEY_FILE).exists()
+    folder = tmp_path / identity.DIR_NAME
+    assert not (folder / identity.KEY_FILE).exists()
+    assert not [entry for entry in folder.iterdir() if entry.name.endswith(".tmp")]
     assert identity.load(tmp_path) is None
+
+
+def test_a_filesystem_without_hard_links_still_makes_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """vfat and some network shares refuse a link: the direct exclusive create is the fallback."""
+
+    def no_links(src: object, dst: object, **kwargs: object) -> None:
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(identity.os, "link", no_links)
+    caplog.set_level(logging.INFO, logger="yulon.portable.identity")
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+    assert key.is_file()
+    assert identity.load(tmp_path).key_id == made.key_id  # type: ignore[union-attr]
+    assert not [entry for entry in folder.iterdir() if entry.name.endswith(".tmp")]
+    said = [record.getMessage() for record in caplog.records]
+    assert [message for message in said if "hard links" in message], "the fallback said nothing"
 
 
 def test_a_failed_write_never_closes_the_handle_twice(
@@ -701,6 +747,91 @@ def test_a_failed_write_never_closes_the_handle_twice(
     with pytest.raises(OSError):
         identity.load_or_create(tmp_path)
     assert not (tmp_path / identity.DIR_NAME / identity.KEY_FILE).exists()
+
+
+def test_a_key_file_never_exists_half_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round C: the payload lands in a temp name and is hard-linked in, whole, or not at all."""
+    real_link = os.link
+    seen: list[tuple[bool, str, str, bytes, list[str]]] = []
+
+    def watched(src: object, dst: object, **kwargs: object) -> None:
+        source = Path(str(src))
+        target = Path(str(dst))
+        seen.append(
+            (
+                target.exists(),
+                target.name,
+                source.name,
+                source.read_bytes(),
+                sorted(entry.name for entry in target.parent.iterdir()),
+            )
+        )
+        real_link(source, target, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(identity.os, "link", watched)
+    identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+    assert len(seen) == 1, "the key was linked in more than once"
+    existed, target_name, tmp_name, payload, names = seen[0]
+    assert not existed, "key.json was visible before it was whole"
+    assert target_name == identity.KEY_FILE
+    assert tmp_name.endswith(".tmp"), f"{tmp_name} is not a temp name"
+    assert payload == key.read_bytes(), "the temp name did not hold the key's whole payload"
+    assert names == [tmp_name], f"the folder held more than the temp key at link time: {names}"
+    assert not [
+        entry for entry in folder.iterdir() if entry.name.endswith(".tmp")
+    ], "a temp key file was left behind"
+
+
+def test_a_second_creator_loads_the_first_ones_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another process wins the link: its key is loaded, and this one's temp file is gone."""
+    planted = identity.Identity(_seed(5), "First")
+    folder = tmp_path / identity.DIR_NAME
+    key = folder / identity.KEY_FILE
+
+    def someone_else_made_it(src: object, dst: object, **kwargs: object) -> None:
+        key.write_bytes(identity._key_payload(planted, "2020-01-01T00:00:00Z"))
+        raise FileExistsError(17, "File exists", str(dst))
+
+    monkeypatch.setattr(identity.os, "link", someone_else_made_it)
+    found = identity.load_or_create(tmp_path)
+    assert found.key_id == planted.key_id
+    assert found.public_key == planted.public_key
+    assert not [entry for entry in folder.iterdir() if entry.name.endswith(".tmp")]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a POSIX mode is what this asserts")
+def test_a_loose_identity_folder_is_made_owner_only_before_the_key_is_read(
+    tmp_path: Path,
+) -> None:
+    """Round C: a folder wider than 0o700 is narrowed before the key in it is looked at."""
+    made = identity.load_or_create(tmp_path)
+    folder = tmp_path / identity.DIR_NAME
+    os.chmod(folder, 0o777)
+    found = identity.load(tmp_path)
+    assert found is not None
+    assert found.key_id == made.key_id
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="an owner uid is what this asserts")
+def test_an_identity_folder_of_another_account_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder another account owns could be read by it however the mode is set: refuse."""
+    folder = tmp_path / identity.DIR_NAME
+    folder.mkdir()
+    other = os.getuid() + 1
+    monkeypatch.setattr(identity.os, "getuid", lambda: other)
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity.load_or_create(tmp_path)
+    assert "belongs to another account" in str(refused.value)
+    assert not (folder / identity.KEY_FILE).exists(), "a key was made in another account's folder"
 
 
 def test_rename_keeps_the_key(tmp_path: Path) -> None:
@@ -729,6 +860,19 @@ def test_rename_with_another_key_is_refused_and_the_key_file_is_unchanged(
         identity.rename(other, "Someone Else's Name", config_dir=tmp_path)
     assert "this is not the key of this Yu'lon" in str(refused.value)
     assert key.read_bytes() == before
+
+
+def test_rename_writes_the_seed_on_disk_not_the_one_it_was_handed(tmp_path: Path) -> None:
+    """A rename writes the key in the file; the caller's Identity is only asked its public key."""
+    made = identity.load_or_create(tmp_path)
+    key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
+    seed_on_disk = _json(key.read_bytes())["seed"]
+    object.__setattr__(made, "_seed", _seed(11))
+    identity.rename(made, "Still Mine", config_dir=tmp_path)
+    assert _json(key.read_bytes())["seed"] == seed_on_disk, "the caller's seed reached the file"
+    reloaded = identity.load(tmp_path)
+    assert reloaded is not None
+    assert reloaded.key_id == made.key_id
 
 
 # ----------------------------------------------------------------- friends

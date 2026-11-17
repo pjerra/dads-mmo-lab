@@ -74,6 +74,11 @@ def test_replacing_a_file_is_a_write() -> None:
     assert _sites_in("import os\ndef f(a, b):\n    os.replace(a, b)\n") == {"f::os.replace"}
 
 
+def test_linking_a_file_is_a_write() -> None:
+    """T894 round C: the key's name appears by `os.link`, which is what makes it atomic."""
+    assert _sites_in("import os\ndef f(a, b):\n    os.link(a, b)\n") == {"f::os.link"}
+
+
 def test_the_sql_write_seam_is_a_write_and_the_read_seam_is_not() -> None:
     """`query()` is what `dbreads` is allowed to call; the other two are not."""
     source = (

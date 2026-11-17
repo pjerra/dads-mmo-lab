@@ -79,6 +79,10 @@ _QUALIFIED = {
     ("os", "rmdir"),
     ("os", "chmod"),
     ("os", "truncate"),
+    # T894 round C: a hard link gives a second name to a file that is already whole. It is how
+    # `identity/key.json` appears atomically -- no reader ever sees half a key -- so it is a
+    # write in the ledger's sense and must stay visible.
+    ("os", "link"),
     ("shutil", "rmtree"),
     # T49: the delete moved behind `yulon.rmtree.remove_tree()` so the read-only
     # retry could be shared. Listed here so the five callers stay VISIBLE in the
