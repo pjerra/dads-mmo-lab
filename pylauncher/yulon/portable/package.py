@@ -9,6 +9,7 @@ the player stops trusting.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -155,16 +156,19 @@ class CharacterPackageError(Exception):
 
 
 def _said(manifest_bytes: bytes) -> str:
-    """` (<made_by.yulon>)` when it is short printable text, else nothing."""
+    """` (<made_by.yulon>)` when it is short printable text, else nothing.
+
+    The same rule `_text` enforces on every stored string, applied here too: a
+    version string is copied out of a file Yu'lon has not validated yet, into a
+    sentence a player reads.
+    """
     try:
         raw = json.loads(manifest_bytes.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         return ""
     made_by = raw.get("made_by") if isinstance(raw, dict) else None
     version = made_by.get("yulon") if isinstance(made_by, dict) else None
-    if not isinstance(version, str) or not version or len(version) > 40:
-        return ""
-    if any(ord(c) < 32 or ord(c) == 127 for c in version):
+    if not isinstance(version, str) or not _printable(version, 40):
         return ""
     return f" ({version})"
 
@@ -174,20 +178,26 @@ def _megabytes(size: int) -> int:
     return max(1, -(-size // (1024 * 1024)))
 
 
-def _text(name: str, value: str, limit: int) -> str:
-    """Printable text: no C0 or C1 controls, and nothing a terminal reorders.
+def _printable(value: str, limit: int) -> bool:
+    """Whether this is text safe to store and show: no controls, no invisible formatting.
 
     Category "Cf" is the invisible formatting characters — the bidi overrides
-    among them — and a name holding one reads one way in a list and another way
-    in a terminal. It is refused where it is stored, before any screen sees it.
+    among them — and a string holding one reads one way in a list and another
+    way in a terminal. Refused where it is stored, and again where a string from
+    an unvalidated file is quoted into a sentence.
     """
-    if (
-        not value
-        or len(value) > limit
-        or any(
+    return (
+        bool(value)
+        and len(value) <= limit
+        and not any(
             ord(c) < 32 or 127 <= ord(c) <= 0x9F or unicodedata.category(c) == "Cf" for c in value
         )
-    ):
+    )
+
+
+def _text(name: str, value: str, limit: int) -> str:
+    """Printable text: no C0 or C1 controls, and nothing a terminal reorders."""
+    if not _printable(value, limit):
         raise ValueError(f"a {name} is printable text of up to {limit} characters")
     return value
 
@@ -454,7 +464,15 @@ class Package:
         """The dump member, checked again as it is read."""
         (member,) = [m for m in self.manifest.members if m.name == DUMP_NAME]
         try:
-            with zipfile.ZipFile(self.path) as archive, archive.open(member.name, mode="r") as fh:
+            archive = zipfile.ZipFile(self.path)
+        except (OSError, zipfile.BadZipFile, ValueError, *_ZIP_TROUBLE) as exc:
+            raise CharacterPackageError(
+                "not_a_package",
+                f"{self.path.name} is not a Yu'lon character file, or it is damaged. "
+                "Export the character again.",
+            ) from exc
+        try:
+            with archive, archive.open(member.name, mode="r") as fh:
                 data = fh.read(member.bytes + 1)
         except (OSError, KeyError, zipfile.BadZipFile) as exc:
             raise CharacterPackageError(
@@ -709,6 +727,52 @@ def _private_opener(path: str, flags: int) -> int:
     return os.open(path, flags | os.O_EXCL, _PRIVATE_MODE)
 
 
+def _no_hard_links(exc: OSError) -> bool:
+    """Whether an `os.link` failure is the filesystem saying it cannot make hard links.
+
+    Only these errnos are answers about the filesystem. `EACCES` is a refusal of
+    this call, not a property of the volume, and a write that fell back on it
+    would hide a real permission problem behind a copy that may work today.
+    Named through `getattr` because not every platform defines every one.
+    """
+    values = {
+        getattr(errno, name)
+        for name in ("EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK")
+        if hasattr(errno, name)
+    }
+    return exc.errno in values
+
+
+def _copy_into_new_file(partial: Path, dest: Path, name: str) -> None:
+    """Publish by creating `dest` exclusively and copying the staging bytes into it.
+
+    The no-hard-links fallback. `exists()` then `replace()` would lose the race
+    `os.link` exists to lose: a file another writer created between the two
+    would be replaced by ours. `O_EXCL` leaves that answer to the kernel, and a
+    destination this call created is removed again if the copy fails, because
+    half a character file must not keep the name.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(dest, flags, _PRIVATE_MODE)
+    except FileExistsError as exc:
+        raise CharacterPackageError(
+            "exists", f"{name} already exists, so Yu'lon did not overwrite it."
+        ) from exc
+    try:
+        with open(partial, "rb") as source, os.fdopen(fd, "wb") as sink:
+            while True:
+                chunk = source.read(1 << 20)
+                if not chunk:
+                    break
+                sink.write(chunk)
+            sink.flush()
+            os.fsync(sink.fileno())
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+
+
 def build_manifest(facts: ExportFacts, dump_facts: DumpFacts, dump: bytes) -> Manifest:
     """The manifest for `facts` and the facts read out of the dump."""
     return Manifest.model_validate(
@@ -812,16 +876,14 @@ def write_package(
             raise CharacterPackageError(
                 "exists", f"{name} already exists, so Yu'lon did not overwrite it."
             ) from exc
-        except OSError:
+        except OSError as exc:
+            if not _no_hard_links(exc):
+                raise
             logger.info(
                 f"{name}: this filesystem has no hard links, so the finished file was "
-                "renamed into place."
+                "copied into place."
             )
-            if dest.exists():
-                raise CharacterPackageError(
-                    "exists", f"{name} already exists, so Yu'lon did not overwrite it."
-                ) from None
-            partial.replace(dest)
+            _copy_into_new_file(partial, dest, name)
     except OSError as exc:
         raise CharacterPackageError(
             "write_failed", f"Yu'lon could not write {name}: {exc}. Nothing was written."
@@ -873,7 +935,7 @@ def read_package(path: Path) -> Package:
         ) from exc
     try:
         archive = zipfile.ZipFile(path)
-    except (OSError, zipfile.BadZipFile, *_ZIP_TROUBLE) as exc:
+    except (OSError, zipfile.BadZipFile, ValueError, *_ZIP_TROUBLE) as exc:
         raise CharacterPackageError(
             "not_a_package",
             f"{name} is not a Yu'lon character file, or it is damaged. Export the "
@@ -891,6 +953,16 @@ def read_package(path: Path) -> Package:
             raise CharacterPackageError(
                 "duplicate_name",
                 f"{name} holds two files of the same name, so it cannot be trusted.",
+            )
+        if any(
+            info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+            or info.flag_bits & 0x1
+            for info in archive.infolist()
+        ):
+            raise CharacterPackageError(
+                "not_a_package",
+                f"{name} is not a Yu'lon character file, or it is damaged. Export the "
+                "character again.",
             )
         if sum(info.file_size for info in archive.infolist()) > MAX_UNPACKED_BYTES:
             raise CharacterPackageError(

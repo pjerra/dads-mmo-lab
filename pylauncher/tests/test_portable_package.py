@@ -157,6 +157,36 @@ def not_a_package_sentence(name: str) -> str:
     return f"{name} is not a Yu'lon character file, or it is damaged. Export the character again."
 
 
+def rezip(source: Path, dest: Path, compression: int) -> Path:
+    """A copy of `source` whose members are all written with another compression."""
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(dest, "w", compression=compression) as out:
+        for info in src.infolist():
+            out.writestr(info.filename, src.read(info.filename))
+    return dest
+
+
+def flip_member_data(path: Path, member: str) -> None:
+    """Flip one byte of a member's compressed data, in the local-header region.
+
+    Ten bytes in, not the first: LZMA's first byte is the range coder's initial
+    byte and liblzma ignores it, so a stream flipped there still decodes and a
+    test built on it would prove nothing about a broken member.
+    """
+    blob = bytearray(path.read_bytes())
+    wanted = member.encode()
+    pos = blob.find(b"PK\x03\x04")
+    while pos != -1:
+        name_size = int.from_bytes(blob[pos + 26 : pos + 28], "little")
+        extra_size = int.from_bytes(blob[pos + 28 : pos + 30], "little")
+        if blob[pos + 30 : pos + 30 + name_size] == wanted:
+            start = pos + 30 + name_size + extra_size
+            blob[start + 10] ^= 0xFF
+            path.write_bytes(bytes(blob))
+            return
+        pos = blob.find(b"PK\x03\x04", pos + 4)
+    raise AssertionError(f"{member} is not in {path.name}")
+
+
 # ------------------------------------------------------------------ round trip
 
 
@@ -307,6 +337,24 @@ def test_a_newer_format_is_refused_and_names_the_yulon_that_made_it(tmp_path: Pa
         f"{bad.name} was made by a newer Yu'lon ({yulon.__version__}). Update Yu'lon "
         "on this computer, then try again."
     )
+
+
+@pytest.mark.parametrize("version", ["2.0\u202e", "2.0\u0085"])
+def test_a_newer_format_byline_with_an_invisible_character_is_not_shown(
+    tmp_path: Path, version: str
+) -> None:
+    good = pack(tmp_path)
+    manifest = manifest_of(good)
+    manifest["format"] = package.FORMAT + 1
+    manifest["made_by"]["yulon"] = version
+    bad = rewrite(good, tmp_path / "byline.ylchar", manifest=manifest)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "newer_format"
+    assert str(raised.value) == (
+        f"{bad.name} was made by a newer Yu'lon. Update Yu'lon on this computer, then try again."
+    )
+    assert version not in str(raised.value)
 
 
 def test_a_wrong_kind_is_refused(tmp_path: Path) -> None:
@@ -518,6 +566,51 @@ def test_an_encrypted_member_is_refused(tmp_path: Path) -> None:
     bad = tmp_path / "encrypted.ylchar"
     bad.write_bytes(pack(tmp_path).read_bytes())
     patch_member_headers(bad, package.MANIFEST_NAME, flags=1)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_an_encrypted_unlisted_member_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    bad = rewrite(good, tmp_path / "encrypted-extra.ylchar", add={"extras/secret.json": b"{}"})
+    patch_member_headers(bad, "extras/secret.json", flags=1)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_an_lzma_member_with_a_broken_stream_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    bad = rezip(good, tmp_path / "lzma.ylchar", zipfile.ZIP_LZMA)
+    flip_member_data(bad, package.DUMP_NAME)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_bzip2_member_is_not_a_package(tmp_path: Path) -> None:
+    good = pack(tmp_path)
+    bad = rezip(good, tmp_path / "bzip2.ylchar", zipfile.ZIP_BZIP2)
+    with pytest.raises(CharacterPackageError) as raised:
+        read_package(bad)
+    assert raised.value.reason == "not_a_package"
+    assert str(raised.value) == not_a_package_sentence(bad.name)
+
+
+def test_a_central_name_that_is_not_utf8_is_not_a_package(tmp_path: Path) -> None:
+    bad = tmp_path / "utf8.ylchar"
+    bad.write_bytes(pack(tmp_path).read_bytes())
+    blob = bytearray(bad.read_bytes())
+    entry = blob.find(b"PK\x01\x02")
+    assert entry != -1
+    flags = int.from_bytes(blob[entry + 8 : entry + 10], "little")
+    blob[entry + 8 : entry + 10] = (flags | 0x800).to_bytes(2, "little")
+    blob[entry + 46] = 0xFF
+    bad.write_bytes(bytes(blob))
     with pytest.raises(CharacterPackageError) as raised:
         read_package(bad)
     assert raised.value.reason == "not_a_package"
@@ -790,7 +883,43 @@ def test_a_filesystem_without_hard_links_still_writes_once(
     assert not list(tmp_path.glob("*.partial"))
 
 
-# ------------------------------------------------------------------ owner only
+def test_a_destination_made_just_before_the_exclusive_create_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = b"another writer was here first"
+    dest = tmp_path / "x.ylchar"
+    real_open = os.open
+
+    def no_links(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "hard links are not permitted here")
+
+    def open_with_race(path: str, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == dest and flags & os.O_EXCL:
+            Path(dest).write_bytes(other)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(package.os, "link", no_links)
+    monkeypatch.setattr(package.os, "open", open_with_race)
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), small_dump())
+    assert raised.value.reason == "exists"
+    assert dest.read_bytes() == other
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_link_failure_that_is_not_about_missing_hard_links_fails_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(src: str, dst: str, *args: object, **kwargs: object) -> None:
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(package.os, "link", refused)
+    dest = tmp_path / "x.ylchar"
+    with pytest.raises(CharacterPackageError) as raised:
+        write_package(dest, facts(), small_dump())
+    assert raised.value.reason == "write_failed"
+    assert not dest.exists()
+    assert not list(tmp_path.glob("*.partial"))
 
 
 def _mode(path: Path) -> int:
