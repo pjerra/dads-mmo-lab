@@ -204,13 +204,39 @@ def secure_folder(folder: Path, *, reading: bool = False) -> None:
         _checked_on_read.add(key)
 
 
-def _narrow(folder: Path) -> None:
-    """One attempt: read, apply if it differs, read back. Says what happened; never raises."""
+def secure_folder_checked(folder: Path) -> bool:
+    """`secure_folder`, answering whether the folder is owner-only now (round B).
+
+    `True` when the platform is not Windows (the file's own 0o600 is real there), when
+    the folder already had the DACL, or when Windows took it. `False` when the attempt
+    failed or the read-back still differs: a caller about to write a private key must not
+    put it in a folder anyone in the profile can open.
+
+    Asks every time, unlike a write's `secure_folder`: the answer is the whole point, so
+    the once-a-launch memo for reads is not consulted. A folder that is not there has
+    nothing to protect yet and answers `True`, exactly as `secure_folder` leaves it alone.
+    """
+    if not _on_windows() or not folder.is_dir():
+        return True
+    key = str(folder.absolute())
+    with _locks_lock:
+        lock = _folder_locks.setdefault(key, threading.Lock())
+    with lock:
+        return _narrow(folder)
+
+
+def _narrow(folder: Path) -> bool:
+    """One attempt: read, apply if it differs, read back. Says what happened; never raises.
+
+    Answers whether the folder is owner-only afterwards: `True` when it already was, or
+    Windows took the DACL; `False` when the attempt failed or the read-back still differs.
+    `secure_folder` ignores the answer, so its callers are unchanged.
+    """
     try:
         user_sid = _user_sid()
         before = _read_dacl(folder)
         if is_owner_only(before, user_sid, sid_of=_sid_of):
-            return
+            return True
         _apply_dacl(folder, owner_only_sddl(user_sid))
         after = _read_dacl(folder)
     except Exception as exc:  # noqa: BLE001 - a narrowing never costs the write it guards
@@ -219,14 +245,15 @@ def _narrow(folder: Path) -> None:
             f"({type(exc).__name__}: {exc}); what is saved there keeps the permissions "
             "it inherits from the folder above it"
         )
-        return
+        return False
     if is_owner_only(after, user_sid, sid_of=_sid_of):
         logger.info(f"made {folder} readable by this account only (T151); it was {before}")
-    else:
-        logger.warning(
-            f"asked Windows to make {folder} readable by this account only, and it "
-            f"still reads {after}"
-        )
+        return True
+    logger.warning(
+        f"asked Windows to make {folder} readable by this account only, and it "
+        f"still reads {after}"
+    )
+    return False
 
 
 # -- the calls into Windows --------------------------------------------------

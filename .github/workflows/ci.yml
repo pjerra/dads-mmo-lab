@@ -245,6 +245,7 @@ jobs:
           - os: windows-latest
             tests: >-
               tests/test_every_module_imports.py
+              tests/test_portable_identity.py
               tests/test_platform.py
               tests/test_winacl.py
               tests/test_winjob.py
@@ -260,6 +261,7 @@ jobs:
           - os: macos-latest
             tests: >-
               tests/test_every_module_imports.py
+              tests/test_portable_identity.py
               tests/test_platform.py
               tests/test_winacl.py
               tests/test_winjob.py

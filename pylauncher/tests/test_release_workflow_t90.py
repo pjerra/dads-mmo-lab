@@ -232,6 +232,26 @@ def test_the_version_check_cannot_fail_a_tag() -> None:
         ), f"{line.strip()!r} would fail the build on a bundle that cannot start"
 
 
+def test_the_signing_check_cannot_fail_a_tag() -> None:
+    """Owner 2026-11-17: "Make it warn". A packaged app that cannot sign must not cost a tag.
+
+    Modelled on the version step: `continue-on-error`, a `::warning`, and no non-zero exit.
+    Both failures the step can see -- a hang killed by its own bound, and a non-zero exit
+    -- must warn with the same title, because those are the two annotations a reader looks
+    for on the run.
+    """
+    step = _step_with(BUILD_JOB, "--self-check-signing")
+    assert "continue-on-error: true" in step
+    assert not re.search(r"\bexit [1-9]", step), "any non-zero exit fails the build job"
+    assert step.count("::warning title=The packaged app cannot sign::") == 2
+    assert step.count("the release is published anyway") == 2
+    assert "signed and checked" in step, "the success line stays: it closes open check 14"
+    for line in re.findall(r"^\s*set [-+]\S+", step, re.M):
+        assert "e" not in line.split()[1].lstrip(
+            "-+"
+        ), f"{line.strip()!r} would fail the build on an app that cannot sign"
+
+
 def test_asking_the_bundle_cannot_hang_the_job() -> None:
     """A windowed exe that throws puts up a MODAL box nothing on a runner closes.
 

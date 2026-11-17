@@ -16,3 +16,5 @@ certifi>=2024.7.4
 # because they carry no zone files. Windows has no database Python can read, so
 # the app ships this one on every host rather than one list per OS.
 tzdata>=2024.1
+# Ed25519 for Play Together's identity and signing (T894): packages and calls to a friend's Yu'lon are signed. Imported lazily in yulon/portable/identity.py.
+cryptography>=46,<51

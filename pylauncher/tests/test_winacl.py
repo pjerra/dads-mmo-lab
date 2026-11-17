@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from yulon import channel_setup, dbsecret, winacl
+from yulon.portable import identity
 
 USER = "S-1-5-21-1111111111-2222222222-3333333333-1001"
 """A local account's SID, as `ConvertSidToStringSidW` spells one."""
@@ -552,3 +553,44 @@ def test_a_second_reader_waits_for_the_first_reader_s_check_to_finish(
     # The first reader's check narrowed it; the second found it checked and asked nothing.
     assert [folder for folder, _, _ in windows.applied] == [tmp_path]
     assert len(windows.reads) == 2
+
+
+def test_the_identity_folder_is_owner_only_before_the_key_lands_in_it(
+    tmp_path: Path, windows: FakeWindows
+) -> None:
+    """T894: the DACL is applied while `identity/` is empty, so `key.json` inherits it."""
+    identity.load_or_create(tmp_path)
+
+    folder = tmp_path / identity.DIR_NAME
+    assert [(applied, files) for applied, _, files in windows.applied] == [(folder, [])]
+
+
+def test_a_refused_dacl_makes_no_key(tmp_path: Path, windows: FakeWindows) -> None:
+    """T894 round B: a folder Windows refused to make private never gets the key.
+
+    Decision 5 warned and wrote the key: a private key that anyone in the profile can read
+    is not a private key, so creating one is now refused. Loading one that is already
+    there still warns only (the test below): refusing to read it would orphan it.
+    """
+    windows.refuse_apply = OSError("this profile refuses WRITE_DAC")
+
+    with pytest.raises(identity.KeyNotProtected) as refused:
+        identity.load_or_create(tmp_path)
+
+    assert "could not make its key folder private" in str(refused.value)
+    assert not (tmp_path / identity.DIR_NAME / identity.KEY_FILE).exists()
+    assert identity.load(tmp_path) is None
+
+
+def test_a_refused_dacl_still_loads_a_key_that_is_already_there(
+    tmp_path: Path, windows: FakeWindows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal above is about making a key; reading an existing one warns and proceeds."""
+    made = identity.load_or_create(tmp_path)
+    windows.refuse_apply = OSError("this profile refuses WRITE_DAC")
+    monkeypatch.setattr(winacl, "_checked_on_read", set())
+
+    reloaded = identity.load(tmp_path)
+
+    assert reloaded is not None
+    assert reloaded.key_id == made.key_id

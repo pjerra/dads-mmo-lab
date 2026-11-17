@@ -100,6 +100,11 @@ hiddenimports = collect_submodules("yulon") + [
     "certifi",
     "pygame",
     "tzdata",
+    # T894: Ed25519 for Play Together's identity. Imported lazily inside
+    # `yulon/portable/identity.py`'s methods, so modulegraph never follows it;
+    # named here so the frozen app carries it (open check 14).
+    "cryptography",
+    "cryptography.hazmat.primitives.asymmetric.ed25519",
 ]
 
 # AND THE STAMP BY NAME, not by trusting the machinery above a second time.

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
         "yulon.catalog.native",
         "yulon.controller",
         "yulon.portable.package",
+        "yulon.portable.identity",
         "main",
     ],
 )
