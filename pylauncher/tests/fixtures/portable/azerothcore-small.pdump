@@ -1,0 +1,15 @@
+IMPORTANT NOTE: THIS DUMPFILE IS MADE FOR USE WITH THE 'PDUMP' COMMAND ONLY - EITHER THROUGH INGAME CHAT OR ON CONSOLE!
+IMPORTANT NOTE: DO NOT apply it directly - it will irreversibly DAMAGE and CORRUPT your database! You have been warned!
+
+INSERT INTO `characters` (`guid`, `account`, `name`, `race`, `class`, `gender`, `level`, `money`, `totaltime`) VALUES ('5', '7', 'Priestest', '1', '5', '1', '12', '1234', '3600');
+INSERT INTO `character_queststatus` (`guid`, `quest`, `status`) VALUES ('5', '33', '3');
+INSERT INTO `character_queststatus_daily` (`guid`, `quest`, `time`) VALUES ('5', '11335', '0');
+INSERT INTO `character_queststatus_rewarded` (`guid`, `quest`, `active`) VALUES ('5', '7', '1');
+INSERT INTO `character_queststatus_rewarded` (`guid`, `quest`, `active`) VALUES ('5', '33', '1');
+INSERT INTO `character_pet` (`id`, `entry`, `owner`, `name`) VALUES ('2', '299', '5', 'Wolf\'s Bane');
+INSERT INTO `character_inventory` (`guid`, `bag`, `slot`, `item`) VALUES ('5', '0', '23', '101');
+INSERT INTO `mail` (`id`, `receiver`, `subject`, `body`) VALUES ('9', '5', 'Hi, there', 'a, b\nc');
+INSERT INTO `item_instance` (`guid`, `itemEntry`, `owner_guid`, `count`, `text`) VALUES ('101', '6948', '5', '1', 'NULL');
+INSERT INTO `item_instance` (`guid`, `itemEntry`, `owner_guid`, `count`, `text`) VALUES ('102', '2504', '5', '1', 'NULL');
+INSERT INTO `item_instance` (`guid`, `itemEntry`, `owner_guid`, `count`, `text`) VALUES ('103', '6948', '5', '1', 'NULL');
+INSERT INTO `character_gifts` (`guid`, `item_guid`, `entry`, `flags`) VALUES ('5', '103', '5043', '0');
