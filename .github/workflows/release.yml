@@ -450,12 +450,15 @@ jobs:
           hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos.dmg"
 
       # T894, open check 14: a build that cannot sign cannot play together.
-      # THIS ONE FAILS THE JOB - no `continue-on-error`, unlike the version step
-      # above. `--self-check-signing` is answered before logging, config and Qt,
-      # in memory only, so it needs no display, no config directory and leaves
+      # Owner 2026-11-17: "Make it warn". It WARNS, like the version step above:
+      # `continue-on-error`, a `::warning`, and the release is published anyway.
+      # `--self-check-signing` is answered before logging, config and Qt, in
+      # memory only, so it needs no display, no config directory and leaves
       # nothing behind. Windows' windowed exe may print nothing; its exit code
-      # is the gate, so the answer file is `cat`-ed for whoever reads the log.
+      # is what the step reads, and the answer file is `cat`-ed for whoever
+      # reads the log.
       - name: The packaged app signs and checks (open check 14)
+        continue-on-error: true
         timeout-minutes: 3
         shell: bash
         run: |
@@ -466,8 +469,8 @@ jobs:
           [ "$RUNNER_OS" = "macOS" ] && exe="dist/Yulon.app/Contents/MacOS/yulon"
           # The same tree kill and bound the version step uses, for the same
           # reason: a windowed bundle that hangs would cost the tag its
-          # artifacts, and `continue-on-error` cannot save a step that never
-          # returns. This step does not use `continue-on-error` at all.
+          # artifacts, and `continue-on-error` cannot rescue a step that never
+          # returns. Nothing here exits non-zero.
           kill_tree() {
             local parent="$1" child
             for child in $(ps -o pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2 == p {print $1}'); do
@@ -490,20 +493,21 @@ jobs:
             sleep 1
             waited=$((waited + 1))
           done
+          killed=0
           if kill -0 "$asked" 2>/dev/null; then
             kill_tree "$asked"
-            cat "$answer" 2>/dev/null || true
-            echo "::error title=The packaged app cannot sign::${exe} --self-check-signing was still running after ${waited}s and was killed"
-            exit 1
+            killed=1
           fi
           status=0
           wait "$asked" 2>/dev/null || status=$?
           cat "$answer" 2>/dev/null || true
-          if [ "$status" -ne 0 ]; then
-            echo "::error title=The packaged app cannot sign::${exe} --self-check-signing exited ${status}"
-            exit 1
+          if [ "$killed" -ne 0 ]; then
+            echo "::warning title=The packaged app cannot sign::${exe} --self-check-signing failed (still running after ${waited}s and was killed); the release is published anyway"
+          elif [ "$status" -ne 0 ]; then
+            echo "::warning title=The packaged app cannot sign::${exe} --self-check-signing failed (exited ${status}); the release is published anyway"
+          else
+            echo "open check 14: ${exe} signed and checked"
           fi
-          echo "open check 14: ${exe} signed and checked"
 
       - uses: actions/upload-artifact@v4
         with:

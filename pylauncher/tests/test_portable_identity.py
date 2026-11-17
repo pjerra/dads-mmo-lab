@@ -144,16 +144,50 @@ def test_a_package_from_an_unpaired_key_is_refused() -> None:
     assert refused.value.reason == "unknown-signer"
 
 
-def test_a_known_key_id_with_another_key_is_refused() -> None:
+def test_a_known_key_id_with_another_key_is_refused(tmp_path: Path) -> None:
+    """At both doors: the list on disk, and a signature claiming a paired id for another key.
+
+    A `Friend` whose key id is not its own key's fingerprint cannot even be built now
+    (below), so the honest ways to present a known key id with another key are a damaged
+    `friends.json` and a `signature.json` that claims one.
+    """
     stranger = identity.Identity(_seed(2), "Stranger")
     impostor = identity.Identity(_seed(3), "Impostor")
-    signature = identity.sign_package(stranger, b"a manifest")
-    friends = identity.FriendList().with_friend(
-        identity.Friend(key_id=stranger.key_id, public_key=impostor.public_key, name="Stranger")
+    folder = tmp_path / identity.DIR_NAME
+    folder.mkdir()
+    (folder / identity.FRIENDS_FILE).write_bytes(
+        identity._json_bytes(
+            {
+                "format": identity.FORMAT,
+                "friends": [
+                    {
+                        "key_id": stranger.key_id,
+                        "public_key": identity._b64(impostor.public_key),
+                        "name": "Stranger",
+                        "reached_by": "",
+                        "reached_at": "",
+                        "homecoming": "ask",
+                        "homecoming_worlds": {},
+                        "visitor": "allowed",
+                        "paired_at": "",
+                    }
+                ],
+            }
+        )
     )
+    with pytest.raises(identity.FriendListDamaged):
+        identity.FriendList.load(tmp_path)
+    # The same claim inside a package: a paired key id, another key, refused on the fingerprint.
+    parsed = _json(identity.sign_package(stranger, b"a manifest"))
+    parsed["public_key"] = identity._b64(impostor.public_key)
     with pytest.raises(identity.PackageRefused) as refused:
-        identity.check_package(b"a manifest", signature, friends=friends, me=_me())
-    assert refused.value.reason == "unknown-signer"
+        identity.check_package(
+            b"a manifest",
+            json.dumps(parsed).encode(),
+            friends=_paired(stranger),
+            me=_me(),
+        )
+    assert refused.value.reason == "key-id-mismatch"
 
 
 def test_a_key_id_that_is_not_the_fingerprint_is_refused() -> None:
@@ -287,6 +321,27 @@ def test_a_reused_nonce_is_refused() -> None:
     assert refused.value.reason == "reused-nonce"
 
 
+def test_a_nonce_is_still_refused_just_inside_the_window() -> None:
+    """Pruning is bounded by the window, not by `now`: a replay 299 s later is a replay."""
+    friend = identity.Identity(_seed(1), "Mira")
+    headers = _headers(friend, nonce="12" * 16, now=NOW)
+    book = identity.NonceBook()
+    identity.check_request(
+        "GET", "/state", b"", headers, friends=_paired(friend), nonces=book, now=NOW
+    )
+    with pytest.raises(identity.RequestRefused) as refused:
+        identity.check_request(
+            "GET",
+            "/state",
+            b"",
+            headers,
+            friends=_paired(friend),
+            nonces=book,
+            now=NOW + identity.FRESH_WINDOW_S - 1,
+        )
+    assert refused.value.reason == "reused-nonce"
+
+
 @pytest.mark.parametrize("change", ["body", "method", "target"])
 def test_a_changed_body_method_or_target_is_refused(change: str) -> None:
     friend = identity.Identity(_seed(1), "Mira")
@@ -312,7 +367,7 @@ def test_a_changed_body_method_or_target_is_refused(change: str) -> None:
 
 
 def test_a_blocked_visitor_is_refused() -> None:
-    friend = identity.Identity(_seed(1), "Mira")
+    friend = identity.Identity(_seed(1), "Mira the Blocked")
     friends = identity.FriendList().with_friend(_friend(friend, visitor="blocked"))
     with pytest.raises(identity.RequestRefused) as refused:
         identity.check_request(
@@ -325,6 +380,9 @@ def test_a_blocked_visitor_is_refused() -> None:
             now=NOW,
         )
     assert refused.value.reason == "blocked"
+    # The refusal goes back over the wire: it names the key, never the name the friend chose.
+    assert friend.key_id in str(refused.value)
+    assert friend.name not in str(refused.value)
 
 
 def test_a_bad_signature_does_not_spend_the_nonce() -> None:
@@ -360,6 +418,31 @@ def test_a_full_nonce_book_refuses() -> None:
             "GET", "/state", b"", _headers(friend), friends=friends, nonces=book, now=NOW
         )
     assert refused.value.reason == "nonce-book-full"
+
+
+def test_one_friend_cannot_fill_the_nonce_book_for_others() -> None:
+    """A quota per key id: one friend's flood refuses that friend only, never the book.
+
+    The fill goes through `NonceBook.remember` directly, because 5,000 signatures for a
+    fact about the book would only make the test slow; the refused request and the friend
+    still served after it go through `check_request`.
+    """
+    mira = identity.Identity(_seed(1), "Mira")
+    jon = identity.Identity(_seed(2), "Jon")
+    friends = _paired(mira, jon)
+    book = identity.NonceBook()
+    assert identity.NONCE_LIMIT_PER_KEY == 5_000
+    for number in range(identity.NONCE_LIMIT_PER_KEY):
+        book.remember(mira.key_id, f"{number:032x}", int(NOW), now=int(NOW))
+    with pytest.raises(identity.RequestRefused) as refused:
+        identity.check_request(
+            "GET", "/state", b"", _headers(mira), friends=friends, nonces=book, now=NOW
+        )
+    assert refused.value.reason == "nonce-book-full"
+    served = identity.check_request(
+        "GET", "/state", b"", _headers(jon), friends=friends, nonces=book, now=NOW
+    )
+    assert served.key_id == jon.key_id
 
 
 def test_old_nonces_are_forgotten() -> None:
@@ -414,6 +497,27 @@ def test_a_missing_or_malformed_header_is_refused(case: str) -> None:
             now=NOW,
         )
     assert refused.value.reason == expected
+
+
+def test_two_header_names_equal_ignoring_case_are_malformed() -> None:
+    """A map can hold `X-Yulon-Key` and `x-yulon-key`; a verifier must never pick one silently."""
+    friend = identity.Identity(_seed(1), "Mira")
+    headers = _headers(friend)
+    headers["x-yulon-key"] = "0" * 32
+    with pytest.raises(identity.RequestRefused) as refused:
+        identity.SignedRequest.from_headers(headers)
+    assert refused.value.reason == "malformed"
+    with pytest.raises(identity.RequestRefused) as via_check:
+        identity.check_request(
+            "GET",
+            "/state",
+            b"",
+            headers,
+            friends=_paired(friend),
+            nonces=identity.NonceBook(),
+            now=NOW,
+        )
+    assert via_check.value.reason == "malformed"
 
 
 def test_a_package_signature_is_not_a_request_signature() -> None:
@@ -536,6 +640,22 @@ def test_an_existing_key_is_never_replaced(tmp_path: Path) -> None:
     assert key.read_bytes() == before
 
 
+def test_an_empty_key_file_counts_as_absent(tmp_path: Path) -> None:
+    """Zero bytes is a power cut between `os.open` and the first write, not a key file."""
+    folder = tmp_path / identity.DIR_NAME
+    folder.mkdir()
+    key = folder / identity.KEY_FILE
+    key.write_bytes(b"")
+    assert identity.load(tmp_path) is None
+    made = identity.load_or_create(tmp_path)
+    assert key.read_bytes(), "the empty key file was adopted instead of replaced"
+    seed = identity._unb64(str(_json(key.read_bytes())["seed"]))
+    assert len(seed) == 32
+    reloaded = identity.load(tmp_path)
+    assert reloaded is not None
+    assert reloaded.key_id == made.key_id
+
+
 def test_a_damaged_key_file_is_refused_not_replaced(tmp_path: Path) -> None:
     folder = tmp_path / identity.DIR_NAME
     folder.mkdir()
@@ -560,6 +680,29 @@ def test_a_failed_write_leaves_no_key_file(tmp_path: Path, monkeypatch: pytest.M
     assert identity.load(tmp_path) is None
 
 
+def test_a_failed_write_never_closes_the_handle_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`os.fdopen`'s stream owns the descriptor once it exists: a second close is a bug."""
+    real_close = os.close
+
+    def watched(fd: int) -> None:
+        try:
+            os.fstat(fd)
+        except OSError:
+            pytest.fail(f"the key file's handle {fd} was closed twice")
+        real_close(fd)
+
+    def refuse(fd: int) -> None:
+        raise OSError("no room on the disk")
+
+    monkeypatch.setattr(identity.os, "fsync", refuse)
+    monkeypatch.setattr(identity.os, "close", watched)
+    with pytest.raises(OSError):
+        identity.load_or_create(tmp_path)
+    assert not (tmp_path / identity.DIR_NAME / identity.KEY_FILE).exists()
+
+
 def test_rename_keeps_the_key(tmp_path: Path) -> None:
     made = identity.load_or_create(tmp_path)
     key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
@@ -572,6 +715,20 @@ def test_rename_keeps_the_key(tmp_path: Path) -> None:
     assert reloaded.key_id == made.key_id
     assert reloaded.name == "A New Name"
     assert _json(key.read_bytes())["created_at"] == created
+
+
+def test_rename_with_another_key_is_refused_and_the_key_file_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A rename is a name change on THIS Yu'lon's key: another key can never rewrite the file."""
+    identity.load_or_create(tmp_path)
+    key = tmp_path / identity.DIR_NAME / identity.KEY_FILE
+    before = key.read_bytes()
+    other = identity.Identity(_seed(9), "Other")
+    with pytest.raises(identity.IdentityError) as refused:
+        identity.rename(other, "Someone Else's Name", config_dir=tmp_path)
+    assert "this is not the key of this Yu'lon" in str(refused.value)
+    assert key.read_bytes() == before
 
 
 # ----------------------------------------------------------------- friends
@@ -619,14 +776,15 @@ def test_a_world_override_wins_over_the_friends_homecoming() -> None:
     assert friend.homecoming_for("wow-vanilla") == "ask"
 
 
-def test_a_new_key_under_a_known_key_id_is_refused() -> None:
+def test_a_friend_whose_key_id_is_not_its_keys_fingerprint_cannot_be_made() -> None:
+    """The paired list's one invariant, kept where a `Friend` is made, not only where it is read."""
     mira = identity.Identity(_seed(1), "Mira")
-    impostor = identity.Identity(_seed(2), "Impostor")
-    friends = identity.FriendList().with_friend(_friend(mira))
+    jon = identity.Identity(_seed(2), "Jon")
     with pytest.raises(ValueError):
-        friends.with_friend(
-            identity.Friend(key_id=mira.key_id, public_key=impostor.public_key, name="Impostor")
-        )
+        identity.Friend(key_id=mira.key_id, public_key=jon.public_key, name="Mira")
+    short = b"x" * 31
+    with pytest.raises(ValueError):
+        identity.Friend(key_id=identity.key_id_of(short), public_key=short, name="Mira")
 
 
 # ----------------------------------------------------------------- secrets

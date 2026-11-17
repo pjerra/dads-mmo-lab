@@ -17,6 +17,8 @@ message.
 **One limit, named rather than hidden (decision 10).** The nonce book lives in memory, so a request
 captured in the 300 seconds before a host restarts can be replayed once after it. A book on disk
 would trade that for a file that has to be repaired; the window is the honest bound this keeps.
+The book also holds a quota per key id (`NONCE_LIMIT_PER_KEY`), so one friend's flood refuses that
+friend's requests only, never every other friend's.
 
 **Nothing here logs the seed.** No log line, exception message, `repr` or file other than
 `key.json` holds it, and `Identity` never hands it back out.
@@ -70,6 +72,12 @@ FRESH_WINDOW_S = 300
 
 NONCE_LIMIT = 100_000
 """The most unexpired nonces the book holds. At the limit a request is refused, never forgotten."""
+
+NONCE_LIMIT_PER_KEY = 5_000
+"""The most unexpired nonces one key id may hold (round B).
+
+The overall limit alone let one friend's flood fill the book and refuse every other friend;
+a quota per key id refuses only the key that spends it."""
 
 NAME_MAX = 40
 """The longest display name accepted, matching what a friend's list will show."""
@@ -131,6 +139,10 @@ class BackendMissing(IdentityError):
 
 class KeyFileDamaged(IdentityError):
     """`key.json` exists and is not a key file this module wrote. Never replaced by a load."""
+
+
+class KeyNotProtected(IdentityError):
+    """The key's folder could not be made private, so no key was written into it (round B)."""
 
 
 class FriendListDamaged(IdentityError):
@@ -385,11 +397,23 @@ def _load_key(path: Path) -> Identity:
     return Identity(seed, name)
 
 
+def _empty_key_file(path: Path) -> bool:
+    """`True` when `key.json` holds zero bytes: a power cut before the first write, not a key."""
+    try:
+        return path.stat().st_size == 0
+    except OSError:
+        return False
+
+
 def load(config_dir: Path | None = None) -> Identity | None:
     """This Yu'lon's key pair, or `None` when `key.json` is not there."""
     folder = identity_dir(config_dir)
     path = folder / KEY_FILE
     if not path.exists():
+        return None
+    if _empty_key_file(path):
+        # Zero bytes is a power cut between `os.open` and the first write, not damage:
+        # `load_or_create` removes it and makes the key. Any other content is damaged.
         return None
     winacl.secure_folder(folder, reading=True)
     return _load_key(path)
@@ -400,15 +424,21 @@ def _create_key(path: Path, payload: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     handle = os.open(path, flags, KEY_MODE)
     try:
-        with os.fdopen(handle, "wb") as fh:
-            fh.write(payload)
-            fh.flush()
-            os.fsync(fh.fileno())
+        stream = os.fdopen(handle, "wb")
     except BaseException:
+        # The stream never took the handle over, so this is the one and only close.
         try:
             os.close(handle)
         except OSError:
             pass
+        path.unlink(missing_ok=True)
+        raise
+    try:
+        with stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
         path.unlink(missing_ok=True)
         raise
 
@@ -420,8 +450,18 @@ def load_or_create(config_dir: Path | None = None) -> Identity:
         return found
     folder = identity_dir(config_dir)
     folder.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    winacl.secure_folder(folder)
     path = folder / KEY_FILE
+    if not winacl.secure_folder_checked(folder):
+        # A key anyone in the profile can read is not a private key (round B). Nothing is
+        # written: the caller sees why, and a later run on a folder that can be protected works.
+        raise KeyNotProtected(
+            "Yu'lon could not make its key folder private on this computer, "
+            "so it did not make a key."
+        )
+    if _empty_key_file(path):
+        # The name a power cut left behind: empty, so no key ever landed. Remove it, or the
+        # exclusive create below would find it and refuse.
+        path.unlink(missing_ok=True)
     identity = Identity(secrets.token_bytes(32), _default_name())
     try:
         _create_key(path, _key_payload(identity, _created_at()))
@@ -440,10 +480,14 @@ def rename(identity: Identity, name: str, *, config_dir: Path | None = None) -> 
     folder = identity_dir(config_dir)
     path = folder / KEY_FILE
     winacl.secure_folder(folder)
+    loaded = _load_key(path)
+    if identity.public_key != loaded.public_key:
+        # A rename is a name change on the key in the file, never a way to replace it.
+        raise IdentityError("this is not the key of this Yu'lon")
     parsed = _key_object(path)
     created = parsed["created_at"]
     assert isinstance(created, str)  # checked by `_key_object`
-    renamed = Identity(identity._seed, name)
+    renamed = Identity(loaded._seed, name)
     platform.write_private_atomically(path, _key_payload(renamed, created))
     logger.info(f"renamed this Yu'lon to {renamed.name!r}; key id {renamed.key_id}")
     return renamed
@@ -562,15 +606,22 @@ class SignedRequest:
     @classmethod
     def from_headers(cls, headers: Mapping[str, str]) -> SignedRequest:
         """The headers as a `SignedRequest`, or `RequestRefused` for a missing or malformed one."""
-        lowered = {str(name).lower(): value for name, value in headers.items()}
+        lowered: dict[str, str] = {}
+        for name, value in headers.items():
+            folded = str(name).lower()
+            if folded in lowered:
+                # Two spellings of one name: a verifier that picks one lets the other be
+                # read by whoever forwards this. There is no honest sender that sends both.
+                raise RequestRefused("malformed", f"two headers are named {folded!r}")
+            lowered[folded] = value
         values: dict[str, str] = {}
         for name in (HEADER_KEY, HEADER_TIME, HEADER_NONCE, HEADER_SIGNATURE):
-            value = lowered.get(name.lower())
-            if value is None:
+            found = lowered.get(name.lower())
+            if found is None:
                 raise RequestRefused("missing-header", name)
-            if not isinstance(value, str):
+            if not isinstance(found, str):
                 raise RequestRefused("malformed", name)
-            values[name] = value
+            values[name] = found
         if not _TIME.fullmatch(values[HEADER_TIME]):
             raise RequestRefused("malformed", HEADER_TIME)
         for name in (HEADER_KEY, HEADER_NONCE):
@@ -622,19 +673,36 @@ class NonceBook:
         self._limit = limit
         self._lock = threading.Lock()
         self._seen: dict[tuple[str, str], int] = {}
+        self._per_key: dict[str, int] = {}
+        self._oldest: int | None = None
 
     def remember(self, key_id: str, nonce: str, timestamp: int, *, now: int) -> None:
         """Record a checked nonce, or refuse it as reused or as one too many."""
         with self._lock:
             cutoff = now - FRESH_WINDOW_S
-            for spent in [key for key, at in self._seen.items() if at < cutoff]:
-                del self._seen[spent]
+            if self._oldest is not None and self._oldest < cutoff:
+                for spent, at in list(self._seen.items()):
+                    if at < cutoff:
+                        del self._seen[spent]
+                        left = self._per_key[spent[0]] - 1
+                        if left:
+                            self._per_key[spent[0]] = left
+                        else:
+                            del self._per_key[spent[0]]
+                self._oldest = min(self._seen.values(), default=None)
             key = (key_id, nonce)
             if key in self._seen:
                 raise RequestRefused("reused-nonce", "this nonce was already spent")
             if len(self._seen) >= self._limit:
                 raise RequestRefused("nonce-book-full", "too many unexpired nonces")
+            if self._per_key.get(key_id, 0) >= NONCE_LIMIT_PER_KEY:
+                # A quota per key id: a flood refuses its own key, never the book.
+                raise RequestRefused(
+                    "nonce-book-full", f"key id {key_id} has too many unexpired nonces"
+                )
             self._seen[key] = timestamp
+            self._per_key[key_id] = self._per_key.get(key_id, 0) + 1
+            self._oldest = timestamp if self._oldest is None else min(self._oldest, timestamp)
 
     def __len__(self) -> int:
         with self._lock:
@@ -659,7 +727,10 @@ def check_request(
     if friend is None:
         raise RequestRefused("unknown-key", f"no paired friend has key id {signed.key_id}")
     if friend.visitor == "blocked":
-        raise RequestRefused("blocked", f"{friend.name} is not allowed to visit")
+        # The reason goes back over the wire: name the key, never the name that friend chose.
+        raise RequestRefused(
+            "blocked", f"the friend with key id {signed.key_id} is not allowed to visit"
+        )
     current = int(time.time() if now is None else now)
     if abs(current - signed.timestamp) > FRESH_WINDOW_S:
         raise RequestRefused("stale", "the timestamp is outside the fresh window")
@@ -690,6 +761,18 @@ class Friend:
     homecoming_worlds: tuple[tuple[str, Homecoming], ...] = ()
     visitor: VisitorRule = "allowed"
     paired_at: str = ""
+
+    def __post_init__(self) -> None:
+        """A friend's key id is its key's fingerprint, and a public key is 32 bytes.
+
+        The list's one invariant, kept where a `Friend` is made (round B): `friends.json`
+        is checked on load as well, so a damaged file is `FriendListDamaged` and never a
+        `Friend` that quietly holds somebody else's key under a known id.
+        """
+        if len(self.public_key) != 32:
+            raise ValueError("a public key is 32 bytes")
+        if self.key_id != key_id_of(self.public_key):
+            raise ValueError(f"key id {self.key_id} is not this public key's fingerprint")
 
     def homecoming_for(self, world_id: str) -> Homecoming:
         """The setting for `world_id`: its override if it has one, else this friend's default."""
