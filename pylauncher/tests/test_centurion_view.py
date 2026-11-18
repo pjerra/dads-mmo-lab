@@ -494,8 +494,13 @@ def test_every_trinitycore_reason_a_tab_says_is_the_registrys_note(
         else:
             # Not drawn at all: the control is absent on every game whose module
             # lacks it, so there is no place where a sentence would stand.
-            assert key == ("yulon.catalog.bot_dashboard", "conf_file"), key
-            assert view.services.bot_dashboard is None
+            assert key in (
+                ("yulon.catalog.bot_dashboard", "conf_file"),
+                # no screen says it yet (T897 adds the Characters tab's Export)
+                ("yulon.portable.package", "write_package"),
+            ), key
+            if key == ("yulon.catalog.bot_dashboard", "conf_file"):
+                assert view.services.bot_dashboard is None
 
 
 def test_the_characters_tab_draws_the_five_confirmed_verbs_and_not_revive(
